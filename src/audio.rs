@@ -8,6 +8,8 @@ use atomic_float::{AtomicF32, AtomicF64};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use memmap2::Mmap;
 
+use crate::audio_channels::{ChannelMapMode, ChannelMixMatrix, MAX_SOURCE_CHANNELS};
+
 #[derive(Debug)]
 pub struct AudioBuffer {
     pub channels: Vec<Vec<f32>>, // per-channel samples in [-1, 1]
@@ -130,6 +132,13 @@ pub struct SharedAudio {
     #[allow(dead_code)]
     pub _out_channels: usize,
     pub out_sample_rate: u32,
+    /// Source-to-output routing policy, as `ChannelMapMode::to_u8`. Read by
+    /// the callback every invocation so the setting can change without
+    /// rebuilding the stream.
+    pub channel_map_mode: std::sync::atomic::AtomicU8,
+    /// Bumped by the cpal error callback. The app watches it so a device that
+    /// disappears mid-playback triggers a reopen instead of silence.
+    pub stream_error_seq: std::sync::atomic::AtomicU32,
     pub loop_enabled: std::sync::atomic::AtomicBool,
     pub loop_start: std::sync::atomic::AtomicUsize,
     pub loop_end: std::sync::atomic::AtomicUsize,
@@ -146,6 +155,24 @@ pub struct SharedAudio {
     pub lufs_m_milli: std::sync::atomic::AtomicI32,
     pub lufs_s_milli: std::sync::atomic::AtomicI32,
     pub true_peak_db_milli: std::sync::atomic::AtomicI32,
+}
+
+/// The per-block snapshot of `SharedAudio` the renderer works from.
+///
+/// Taken once at the top of the callback so every frame in the block sees a
+/// consistent transport state, whatever the UI thread does meanwhile.
+#[derive(Clone, Copy)]
+struct RenderParams {
+    vol: f32,
+    audible_mask: u64,
+    rate: f64,
+    looping: bool,
+    loop_start: usize,
+    loop_end: usize,
+    loop_xfade_samples: usize,
+    loop_xfade_shape: u8,
+    map_mode: ChannelMapMode,
+    pos_f: f64,
 }
 
 pub struct AudioEngine {
@@ -447,6 +474,8 @@ impl AudioEngine {
             meter_ch_count: std::sync::atomic::AtomicUsize::new(0),
             _out_channels: out_channels,
             out_sample_rate,
+            channel_map_mode: std::sync::atomic::AtomicU8::new(ChannelMapMode::default().to_u8()),
+            stream_error_seq: std::sync::atomic::AtomicU32::new(0),
             loop_enabled: std::sync::atomic::AtomicBool::new(false),
             loop_start: std::sync::atomic::AtomicUsize::new(0),
             loop_end: std::sync::atomic::AtomicUsize::new(0),
@@ -714,7 +743,15 @@ impl AudioEngine {
         T: cpal::SizedSample + cpal::FromSample<f32>,
     {
         let channels = cfg.channels as usize;
-        let err_fn = |e| eprintln!("cpal stream error: {e}");
+        // The data callback takes ownership of `shared`, so the error callback
+        // gets its own handle to flag a dead device for the app to act on.
+        let err_shared = shared.clone();
+        let err_fn = move |e| {
+            eprintln!("cpal stream error: {e}");
+            err_shared
+                .stream_error_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        };
         let stream = device.build_output_stream(
             cfg,
             move |data: &mut [T], _| {
@@ -722,15 +759,7 @@ impl AudioEngine {
                 let maybe_stream = shared.streamed_wav.load();
                 let playing = shared.playing.load(std::sync::atomic::Ordering::Relaxed);
                 if !playing {
-                    for frame in data.chunks_mut(channels) {
-                        for ch in frame.iter_mut() {
-                            *ch = T::from_sample(0.0);
-                        }
-                    }
-                    shared
-                        .meter_rms
-                        .store(0.0, std::sync::atomic::Ordering::Relaxed);
-                    Self::zero_channel_meters(&shared);
+                    Self::fill_silence::<T>(data, &shared);
                     return;
                 }
 
@@ -761,291 +790,227 @@ impl AudioEngine {
                 let loop_xfade_shape = shared
                     .loop_xfade_shape
                     .load(std::sync::atomic::Ordering::Relaxed);
+                let map_mode = ChannelMapMode::from_u8(
+                    shared
+                        .channel_map_mode
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                );
                 let mut pos_f = shared.play_pos_f.load(std::sync::atomic::Ordering::Relaxed);
                 if !pos_f.is_finite() || pos_f < 0.0 {
                     pos_f = 0.0;
                 }
 
+                let params = RenderParams {
+                    vol,
+                    audible_mask,
+                    rate,
+                    looping,
+                    loop_start,
+                    loop_end,
+                    loop_xfade_samples,
+                    loop_xfade_shape,
+                    map_mode,
+                    pos_f,
+                };
+
+                // The two sources differ only in how a sample is fetched, so
+                // both go through the same renderer.
                 if let Some(samples_arc) = maybe_samples.as_ref() {
                     let samples = samples_arc.as_ref();
-                    let len = samples.len();
-                    if len == 0 {
-                        shared
-                            .playing
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
-                        for frame in data.chunks_mut(channels) {
-                            for ch in frame.iter_mut() {
-                                *ch = T::from_sample(0.0);
-                            }
-                        }
-                        shared
-                            .meter_rms
-                            .store(0.0, std::sync::atomic::Ordering::Relaxed);
-                        Self::zero_channel_meters(&shared);
-                        return;
-                    }
-                    let src_channels = samples.channel_count();
-                    let valid_loop = looping && loop_end > loop_start && loop_end <= len;
-                    let xfade = if valid_loop {
-                        loop_xfade_samples.min((loop_end - loop_start) / 2)
-                    } else {
-                        0
-                    };
-                    let xfade_skip =
-                        if xfade > 0 && !Self::loop_xfade_uses_through_zero(loop_xfade_shape) {
-                            xfade as f64
-                        } else {
-                            0.0
-                        };
-                    let mut meter_sum_sq = 0.0f64;
-                    let mut meter_count = 0usize;
-                    let mut ch_sum_sq = [0.0f64; METER_CH_SLOTS];
-                    let mut ch_peak = [0.0f32; METER_CH_SLOTS];
-                    let mut ch_counts = [0usize; METER_CH_SLOTS];
-                    let mut pos = pos_f.floor() as usize;
-                    for frame in data.chunks_mut(channels) {
-                        if pos >= len {
-                            if valid_loop {
-                                pos_f = Self::wrap_loop_position(
-                                    pos_f, loop_start, loop_end, xfade_skip,
-                                );
-                                pos = pos_f.floor() as usize;
-                            } else {
-                                shared
-                                    .playing
-                                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                                for ch in frame.iter_mut() {
-                                    *ch = T::from_sample(0.0);
-                                }
-                                continue;
-                            }
-                        }
-                        if valid_loop && pos >= loop_end {
-                            pos_f =
-                                Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
-                        }
-                        let mut tap_frame = [0.0f32; 2];
-                        for (out_ch, out_sample) in frame.iter_mut().enumerate() {
-                            let sample = if valid_loop && xfade > 0 {
-                                Self::sample_loop_with_xfade(
-                                    pos_f,
-                                    loop_start,
-                                    loop_end,
-                                    xfade,
-                                    loop_xfade_shape,
-                                    |sample_pos| {
-                                        Self::fold_src_sample(
-                                            src_channels,
-                                            channels,
-                                            out_ch,
-                                            sample_pos,
-                                            audible_mask,
-                                            |c, p| Self::sample_at_interp(samples, c, p),
-                                        )
-                                    },
-                                )
-                            } else {
-                                Self::fold_src_sample(
-                                    src_channels,
-                                    channels,
-                                    out_ch,
-                                    pos_f,
-                                    audible_mask,
-                                    |c, p| Self::sample_at_interp(samples, c, p),
-                                )
-                            };
-                            let out = (sample * vol).clamp(-1.0, 1.0);
-                            *out_sample = T::from_sample(out);
-                            if out_ch < 2 {
-                                tap_frame[out_ch] = out;
-                            }
-                            meter_sum_sq += f64::from(out * out);
-                            meter_count = meter_count.saturating_add(1);
-                            let slot = out_ch.min(METER_CH_SLOTS - 1);
-                            ch_sum_sq[slot] += f64::from(out * out);
-                            ch_peak[slot] = ch_peak[slot].max(out.abs());
-                            ch_counts[slot] += 1;
-                        }
-                        shared.meter_tap.push_frame(
-                            tap_frame[0],
-                            if channels >= 2 {
-                                tap_frame[1]
-                            } else {
-                                tap_frame[0]
-                            },
-                        );
-                        pos_f += rate;
-                        if valid_loop && pos_f >= loop_end as f64 {
-                            pos_f =
-                                Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
-                        }
-                        pos = pos_f.floor() as usize;
-                    }
-                    shared
-                        .play_pos
-                        .store(pos, std::sync::atomic::Ordering::Relaxed);
-                    shared
-                        .play_pos_f
-                        .store(pos_f, std::sync::atomic::Ordering::Relaxed);
-                    shared.meter_rms.store(
-                        if meter_count > 0 {
-                            (meter_sum_sq / meter_count as f64).sqrt() as f32
-                        } else {
-                            0.0
-                        },
-                        std::sync::atomic::Ordering::Relaxed,
+                    Self::render_block::<T, _>(
+                        data,
+                        channels,
+                        &shared,
+                        samples.channel_count(),
+                        samples.len(),
+                        &params,
+                        |c, p| Self::sample_at_interp(samples, c, p),
                     );
-                    Self::store_channel_meters(&shared, &ch_sum_sq, &ch_peak, &ch_counts, channels);
                     return;
                 }
 
                 if let Some(stream) = maybe_stream.as_ref() {
-                    let len = stream.len();
-                    if len == 0 {
-                        shared
-                            .playing
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
-                        for frame in data.chunks_mut(channels) {
-                            for ch in frame.iter_mut() {
-                                *ch = T::from_sample(0.0);
-                            }
-                        }
-                        shared
-                            .meter_rms
-                            .store(0.0, std::sync::atomic::Ordering::Relaxed);
-                        Self::zero_channel_meters(&shared);
-                        return;
-                    }
-                    let src_channels = stream.channel_count();
-                    let valid_loop = looping && loop_end > loop_start && loop_end <= len;
-                    let xfade = if valid_loop {
-                        loop_xfade_samples.min((loop_end - loop_start) / 2)
-                    } else {
-                        0
-                    };
-                    let xfade_skip =
-                        if xfade > 0 && !Self::loop_xfade_uses_through_zero(loop_xfade_shape) {
-                            xfade as f64
-                        } else {
-                            0.0
-                        };
-                    let mut meter_sum_sq = 0.0f64;
-                    let mut meter_count = 0usize;
-                    let mut ch_sum_sq = [0.0f64; METER_CH_SLOTS];
-                    let mut ch_peak = [0.0f32; METER_CH_SLOTS];
-                    let mut ch_counts = [0usize; METER_CH_SLOTS];
-                    let mut pos = pos_f.floor() as usize;
-                    for frame in data.chunks_mut(channels) {
-                        if pos >= len {
-                            if valid_loop {
-                                pos_f = Self::wrap_loop_position(
-                                    pos_f, loop_start, loop_end, xfade_skip,
-                                );
-                                pos = pos_f.floor() as usize;
-                            } else {
-                                shared
-                                    .playing
-                                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                                for ch in frame.iter_mut() {
-                                    *ch = T::from_sample(0.0);
-                                }
-                                continue;
-                            }
-                        }
-                        if valid_loop && pos >= loop_end {
-                            pos_f =
-                                Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
-                        }
-                        let mut tap_frame = [0.0f32; 2];
-                        for (out_ch, out_sample) in frame.iter_mut().enumerate() {
-                            let sample = if valid_loop && xfade > 0 {
-                                Self::sample_loop_with_xfade(
-                                    pos_f,
-                                    loop_start,
-                                    loop_end,
-                                    xfade,
-                                    loop_xfade_shape,
-                                    |sample_pos| {
-                                        Self::fold_src_sample(
-                                            src_channels,
-                                            channels,
-                                            out_ch,
-                                            sample_pos,
-                                            audible_mask,
-                                            |c, p| stream.sample_at_interp(c, p),
-                                        )
-                                    },
-                                )
-                            } else {
-                                Self::fold_src_sample(
-                                    src_channels,
-                                    channels,
-                                    out_ch,
-                                    pos_f,
-                                    audible_mask,
-                                    |c, p| stream.sample_at_interp(c, p),
-                                )
-                            };
-                            let out = (sample * vol).clamp(-1.0, 1.0);
-                            *out_sample = T::from_sample(out);
-                            if out_ch < 2 {
-                                tap_frame[out_ch] = out;
-                            }
-                            meter_sum_sq += f64::from(out * out);
-                            meter_count = meter_count.saturating_add(1);
-                            let slot = out_ch.min(METER_CH_SLOTS - 1);
-                            ch_sum_sq[slot] += f64::from(out * out);
-                            ch_peak[slot] = ch_peak[slot].max(out.abs());
-                            ch_counts[slot] += 1;
-                        }
-                        shared.meter_tap.push_frame(
-                            tap_frame[0],
-                            if channels >= 2 {
-                                tap_frame[1]
-                            } else {
-                                tap_frame[0]
-                            },
-                        );
-                        pos_f += rate;
-                        if valid_loop && pos_f >= loop_end as f64 {
-                            pos_f =
-                                Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
-                        }
-                        pos = pos_f.floor() as usize;
-                    }
-                    shared
-                        .play_pos
-                        .store(pos, std::sync::atomic::Ordering::Relaxed);
-                    shared
-                        .play_pos_f
-                        .store(pos_f, std::sync::atomic::Ordering::Relaxed);
-                    shared.meter_rms.store(
-                        if meter_count > 0 {
-                            (meter_sum_sq / meter_count as f64).sqrt() as f32
-                        } else {
-                            0.0
-                        },
-                        std::sync::atomic::Ordering::Relaxed,
+                    Self::render_block::<T, _>(
+                        data,
+                        channels,
+                        &shared,
+                        stream.channel_count(),
+                        stream.len(),
+                        &params,
+                        |c, p| stream.sample_at_interp(c, p),
                     );
-                    Self::store_channel_meters(&shared, &ch_sum_sq, &ch_peak, &ch_counts, channels);
                     return;
                 }
 
-                for frame in data.chunks_mut(channels) {
-                    for ch in frame.iter_mut() {
-                        *ch = T::from_sample(0.0);
-                    }
-                }
-                shared
-                    .meter_rms
-                    .store(0.0, std::sync::atomic::Ordering::Relaxed);
-                Self::zero_channel_meters(&shared);
+                Self::fill_silence::<T>(data, &shared);
             },
             err_fn,
             None,
         )?;
         stream.play()?;
         Ok(stream)
+    }
+
+    /// Zero the block and park every meter. Used when nothing is playing and
+    /// when the source turns out to be empty.
+    fn fill_silence<T>(data: &mut [T], shared: &SharedAudio)
+    where
+        T: cpal::SizedSample + cpal::FromSample<f32>,
+    {
+        for sample in data.iter_mut() {
+            *sample = T::from_sample(0.0);
+        }
+        shared
+            .meter_rms
+            .store(0.0, std::sync::atomic::Ordering::Relaxed);
+        Self::zero_channel_meters(shared);
+    }
+
+    /// Render one callback block from whichever source is active.
+    ///
+    /// `sample_at(channel, position)` reads the source; everything else —
+    /// looping, rate, mute/solo, channel routing, gain and metering — is
+    /// shared between the in-memory buffer and the memory-mapped WAV.
+    fn render_block<T, S>(
+        data: &mut [T],
+        out_channels: usize,
+        shared: &SharedAudio,
+        src_channels: usize,
+        len: usize,
+        params: &RenderParams,
+        sample_at: S,
+    ) where
+        T: cpal::SizedSample + cpal::FromSample<f32>,
+        S: Fn(usize, f64) -> f32,
+    {
+        if len == 0 {
+            shared
+                .playing
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            Self::fill_silence::<T>(data, shared);
+            return;
+        }
+
+        let RenderParams {
+            vol,
+            audible_mask,
+            rate,
+            looping,
+            loop_start,
+            loop_end,
+            loop_xfade_samples,
+            loop_xfade_shape,
+            map_mode,
+            mut pos_f,
+        } = *params;
+
+        let valid_loop = looping && loop_end > loop_start && loop_end <= len;
+        let xfade = if valid_loop {
+            loop_xfade_samples.min((loop_end - loop_start) / 2)
+        } else {
+            0
+        };
+        let xfade_skip = if xfade > 0 && !Self::loop_xfade_uses_through_zero(loop_xfade_shape) {
+            xfade as f64
+        } else {
+            0.0
+        };
+
+        // Only the source channels the matrix actually reads are interpolated,
+        // so a stereo clip on a 7.1.4 device costs two reads per frame.
+        let matrix = ChannelMixMatrix::build(src_channels, out_channels, map_mode);
+        let mut src_frame = [0.0f32; MAX_SOURCE_CHANNELS];
+        let is_audible = |c: usize| c >= 64 || (audible_mask >> c) & 1 == 1;
+
+        let mut meter_sum_sq = 0.0f64;
+        let mut meter_count = 0usize;
+        let mut ch_sum_sq = [0.0f64; METER_CH_SLOTS];
+        let mut ch_peak = [0.0f32; METER_CH_SLOTS];
+        let mut ch_counts = [0usize; METER_CH_SLOTS];
+        let mut pos = pos_f.floor() as usize;
+
+        for frame in data.chunks_mut(out_channels) {
+            if pos >= len {
+                if valid_loop {
+                    pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
+                    pos = pos_f.floor() as usize;
+                } else {
+                    shared
+                        .playing
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    for ch in frame.iter_mut() {
+                        *ch = T::from_sample(0.0);
+                    }
+                    continue;
+                }
+            }
+            if valid_loop && pos >= loop_end {
+                pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
+            }
+
+            for &src_ch in matrix.used_sources() {
+                let src_ch = src_ch as usize;
+                src_frame[src_ch] = if !is_audible(src_ch) {
+                    0.0
+                } else if valid_loop && xfade > 0 {
+                    Self::sample_loop_with_xfade(
+                        pos_f,
+                        loop_start,
+                        loop_end,
+                        xfade,
+                        loop_xfade_shape,
+                        |sample_pos| sample_at(src_ch, sample_pos),
+                    )
+                } else {
+                    sample_at(src_ch, pos_f)
+                };
+            }
+
+            let mut tap_frame = [0.0f32; 2];
+            for (out_ch, out_sample) in frame.iter_mut().enumerate() {
+                let out = (matrix.mix(out_ch, &src_frame) * vol).clamp(-1.0, 1.0);
+                *out_sample = T::from_sample(out);
+                if out_ch < 2 {
+                    tap_frame[out_ch] = out;
+                }
+                meter_sum_sq += f64::from(out * out);
+                meter_count = meter_count.saturating_add(1);
+                let slot = out_ch.min(METER_CH_SLOTS - 1);
+                ch_sum_sq[slot] += f64::from(out * out);
+                ch_peak[slot] = ch_peak[slot].max(out.abs());
+                ch_counts[slot] += 1;
+            }
+            shared.meter_tap.push_frame(
+                tap_frame[0],
+                if out_channels >= 2 {
+                    tap_frame[1]
+                } else {
+                    tap_frame[0]
+                },
+            );
+
+            pos_f += rate;
+            if valid_loop && pos_f >= loop_end as f64 {
+                pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
+            }
+            pos = pos_f.floor() as usize;
+        }
+
+        shared
+            .play_pos
+            .store(pos, std::sync::atomic::Ordering::Relaxed);
+        shared
+            .play_pos_f
+            .store(pos_f, std::sync::atomic::Ordering::Relaxed);
+        shared.meter_rms.store(
+            if meter_count > 0 {
+                (meter_sum_sq / meter_count as f64).sqrt() as f32
+            } else {
+                0.0
+            },
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        Self::store_channel_meters(shared, &ch_sum_sq, &ch_peak, &ch_counts, out_channels);
     }
 
     pub fn set_samples(&self, samples: Arc<AudioBuffer>) {
@@ -1409,15 +1374,31 @@ impl AudioEngine {
             .store(rate.clamp(0.25, 4.0), std::sync::atomic::Ordering::Relaxed);
     }
 
-    #[allow(dead_code)]
-    /// Map planar source channels onto output channel `out_ch`:
-    /// - mono source: duplicated to every output (unchanged)
-    /// - src <= out: direct mapping; extra outputs repeat the last source
-    ///   channel (unchanged)
-    /// - src > out: output `o` averages source channels `{c | c % out == o}`
-    ///   so no source channel is silently dropped. This is a generic
-    ///   fold-down (pure mapping arithmetic, not DSP), not a standards
-    ///   surround downmix.
+    /// Choose how source channels reach the device. Takes effect on the next
+    /// callback block; the stream is not rebuilt.
+    pub fn set_channel_map_mode(&self, mode: ChannelMapMode) {
+        self.shared
+            .channel_map_mode
+            .store(mode.to_u8(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn channel_map_mode(&self) -> ChannelMapMode {
+        ChannelMapMode::from_u8(
+            self.shared
+                .channel_map_mode
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Monotonic count of cpal stream errors seen so far. The app compares it
+    /// against the previous reading to notice a device that has gone away.
+    pub fn stream_error_seq(&self) -> u32 {
+        self.shared
+            .stream_error_seq
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Park every per-output-channel meter slot.
     #[inline]
     fn zero_channel_meters(shared: &SharedAudio) {
         for slot in &shared.meter_ch_rms {
@@ -1453,54 +1434,6 @@ impl AudioEngine {
         shared
             .meter_ch_count
             .store(used, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// `audible` masks source channels (bit N = channel N audible; channels
-    /// >= 64 are always audible). Solo/mute is resolved by the caller into
-    /// this single mask. Skipping a channel is still pure mapping: silenced
-    /// channels simply do not contribute, and fold-down averages only the
-    /// audible members.
-    #[inline]
-    fn fold_src_sample<F: Fn(usize, f64) -> f32>(
-        src_channels: usize,
-        out_channels: usize,
-        out_ch: usize,
-        pos: f64,
-        audible: u64,
-        sample_at: F,
-    ) -> f32 {
-        let is_audible = |c: usize| c >= 64 || (audible >> c) & 1 == 1;
-        if src_channels <= 1 {
-            return if is_audible(0) {
-                sample_at(0, pos)
-            } else {
-                0.0
-            };
-        }
-        if src_channels <= out_channels {
-            let c = out_ch.min(src_channels - 1);
-            return if is_audible(c) {
-                sample_at(c, pos)
-            } else {
-                0.0
-            };
-        }
-        let step = out_channels.max(1);
-        let mut sum = 0.0f32;
-        let mut n = 0u32;
-        let mut c = out_ch.min(step - 1);
-        while c < src_channels {
-            if is_audible(c) {
-                sum += sample_at(c, pos);
-                n += 1;
-            }
-            c += step;
-        }
-        if n > 0 {
-            sum / n as f32
-        } else {
-            0.0
-        }
     }
 
     fn sample_at_interp(buffer: &AudioBuffer, ch_idx: usize, pos_f: f64) -> f32 {
@@ -1688,33 +1621,20 @@ mod tests {
         writer.finalize().expect("finalize wav");
     }
 
-    fn fold_const(src: &[f32], out_channels: usize, out_ch: usize) -> f32 {
-        fold_masked(src, out_channels, out_ch, u64::MAX)
-    }
-
-    fn fold_masked(src: &[f32], out_channels: usize, out_ch: usize, audible: u64) -> f32 {
-        AudioEngine::fold_src_sample(src.len(), out_channels, out_ch, 0.0, audible, |c, _| src[c])
-    }
-
-    #[test]
-    fn fold_src_sample_duplicates_mono_to_all_outputs() {
-        let src = [0.5f32];
-        assert_eq!(fold_const(&src, 2, 0), 0.5);
-        assert_eq!(fold_const(&src, 2, 1), 0.5);
-    }
-
-    #[test]
-    fn fold_src_sample_keeps_stereo_identity() {
-        let src = [0.25f32, -0.75];
-        assert_eq!(fold_const(&src, 2, 0), 0.25);
-        assert_eq!(fold_const(&src, 2, 1), -0.75);
-    }
-
-    #[test]
-    fn fold_src_sample_repeats_last_channel_on_extra_outputs() {
-        let src = [0.25f32, -0.75];
-        assert_eq!(fold_const(&src, 4, 2), -0.75);
-        assert_eq!(fold_const(&src, 4, 3), -0.75);
+    /// Route one constant source frame exactly the way `render_block` does:
+    /// silence the masked-out source channels, then apply the routing matrix.
+    /// Routing itself is covered in `audio_channels`; these tests are about
+    /// how the mute/solo mask interacts with it.
+    fn route_masked(src: &[f32], out_channels: usize, out_ch: usize, audible: u64) -> f32 {
+        let matrix = ChannelMixMatrix::build(src.len(), out_channels, ChannelMapMode::Auto);
+        let mut src_frame = [0.0f32; MAX_SOURCE_CHANNELS];
+        for &c in matrix.used_sources() {
+            let c = c as usize;
+            if c >= 64 || (audible >> c) & 1 == 1 {
+                src_frame[c] = src[c];
+            }
+        }
+        matrix.mix(out_ch, &src_frame)
     }
 
     #[test]
@@ -1753,62 +1673,48 @@ mod tests {
     }
 
     #[test]
-    fn fold_masked_mutes_direct_channel() {
+    fn mask_mutes_direct_channel() {
         let src = [0.25f32, 0.75];
         // Mute channel 1: right output goes silent, left unaffected.
         let audible = !(1u64 << 1);
-        assert_eq!(fold_masked(&src, 2, 0, audible), 0.25);
-        assert_eq!(fold_masked(&src, 2, 1, audible), 0.0);
+        assert_eq!(route_masked(&src, 2, 0, audible), 0.25);
+        assert_eq!(route_masked(&src, 2, 1, audible), 0.0);
     }
 
     #[test]
-    fn fold_masked_solo_equivalent_mask_keeps_only_solo_channel() {
+    fn mask_solo_equivalent_mask_keeps_only_solo_channel() {
         let src = [0.25f32, 0.75];
         // Callers resolve solo into the audible mask: solo ch1 == only bit 1.
         let audible = 1u64 << 1;
-        assert_eq!(fold_masked(&src, 2, 0, audible), 0.0);
-        assert_eq!(fold_masked(&src, 2, 1, audible), 0.75);
+        assert_eq!(route_masked(&src, 2, 0, audible), 0.0);
+        assert_eq!(route_masked(&src, 2, 1, audible), 0.75);
     }
 
     #[test]
-    fn fold_masked_mutes_mono_source() {
+    fn mask_mutes_mono_source() {
         let src = [0.5f32];
-        assert_eq!(fold_masked(&src, 2, 0, !1u64), 0.0);
-        assert_eq!(fold_masked(&src, 2, 1, !1u64), 0.0);
+        assert_eq!(route_masked(&src, 2, 0, !1u64), 0.0);
+        assert_eq!(route_masked(&src, 2, 1, !1u64), 0.0);
     }
 
     #[test]
-    fn fold_masked_averages_only_audible_in_folddown() {
-        // 4ch -> stereo: left output normally averages ch0 and ch2.
+    fn mask_removes_only_the_muted_channel_from_a_downmix() {
+        // Quad -> stereo: L = FL + -3dB * BL, R = FR + -3dB * BR.
         let src = [0.2f32, 0.4, 0.6, 0.8];
-        // Mute ch0: left output should be just ch2 (not (0 + 0.6) / 2).
+        let half_power = std::f32::consts::FRAC_1_SQRT_2;
+        // Mute FL: the left output keeps only the folded BL. The remaining
+        // channels hold their gains rather than being scaled up to compensate.
         let audible = !(1u64 << 0);
-        assert!((fold_masked(&src, 2, 0, audible) - 0.6).abs() < 1e-6);
-        // Right output (ch1, ch3) unaffected.
-        assert!((fold_masked(&src, 2, 1, audible) - 0.6).abs() < 1e-6);
+        assert!((route_masked(&src, 2, 0, audible) - half_power * 0.6).abs() < 1e-6);
+        // The right output has no muted contributor and is unchanged.
+        assert!((route_masked(&src, 2, 1, audible) - (0.4 + half_power * 0.8)).abs() < 1e-6);
     }
 
     #[test]
-    fn fold_masked_all_muted_is_silent() {
+    fn mask_all_muted_is_silent() {
         let src = [0.2f32, 0.4, 0.6, 0.8];
-        assert_eq!(fold_masked(&src, 2, 0, 0), 0.0);
-        assert_eq!(fold_masked(&src, 2, 1, 0), 0.0);
-    }
-
-    #[test]
-    fn fold_src_sample_averages_surplus_channels_to_stereo() {
-        // 4ch -> 2ch: L = (c0 + c2) / 2, R = (c1 + c3) / 2
-        let src = [0.2f32, 0.4, 0.6, 0.8];
-        assert!((fold_const(&src, 2, 0) - 0.4).abs() < 1e-6);
-        assert!((fold_const(&src, 2, 1) - 0.6).abs() < 1e-6);
-        // 3ch -> 2ch: L = (c0 + c2) / 2, R = c1 (no channel dropped)
-        let src3 = [0.3f32, -0.9, 0.5];
-        assert!((fold_const(&src3, 2, 0) - 0.4).abs() < 1e-6);
-        assert!((fold_const(&src3, 2, 1) - (-0.9)).abs() < 1e-6);
-        // 6ch -> 2ch: L = (c0 + c2 + c4) / 3, R = (c1 + c3 + c5) / 3
-        let src6 = [0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6];
-        assert!((fold_const(&src6, 2, 0) - 0.3).abs() < 1e-6);
-        assert!((fold_const(&src6, 2, 1) - 0.4).abs() < 1e-6);
+        assert_eq!(route_masked(&src, 2, 0, 0), 0.0);
+        assert_eq!(route_masked(&src, 2, 1, 0), 0.0);
     }
 
     #[test]

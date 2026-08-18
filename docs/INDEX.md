@@ -34,6 +34,7 @@
   - UI/Audio Performance Improvement Candidates (2026-06-06): docs/UI_PERFORMANCE_IMPROVEMENT_CANDIDATES_20260606.md
   - CHANGELOG: CHANGELOG.md
   - Linux Debug Guide: docs/LINUX_DEBUG.md
+  - Native Drag / Windows Shell Path (2026-08-18): docs/NATIVE_DRAG_SHELL_PATH_20260818.md
 
 Notes
 - All docs are staged for iterative refinement; some Japanese content may include mojibake depending on editor encoding. Save files as UTF-8 (no BOM) for best results.

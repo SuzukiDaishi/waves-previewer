@@ -444,6 +444,8 @@ impl WavesPreviewer {
                 } else {
                     Some(v.to_string())
                 };
+            } else if let Some(rest) = line.strip_prefix("audio_channel_map=") {
+                self.audio_channel_map_direct = rest.trim().eq_ignore_ascii_case("direct");
             } else if let Some(rest) = line.strip_prefix("auto_play_list_nav=") {
                 self.auto_play_list_nav = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("list_click_audition=") {
@@ -749,6 +751,11 @@ impl WavesPreviewer {
             SrcQuality::Best => "best",
         };
         let audio_output_device = self.audio_output_device_name.as_deref().unwrap_or("");
+        let audio_channel_map = if self.audio_channel_map_direct {
+            "direct"
+        } else {
+            "auto"
+        };
         let auto_play_list_nav = if self.auto_play_list_nav { "1" } else { "0" };
         let list_click_audition = if self.list_click_audition { "1" } else { "0" };
         let inspect_cfg = {
@@ -860,6 +867,7 @@ spectro_note_labels={}\n\
 item_bg_mode={}\n\
 src_quality={}\n\
 audio_output_device={}\n\
+audio_channel_map={}\n\
 auto_play_list_nav={}\n\
 list_click_audition={}\n\
 list_col_widths={}\n\
@@ -932,6 +940,7 @@ zoo_flip_manual={}\n",
             item_bg_mode,
             src_quality,
             audio_output_device,
+            audio_channel_map,
             auto_play_list_nav,
             list_click_audition,
             list_col_widths,

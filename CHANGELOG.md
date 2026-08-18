@@ -2,6 +2,27 @@
 
 All notable changes in this repository (hand-written).
 
+## Unreleased
+
+### Surround output
+- **Speaker-aware channel mapping**: playback used to map source channels onto the device by index, and any output beyond the source's channel count repeated the source's *last* channel. On a 5.1 device a stereo clip put the right channel into the centre, the LFE and both surrounds; on 7.1.4 the right channel came out of eleven speakers at once, so the clip appeared to be playing from behind the listener. Source and device channels are now labelled with the standard WAVE layout for their channel count and routed by speaker position:
+  - A stereo clip reaches only the front pair. Centre, LFE, surrounds and heights stay silent.
+  - A mono clip goes to both front speakers (not to the centre, which the listener may not have).
+  - A surround clip on a narrower device folds down with ITU-style coefficients — centre and surrounds enter their neighbours at -3 dB, sides fall back to the backs (and vice versa), heights drop onto the bed speaker below them, and LFE is dropped when the device has none. Previously this was a modulo average (`L = (c0 + c2 + c4) / 3` for 5.1), which mixed centre, LFE and surround content at equal weight. The fold is not gain-normalized, so heavily loaded surround material clips against the existing output limiter rather than being quietly attenuated.
+  - Channel counts with no agreed layout (9, 11, 13+) keep the previous index arithmetic.
+  - Muting or soloing a source channel still removes only that channel's contribution; the remaining channels hold their gains instead of being scaled up to compensate.
+  - The output callback now interpolates only the source channels the routing actually reads, so a stereo clip on a 7.1.4 device costs two reads per frame instead of twelve.
+- **Settings > Audio Output > Direct channel mapping**: opt out of the mapping and send source channel N straight to output channel N. Extra outputs stay silent and source channels past the device's count are dropped. Off by default; persisted as `audio_channel_map` in prefs.
+
+### Fixes
+- **Output device follow during playback**: with the output left on `Default`, a change to the OS default device was only picked up while playback was stopped — switching devices mid-playback left audio going to the endpoint the user had just switched away from. The swap now happens immediately and playback resumes at the same position on the new device. An explicitly pinned device is still never overridden, and the switch is still deferred while recording.
+- **Dead output stream recovery**: cpal stream errors were printed to stderr and otherwise ignored, so an endpoint unplugged mid-playback produced silence until the next manual device change. The error now flags the engine and the device is reopened on the next frame, honouring the pinned/default preference, instead of waiting on the 1 Hz device poll.
+- **Dragging files out of long or network paths**: dragging an item to another application panicked whenever Windows could not express the file's path in the legacy form its shell requires — paths over 260 characters, files on a network share, and names the shell rejects. Such a file is now copied to a short temporary path first, so the drag completes instead of failing (the copy is removed by the existing 10-minute sweep).
+- **Crash reports for failures that were already handled**: the native drag path catches its own panics and reports them in the status bar, but the panic hook still wrote a crash report, so a recovered failure looked like a crash. Panics inside a scope that handles them no longer produce a report, and the panic's message is carried into the status line and the debug log instead.
+
+### Diagnostics
+- **Crash reports keep source-relative paths**: panic locations inside a dependency were anonymized down to the bare file name, which for a common name like `mod.rs` identified nothing. Paths that carry no user data — under the cargo registry, a git checkout, the Rust standard library, or the project's own `src/` — now keep their crate-relative part (`drag-2.1.1/src/platform_impl/windows/mod.rs`). Everything else, including the user's media paths, is still reduced to a file name.
+
 ## 0.20260802.0 - 2026-08-02
 
 ### Metadata inspection and scalable sessions

@@ -93,8 +93,16 @@ impl WavesPreviewer {
                 return;
             }
         };
+        let mut temp_paths = prepared.temp_paths;
+        let paths = match self.shell_compatible_drag_paths(&paths, &mut temp_paths) {
+            Ok(paths) => paths,
+            Err(err) => {
+                self.set_external_drag_status(format!("Drag failed: {err}"));
+                return;
+            }
+        };
         let now = Instant::now();
-        for path in prepared.temp_paths {
+        for path in temp_paths {
             self.external_drag_temp_files
                 .push_back(ExternalDragTempFile {
                     path,
@@ -314,6 +322,18 @@ impl WavesPreviewer {
     }
 
     fn allocate_readable_drag_wav(&self, display_name: &str) -> Result<PathBuf, String> {
+        self.allocate_drag_temp_path(display_name, "wav")
+    }
+
+    /// A free name for `display_name` inside the drag temp directory.
+    ///
+    /// Callers register whatever they create in `external_drag_temp_files` so
+    /// the existing retention sweep removes it.
+    fn allocate_drag_temp_path(
+        &self,
+        display_name: &str,
+        extension: &str,
+    ) -> Result<PathBuf, String> {
         let dir = super::temp_audio_ops::neowaves_temp_cache_dir("drag");
         std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
         let stem = Path::new(display_name)
@@ -323,9 +343,9 @@ impl WavesPreviewer {
         let stem = crate::app::helpers::sanitize_filename_component(stem);
         for suffix in 0..1000u32 {
             let name = if suffix == 0 {
-                format!("{stem}.wav")
+                format!("{stem}.{extension}")
             } else {
-                format!("{stem} ({suffix}).wav")
+                format!("{stem} ({suffix}).{extension}")
             };
             let path = dir.join(name);
             if !path.exists() && !provenance_path(&path).exists() {
@@ -333,6 +353,61 @@ impl WavesPreviewer {
             }
         }
         Err("could not allocate unique readable drag filename".to_string())
+    }
+
+    /// Rewrite the payload into paths the Win32 shell can actually parse.
+    ///
+    /// `drag` normalizes each path with `dunce::canonicalize` and feeds the
+    /// result to `ILCreateFromPathW`, which does not understand the `\\?\`
+    /// verbatim prefix. `dunce` keeps that prefix when it cannot safely drop
+    /// it — paths over 260 characters, UNC network shares, and file names the
+    /// legacy APIs reject — and `drag` then unwraps the shell failure into a
+    /// panic (`drag-2.1.1/src/platform_impl/windows/mod.rs:370`). Copying such
+    /// a file under the short temp directory gives the shell a path it accepts.
+    fn shell_compatible_drag_paths(
+        &mut self,
+        paths: &[PathBuf],
+        temp_paths: &mut Vec<PathBuf>,
+    ) -> Result<Vec<PathBuf>, String> {
+        self.rewrite_drag_paths_for_shell(paths, temp_paths, shell_facing_path)
+    }
+
+    /// The body of `shell_compatible_drag_paths`, with the normalization step
+    /// injected.
+    ///
+    /// Only Windows can produce a verbatim path, so tests substitute a
+    /// `facing` that returns one and exercise the copy branch on any platform.
+    fn rewrite_drag_paths_for_shell(
+        &mut self,
+        paths: &[PathBuf],
+        temp_paths: &mut Vec<PathBuf>,
+        facing: impl Fn(&Path) -> Result<PathBuf, String>,
+    ) -> Result<Vec<PathBuf>, String> {
+        let mut out = Vec::with_capacity(paths.len());
+        for path in paths {
+            let facing = facing(path)?;
+            if !is_verbatim_path(&facing) {
+                out.push(facing);
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("NeoWaves Audio");
+            let extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("wav")
+                .to_owned();
+            let copy = self.allocate_drag_temp_path(name, &extension)?;
+            std::fs::copy(path, &copy).map_err(|err| format!("{name}: copy failed: {err}"))?;
+            self.debug_log(format!(
+                "external drag: copied {name} to a short temp path (the shell cannot open the original)"
+            ));
+            temp_paths.push(copy.clone());
+            out.push(copy);
+        }
+        Ok(out)
     }
 
     fn write_virtual_drag_provenance(
@@ -445,13 +520,51 @@ fn canonicalize_drag_payload_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, St
     Ok(out)
 }
 
+/// Whether the Win32 shell will refuse this path.
+///
+/// `ILCreateFromPathW` cannot parse the `\\?\` verbatim prefix. Only Windows
+/// produces such paths, but the check is plain string work so it compiles and
+/// is tested everywhere.
+fn is_verbatim_path(path: &Path) -> bool {
+    path.as_os_str().to_string_lossy().starts_with(r"\\?\")
+}
+
+/// The path `drag` will hand to the shell, i.e. what its own
+/// `dunce::canonicalize` call leaves behind.
+fn shell_facing_path(path: &Path) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    let resolved = dunce::canonicalize(path);
+    #[cfg(not(windows))]
+    let resolved = std::fs::canonicalize(path);
+    resolved.map_err(|err| {
+        let name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        format!("{name}: {err}")
+    })
+}
+
 fn start_native_file_drag_guarded<F>(start: F) -> Result<NativeDragOutcome, String>
 where
     F: FnOnce() -> Result<NativeDragOutcome, String>,
 {
+    // `drag` unwraps shell failures rather than returning them, so a panic in
+    // here is a failure mode this function handles — not a crash. Keep it out
+    // of the crash reports the user is prompted to send; the message still
+    // reaches the UI status and the debug log below.
+    //
+    // The modal drag loop pumps window messages, so app code can run
+    // re-entrantly underneath and its panics are suppressed too. They are also
+    // caught here rather than reaching the user as a crash, so the status line
+    // and debug log stay the record either way.
+    let _suppression = crate::crash_report::suppress_panic_reports();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(start)) {
         Ok(result) => result,
-        Err(_) => Err("native drag panicked".to_string()),
+        Err(payload) => Err(format!(
+            "native drag panicked: {}",
+            crate::crash_report::panic_payload_message(payload.as_ref())
+        )),
     }
 }
 
@@ -694,7 +807,182 @@ mod tests {
         });
         std::panic::set_hook(hook);
         let err = result.expect_err("panic should be converted into an error");
-        assert!(err.contains("native drag panicked"));
+        assert!(err.contains("native drag panicked"), "{err}");
+        // The payload is what says which shell call failed; without it the
+        // debug log only records that something went wrong.
+        assert!(err.contains("simulated native drag panic"), "{err}");
+    }
+
+    #[test]
+    fn external_drag_guard_keeps_the_panic_out_of_crash_reports() {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {
+            assert!(
+                crate::crash_report::panic_reports_suppressed_for_test(),
+                "the drag guard must suppress reporting while the panic unwinds"
+            );
+        }));
+        let result = start_native_file_drag_guarded(|| -> Result<NativeDragOutcome, String> {
+            panic!("simulated native drag panic");
+        });
+        std::panic::set_hook(hook);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn shell_compatible_paths_leave_ordinary_files_untouched() {
+        let dir = temp_dir("shell_ok");
+        let wav = dir.join("source.wav");
+        crate::wave::export_channels_audio(&[vec![0.0, 0.1, -0.1]], 48_000, &wav)
+            .expect("write wav");
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+
+        let canonical = canonicalize_drag_payload_paths(&[wav]).expect("canonicalize");
+        let mut temp_paths = Vec::new();
+        let out = app
+            .shell_compatible_drag_paths(&canonical, &mut temp_paths)
+            .expect("shell compatible");
+
+        assert_eq!(out.len(), 1);
+        assert!(out[0].is_file());
+        assert!(!is_verbatim_path(&out[0]));
+        // A path the shell already accepts must not cost a copy.
+        assert!(temp_paths.is_empty());
+    }
+
+    /// Scenario 1 & 2 (long paths, network shares) as far as a non-Windows
+    /// host can reach: the normalization is stubbed to report what Windows
+    /// would report, and the copy fallback is checked end to end.
+    #[test]
+    fn shell_hostile_paths_are_dragged_as_a_short_temp_copy() {
+        let dir = temp_dir("shell_verbatim");
+        let source = dir.join("deep take.flac");
+        std::fs::write(&source, b"flac-bytes").expect("write source");
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+
+        let mut temp_paths = Vec::new();
+        let out = app
+            .rewrite_drag_paths_for_shell(
+                std::slice::from_ref(&source),
+                &mut temp_paths,
+                // What `dunce::canonicalize` leaves behind for a path over 260
+                // characters or one on a UNC share.
+                |path| Ok(PathBuf::from(format!(r"\\?\C:{}", path.display()))),
+            )
+            .expect("rewrite");
+
+        assert_eq!(out.len(), 1);
+        let copy = &out[0];
+        assert!(
+            !is_verbatim_path(copy),
+            "the shell must be handed a path it can parse, got {}",
+            copy.display()
+        );
+        assert!(copy.is_file(), "the copy must exist before the drag starts");
+        assert_eq!(std::fs::read(copy).unwrap(), b"flac-bytes");
+        assert_eq!(
+            copy.extension().and_then(|v| v.to_str()),
+            Some("flac"),
+            "the receiving application picks the handler by extension"
+        );
+        assert_ne!(copy, &source);
+        // Registered so the existing retention sweep deletes it.
+        assert_eq!(temp_paths, vec![copy.clone()]);
+    }
+
+    /// Scenario 3: a path the shell already accepts costs no copy.
+    #[test]
+    fn shell_compatible_paths_are_passed_through_without_a_copy() {
+        let dir = temp_dir("shell_passthrough");
+        let source = dir.join("plain.wav");
+        std::fs::write(&source, b"wav-bytes").expect("write source");
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+
+        let mut temp_paths = Vec::new();
+        let out = app
+            .rewrite_drag_paths_for_shell(std::slice::from_ref(&source), &mut temp_paths, |path| {
+                Ok(path.to_path_buf())
+            })
+            .expect("rewrite");
+
+        assert_eq!(out, vec![source]);
+        assert!(temp_paths.is_empty(), "no temp file should be created");
+    }
+
+    /// Scenario 1 on the real platform: a path past `MAX_PATH` is one
+    /// `dunce::canonicalize` refuses to simplify, so the drag must fall back
+    /// to a copy rather than panicking inside `drag`.
+    #[cfg(windows)]
+    #[test]
+    fn windows_long_paths_fall_back_to_a_copy() {
+        let dir = temp_dir("shell_long");
+        let mut deep = dir.clone();
+        // Push past MAX_PATH (260) so `dunce` keeps the verbatim prefix.
+        while deep.as_os_str().len() < 300 {
+            deep = deep.join("nested_directory_segment");
+        }
+        std::fs::create_dir_all(&deep).expect("create deep dir");
+        let source = deep.join("take.wav");
+        crate::wave::export_channels_audio(&[vec![0.0, 0.5, -0.5]], 48_000, &source)
+            .expect("write wav");
+
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+        let canonical = canonicalize_drag_payload_paths(&[source]).expect("canonicalize");
+        let mut temp_paths = Vec::new();
+        let out = app
+            .shell_compatible_drag_paths(&canonical, &mut temp_paths)
+            .expect("shell compatible");
+
+        assert_eq!(out.len(), 1);
+        assert!(!is_verbatim_path(&out[0]), "{}", out[0].display());
+        assert!(out[0].is_file());
+        assert_eq!(temp_paths.len(), 1, "the long path must be copied");
+    }
+
+    /// Scenario 3 on the real platform.
+    #[cfg(windows)]
+    #[test]
+    fn windows_short_paths_are_dragged_in_place() {
+        let dir = temp_dir("shell_short");
+        let source = dir.join("take.wav");
+        crate::wave::export_channels_audio(&[vec![0.0, 0.5, -0.5]], 48_000, &source)
+            .expect("write wav");
+
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+        let canonical = canonicalize_drag_payload_paths(&[source]).expect("canonicalize");
+        let mut temp_paths = Vec::new();
+        let out = app
+            .shell_compatible_drag_paths(&canonical, &mut temp_paths)
+            .expect("shell compatible");
+
+        assert_eq!(out.len(), 1);
+        assert!(!is_verbatim_path(&out[0]), "{}", out[0].display());
+        assert!(temp_paths.is_empty(), "a short path must not be copied");
+    }
+
+    #[test]
+    fn drag_temp_paths_keep_the_source_extension() {
+        let app = WavesPreviewer::new_headless(Default::default()).expect("app");
+        let flac = app
+            .allocate_drag_temp_path("Kick Sample.flac", "flac")
+            .expect("allocate");
+        assert_eq!(flac.extension().and_then(|v| v.to_str()), Some("flac"));
+        assert!(flac
+            .file_stem()
+            .and_then(|v| v.to_str())
+            .is_some_and(|stem| stem.starts_with("Kick Sample")));
+    }
+
+    #[test]
+    fn verbatim_paths_are_recognized_as_shell_hostile() {
+        assert!(is_verbatim_path(Path::new(r"\\?\C:\audio\take.wav")));
+        assert!(is_verbatim_path(Path::new(
+            r"\\?\UNC\server\share\take.wav"
+        )));
+        assert!(!is_verbatim_path(Path::new(r"C:\audio\take.wav")));
+        // A plain UNC path is fine — the shell resolves network shares.
+        assert!(!is_verbatim_path(Path::new(r"\\server\share\take.wav")));
+        assert!(!is_verbatim_path(Path::new("/home/user/take.wav")));
     }
 
     #[test]

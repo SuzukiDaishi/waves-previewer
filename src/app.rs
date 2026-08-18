@@ -203,6 +203,13 @@ struct AudioDeviceWatchState {
     rx: Option<std::sync::mpsc::Receiver<AudioDeviceSnapshot>>,
     last_default_output_name: Option<String>,
     last_default_input_id: Option<String>,
+    /// Last `AudioEngine::stream_error_seq` we acted on. The device poll runs
+    /// at 1 Hz, which is too slow to notice an endpoint that was pulled out
+    /// mid-playback; a bump here reopens the device on the next frame instead.
+    last_stream_error_seq: u32,
+    /// Earliest time a stream error may trigger another reopen. Without it a
+    /// device that fails on every callback would be reopened every frame.
+    next_stream_error_retry_at: std::time::Instant,
 }
 
 impl Default for AudioDeviceWatchState {
@@ -212,6 +219,8 @@ impl Default for AudioDeviceWatchState {
             rx: None,
             last_default_output_name: None,
             last_default_input_id: None,
+            last_stream_error_seq: 0,
+            next_stream_error_retry_at: std::time::Instant::now(),
         }
     }
 }
@@ -440,6 +449,9 @@ pub struct WavesPreviewer {
     audio_output_device_name: Option<String>,
     audio_output_devices: Vec<String>,
     audio_output_error: Option<String>,
+    /// Route source channel N straight to output channel N instead of mapping
+    /// by speaker position. Off by default.
+    audio_channel_map_direct: bool,
     audio_device_watch: AudioDeviceWatchState,
     /// Real CPAL initialization runs after the native window can be shown.
     /// Until it arrives, the lock-free test engine keeps every call site valid.

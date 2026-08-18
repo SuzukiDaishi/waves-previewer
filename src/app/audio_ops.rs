@@ -2,8 +2,36 @@ use std::time::{Duration, Instant};
 
 use super::helpers::db_to_amp;
 use super::{AudioDeviceSnapshot, WavesPreviewer, AUDIO_DEVICE_POLL_INTERVAL_MS};
+use crate::audio_channels::ChannelMapMode;
 
 impl WavesPreviewer {
+    /// How the current preference maps source channels onto the device.
+    pub(super) fn audio_channel_map_mode(&self) -> ChannelMapMode {
+        if self.audio_channel_map_direct {
+            ChannelMapMode::Direct
+        } else {
+            ChannelMapMode::Auto
+        }
+    }
+
+    /// Push the routing preference into the engine. Cheap and idempotent, so
+    /// it is re-run after every engine swap (each one brings a fresh
+    /// `SharedAudio` that starts at the default mode).
+    pub(super) fn apply_audio_channel_map_mode(&self) {
+        self.audio
+            .set_channel_map_mode(self.audio_channel_map_mode());
+    }
+
+    /// Toggle the direct-routing preference, persisting it.
+    pub(super) fn set_audio_channel_map_direct(&mut self, direct: bool) {
+        if self.audio_channel_map_direct == direct {
+            return;
+        }
+        self.audio_channel_map_direct = direct;
+        self.apply_audio_channel_map_mode();
+        self.save_prefs();
+    }
+
     pub(super) fn ensure_output_sample_rate(&mut self, preferred_sr: Option<u32>) -> bool {
         let Some(preferred_sr) = preferred_sr.filter(|v| *v > 0) else {
             return true;
@@ -182,6 +210,7 @@ impl WavesPreviewer {
 
     pub(super) fn tick_audio_device_watch(&mut self, now: Instant) {
         self.drain_audio_device_watch();
+        self.handle_output_stream_errors(now);
         if !self.audio.has_output_stream()
             || self.audio_device_watch.rx.is_some()
             || now < self.audio_device_watch.next_poll_at
@@ -196,6 +225,31 @@ impl WavesPreviewer {
         std::thread::spawn(move || {
             let _ = tx.send(Self::capture_audio_device_snapshot());
         });
+    }
+
+    /// Reopen the output when cpal reported the stream broken — typically the
+    /// endpoint being unplugged. The user's choice is honoured: a pinned device
+    /// is retried by name, "Default" reopens whatever the default now is.
+    fn handle_output_stream_errors(&mut self, now: Instant) {
+        if !self.audio.has_output_stream() {
+            return;
+        }
+        let seq = self.audio.stream_error_seq();
+        if seq == self.audio_device_watch.last_stream_error_seq {
+            return;
+        }
+        self.audio_device_watch.last_stream_error_seq = seq;
+        // A device that fails on every callback must not be reopened on every
+        // frame; hold the same cadence as the device poll.
+        if now < self.audio_device_watch.next_stream_error_retry_at {
+            return;
+        }
+        self.audio_device_watch.next_stream_error_retry_at =
+            now + Duration::from_millis(AUDIO_DEVICE_POLL_INTERVAL_MS);
+        let requested = self.audio_output_device_name.clone();
+        self.reopen_output_device_keeping_playback(requested);
+        // The replacement engine starts its own error counter.
+        self.audio_device_watch.last_stream_error_seq = self.audio.stream_error_seq();
     }
 
     fn drain_audio_device_watch(&mut self) {
@@ -237,15 +291,18 @@ impl WavesPreviewer {
         )
     }
 
+    /// The device to move to, if the OS default has changed out from under us.
+    ///
+    /// Only applies when the user left the output on "Default" — an explicitly
+    /// pinned device is never overridden. Playback is *not* a reason to defer:
+    /// when the default endpoint changes (or disappears) mid-playback, staying
+    /// on the old one just plays to nothing, so the swap happens immediately
+    /// and playback is resumed at the same position on the new device.
     pub(super) fn default_output_follow_target(
         &self,
         default_output_name: Option<&str>,
     ) -> Option<String> {
-        if self.audio_output_device_name.is_some()
-            || self.playback_is_playing_now()
-            || self.playback_session.is_playing
-            || !self.recording_allows_device_list_refresh()
-        {
+        if self.audio_output_device_name.is_some() || !self.recording_allows_device_list_refresh() {
             return None;
         }
         let default_output_name = default_output_name
@@ -267,18 +324,54 @@ impl WavesPreviewer {
         &mut self,
         default_output_name: Option<&str>,
     ) -> bool {
-        if self.audio.has_output_stream()
-            && self
+        if !self.audio.has_output_stream()
+            || self
                 .default_output_follow_target(default_output_name)
-                .is_some()
+                .is_none()
         {
-            return self.apply_audio_output_device_selection_inner(None, false, false);
+            return false;
         }
-        false
+        self.reopen_output_device_keeping_playback(None)
+    }
+
+    /// Swap the output engine and pick playback back up where it left off.
+    ///
+    /// The engine swap brings a fresh `SharedAudio`, so
+    /// `sync_after_audio_engine_replaced` tears the playback session down. The
+    /// source position is read before the swap (while the old timeline map is
+    /// still valid) and restored after the buffer has been rebuilt against the
+    /// new device — the same capture/rebuild/seek order the editor rebuild path
+    /// uses.
+    fn reopen_output_device_keeping_playback(&mut self, requested: Option<String>) -> bool {
+        let was_playing = self.playback_is_playing_now() || self.playback_session.is_playing;
+        let source_time_sec = self.playback_current_source_time_sec();
+        let playing_path = self.playing_path.clone();
+
+        if !self.apply_audio_output_device_selection_inner(requested, false, false) {
+            return false;
+        }
+        if !was_playing {
+            return true;
+        }
+
+        // The same file is still the one playing, so restore it before the
+        // rebuild — its pending gain is looked up from here.
+        self.playing_path = playing_path;
+        self.rebuild_current_buffer_with_mode();
+        if let Some(source_time_sec) = source_time_sec {
+            self.playback_seek_to_source_time(self.mode, source_time_sec);
+        }
+        // `play` is a no-op when the rebuild has not produced a buffer yet
+        // (a heavy-processing path decodes in the background), so take the
+        // engine's word for it rather than asserting playback resumed.
+        self.audio.play();
+        self.playback_session.is_playing = self.playback_is_playing_now();
+        true
     }
 
     pub(super) fn sync_after_audio_engine_replaced(&mut self) {
         self.audio.stop();
+        self.apply_audio_channel_map_mode();
         self.playing_path = None;
         self.list_play_pending = false;
         self.list_preview_pending_path = None;

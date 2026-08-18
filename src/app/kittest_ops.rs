@@ -439,6 +439,18 @@ impl super::WavesPreviewer {
         self.default_output_follow_target(default_output_name)
     }
 
+    pub fn test_audio_channel_map_direct(&self) -> bool {
+        self.audio_channel_map_direct
+    }
+
+    pub fn test_set_audio_channel_map_direct(&mut self, direct: bool) {
+        self.set_audio_channel_map_direct(direct);
+    }
+
+    pub fn test_audio_engine_channel_map_mode_is_direct(&self) -> bool {
+        self.audio.channel_map_mode() == crate::audio_channels::ChannelMapMode::Direct
+    }
+
     pub fn test_set_audio_playing_flag(&mut self, playing: bool) {
         self.audio
             .shared
@@ -3435,6 +3447,14 @@ impl super::WavesPreviewer {
 
     pub fn test_discard_recording(&mut self) {
         self.discard_recording();
+    }
+
+    /// Test-only: complete a discard. `discard_recording` only asks the worker
+    /// to stop and parks the tab in `Finalizing`; with no capture thread
+    /// running, nothing would ever move it back to `Idle`.
+    pub fn test_finish_recording_discard(&mut self) {
+        self.recording_tab.state = crate::app::types::RecordingState::Idle;
+        self.recording_tab.progress_message.clear();
     }
 
     pub fn test_recording_paused_flag(&self) -> bool {
