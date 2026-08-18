@@ -17,6 +17,11 @@ All notable changes in this repository (hand-written).
 ### Fixes
 - **Output device follow during playback**: with the output left on `Default`, a change to the OS default device was only picked up while playback was stopped — switching devices mid-playback left audio going to the endpoint the user had just switched away from. The swap now happens immediately and playback resumes at the same position on the new device. An explicitly pinned device is still never overridden, and the switch is still deferred while recording.
 - **Dead output stream recovery**: cpal stream errors were printed to stderr and otherwise ignored, so an endpoint unplugged mid-playback produced silence until the next manual device change. The error now flags the engine and the device is reopened on the next frame, honouring the pinned/default preference, instead of waiting on the 1 Hz device poll.
+- **Dragging files out of long or network paths**: dragging an item to another application panicked whenever Windows could not express the file's path in the legacy form its shell requires — paths over 260 characters, files on a network share, and names the shell rejects. Such a file is now copied to a short temporary path first, so the drag completes instead of failing (the copy is removed by the existing 10-minute sweep).
+- **Crash reports for failures that were already handled**: the native drag path catches its own panics and reports them in the status bar, but the panic hook still wrote a crash report, so a recovered failure looked like a crash. Panics inside a scope that handles them no longer produce a report, and the panic's message is carried into the status line and the debug log instead.
+
+### Diagnostics
+- **Crash reports keep source-relative paths**: panic locations inside a dependency were anonymized down to the bare file name, which for a common name like `mod.rs` identified nothing. Paths that carry no user data — under the cargo registry, a git checkout, the Rust standard library, or the project's own `src/` — now keep their crate-relative part (`drag-2.1.1/src/platform_impl/windows/mod.rs`). Everything else, including the user's media paths, is still reduced to a file name.
 
 ## 0.20260802.0 - 2026-08-02
 

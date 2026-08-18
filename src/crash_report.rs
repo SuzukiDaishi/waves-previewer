@@ -2,6 +2,7 @@ use chrono::Local;
 use regex::Regex;
 use std::{
     backtrace::Backtrace,
+    cell::Cell,
     env, fs, io,
     path::{Path, PathBuf},
     process,
@@ -15,6 +16,47 @@ const ENV_REPORT_DIR: &str = "NEOWAVES_CRASH_REPORT_DIR";
 
 static HOOK_INSTALLED: Once = Once::new();
 static APP_MODE: AtomicU8 = AtomicU8::new(CrashReportMode::Unknown as u8);
+
+thread_local! {
+    /// Set while a `catch_unwind` scope is responsible for the panic. The hook
+    /// still runs (Rust has no way to skip it), so it reads this to decide
+    /// whether the panic is worth a report on disk.
+    static SUPPRESS_REPORTS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Restores the previous suppression state when dropped.
+#[must_use = "the suppression only lasts while the guard is alive"]
+pub struct PanicReportSuppression {
+    previous: bool,
+}
+
+impl Drop for PanicReportSuppression {
+    fn drop(&mut self) {
+        SUPPRESS_REPORTS.with(|flag| flag.set(self.previous));
+    }
+}
+
+/// Stop writing crash reports on this thread until the guard is dropped.
+///
+/// For panics the caller already handles — a `catch_unwind` that turns them
+/// into an error the UI shows. Without this a recovered panic still leaves a
+/// crash report behind, which reads to the user as a crash that never
+/// happened. Panics still reach the default hook, so they stay visible on
+/// stderr.
+pub fn suppress_panic_reports() -> PanicReportSuppression {
+    let previous = SUPPRESS_REPORTS.with(|flag| flag.replace(true));
+    PanicReportSuppression { previous }
+}
+
+fn panic_reports_suppressed() -> bool {
+    SUPPRESS_REPORTS.with(Cell::get)
+}
+
+/// Lets other modules' tests assert that they suppressed reporting.
+#[cfg(test)]
+pub fn panic_reports_suppressed_for_test() -> bool {
+    panic_reports_suppressed()
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -64,6 +106,10 @@ pub fn install_panic_hook(app_mode: CrashReportMode) {
     HOOK_INSTALLED.call_once(|| {
         let previous_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            if panic_reports_suppressed() {
+                previous_hook(info);
+                return;
+            }
             let mode = CrashReportMode::from_u8(APP_MODE.load(Ordering::SeqCst));
             match write_panic_report(info, mode) {
                 Ok(path) => {
@@ -263,7 +309,9 @@ fn push_field(report: &mut String, name: &str, value: &str) {
     report.push('\n');
 }
 
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+/// The human-readable text of a panic payload, for both the report and
+/// callers that recover from a panic themselves.
+pub fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_owned()
     } else if let Some(message) = payload.downcast_ref::<String>() {
@@ -310,16 +358,62 @@ fn anonymize_text(text: &str) -> String {
     let unix_path =
         Regex::new(r#"/[^\s`"'<>\]\)]+(?:/[^\s`"'<>\]\)]+)+"#).expect("valid unix path regex");
 
-    let text = windows_path
+    // Unix paths first: a replacement token can contain `/` (source-relative
+    // paths keep their separators), and the Windows pattern needs a drive
+    // letter followed by a backslash, so it can never match inside one. The
+    // other order lets the Unix pass chew through tokens the Windows pass
+    // just produced.
+    let text = unix_path
         .replace_all(text, |captures: &regex::Captures<'_>| {
             anonymize_path_token(&captures[0])
         })
         .into_owned();
-    unix_path
+    windows_path
         .replace_all(&text, |captures: &regex::Captures<'_>| {
             anonymize_path_token(&captures[0])
         })
         .into_owned()
+}
+
+/// The part of a source path that is worth keeping in a report.
+///
+/// A bare file name is not enough to act on: a panic in `mod.rs` could belong
+/// to any of hundreds of crates. The segments below are build-layout, not user
+/// data — no account name, no directory choices — so keeping them costs no
+/// privacy and turns "which `mod.rs`?" into an answer.
+///
+/// Everything else (the user's own files) still falls back to the file name.
+fn source_relative_path(normalized: &str) -> Option<String> {
+    if !normalized.ends_with(".rs") {
+        return None;
+    }
+    // Dependency from crates.io: .../registry/src/<index>/<crate-version>/src/...
+    if let Some(rest) = split_after(normalized, "/registry/src/") {
+        // Drop the registry index host, keep the crate directory onwards.
+        if let Some((_, crate_relative)) = rest.split_once('/') {
+            return Some(crate_relative.to_owned());
+        }
+    }
+    // Dependency from git: .../git/checkouts/<name-hash>/<rev>/src/...
+    if let Some(rest) = split_after(normalized, "/git/checkouts/") {
+        return Some(rest.to_owned());
+    }
+    // The standard library: /rustc/<hash>/library/std/src/...
+    if let Some(rest) = split_after(normalized, "/library/") {
+        if normalized.contains("/rustc/") {
+            return Some(format!("library/{rest}"));
+        }
+    }
+    // Our own crate: <build dir>/src/... — the build directory is the user's
+    // choice, the path below `src/` is ours.
+    split_after(normalized, "/src/").map(|rest| format!("src/{rest}"))
+}
+
+fn split_after<'a>(haystack: &'a str, marker: &str) -> Option<&'a str> {
+    haystack
+        .rfind(marker)
+        .map(|at| &haystack[at + marker.len()..])
+        .filter(|rest| !rest.is_empty())
 }
 
 fn anonymize_path_token(token: &str) -> String {
@@ -331,22 +425,27 @@ fn anonymize_path_token(token: &str) -> String {
     });
     let trimmed = trimmed.trim_end_matches(|c: char| matches!(c, ',' | ';' | '.'));
     let normalized = trimmed.replace('\\', "/");
-    let mut file_name = normalized
-        .rsplit('/')
-        .find(|part| !part.is_empty())
-        .filter(|part| part.contains('.'))
-        .unwrap_or_default()
-        .to_owned();
+    // Panic locations arrive as `<path>:<line>:<col>`. Strip those before
+    // looking at the path so the source-relative match sees a real file name;
+    // a Windows drive colon survives because its suffix is not all digits.
+    let mut path = normalized.as_str();
     for _ in 0..2 {
-        let Some((name, suffix)) = file_name.rsplit_once(':') else {
+        let Some((head, suffix)) = path.rsplit_once(':') else {
             break;
         };
         if suffix.chars().all(|ch| ch.is_ascii_digit()) {
-            file_name = name.to_owned();
+            path = head;
         } else {
             break;
         }
     }
+    let file_name = source_relative_path(path).unwrap_or_else(|| {
+        path.rsplit('/')
+            .find(|part| !part.is_empty())
+            .filter(|part| part.contains('.'))
+            .unwrap_or_default()
+            .to_owned()
+    });
     if file_name.is_empty() {
         "<path>".to_owned()
     } else {
@@ -535,8 +634,83 @@ mod tests {
             assert!(!text.contains(r#"C:\Users"#));
             assert!(text.contains("<path:secret.wav>"));
             assert!(text.contains("<path:song.wav>"));
-            assert!(text.contains("<path:main.rs>"));
+            // Source files keep the part below `src/`; the build directory
+            // above it (which carries the user name) is still dropped.
+            assert!(text.contains("<path:src/main.rs>"));
         });
+    }
+
+    #[test]
+    fn anonymize_keeps_source_relative_paths_for_dependencies() {
+        let registry = anonymize_text(
+            r#"panicked at C:\Users\Alice\.cargo\registry\src\index.crates.io-1949cf8c\drag-2.1.1\src\platform_impl\windows\mod.rs:370:60"#,
+        );
+        assert!(
+            registry.contains("<path:drag-2.1.1/src/platform_impl/windows/mod.rs>"),
+            "{registry}"
+        );
+        assert!(!registry.contains("Alice"));
+
+        let git = anonymize_text(
+            "/home/bob/.cargo/git/checkouts/clack-e0a4d228e55f/f874e858/host/src/bundle/mod.rs:12:7",
+        );
+        assert!(
+            git.contains("<path:clack-e0a4d228e55f/f874e858/host/src/bundle/mod.rs>"),
+            "{git}"
+        );
+        assert!(!git.contains("bob"));
+
+        let std_lib = anonymize_text("/rustc/9b00956e56/library/std/src/io/mod.rs:370:60");
+        assert!(
+            std_lib.contains("<path:library/std/src/io/mod.rs>"),
+            "{std_lib}"
+        );
+    }
+
+    #[test]
+    fn anonymize_still_reduces_user_media_paths_to_a_file_name() {
+        let text = anonymize_text(
+            r#"failed C:\Users\Alice\Music\Session\src\take_one.wav and /home/bob/src/mix.flac"#,
+        );
+        assert!(text.contains("<path:take_one.wav>"), "{text}");
+        assert!(text.contains("<path:mix.flac>"), "{text}");
+        assert!(!text.contains("Alice"));
+        assert!(!text.contains("bob"));
+    }
+
+    #[test]
+    fn suppression_guard_is_scoped_and_nests() {
+        assert!(!panic_reports_suppressed());
+        {
+            let _outer = suppress_panic_reports();
+            assert!(panic_reports_suppressed());
+            {
+                let _inner = suppress_panic_reports();
+                assert!(panic_reports_suppressed());
+            }
+            assert!(
+                panic_reports_suppressed(),
+                "the inner guard must not end the outer scope"
+            );
+        }
+        assert!(!panic_reports_suppressed());
+    }
+
+    #[test]
+    fn suppression_clears_after_a_caught_panic() {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(|| {
+            let _guard = suppress_panic_reports();
+            assert!(panic_reports_suppressed());
+            panic!("simulated");
+        });
+        std::panic::set_hook(hook);
+        assert!(result.is_err());
+        assert!(
+            !panic_reports_suppressed(),
+            "unwinding must drop the guard and restore reporting"
+        );
     }
 
     #[test]
