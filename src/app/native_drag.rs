@@ -369,9 +369,23 @@ impl WavesPreviewer {
         paths: &[PathBuf],
         temp_paths: &mut Vec<PathBuf>,
     ) -> Result<Vec<PathBuf>, String> {
+        self.rewrite_drag_paths_for_shell(paths, temp_paths, shell_facing_path)
+    }
+
+    /// The body of `shell_compatible_drag_paths`, with the normalization step
+    /// injected.
+    ///
+    /// Only Windows can produce a verbatim path, so tests substitute a
+    /// `facing` that returns one and exercise the copy branch on any platform.
+    fn rewrite_drag_paths_for_shell(
+        &mut self,
+        paths: &[PathBuf],
+        temp_paths: &mut Vec<PathBuf>,
+        facing: impl Fn(&Path) -> Result<PathBuf, String>,
+    ) -> Result<Vec<PathBuf>, String> {
         let mut out = Vec::with_capacity(paths.len());
         for path in paths {
-            let facing = shell_facing_path(path)?;
+            let facing = facing(path)?;
             if !is_verbatim_path(&facing) {
                 out.push(facing);
                 continue;
@@ -834,6 +848,116 @@ mod tests {
         assert!(!is_verbatim_path(&out[0]));
         // A path the shell already accepts must not cost a copy.
         assert!(temp_paths.is_empty());
+    }
+
+    /// Scenario 1 & 2 (long paths, network shares) as far as a non-Windows
+    /// host can reach: the normalization is stubbed to report what Windows
+    /// would report, and the copy fallback is checked end to end.
+    #[test]
+    fn shell_hostile_paths_are_dragged_as_a_short_temp_copy() {
+        let dir = temp_dir("shell_verbatim");
+        let source = dir.join("deep take.flac");
+        std::fs::write(&source, b"flac-bytes").expect("write source");
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+
+        let mut temp_paths = Vec::new();
+        let out = app
+            .rewrite_drag_paths_for_shell(
+                std::slice::from_ref(&source),
+                &mut temp_paths,
+                // What `dunce::canonicalize` leaves behind for a path over 260
+                // characters or one on a UNC share.
+                |path| Ok(PathBuf::from(format!(r"\\?\C:{}", path.display()))),
+            )
+            .expect("rewrite");
+
+        assert_eq!(out.len(), 1);
+        let copy = &out[0];
+        assert!(
+            !is_verbatim_path(copy),
+            "the shell must be handed a path it can parse, got {}",
+            copy.display()
+        );
+        assert!(copy.is_file(), "the copy must exist before the drag starts");
+        assert_eq!(std::fs::read(copy).unwrap(), b"flac-bytes");
+        assert_eq!(
+            copy.extension().and_then(|v| v.to_str()),
+            Some("flac"),
+            "the receiving application picks the handler by extension"
+        );
+        assert_ne!(copy, &source);
+        // Registered so the existing retention sweep deletes it.
+        assert_eq!(temp_paths, vec![copy.clone()]);
+    }
+
+    /// Scenario 3: a path the shell already accepts costs no copy.
+    #[test]
+    fn shell_compatible_paths_are_passed_through_without_a_copy() {
+        let dir = temp_dir("shell_passthrough");
+        let source = dir.join("plain.wav");
+        std::fs::write(&source, b"wav-bytes").expect("write source");
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+
+        let mut temp_paths = Vec::new();
+        let out = app
+            .rewrite_drag_paths_for_shell(std::slice::from_ref(&source), &mut temp_paths, |path| {
+                Ok(path.to_path_buf())
+            })
+            .expect("rewrite");
+
+        assert_eq!(out, vec![source]);
+        assert!(temp_paths.is_empty(), "no temp file should be created");
+    }
+
+    /// Scenario 1 on the real platform: a path past `MAX_PATH` is one
+    /// `dunce::canonicalize` refuses to simplify, so the drag must fall back
+    /// to a copy rather than panicking inside `drag`.
+    #[cfg(windows)]
+    #[test]
+    fn windows_long_paths_fall_back_to_a_copy() {
+        let dir = temp_dir("shell_long");
+        let mut deep = dir.clone();
+        // Push past MAX_PATH (260) so `dunce` keeps the verbatim prefix.
+        while deep.as_os_str().len() < 300 {
+            deep = deep.join("nested_directory_segment");
+        }
+        std::fs::create_dir_all(&deep).expect("create deep dir");
+        let source = deep.join("take.wav");
+        crate::wave::export_channels_audio(&[vec![0.0, 0.5, -0.5]], 48_000, &source)
+            .expect("write wav");
+
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+        let canonical = canonicalize_drag_payload_paths(&[source]).expect("canonicalize");
+        let mut temp_paths = Vec::new();
+        let out = app
+            .shell_compatible_drag_paths(&canonical, &mut temp_paths)
+            .expect("shell compatible");
+
+        assert_eq!(out.len(), 1);
+        assert!(!is_verbatim_path(&out[0]), "{}", out[0].display());
+        assert!(out[0].is_file());
+        assert_eq!(temp_paths.len(), 1, "the long path must be copied");
+    }
+
+    /// Scenario 3 on the real platform.
+    #[cfg(windows)]
+    #[test]
+    fn windows_short_paths_are_dragged_in_place() {
+        let dir = temp_dir("shell_short");
+        let source = dir.join("take.wav");
+        crate::wave::export_channels_audio(&[vec![0.0, 0.5, -0.5]], 48_000, &source)
+            .expect("write wav");
+
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+        let canonical = canonicalize_drag_payload_paths(&[source]).expect("canonicalize");
+        let mut temp_paths = Vec::new();
+        let out = app
+            .shell_compatible_drag_paths(&canonical, &mut temp_paths)
+            .expect("shell compatible");
+
+        assert_eq!(out.len(), 1);
+        assert!(!is_verbatim_path(&out[0]), "{}", out[0].display());
+        assert!(temp_paths.is_empty(), "a short path must not be copied");
     }
 
     #[test]
