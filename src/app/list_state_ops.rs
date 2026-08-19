@@ -67,8 +67,7 @@ impl WavesPreviewer {
                 return *exists;
             }
         }
-        self.fs_exists_refreshes_this_frame =
-            self.fs_exists_refreshes_this_frame.saturating_add(1);
+        self.fs_exists_refreshes_this_frame = self.fs_exists_refreshes_this_frame.saturating_add(1);
         let exists = path.is_file();
         // Bound memory on very large lists; entries repopulate on demand.
         if self.fs_exists_cache.len() >= 100_000 {

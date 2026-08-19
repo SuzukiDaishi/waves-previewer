@@ -189,8 +189,8 @@ mod tests {
             .expect("write fixture");
         let session = dir.join("parity.nwsess");
         {
-            let mut app = crate::app::WavesPreviewer::new_headless(Default::default())
-                .expect("headless app");
+            let mut app =
+                crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
             app.replace_with_files(&[audio.clone()]);
             app.save_project_as_blocking(session.clone())
                 .expect("save session");
@@ -232,8 +232,8 @@ mod tests {
             .expect("write fixture");
         let session = dir.join("missing.nwsess");
         {
-            let mut app = crate::app::WavesPreviewer::new_headless(Default::default())
-                .expect("headless app");
+            let mut app =
+                crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
             app.replace_with_files(&[present.clone()]);
             app.save_project_as_blocking(session.clone())
                 .expect("save session");
@@ -241,10 +241,7 @@ mod tests {
         // Add a path that never existed, the way a session outlives a file.
         let text = std::fs::read_to_string(&session).expect("read session");
         let mut saved = deserialize_project(&text).expect("parse session");
-        saved
-            .list
-            .files
-            .push(absent.to_string_lossy().to_string());
+        saved.list.files.push(absent.to_string_lossy().to_string());
         std::fs::write(&session, serialize_project(&saved).expect("serialize"))
             .expect("rewrite session");
 
@@ -260,7 +257,10 @@ mod tests {
             .map(|item| item.status.clone())
             .expect("absent row present in the list");
         assert!(
-            matches!(absent_status, super::super::types::MediaStatus::DecodeFailed(_)),
+            matches!(
+                absent_status,
+                super::super::types::MediaStatus::DecodeFailed(_)
+            ),
             "a session row whose file is gone must still read as missing, got {absent_status:?}"
         );
         let present_status = app
@@ -286,8 +286,8 @@ mod tests {
             .expect("write fixture");
         let session = dir.join("prefetch.nwsess");
         {
-            let mut app = crate::app::WavesPreviewer::new_headless(Default::default())
-                .expect("headless app");
+            let mut app =
+                crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
             app.replace_with_files(&[audio.clone()]);
             app.open_or_activate_tab(&audio);
             // A sidecar is only written for a dirty tab with samples, and a
@@ -312,8 +312,7 @@ mod tests {
 
         let prefetched_parsed = crate::app::WavesPreviewer::parse_session_document(session.clone())
             .expect("parse for prefetch");
-        let requests =
-            crate::app::WavesPreviewer::collect_prefetch_requests(&prefetched_parsed);
+        let requests = crate::app::WavesPreviewer::collect_prefetch_requests(&prefetched_parsed);
         assert!(
             !requests.is_empty(),
             "the fixture must produce something to prefetch, or this proves nothing"
@@ -335,9 +334,10 @@ mod tests {
             prefetch
                 .sidecars
                 .values()
-                .any(|(channels, sr)| channels.as_slice()
-                    == [vec![0.5f32, -0.25, 0.125, -0.0625]]
-                    && *sr == 48_000),
+                .any(
+                    |(channels, sr)| channels.as_slice() == [vec![0.5f32, -0.25, 0.125, -0.0625]]
+                        && *sr == 48_000
+                ),
             "prefetched sidecar audio should match what the session saved, got {:?}",
             prefetch
                 .sidecars
@@ -847,12 +847,8 @@ impl super::WavesPreviewer {
             .name("neowaves-session-audio".to_string())
             .spawn(move || {
                 crate::app::threading::lower_current_thread_priority();
-                let prefetch = Self::run_audio_prefetch(
-                    &parsed.path.clone(),
-                    requests,
-                    concurrency,
-                    &cancel,
-                );
+                let prefetch =
+                    Self::run_audio_prefetch(&parsed.path.clone(), requests, concurrency, &cancel);
                 let _ = tx.send((parsed, prefetch));
                 crate::ui_wake::wake_ui();
             });
@@ -2006,7 +2002,9 @@ impl super::WavesPreviewer {
             return prefetch;
         }
         let queue = std::sync::Arc::new(std::sync::Mutex::new(
-            requests.into_iter().collect::<std::collections::VecDeque<_>>(),
+            requests
+                .into_iter()
+                .collect::<std::collections::VecDeque<_>>(),
         ));
         let (tx, rx) = std::sync::mpsc::channel::<PrefetchResult>();
         let workers = concurrency.max(1);
@@ -2024,10 +2022,8 @@ impl super::WavesPreviewer {
                         if cancel.load(Ordering::Relaxed) {
                             break;
                         }
-                        let Some(request) = queue
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .pop_front()
+                        let Some(request) =
+                            queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front()
                         else {
                             break;
                         };
@@ -2440,13 +2436,10 @@ impl super::WavesPreviewer {
                     //    edits (gain/fade/normalize/trim) the op_chain cannot
                     //    express. Reconstruct from source only when it's absent.
                     if let Some(raw) = entry.sidecar_audio.as_ref() {
-                        match prefetch
-                            .take_sidecar(raw)
-                            .map(Ok)
-                            .unwrap_or_else(|| {
-                                load_sidecar_audio(&project_path, raw)
-                                    .map(|(channels, sr, _)| (channels, sr))
-                            }) {
+                        match prefetch.take_sidecar(raw).map(Ok).unwrap_or_else(|| {
+                            load_sidecar_audio(&project_path, raw)
+                                .map(|(channels, sr, _)| (channels, sr))
+                        }) {
                             Ok((channels, sr)) => {
                                 channels_opt = Some(channels);
                                 sample_rate = sr.max(1);
@@ -2463,9 +2456,8 @@ impl super::WavesPreviewer {
                         match &source {
                             VirtualSourceRef::FilePath(src_path) => {
                                 if src_path.is_file() {
-                                    if let Some((channels, sr)) = prefetch
-                                        .take_file(src_path)
-                                        .or_else(|| {
+                                    if let Some((channels, sr)) =
+                                        prefetch.take_file(src_path).or_else(|| {
                                             crate::audio_io::decode_audio_multi(src_path).ok()
                                         })
                                     {
@@ -2784,13 +2776,11 @@ impl super::WavesPreviewer {
         let out_sr = self.audio.shared.out_sample_rate;
         for edit in project.cached_edits.iter() {
             let path = resolve_path(&edit.path, &base_dir);
-            let edited = prefetch
-                .take_sidecar(&edit.edited_audio)
-                .or_else(|| {
-                    load_sidecar_audio(&project_path, &edit.edited_audio)
-                        .ok()
-                        .map(|(chans, sr, _)| (chans, sr))
-                });
+            let edited = prefetch.take_sidecar(&edit.edited_audio).or_else(|| {
+                load_sidecar_audio(&project_path, &edit.edited_audio)
+                    .ok()
+                    .map(|(chans, sr, _)| (chans, sr))
+            });
             let Some((chans, sr)) = edited else {
                 continue;
             };

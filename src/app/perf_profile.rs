@@ -263,7 +263,10 @@ mod tests {
         assert_eq!(low.meta_pool_workers(), 1);
         assert_eq!(low.scan_pool_workers(8), 1);
         assert!(low.list_sync_threshold() < 50_000);
-        assert!(low.frame_budget() < PerfProfile::from_cores(16, PerfTierPreference::Auto).frame_budget());
+        assert!(
+            low.frame_budget()
+                < PerfProfile::from_cores(16, PerfTierPreference::Auto).frame_budget()
+        );
     }
 
     #[test]
@@ -343,7 +346,10 @@ mod tests {
             assert_eq!(PerfTierPreference::parse(pref.as_str()), pref);
         }
         // Unknown values fall back to Auto rather than refusing to load prefs.
-        assert_eq!(PerfTierPreference::parse("banana"), PerfTierPreference::Auto);
+        assert_eq!(
+            PerfTierPreference::parse("banana"),
+            PerfTierPreference::Auto
+        );
     }
 
     #[test]

@@ -699,9 +699,8 @@ impl WavesPreviewer {
                     plugin_paths.push(PathBuf::from(raw));
                 }
             } else if let Some(rest) = line.strip_prefix("perf_tier=") {
-                self.perf.set_preference(
-                    crate::app::perf_profile::PerfTierPreference::parse(rest),
-                );
+                self.perf
+                    .set_preference(crate::app::perf_profile::PerfTierPreference::parse(rest));
             } else if let Some(rest) = line.strip_prefix("zoo_enabled=") {
                 self.zoo_enabled = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("zoo_walk_enabled=") {
