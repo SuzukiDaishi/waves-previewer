@@ -915,6 +915,9 @@ pub struct WavesPreviewer {
     /// Set when an interactive Session Close is waiting on its async
     /// autosave; `drain_session_save` tears the session down once written.
     close_after_session_save: bool,
+    /// Row existence stats taken so far this frame; see
+    /// `FS_EXISTS_REFRESH_BUDGET`.
+    fs_exists_refreshes_this_frame: u32,
     theme_mode: ThemeMode,
     item_bg_mode: ItemBgMode,
     show_rename_dialog: bool,

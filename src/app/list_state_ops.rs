@@ -49,14 +49,26 @@ impl WavesPreviewer {
     /// `Path::is_file()` with a short TTL cache. The list view calls this for
     /// every visible row; doing a real stat() per row per frame stalls the UI
     /// thread (badly so on network shares). Stale entries refresh within 2s.
+    ///
+    /// The TTL alone is not enough: every visible row's entry expires in the
+    /// same frame it was filled, so a full screen of rows re-stats together
+    /// and on a slow share that one frame costs hundreds of milliseconds.
+    /// Only a few refreshes are allowed per frame; the rest keep serving
+    /// their previous answer and refresh over the following frames. A file
+    /// that appears or disappears is therefore noticed a frame or two later
+    /// than before, which no caller depends on -- both of them only decide
+    /// whether to grey a row out.
     pub(super) fn path_is_file_cached(&mut self, path: &Path) -> bool {
         const TTL: std::time::Duration = std::time::Duration::from_secs(2);
         let now = std::time::Instant::now();
         if let Some((exists, checked_at)) = self.fs_exists_cache.get(path) {
-            if now.duration_since(*checked_at) < TTL {
+            let fresh = now.duration_since(*checked_at) < TTL;
+            if fresh || self.fs_exists_refreshes_this_frame >= Self::FS_EXISTS_REFRESH_BUDGET {
                 return *exists;
             }
         }
+        self.fs_exists_refreshes_this_frame =
+            self.fs_exists_refreshes_this_frame.saturating_add(1);
         let exists = path.is_file();
         // Bound memory on very large lists; entries repopulate on demand.
         if self.fs_exists_cache.len() >= 100_000 {
@@ -65,6 +77,15 @@ impl WavesPreviewer {
         self.fs_exists_cache
             .insert(path.to_path_buf(), (exists, now));
         exists
+    }
+
+    /// Stats allowed per frame for the row existence cache. Small enough
+    /// that a slow network share cannot build a visible stall out of them,
+    /// large enough that a screen of rows settles within a few frames.
+    const FS_EXISTS_REFRESH_BUDGET: u32 = 8;
+
+    pub(super) fn begin_frame_fs_exists_budget(&mut self) {
+        self.fs_exists_refreshes_this_frame = 0;
     }
 
     /// Drop a single cached existence entry (call after deleting/renaming a file).

@@ -137,6 +137,7 @@ impl WavesPreviewer {
                 }
             }};
         }
+        self.begin_frame_fs_exists_budget();
         if had_ui_input {
             self.debug.ui_input_started_at = Some(frame_started);
         }
