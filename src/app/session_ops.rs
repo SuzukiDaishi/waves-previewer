@@ -43,18 +43,11 @@ pub(super) struct ParsedSession {
     /// sources, virtual sources, managed assets, external data sources.
     /// The apply stage runs on the UI thread, so it must look answers up
     /// here rather than take a syscall that could block on an SMB timeout.
+    ///
+    /// A path absent from the map counts as present: the restore then takes
+    /// its normal route and whatever it tries next reports its own failure,
+    /// which is what happened before the map existed.
     pub other_exists: rustc_hash::FxHashMap<PathBuf, bool>,
-}
-
-impl ParsedSession {
-    /// Existence of a path the parse worker checked. An unknown path (a
-    /// document shape the collector does not cover) is reported present:
-    /// the restore then takes its normal path and whatever it tries next
-    /// reports its own failure, which is what happened before this map
-    /// existed.
-    pub fn path_exists(&self, path: &Path) -> bool {
-        self.other_exists.get(path).copied().unwrap_or(true)
-    }
 }
 
 /// Audio a session restore needs, decoded ahead of the apply stage.
@@ -150,6 +143,43 @@ enum PrefetchResult {
     },
 }
 
+/// A step of the decode stage, reported as it happens so a long load shows
+/// movement instead of a bare elapsed counter.
+pub(super) enum PrefetchProgress {
+    Started { label: String },
+    Finished { label: String },
+}
+
+/// What the topbar shows about a session open in progress.
+#[derive(Default)]
+pub(super) struct SessionOpenProgress {
+    pub done: usize,
+    pub total: usize,
+    /// Items a worker has started but not finished, oldest first. The first
+    /// entry is what a stalled load is stuck on.
+    pub in_flight: Vec<String>,
+    /// When `done` last changed. A load that stops moving for long enough is
+    /// reported as waiting on the server rather than left looking hung.
+    pub last_progress_at: Option<Instant>,
+}
+
+impl SessionOpenProgress {
+    /// Nothing has completed for this long -> say what we are waiting on.
+    const STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+
+    pub fn fraction(&self) -> Option<f32> {
+        (self.total > 0).then(|| (self.done as f32 / self.total as f32).clamp(0.0, 1.0))
+    }
+
+    pub fn stalled_on(&self) -> Option<&str> {
+        let since = self.last_progress_at?;
+        if since.elapsed() < Self::STALL_AFTER {
+            return None;
+        }
+        self.in_flight.first().map(String::as_str)
+    }
+}
+
 /// Which part of opening a session is currently running.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum SessionOpenPhase {
@@ -183,6 +213,9 @@ pub(super) struct ProjectOpenState {
     /// Result channel for the decode stage, which returns the parsed
     /// document alongside the audio it decoded.
     pub decode_rx: Option<std::sync::mpsc::Receiver<(ParsedSession, SessionAudioPrefetch)>>,
+    /// Per-item progress from the decode workers.
+    pub progress_rx: Option<std::sync::mpsc::Receiver<PrefetchProgress>>,
+    pub progress: SessionOpenProgress,
     /// Bumped per open; a worker whose generation no longer matches has
     /// been superseded (the user opened another session) and its result is
     /// dropped rather than applied over the newer one.
@@ -385,6 +418,7 @@ mod tests {
             requests,
             2,
             &cancel,
+            None,
         );
         assert!(
             !prefetch.prepared.is_empty(),
@@ -453,7 +487,7 @@ mod tests {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
 
         let prefetch =
-            crate::app::WavesPreviewer::run_audio_prefetch(&session, requests, 2, &cancel);
+            crate::app::WavesPreviewer::run_audio_prefetch(&session, requests, 2, &cancel, None);
 
         assert!(
             prefetch.files.is_empty() && prefetch.sidecars.is_empty(),
@@ -494,13 +528,12 @@ mod tests {
             Some(&false),
             "the parse worker should have probed the tab's source"
         );
-        assert!(
-            !parsed.path_exists(&audio),
-            "a probed-missing path must read as missing"
-        );
-        // A path the collector does not cover reads as present, so the
-        // restore takes its normal route and reports its own failure.
-        assert!(parsed.path_exists(&dir.join("never_referenced.wav")));
+        // A path the collector does not cover is simply absent, which the
+        // apply stage reads as present: it then takes its normal route and
+        // reports its own failure.
+        assert!(!parsed
+            .other_exists
+            .contains_key(&dir.join("never_referenced.wav")));
 
         let mut app =
             crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
@@ -510,6 +543,90 @@ mod tests {
             "the tab should still be restored so the user can see what is missing"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A long load must show movement, not just a rising second counter:
+    /// that is the difference between "working" and "hung" to the user.
+    #[test]
+    fn the_prefetch_reports_progress_per_item() {
+        let dir = temp_dir("progress");
+        let session = dir.join("progress.nwsess");
+        std::fs::write(&session, "").expect("touch session");
+        // Three sidecars that will not decode. Failures still have to be
+        // reported as progress, or a session full of missing edits would
+        // sit at 0/3 forever.
+        let requests: Vec<_> = ["a.wav", "b.wav", "c.wav"]
+            .into_iter()
+            .map(|name| PrefetchRequest::Sidecar {
+                raw: format!("sidecars/{name}"),
+                prep: None,
+            })
+            .collect();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        crate::app::WavesPreviewer::run_audio_prefetch(&session, requests, 2, &cancel, Some(tx));
+
+        let mut started = Vec::new();
+        let mut finished = Vec::new();
+        while let Ok(update) = rx.try_recv() {
+            match update {
+                PrefetchProgress::Started { label } => started.push(label),
+                PrefetchProgress::Finished { label } => finished.push(label),
+            }
+        }
+        started.sort();
+        finished.sort();
+        assert_eq!(started, vec!["a.wav", "b.wav", "c.wav"]);
+        assert_eq!(finished, vec!["a.wav", "b.wav", "c.wav"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The label is what the user sees while a share is slow, so it has to
+    /// be the file name rather than the document's internal reference.
+    #[test]
+    fn progress_labels_are_file_names() {
+        assert_eq!(
+            crate::app::WavesPreviewer::prefetch_request_label(&PrefetchRequest::Sidecar {
+                raw: "sidecars/session_tab_0.wav".to_string(),
+                prep: None,
+            }),
+            "session_tab_0.wav"
+        );
+        assert_eq!(
+            crate::app::WavesPreviewer::prefetch_request_label(&PrefetchRequest::File {
+                path: PathBuf::from("/mnt/share/kicks/kick_01.wav"),
+            }),
+            "kick_01.wav"
+        );
+    }
+
+    /// A load that stops moving has to say so, and only after long enough
+    /// that a merely slow file does not trip it.
+    #[test]
+    fn a_stalled_load_names_what_it_is_waiting_on() {
+        let mut progress = SessionOpenProgress {
+            done: 3,
+            total: 10,
+            in_flight: vec!["slow.wav".to_string(), "next.wav".to_string()],
+            last_progress_at: Some(Instant::now()),
+        };
+        assert_eq!(progress.stalled_on(), None, "fresh progress is not stalled");
+        assert_eq!(progress.fraction(), Some(0.3));
+
+        progress.last_progress_at = Some(
+            Instant::now() - SessionOpenProgress::STALL_AFTER - std::time::Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            progress.stalled_on(),
+            Some("slow.wav"),
+            "a stalled load should name the oldest item still in flight"
+        );
+
+        // Nothing in flight means nothing to blame, even when stalled.
+        progress.in_flight.clear();
+        assert_eq!(progress.stalled_on(), None);
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -926,6 +1043,8 @@ impl super::WavesPreviewer {
             phase: SessionOpenPhase::Announced,
             parse_rx: None,
             decode_rx: None,
+            progress_rx: None,
+            progress: SessionOpenProgress::default(),
             generation: self.project_open_generation,
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
@@ -959,13 +1078,20 @@ impl super::WavesPreviewer {
             return;
         }
         let concurrency = self.perf.restore_concurrency();
+        let total = requests.len();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("neowaves-session-audio".to_string())
             .spawn(move || {
                 crate::app::threading::lower_current_thread_priority();
-                let prefetch =
-                    Self::run_audio_prefetch(&parsed.path.clone(), requests, concurrency, &cancel);
+                let prefetch = Self::run_audio_prefetch(
+                    &parsed.path.clone(),
+                    requests,
+                    concurrency,
+                    &cancel,
+                    Some(progress_tx),
+                );
                 let _ = tx.send((parsed, prefetch));
                 crate::ui_wake::wake_ui();
             });
@@ -975,6 +1101,12 @@ impl super::WavesPreviewer {
         match spawned {
             Ok(_) => {
                 state.decode_rx = Some(rx);
+                state.progress_rx = Some(progress_rx);
+                state.progress = SessionOpenProgress {
+                    total,
+                    last_progress_at: Some(Instant::now()),
+                    ..Default::default()
+                };
                 state.phase = SessionOpenPhase::Decoding;
             }
             Err(err) => {
@@ -1102,6 +1234,24 @@ impl super::WavesPreviewer {
                 }
             }
             SessionOpenPhase::Decoding => {
+                if let Some(progress_rx) = state.progress_rx.as_ref() {
+                    while let Ok(update) = progress_rx.try_recv() {
+                        match update {
+                            PrefetchProgress::Started { label } => {
+                                state.progress.in_flight.push(label);
+                            }
+                            PrefetchProgress::Finished { label } => {
+                                if let Some(pos) =
+                                    state.progress.in_flight.iter().position(|l| *l == label)
+                                {
+                                    state.progress.in_flight.remove(pos);
+                                }
+                                state.progress.done = state.progress.done.saturating_add(1);
+                                state.progress.last_progress_at = Some(Instant::now());
+                            }
+                        }
+                    }
+                }
                 let Some(rx) = state.decode_rx.as_ref() else {
                     self.project_open_state = None;
                     return;
@@ -1110,6 +1260,7 @@ impl super::WavesPreviewer {
                 match rx.try_recv() {
                     Ok((parsed, prefetch)) => {
                         state.decode_rx = None;
+                        state.progress_rx = None;
                         state.phase = SessionOpenPhase::Applying;
                         if generation != self.project_open_generation {
                             self.project_open_state = None;
@@ -2083,7 +2234,7 @@ impl super::WavesPreviewer {
         base_dir: &Path,
     ) -> rustc_hash::FxHashMap<PathBuf, bool> {
         let mut out: rustc_hash::FxHashMap<PathBuf, bool> = Default::default();
-        let mut probe = |path: PathBuf, out: &mut rustc_hash::FxHashMap<PathBuf, bool>| {
+        let probe = |path: PathBuf, out: &mut rustc_hash::FxHashMap<PathBuf, bool>| {
             if let std::collections::hash_map::Entry::Vacant(slot) = out.entry(path.clone()) {
                 slot.insert(path.is_file());
             }
@@ -2200,6 +2351,7 @@ impl super::WavesPreviewer {
         requests: Vec<PrefetchRequest>,
         concurrency: usize,
         cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        progress: Option<std::sync::mpsc::Sender<PrefetchProgress>>,
     ) -> SessionAudioPrefetch {
         use std::sync::atomic::Ordering;
 
@@ -2220,6 +2372,7 @@ impl super::WavesPreviewer {
             let tx = tx.clone();
             let cancel = std::sync::Arc::clone(cancel);
             let project_path = project_path.to_path_buf();
+            let progress = progress.clone();
             let handle = std::thread::Builder::new()
                 .name("neowaves-session-decode".to_string())
                 .spawn(move || {
@@ -2233,6 +2386,16 @@ impl super::WavesPreviewer {
                         else {
                             break;
                         };
+                        // Name the item before touching it: the read below
+                        // is where a load off a share appears to hang, and
+                        // this is what the status line has to show.
+                        let label = Self::prefetch_request_label(&request);
+                        if let Some(progress) = progress.as_ref() {
+                            let _ = progress.send(PrefetchProgress::Started {
+                                label: label.clone(),
+                            });
+                            crate::ui_wake::wake_ui();
+                        }
                         let sent = match request {
                             PrefetchRequest::Sidecar { raw, prep } => {
                                 match load_sidecar_audio(&project_path, &raw) {
@@ -2263,6 +2426,10 @@ impl super::WavesPreviewer {
                                 }
                             }
                         };
+                        if let Some(progress) = progress.as_ref() {
+                            let _ = progress.send(PrefetchProgress::Finished { label });
+                            crate::ui_wake::wake_ui();
+                        }
                         if sent.is_err() {
                             break;
                         }
@@ -2330,6 +2497,26 @@ impl super::WavesPreviewer {
             let _ = handle.join();
         }
         prefetch
+    }
+
+    /// What to call an item in the status line: the file name, which is
+    /// what the user recognises, not the raw document reference.
+    fn prefetch_request_label(request: &PrefetchRequest) -> String {
+        let raw: &str = match request {
+            PrefetchRequest::Sidecar { raw, .. } => raw.as_str(),
+            PrefetchRequest::File { path } => {
+                return path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("(file)")
+                    .to_string();
+            }
+        };
+        Path::new(raw)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(raw)
+            .to_string()
     }
 
     /// Normalize a decoded sidecar to the output rate and build its editor

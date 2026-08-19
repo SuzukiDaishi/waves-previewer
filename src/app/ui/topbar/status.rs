@@ -455,9 +455,34 @@ impl WavesPreviewer {
         }
         if let Some(state) = &self.project_open_state {
             let elapsed = state.started_at.elapsed().as_secs_f32();
+            let progress = &state.progress;
+            // A load off a file server can run for minutes. Elapsed seconds
+            // alone read as "hung", so name what is being read and how far
+            // in we are -- and once nothing has completed for a while, say
+            // plainly that we are waiting on the server.
+            let label = if let Some(stalled) = progress.stalled_on() {
+                format!("Waiting on {stalled} ({elapsed:.0}s)")
+            } else if progress.total > 0 {
+                match progress.in_flight.first() {
+                    Some(current) => format!(
+                        "{} {}/{} — {current}",
+                        state.phase.label(),
+                        progress.done,
+                        progress.total
+                    ),
+                    None => format!(
+                        "{} {}/{}",
+                        state.phase.label(),
+                        progress.done,
+                        progress.total
+                    ),
+                }
+            } else {
+                format!("{}... ({elapsed:.1}s)", state.phase.label())
+            };
             items.push(TopbarActivityItem {
-                label: format!("{}... ({elapsed:.1}s)", state.phase.label()),
-                progress: None,
+                label,
+                progress: progress.fraction(),
                 show_percentage: false,
                 cancel: Some(TopbarActivityCancel::SessionOpen),
             });
