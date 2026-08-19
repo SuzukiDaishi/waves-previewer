@@ -1,0 +1,366 @@
+//! Machine performance tier and the UI-thread budgets derived from it.
+//!
+//! Thresholds used to be hard-coded constants tuned on a developer machine
+//! (`LIST_JOB_SYNC_THRESHOLD = 50_000`, fixed drain budgets, `cores / 2`
+//! worker pools). On a two-core laptop those same numbers put seconds of
+//! work inside a single frame, which Windows reports as "not responding".
+//!
+//! Everything that decides "how much may this frame do" and "how many
+//! workers may compete with the UI thread" reads its number from here
+//! instead, so a low-spec machine gets smaller slices without a separate
+//! code path.
+//!
+//! The tier starts from the core count and can be demoted at runtime when
+//! measured frame times stay bad. Demotion is one-way: promoting back on a
+//! few fast frames would oscillate between policies while the user is
+//! working. A restart (or the manual override) is the way back up.
+
+use std::time::Duration;
+
+/// How much machine we are running on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PerfTier {
+    Low,
+    Normal,
+    High,
+}
+
+impl PerfTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PerfTier::Low => "low",
+            PerfTier::Normal => "normal",
+            PerfTier::High => "high",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(PerfTier::Low),
+            "normal" => Some(PerfTier::Normal),
+            "high" => Some(PerfTier::High),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PerfTier::Low => "Low (small slices)",
+            PerfTier::Normal => "Normal",
+            PerfTier::High => "High (large slices)",
+        }
+    }
+
+    fn demoted(self) -> Self {
+        match self {
+            PerfTier::High => PerfTier::Normal,
+            PerfTier::Normal | PerfTier::Low => PerfTier::Low,
+        }
+    }
+}
+
+/// User-facing setting: follow the measurement, or pin a tier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PerfTierPreference {
+    #[default]
+    Auto,
+    Pinned(PerfTier),
+}
+
+impl PerfTierPreference {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PerfTierPreference::Auto => "auto",
+            PerfTierPreference::Pinned(tier) => tier.as_str(),
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" | "" => PerfTierPreference::Auto,
+            other => PerfTier::parse(other)
+                .map(PerfTierPreference::Pinned)
+                .unwrap_or(PerfTierPreference::Auto),
+        }
+    }
+}
+
+/// A frame slower than this is evidence the current tier is too ambitious.
+const SLOW_FRAME_MS: f32 = 120.0;
+/// Consecutive slow frames before demoting. High enough that one expensive
+/// one-off (a modal opening, a texture upload) cannot demote the machine.
+const SLOW_FRAMES_BEFORE_DEMOTE: u32 = 12;
+
+/// Budgets and thresholds for the current machine.
+#[derive(Clone, Copy, Debug)]
+pub struct PerfProfile {
+    pub cores: usize,
+    pub tier: PerfTier,
+    /// Tier implied by the hardware alone, before any demotion. Kept so the
+    /// Debug window can show "High, demoted to Normal".
+    pub base_tier: PerfTier,
+    pub preference: PerfTierPreference,
+    slow_frame_streak: u32,
+}
+
+impl Default for PerfProfile {
+    fn default() -> Self {
+        Self::detect(PerfTierPreference::Auto)
+    }
+}
+
+impl PerfProfile {
+    pub fn detect(preference: PerfTierPreference) -> Self {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2);
+        Self::from_cores(cores, preference)
+    }
+
+    pub fn from_cores(cores: usize, preference: PerfTierPreference) -> Self {
+        let cores = cores.max(1);
+        let base_tier = if cores <= 2 {
+            PerfTier::Low
+        } else if cores >= 8 {
+            PerfTier::High
+        } else {
+            PerfTier::Normal
+        };
+        let tier = match preference {
+            PerfTierPreference::Auto => base_tier,
+            PerfTierPreference::Pinned(pinned) => pinned,
+        };
+        Self {
+            cores,
+            tier,
+            base_tier,
+            preference,
+            slow_frame_streak: 0,
+        }
+    }
+
+    /// Re-apply a changed Settings choice without losing the detected cores.
+    pub fn set_preference(&mut self, preference: PerfTierPreference) {
+        *self = Self::from_cores(self.cores, preference);
+    }
+
+    /// Feed each finished frame's wall time in. Returns true when the tier
+    /// changed, so the caller can log it.
+    ///
+    /// Only `Auto` demotes: a pinned tier is the user's explicit instruction
+    /// and must not drift underneath them.
+    pub fn note_frame_ms(&mut self, frame_ms: f32) -> bool {
+        if self.preference != PerfTierPreference::Auto || self.tier == PerfTier::Low {
+            return false;
+        }
+        if frame_ms < SLOW_FRAME_MS {
+            self.slow_frame_streak = 0;
+            return false;
+        }
+        self.slow_frame_streak = self.slow_frame_streak.saturating_add(1);
+        if self.slow_frame_streak < SLOW_FRAMES_BEFORE_DEMOTE {
+            return false;
+        }
+        self.slow_frame_streak = 0;
+        self.tier = self.tier.demoted();
+        true
+    }
+
+    pub fn demoted_from_hardware(&self) -> bool {
+        self.preference == PerfTierPreference::Auto && self.tier < self.base_tier
+    }
+
+    // ---- Derived budgets ---------------------------------------------------
+
+    /// How long the whole pre-UI drain phase may spend before deferring the
+    /// rest to the next frame. Deliberately well under one 60fps frame: the
+    /// UI still has to lay out and paint after this.
+    pub fn frame_budget(&self) -> Duration {
+        Duration::from_micros(match self.tier {
+            PerfTier::Low => 4_000,
+            PerfTier::Normal => 8_000,
+            PerfTier::High => 12_000,
+        })
+    }
+
+    /// Lists at or below this size sort/filter synchronously in one frame.
+    /// Above it the sliced + worker path runs instead.
+    pub fn list_sync_threshold(&self) -> usize {
+        match self.tier {
+            PerfTier::Low => 2_000,
+            PerfTier::Normal => 20_000,
+            PerfTier::High => 50_000,
+        }
+    }
+
+    /// Per-frame time budget for the sliced decorate / filter passes.
+    pub fn list_job_frame_budget_ms(&self) -> f64 {
+        match self.tier {
+            PerfTier::Low => 1.0,
+            PerfTier::Normal => 2.0,
+            PerfTier::High => 3.0,
+        }
+    }
+
+    /// Concurrent heavy restore/decode jobs during a session open.
+    pub fn restore_concurrency(&self) -> usize {
+        match self.tier {
+            PerfTier::Low => 1,
+            PerfTier::Normal => self.cores.saturating_sub(1).clamp(1, 3),
+            PerfTier::High => self.cores.saturating_sub(1).clamp(1, 4),
+        }
+    }
+
+    /// Worker count for background scan-style pools (inspection, duplicate
+    /// fingerprinting). Always leaves the UI thread a core to itself.
+    pub fn scan_pool_workers(&self, cap: usize) -> usize {
+        let by_tier = match self.tier {
+            PerfTier::Low => 1,
+            PerfTier::Normal => self.cores.saturating_sub(1).clamp(1, 3),
+            PerfTier::High => (self.cores / 2).max(1),
+        };
+        by_tier.min(cap.max(1))
+    }
+
+    /// Worker count for the list metadata pool.
+    pub fn meta_pool_workers(&self) -> usize {
+        match self.tier {
+            PerfTier::Low => 1,
+            PerfTier::Normal => self.cores.saturating_sub(1).clamp(1, 4),
+            PerfTier::High => self.cores.saturating_sub(1).clamp(1, 6),
+        }
+    }
+
+    /// How many rows the staged session restore may materialize per frame.
+    pub fn list_build_chunk(&self) -> usize {
+        match self.tier {
+            PerfTier::Low => 2_000,
+            PerfTier::Normal => 8_000,
+            PerfTier::High => 16_000,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_count_picks_the_tier() {
+        assert_eq!(
+            PerfProfile::from_cores(1, PerfTierPreference::Auto).tier,
+            PerfTier::Low
+        );
+        assert_eq!(
+            PerfProfile::from_cores(2, PerfTierPreference::Auto).tier,
+            PerfTier::Low
+        );
+        assert_eq!(
+            PerfProfile::from_cores(4, PerfTierPreference::Auto).tier,
+            PerfTier::Normal
+        );
+        assert_eq!(
+            PerfProfile::from_cores(16, PerfTierPreference::Auto).tier,
+            PerfTier::High
+        );
+    }
+
+    #[test]
+    fn low_tier_keeps_the_ui_thread_a_core() {
+        let low = PerfProfile::from_cores(2, PerfTierPreference::Auto);
+        assert_eq!(low.restore_concurrency(), 1);
+        assert_eq!(low.meta_pool_workers(), 1);
+        assert_eq!(low.scan_pool_workers(8), 1);
+        assert!(low.list_sync_threshold() < 50_000);
+        assert!(low.frame_budget() < PerfProfile::from_cores(16, PerfTierPreference::Auto).frame_budget());
+    }
+
+    #[test]
+    fn worker_counts_never_reach_the_core_count() {
+        for cores in 1..=32usize {
+            let profile = PerfProfile::from_cores(cores, PerfTierPreference::Auto);
+            assert!(profile.meta_pool_workers() >= 1);
+            assert!(profile.restore_concurrency() >= 1);
+            assert!(profile.scan_pool_workers(64) >= 1);
+            if cores > 1 {
+                assert!(
+                    profile.meta_pool_workers() < cores,
+                    "cores={cores} left no room for the UI thread"
+                );
+                assert!(profile.restore_concurrency() < cores);
+                assert!(profile.scan_pool_workers(64) < cores);
+            }
+        }
+    }
+
+    #[test]
+    fn sustained_slow_frames_demote_one_step_at_a_time() {
+        let mut profile = PerfProfile::from_cores(16, PerfTierPreference::Auto);
+        assert_eq!(profile.tier, PerfTier::High);
+        for _ in 0..SLOW_FRAMES_BEFORE_DEMOTE {
+            profile.note_frame_ms(SLOW_FRAME_MS + 1.0);
+        }
+        assert_eq!(profile.tier, PerfTier::Normal);
+        assert!(profile.demoted_from_hardware());
+        for _ in 0..SLOW_FRAMES_BEFORE_DEMOTE {
+            profile.note_frame_ms(SLOW_FRAME_MS + 1.0);
+        }
+        assert_eq!(profile.tier, PerfTier::Low);
+    }
+
+    #[test]
+    fn one_slow_frame_among_fast_ones_does_not_demote() {
+        let mut profile = PerfProfile::from_cores(16, PerfTierPreference::Auto);
+        for _ in 0..200 {
+            profile.note_frame_ms(SLOW_FRAME_MS + 50.0);
+            profile.note_frame_ms(1.0);
+        }
+        assert_eq!(profile.tier, PerfTier::High);
+    }
+
+    #[test]
+    fn demotion_never_promotes_back() {
+        let mut profile = PerfProfile::from_cores(16, PerfTierPreference::Auto);
+        for _ in 0..SLOW_FRAMES_BEFORE_DEMOTE {
+            profile.note_frame_ms(SLOW_FRAME_MS + 1.0);
+        }
+        assert_eq!(profile.tier, PerfTier::Normal);
+        for _ in 0..10_000 {
+            profile.note_frame_ms(0.5);
+        }
+        assert_eq!(profile.tier, PerfTier::Normal);
+    }
+
+    #[test]
+    fn a_pinned_tier_is_never_demoted() {
+        let mut profile = PerfProfile::from_cores(16, PerfTierPreference::Pinned(PerfTier::High));
+        for _ in 0..1_000 {
+            profile.note_frame_ms(SLOW_FRAME_MS * 10.0);
+        }
+        assert_eq!(profile.tier, PerfTier::High);
+        assert!(!profile.demoted_from_hardware());
+    }
+
+    #[test]
+    fn preference_round_trips_through_prefs_text() {
+        for pref in [
+            PerfTierPreference::Auto,
+            PerfTierPreference::Pinned(PerfTier::Low),
+            PerfTierPreference::Pinned(PerfTier::Normal),
+            PerfTierPreference::Pinned(PerfTier::High),
+        ] {
+            assert_eq!(PerfTierPreference::parse(pref.as_str()), pref);
+        }
+        // Unknown values fall back to Auto rather than refusing to load prefs.
+        assert_eq!(PerfTierPreference::parse("banana"), PerfTierPreference::Auto);
+    }
+
+    #[test]
+    fn pinning_keeps_the_detected_core_count() {
+        let mut profile = PerfProfile::from_cores(12, PerfTierPreference::Auto);
+        profile.set_preference(PerfTierPreference::Pinned(PerfTier::Low));
+        assert_eq!(profile.cores, 12);
+        assert_eq!(profile.tier, PerfTier::Low);
+        assert_eq!(profile.base_tier, PerfTier::High);
+    }
+}

@@ -48,12 +48,9 @@ impl super::WavesPreviewer {
 
     pub(super) fn reset_meta_pool(&mut self) {
         // Reserve one core for the UI/audio threads; the workers also run at
-        // lowered OS priority (see spawn_meta_pool).
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .saturating_sub(1)
-            .clamp(1, 6);
+        // lowered OS priority (see spawn_meta_pool). A two-core machine gets
+        // exactly one worker (see PerfProfile).
+        let workers = self.perf.meta_pool_workers();
         let (pool, rx) = crate::app::meta::spawn_meta_pool(workers);
         // Only pool construction site, so a pool recreated mid-session keeps
         // measuring Blank Pad at the user's threshold rather than the default.

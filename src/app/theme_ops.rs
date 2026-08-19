@@ -654,6 +654,10 @@ impl WavesPreviewer {
                 if !raw.is_empty() {
                     plugin_paths.push(PathBuf::from(raw));
                 }
+            } else if let Some(rest) = line.strip_prefix("perf_tier=") {
+                self.perf.set_preference(
+                    crate::app::perf_profile::PerfTierPreference::parse(rest),
+                );
             } else if let Some(rest) = line.strip_prefix("zoo_enabled=") {
                 self.zoo_enabled = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("zoo_walk_enabled=") {
@@ -1008,6 +1012,9 @@ zoo_flip_manual={}\n",
             self.zoo_speed,
             zoo_flip_manual
         );
+        out.push_str("perf_tier=");
+        out.push_str(self.perf.preference.as_str());
+        out.push('\n');
         if let Some(path) = &self.zoo_gif_path {
             out.push_str("zoo_gif_path=");
             out.push_str(&path.to_string_lossy().replace('\n', " "));

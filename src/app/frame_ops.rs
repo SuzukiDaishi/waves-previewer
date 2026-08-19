@@ -997,5 +997,15 @@ impl WavesPreviewer {
         if self.debug.frame_peak_ms < self.debug.frame_last_ms {
             self.debug.frame_peak_ms = self.debug.frame_last_ms;
         }
+        // Sustained slow frames mean this machine cannot afford the slice
+        // sizes it was given; drop a tier so every budget shrinks at once.
+        if self.perf.note_frame_ms(self.debug.frame_last_ms) {
+            let tier = self.perf.tier;
+            self.debug_log(format!(
+                "perf tier demoted to {} after sustained slow frames (last {:.1}ms)",
+                tier.as_str(),
+                self.debug.frame_last_ms
+            ));
+        }
     }
 }

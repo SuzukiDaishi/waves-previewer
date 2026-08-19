@@ -81,6 +81,7 @@ mod music_onnx;
 mod native_drag;
 mod plugin_ops;
 pub mod plugin_preset_ops;
+mod perf_profile;
 mod preview;
 mod preview_ops;
 mod project;
@@ -831,6 +832,10 @@ pub struct WavesPreviewer {
     plugin_rack_worker: Arc<std::sync::Mutex<Option<crate::plugin::client::RackWorkerClient>>>,
     plugin_job_id: u64,
     plugin_temp_seq: u64,
+    /// Machine tier and every UI-thread budget derived from it. Read this
+    /// instead of hard-coding a threshold, so a low-spec machine takes
+    /// smaller slices everywhere at once.
+    perf: crate::app::perf_profile::PerfProfile,
     zoo_enabled: bool,
     zoo_walk_enabled: bool,
     zoo_voice_enabled: bool,
