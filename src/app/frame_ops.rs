@@ -117,6 +117,9 @@ impl WavesPreviewer {
                 }
             }};
         }
+        // Background threads push into channels this loop polls; once the
+        // loop is allowed to sleep they need a way to ask for a frame.
+        crate::ui_wake::register_ui_context(ctx);
         // One shared deadline for everything marked deferrable below. The
         // per-subsystem budgets are additive on their own; this caps the sum.
         self.frame_budget
@@ -972,6 +975,21 @@ impl WavesPreviewer {
         }
     }
 
+    /// True while the staged startup work still has steps left to run.
+    fn startup_maintenance_finished(&self) -> bool {
+        self.startup_paths_applied && self.startup_maintenance_step >= 7
+    }
+
+    /// True while a metadata/transcript worker still owes this frame loop a
+    /// result. The pools feed themselves from the per-frame pump, so as long
+    /// as anything is in flight the loop has to keep coming back.
+    fn meta_pool_has_pending_work(&self) -> bool {
+        !self.meta_inflight.is_empty()
+            || !self.transcript_inflight.is_empty()
+            || !self.transcript_ai_inflight.is_empty()
+            || !self.metadata_summary_inflight.is_empty()
+    }
+
     fn run_frame_finish(&mut self, ctx: &egui::Context, frame_started: Instant) {
         let scroll_target = self.current_ui_scroll_target();
         self.ui_scroll_focus.finish_frame(scroll_target);
@@ -1002,18 +1020,44 @@ impl WavesPreviewer {
             || self.sort_job_active()
             || self.filter_job_active()
             || !self.editor_feature_inflight.is_empty();
+        // Anything still working needs the loop to come back on its own.
+        // Everything here either polls a channel per frame or advances a
+        // timer, so leaving one out would stall that work until the user
+        // happened to move the mouse.
+        let background_work = self.frame_budget.has_deferred_work()
+            || self.audio_bootstrap_rx.is_some()
+            || !self.startup_maintenance_finished()
+            || self.meta_pool_has_pending_work()
+            || !self.toasts.is_empty();
         let repaint_ms = if fast_repaint {
-            16
+            Some(16)
         } else if progress_repaint {
-            50
+            Some(50)
         } else if self.zoo_enabled && self.is_list_workspace_active() {
-            50
+            Some(50)
         } else if self.zoo_enabled {
-            33
+            Some(33)
+        } else if background_work {
+            Some(80)
+        } else if self.audio.has_output_stream() {
+            // The output device poll only advances when this loop runs, so
+            // a fully asleep app would stop noticing an endpoint being
+            // unplugged. One frame a second keeps that working at a
+            // fraction of the old 12fps idle cost. (During playback the
+            // fast path above already covers it.)
+            Some(1_000)
         } else {
-            80
+            // Genuinely idle: no timer to service and no channel with
+            // anything coming. Asking for another frame here is what kept
+            // the app repainting at 12fps forever, which on a weak GPU is
+            // real CPU the UI thread has to win back from the workers.
+            // Input wakes egui on its own; background threads call
+            // `ui_wake::wake_ui()`.
+            None
         };
-        ctx.request_repaint_after(Duration::from_millis(repaint_ms));
+        if let Some(ms) = repaint_ms {
+            ctx.request_repaint_after(Duration::from_millis(ms));
+        }
         if let Some(started_at) = self.debug.ui_input_started_at.take() {
             let elapsed_ms = started_at.elapsed().as_secs_f32() * 1000.0;
             self.debug_push_ui_input_to_paint_sample(elapsed_ms);

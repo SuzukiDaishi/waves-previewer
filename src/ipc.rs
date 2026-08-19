@@ -56,6 +56,10 @@ pub fn start_listener() -> std::io::Result<mpsc::Receiver<IpcRequest>> {
                 continue;
             };
             let _ = tx.send(req);
+            // The UI polls this channel per frame but sleeps when idle, so
+            // a forwarded file would sit unread until the user touched the
+            // window. Ask for a frame now.
+            crate::ui_wake::wake_ui();
             let _ = stream.write_all(b"ok");
             let _ = stream.flush();
         }

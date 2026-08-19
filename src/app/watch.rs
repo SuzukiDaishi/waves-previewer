@@ -191,6 +191,9 @@ pub fn spawn_folder_watch(root: PathBuf, interval_ms: u64, skip_dotfiles: bool) 
                         if tx.send(batch).is_err() {
                             break;
                         }
+                        // The UI drains this per frame but sleeps when idle;
+                        // without a nudge the batch would wait for input.
+                        crate::ui_wake::wake_ui();
                     }
                 }
             });
