@@ -146,11 +146,20 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn drain_editor_wave_cache_jobs(&mut self, ctx: &egui::Context) {
+        // Each result clones a full waveform + pyramid into every matching
+        // tab; two of those is already a lot of copying for one frame.
+        const MAX_PER_FRAME: usize = 2;
         let mut results = Vec::new();
         if let Some(rx) = &self.editor_wave_cache_rx {
             while let Ok(msg) = rx.try_recv() {
                 results.push(msg);
+                if results.len() >= MAX_PER_FRAME {
+                    break;
+                }
             }
+        }
+        if results.len() >= MAX_PER_FRAME {
+            ctx.request_repaint();
         }
         for (path, generation, waveform_minmax, waveform_pyramid) in results {
             if self.editor_wave_cache_generation.get(&path).copied() != Some(generation) {

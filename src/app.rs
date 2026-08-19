@@ -52,6 +52,7 @@ mod external_load_jobs;
 mod external_load_ops;
 mod external_ops;
 pub mod fingerprint;
+mod frame_budget;
 mod frame_ops;
 mod gain_ops;
 mod helpers;
@@ -836,6 +837,9 @@ pub struct WavesPreviewer {
     /// instead of hard-coding a threshold, so a low-spec machine takes
     /// smaller slices everywhere at once.
     perf: crate::app::perf_profile::PerfProfile,
+    /// Shared deadline for the deferrable drains in `run_frame_pre_ui`, so
+    /// their individual budgets cannot add up into a long frame.
+    frame_budget: crate::app::frame_budget::FrameBudget,
     zoo_enabled: bool,
     zoo_walk_enabled: bool,
     zoo_voice_enabled: bool,

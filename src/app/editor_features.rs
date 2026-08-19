@@ -295,11 +295,20 @@ impl super::WavesPreviewer {
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        // Applying one result rebuilds a viewport cache, so a burst of
+        // finished analyses must not all land on the same frame.
+        const MAX_PER_FRAME: usize = 2;
         let mut messages = Vec::new();
         if let Some(rx) = &self.editor_feature_rx {
             while let Ok(msg) = rx.try_recv() {
                 messages.push(msg);
+                if messages.len() >= MAX_PER_FRAME {
+                    break;
+                }
             }
+        }
+        if messages.len() >= MAX_PER_FRAME {
+            ctx.request_repaint();
         }
         for msg in messages {
             match msg {

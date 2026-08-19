@@ -325,6 +325,7 @@ impl WavesPreviewer {
             plugin_job_id: 0,
             plugin_temp_seq: 0,
             perf: crate::app::perf_profile::PerfProfile::default(),
+            frame_budget: crate::app::frame_budget::FrameBudget::default(),
             zoo_enabled: false,
             zoo_walk_enabled: true,
             zoo_voice_enabled: false,

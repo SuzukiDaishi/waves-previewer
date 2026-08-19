@@ -117,6 +117,23 @@ impl WavesPreviewer {
                 }
             }};
         }
+        // One shared deadline for everything marked deferrable below. The
+        // per-subsystem budgets are additive on their own; this caps the sum.
+        self.frame_budget
+            .begin(frame_started, self.perf.frame_budget());
+        // Runs whatever `$body` is unless the frame budget is already spent,
+        // in which case the work stays queued and a repaint is requested at
+        // the end of the frame. Only for drains the user is not waiting on
+        // synchronously -- latency-critical work below is called directly.
+        macro_rules! deferrable {
+            ($body:expr) => {{
+                if self.frame_budget.should_continue() {
+                    $body;
+                } else {
+                    self.frame_budget.note_deferred();
+                }
+            }};
+        }
         if had_ui_input {
             self.debug.ui_input_started_at = Some(frame_started);
         }
@@ -149,11 +166,14 @@ impl WavesPreviewer {
                 ctx.request_repaint();
             }
         });
-        trace_stage!("pump_list_meta_prefetch", self.pump_list_meta_prefetch());
-        trace_stage!(
+        deferrable!(trace_stage!(
+            "pump_list_meta_prefetch",
+            self.pump_list_meta_prefetch()
+        ));
+        deferrable!(trace_stage!(
             "pump_metadata_summary_prefetch",
             self.pump_metadata_summary_prefetch()
-        );
+        ));
         self.process_ipc_requests();
         self.apply_pending_transcript_seek();
         self.process_tool_results();
@@ -177,15 +197,15 @@ impl WavesPreviewer {
         );
         self.drain_editor_decode();
         self.drain_heavy_overlay_results();
-        self.drain_auto_trim_results();
-        self.poll_auto_trim_live_rerun();
-        self.drain_loop_detect_results();
+        deferrable!(self.drain_auto_trim_results());
+        deferrable!(self.poll_auto_trim_live_rerun());
+        deferrable!(self.drain_loop_detect_results());
         self.drain_recording_events();
         self.tick_audio_device_watch(frame_started);
         self.drain_editor_apply_jobs(ctx);
         self.drain_mix_audition(ctx);
-        self.tick_folder_watch(ctx);
-        self.poll_resample_fallbacks();
+        deferrable!(self.tick_folder_watch(ctx));
+        deferrable!(self.poll_resample_fallbacks());
         self.drain_editor_wave_cache_jobs(ctx);
         self.poll_editor_play_selection(ctx);
         self.drain_session_save(ctx);
@@ -194,19 +214,22 @@ impl WavesPreviewer {
         self.drain_plugin_jobs(ctx);
         self.poll_plugin_auto_preview(ctx);
         self.poll_variation_audition(ctx);
-        self.drain_duplicate_scan(ctx);
-        self.drain_transcript_model_download_results(ctx);
-        self.drain_transcript_ai_results(ctx);
-        self.drain_music_model_download_results(ctx);
-        self.drain_music_ai_results(ctx);
+        deferrable!(self.drain_duplicate_scan(ctx));
+        deferrable!(self.drain_transcript_model_download_results(ctx));
+        deferrable!(self.drain_transcript_ai_results(ctx));
+        deferrable!(self.drain_music_model_download_results(ctx));
+        deferrable!(self.drain_music_ai_results(ctx));
         self.drain_music_preview_results(ctx);
-        self.enforce_music_stem_cache_policy();
-        trace_stage!("drain_meta_updates", self.drain_meta_updates(ctx));
-        trace_stage!(
+        deferrable!(self.enforce_music_stem_cache_policy());
+        deferrable!(trace_stage!(
+            "drain_meta_updates",
+            self.drain_meta_updates(ctx)
+        ));
+        deferrable!(trace_stage!(
             "drain_metadata_summary_updates",
             self.drain_metadata_summary_updates(ctx)
-        );
-        self.drain_external_load_results(ctx);
+        ));
+        deferrable!(self.drain_external_load_results(ctx));
         self.check_csv_export_completion();
         self.tick_bulk_resample();
         if self.bulk_resample_state.is_some() {
@@ -216,18 +239,23 @@ impl WavesPreviewer {
         if self.batch_loudnorm_state.is_some() {
             ctx.request_repaint();
         }
-        self.apply_spectrogram_updates(ctx);
-        self.apply_feature_analysis_updates(ctx);
-        self.apply_editor_viewport_render_updates(ctx);
+        deferrable!(self.apply_spectrogram_updates(ctx));
+        deferrable!(self.apply_feature_analysis_updates(ctx));
+        deferrable!(self.apply_editor_viewport_render_updates(ctx));
         self.drain_export_results(ctx);
-        self.drain_lufs_recalc_results();
+        deferrable!(self.drain_lufs_recalc_results());
         if self.inspection_run_state.is_some() {
-            self.drain_inspection_results(ctx);
+            deferrable!(self.drain_inspection_results(ctx));
         }
         self.drain_effect_graph_runner(ctx);
         self.tick_playback_fx_state(ctx);
-        self.pump_lufs_recalc_worker();
+        deferrable!(self.pump_lufs_recalc_worker());
         self.tick_processing_state(ctx);
+        // Anything skipped above must come back promptly, or a backlog
+        // would sit until the next unrelated repaint.
+        if self.frame_budget.has_deferred_work() {
+            ctx.request_repaint();
+        }
     }
 
     fn run_frame_workspace(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {

@@ -288,12 +288,26 @@ impl crate::app::WavesPreviewer {
             .suspend
             .store(busy, std::sync::atomic::Ordering::Relaxed);
 
+        // Applying an event touches the item list, so a bulk change on disk
+        // (a folder copied in, a render finishing) must not be applied in a
+        // single frame. Unread batches stay in the channel for the next one.
+        const MAX_EVENTS_PER_FRAME: usize = 512;
         let mut batches: Vec<Vec<WatchEvent>> = Vec::new();
-        while let Ok(batch) = watch.rx.try_recv() {
-            batches.push(batch);
+        let mut queued_events = 0usize;
+        while queued_events < MAX_EVENTS_PER_FRAME {
+            match watch.rx.try_recv() {
+                Ok(batch) => {
+                    queued_events += batch.len();
+                    batches.push(batch);
+                }
+                Err(_) => break,
+            }
         }
         if batches.is_empty() {
             return;
+        }
+        if queued_events >= MAX_EVENTS_PER_FRAME {
+            ctx.request_repaint();
         }
         let mut added: Vec<PathBuf> = Vec::new();
         let mut removed = 0usize;
