@@ -3611,6 +3611,11 @@ impl crate::app::WavesPreviewer {
     /// true so the caller refuses to spawn a second one (the busy tab's UI is
     /// disabled, but other tabs' Apply buttons and hotkeys can still race).
     pub(super) fn editor_apply_slot_busy_toast(&mut self) -> bool {
+        // A restore in flight still owns the tab set; an apply started now
+        // could target a tab the restore is about to replace.
+        if self.session_open_busy_toast() {
+            return true;
+        }
         if self.editor_apply_state.is_some() {
             self.push_toast(
                 crate::app::types::ToastSeverity::Info,

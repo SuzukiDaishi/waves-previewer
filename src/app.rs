@@ -909,6 +909,9 @@ pub struct WavesPreviewer {
     recent_sessions: Vec<PathBuf>,
     project_open_pending: Option<PathBuf>,
     project_open_state: Option<ProjectOpenState>,
+    /// Bumped per session open so a parse worker whose result arrives
+    /// after the user started another open can be dropped.
+    project_open_generation: u64,
     theme_mode: ThemeMode,
     item_bg_mode: ItemBgMode,
     show_rename_dialog: bool,

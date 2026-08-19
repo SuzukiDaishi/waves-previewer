@@ -49,6 +49,7 @@ enum TopbarActivityCancel {
     DuplicateScan,
     EditorAnalysis,
     VirtualTrim,
+    SessionOpen,
 }
 
 struct TopbarActivityItem {
@@ -455,10 +456,10 @@ impl WavesPreviewer {
         if let Some(state) = &self.project_open_state {
             let elapsed = state.started_at.elapsed().as_secs_f32();
             items.push(TopbarActivityItem {
-                label: format!("Opening session... ({elapsed:.1}s)"),
+                label: format!("{}... ({elapsed:.1}s)", state.phase.label()),
                 progress: None,
                 show_percentage: false,
-                cancel: None,
+                cancel: Some(TopbarActivityCancel::SessionOpen),
             });
         }
         if let Some(export) = &self.export_state {
@@ -511,6 +512,7 @@ impl WavesPreviewer {
             TopbarActivityCancel::MusicPreview => self.cancel_music_preview_run(),
             TopbarActivityCancel::EditorApply => self.cancel_editor_apply(),
             TopbarActivityCancel::VirtualTrim => self.cancel_virtual_trim_job(),
+            TopbarActivityCancel::SessionOpen => self.cancel_session_open(),
             TopbarActivityCancel::PluginProcess => self.cancel_plugin_process(),
             TopbarActivityCancel::BulkResample => {
                 if let Some(state) = &mut self.bulk_resample_state {

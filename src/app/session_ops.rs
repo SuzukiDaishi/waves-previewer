@@ -20,13 +20,59 @@ use super::project::{
     ProjectExternalSource, ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList,
     ProjectListColumns, ProjectListItem, ProjectSampleRateOverride, ProjectToolState,
     ProjectTranscriptDocument, ProjectTranscriptLanguage, ProjectVirtualItem, ProjectVirtualOp,
-    ProjectVirtualSource, SessionPathMode,
+    ProjectVirtualSource, SessionPathMode, SessionPathRepair,
 };
 use super::types::{LoopXfadeShape, MediaSource, VirtualOp, VirtualSourceRef, VirtualState};
+
+/// A session document that has been read, version-checked and had its
+/// source paths repaired -- everything that can be done without touching
+/// app state, and therefore everything that can run off the UI thread.
+pub(super) struct ParsedSession {
+    pub path: PathBuf,
+    /// Boxed: `ProjectFile` is large and this crosses a channel.
+    pub project: Box<ProjectFile>,
+    pub path_repair: SessionPathRepair,
+    pub session_path_mode: SessionPathMode,
+    pub base_dir: PathBuf,
+    /// Whether each entry of `project.list.files` exists on disk, in the
+    /// same order. Computed on the worker: the UI thread used to stat every
+    /// path itself while building the list, which on a large session or a
+    /// network share is the single longest blocking step of an open.
+    pub file_exists: Vec<bool>,
+}
+
+/// Which part of opening a session is currently running.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum SessionOpenPhase {
+    /// Waiting for the first frame to paint, so the user sees the status
+    /// line before anything expensive starts.
+    Announced,
+    /// A worker is reading and repairing the document.
+    Parsing,
+    /// The parsed document is being applied to app state.
+    Applying,
+}
+
+impl SessionOpenPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionOpenPhase::Announced | SessionOpenPhase::Parsing => "Reading session",
+            SessionOpenPhase::Applying => "Restoring session",
+        }
+    }
+}
 
 pub(super) struct ProjectOpenState {
     pub started_at: Instant,
     pub shown: bool,
+    pub phase: SessionOpenPhase,
+    /// Result channel for the parse worker.
+    pub parse_rx: Option<std::sync::mpsc::Receiver<Result<ParsedSession, String>>>,
+    /// Bumped per open; a worker whose generation no longer matches has
+    /// been superseded (the user opened another session) and its result is
+    /// dropped rather than applied over the newer one.
+    pub generation: u64,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(windows)]
@@ -73,6 +119,103 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// The staged open must reach exactly the state the one-shot open
+    /// reaches. `open_project_file` is the one-shot path (CLI, kittest);
+    /// the GUI runs the same parse on a worker and applies the result, so
+    /// splitting the two must not change what lands in app state.
+    #[test]
+    fn staged_open_matches_the_one_shot_open() {
+        let dir = temp_dir("staged_parity");
+        let audio = dir.join("tone.wav");
+        crate::wave::export_channels_audio(&[vec![0.1, -0.1, 0.2]], 48_000, &audio)
+            .expect("write fixture");
+        let session = dir.join("parity.nwsess");
+        {
+            let mut app = crate::app::WavesPreviewer::new_headless(Default::default())
+                .expect("headless app");
+            app.replace_with_files(&[audio.clone()]);
+            app.save_project_as_blocking(session.clone())
+                .expect("save session");
+        }
+
+        let mut one_shot =
+            crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+        one_shot
+            .open_project_file(session.clone())
+            .expect("one-shot open");
+
+        // The staged path: parse off-thread, then apply.
+        let parsed = crate::app::WavesPreviewer::parse_session_document(session.clone())
+            .expect("parse session");
+        let mut staged =
+            crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+        staged.apply_parsed_session(parsed).expect("staged apply");
+
+        let paths_of = |app: &crate::app::WavesPreviewer| -> Vec<PathBuf> {
+            app.items.iter().map(|item| item.path.clone()).collect()
+        };
+        assert_eq!(paths_of(&one_shot), paths_of(&staged));
+        assert_eq!(one_shot.files.len(), staged.files.len());
+        assert_eq!(one_shot.tabs.len(), staged.tabs.len());
+        assert_eq!(one_shot.project_path, staged.project_path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A file listed by the session but gone from disk must still be marked
+    /// missing. The stat moved to the parse worker, so the flag now travels
+    /// in `ParsedSession::file_exists` rather than being taken on the UI
+    /// thread while building rows.
+    #[test]
+    fn a_missing_file_is_still_flagged_after_the_stat_moved_to_the_worker() {
+        let dir = temp_dir("missing_flag");
+        let present = dir.join("present.wav");
+        let absent = dir.join("absent.wav");
+        crate::wave::export_channels_audio(&[vec![0.1, 0.2]], 48_000, &present)
+            .expect("write fixture");
+        let session = dir.join("missing.nwsess");
+        {
+            let mut app = crate::app::WavesPreviewer::new_headless(Default::default())
+                .expect("headless app");
+            app.replace_with_files(&[present.clone()]);
+            app.save_project_as_blocking(session.clone())
+                .expect("save session");
+        }
+        // Add a path that never existed, the way a session outlives a file.
+        let text = std::fs::read_to_string(&session).expect("read session");
+        let mut saved = deserialize_project(&text).expect("parse session");
+        saved
+            .list
+            .files
+            .push(absent.to_string_lossy().to_string());
+        std::fs::write(&session, serialize_project(&saved).expect("serialize"))
+            .expect("rewrite session");
+
+        let parsed = crate::app::WavesPreviewer::parse_session_document(session.clone())
+            .expect("parse session");
+        assert_eq!(parsed.file_exists.len(), parsed.project.list.files.len());
+        let mut app =
+            crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+        app.apply_parsed_session(parsed).expect("apply");
+
+        let absent_status = app
+            .item_for_path(&absent)
+            .map(|item| item.status.clone())
+            .expect("absent row present in the list");
+        assert!(
+            matches!(absent_status, super::super::types::MediaStatus::DecodeFailed(_)),
+            "a session row whose file is gone must still read as missing, got {absent_status:?}"
+        );
+        let present_status = app
+            .item_for_path(&present)
+            .map(|item| item.status.clone())
+            .expect("present row");
+        assert!(matches!(
+            present_status,
+            super::super::types::MediaStatus::Ok
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -448,29 +591,153 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn queue_project_open(&mut self, path: PathBuf) {
+        // Supersede any open still in flight: its worker result will be
+        // dropped on generation mismatch rather than applied over this one.
+        if let Some(previous) = self.project_open_state.as_ref() {
+            previous
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.project_open_generation = self.project_open_generation.wrapping_add(1);
         self.project_open_pending = Some(path);
         self.project_open_state = Some(ProjectOpenState {
             started_at: Instant::now(),
             shown: false,
+            phase: SessionOpenPhase::Announced,
+            parse_rx: None,
+            generation: self.project_open_generation,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
     }
 
+    /// True while a session open is in flight. Callers that mutate session
+    /// state (save, export, destructive edits) refuse while this holds, so
+    /// a half-restored document is never written back or edited.
+    pub(super) fn session_open_in_progress(&self) -> bool {
+        self.project_open_state.is_some()
+    }
+
+    /// Guard for anything that writes session state while a restore is
+    /// running: toast + true when the caller must refuse. Reading the list,
+    /// scrolling and playback stay available -- only writes are held back,
+    /// because the document is only partly applied.
+    pub(super) fn session_open_busy_toast(&mut self) -> bool {
+        if !self.session_open_in_progress() {
+            return false;
+        }
+        self.push_toast(
+            super::types::ToastSeverity::Info,
+            "The session is still opening — wait for it or cancel it from the topbar",
+        );
+        true
+    }
+
+    pub(super) fn cancel_session_open(&mut self) {
+        let Some(state) = self.project_open_state.take() else {
+            return;
+        };
+        state
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.project_open_pending = None;
+        // A cancelled open must not leave a half-applied document behind:
+        // the parse phase has not touched app state yet, but the apply
+        // phase has, so clear back to an empty session either way.
+        if state.phase == SessionOpenPhase::Applying {
+            self.close_project();
+        }
+        self.push_toast(super::types::ToastSeverity::Info, "Session open cancelled");
+    }
+
+    /// Drive the staged session open. Reading and repairing the document
+    /// runs on a worker (the path repair stats every referenced file);
+    /// applying it happens on the UI thread once the worker lands.
     pub(super) fn tick_project_open(&mut self) {
         let Some(state) = self.project_open_state.as_mut() else {
             return;
         };
+        // Paint one frame with the status line before starting work, so the
+        // window is visibly alive before the first expensive step.
         if !state.shown {
             state.shown = true;
             return;
         }
-        let Some(path) = self.project_open_pending.take() else {
-            self.project_open_state = None;
-            return;
-        };
-        if let Err(err) = self.open_project_file(path) {
-            self.debug_log(format!("session open error: {err}"));
+        match state.phase {
+            SessionOpenPhase::Announced => {
+                let Some(path) = self.project_open_pending.take() else {
+                    self.project_open_state = None;
+                    return;
+                };
+                let (tx, rx) = std::sync::mpsc::channel();
+                let spawned = std::thread::Builder::new()
+                    .name("neowaves-session-parse".to_string())
+                    .spawn(move || {
+                        crate::app::threading::lower_current_thread_priority();
+                        let _ = tx.send(Self::parse_session_document(path));
+                        crate::ui_wake::wake_ui();
+                    });
+                let Some(state) = self.project_open_state.as_mut() else {
+                    return;
+                };
+                match spawned {
+                    Ok(_) => {
+                        state.parse_rx = Some(rx);
+                        state.phase = SessionOpenPhase::Parsing;
+                    }
+                    Err(err) => {
+                        self.debug_log(format!("session parse thread failed: {err}"));
+                        self.project_open_state = None;
+                    }
+                }
+            }
+            SessionOpenPhase::Parsing => {
+                let Some(rx) = state.parse_rx.as_ref() else {
+                    self.project_open_state = None;
+                    return;
+                };
+                let generation = state.generation;
+                match rx.try_recv() {
+                    Ok(result) => {
+                        state.parse_rx = None;
+                        state.phase = SessionOpenPhase::Applying;
+                        // The user may have started another open while this
+                        // one was parsing; that one owns the app state now.
+                        if generation != self.project_open_generation {
+                            return;
+                        }
+                        match result {
+                            Ok(parsed) => {
+                                if let Err(err) = self.apply_parsed_session(parsed) {
+                                    self.debug_log(format!("session open error: {err}"));
+                                    self.push_toast(
+                                    super::types::ToastSeverity::Error,
+                                    format!("Session open failed: {err}"),
+                                );
+                                }
+                            }
+                            Err(err) => {
+                                self.debug_log(format!("session open error: {err}"));
+                                self.push_toast(
+                                    super::types::ToastSeverity::Error,
+                                    format!("Session open failed: {err}"),
+                                );
+                            }
+                        }
+                        self.project_open_state = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.debug_log("session parse worker disconnected".to_string());
+                        self.project_open_state = None;
+                    }
+                }
+            }
+            SessionOpenPhase::Applying => {
+                // Applying completes within the frame that starts it; a
+                // state left here means that frame returned early.
+                self.project_open_state = None;
+            }
         }
-        self.project_open_state = None;
     }
 
     pub(super) fn is_session_path(path: &Path) -> bool {
@@ -1261,6 +1528,11 @@ impl super::WavesPreviewer {
         if self.session_save_state.is_some() {
             return Err("session save already in progress".to_string());
         }
+        // Saving a partly-restored document would write the half of it that
+        // has been applied over the complete file on disk.
+        if self.session_open_in_progress() {
+            return Err("session is still opening".to_string());
+        }
         let (path, project, jobs) = self.build_session_save_plan(path)?;
         let job_count = jobs.len();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1316,7 +1588,12 @@ impl super::WavesPreviewer {
         ctx.request_repaint();
     }
 
-    pub(super) fn open_project_file(&mut self, path: PathBuf) -> Result<(), String> {
+    /// Read and normalize a session document. Touches only the filesystem
+    /// and the parsed document, never `self`, so the GUI runs it on a
+    /// worker thread (see `tick_project_open`): the path repair alone
+    /// stats every file the session references, which on a large session
+    /// or a network share is seconds of blocking I/O.
+    pub(super) fn parse_session_document(path: PathBuf) -> Result<ParsedSession, String> {
         let path = if path.is_absolute() {
             path
         } else {
@@ -1337,6 +1614,40 @@ impl super::WavesPreviewer {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
+        let file_exists = project
+            .list
+            .files
+            .iter()
+            .map(|raw| resolve_path(raw, &base_dir).is_file())
+            .collect();
+        Ok(ParsedSession {
+            path,
+            project: Box::new(project),
+            path_repair,
+            session_path_mode,
+            base_dir,
+            file_exists,
+        })
+    }
+
+    /// Blocking open, kept for the CLI, the kittest harness and unit tests.
+    /// The GUI goes through `tick_project_open` instead so the parse and the
+    /// heavy restore do not land on one frame.
+    pub(super) fn open_project_file(&mut self, path: PathBuf) -> Result<(), String> {
+        let parsed = Self::parse_session_document(path)?;
+        self.apply_parsed_session(parsed)
+    }
+
+    pub(super) fn apply_parsed_session(&mut self, parsed: ParsedSession) -> Result<(), String> {
+        let ParsedSession {
+            path,
+            project,
+            path_repair,
+            session_path_mode,
+            base_dir,
+            file_exists,
+        } = parsed;
+        let mut project = *project;
 
         let project_path = path.clone();
         self.close_project();
@@ -1510,7 +1821,7 @@ impl super::WavesPreviewer {
         self.apply_spectro_config(spectro_config_from_project(&project.spectrogram));
 
         if !project.list.files.is_empty() {
-            self.reset_list_from_project(&project.list.files, &base_dir);
+            self.reset_list_from_project(&project.list.files, &base_dir, &file_exists);
             self.after_add_refresh();
         } else if let Some(root) = project.list.root.as_ref() {
             let root_path = resolve_path(root, &base_dir);
