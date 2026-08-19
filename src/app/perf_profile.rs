@@ -230,15 +230,6 @@ impl PerfProfile {
             PerfTier::High => self.cores.saturating_sub(1).clamp(1, 6),
         }
     }
-
-    /// How many rows the staged session restore may materialize per frame.
-    pub fn list_build_chunk(&self) -> usize {
-        match self.tier {
-            PerfTier::Low => 2_000,
-            PerfTier::Normal => 8_000,
-            PerfTier::High => 16_000,
-        }
-    }
 }
 
 #[cfg(test)]

@@ -138,7 +138,7 @@ impl WavesPreviewer {
                 ui.close();
             }
             if ui.button("Session Close").clicked() {
-                if let Err(err) = self.close_project_with_autosave() {
+                if let Err(err) = self.request_close_project_with_autosave() {
                     self.debug_log(format!("session close save error: {err}"));
                     self.push_toast(
                         crate::app::types::ToastSeverity::Error,

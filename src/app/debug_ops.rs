@@ -472,6 +472,27 @@ impl WavesPreviewer {
             self.debug.frame_peak_ms,
             self.debug.frame_samples
         ));
+        lines.push(format!(
+            "perf_tier: {} ({} cores{})",
+            self.perf.tier.as_str(),
+            self.perf.cores,
+            if self.perf.demoted_from_hardware() {
+                format!(", auto-lowered from {}", self.perf.base_tier.as_str())
+            } else {
+                String::new()
+            }
+        ));
+        if self.debug.long_frames.is_empty() {
+            lines.push("long_frames: none".to_string());
+        } else {
+            lines.push(format!(
+                "long_frames ({} shown, newest first):",
+                self.debug.long_frames.len()
+            ));
+            for (ms, detail) in self.debug.long_frames.iter() {
+                lines.push(format!("  {ms:.0}ms {detail}"));
+            }
+        }
         let summarize = |samples: &std::collections::VecDeque<f32>| -> String {
             if samples.is_empty() {
                 return "n=0".to_string();

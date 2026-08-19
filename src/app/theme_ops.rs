@@ -171,16 +171,13 @@ impl WavesPreviewer {
             "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
             "/usr/share/fonts/truetype/takao-gothic/TakaoGothic.ttf",
         ];
-        let mut system_font_loaded = false;
-        for path in system_candidates {
-            if let Ok(bytes) = std::fs::read(path) {
-                fonts
-                    .font_data
-                    .insert("jp_system".into(), FontData::from_owned(bytes).into());
-                system_font_loaded = true;
-                break;
-            }
-        }
+        // Reading a CJK system font is several megabytes off disk, and it
+        // happens before the first frame can be painted -- on a cold cache
+        // that is a visibly late window. Start with the embedded font only
+        // and swap the system one in from a worker (see
+        // `spawn_system_font_upgrade`); the bundled face renders every
+        // glyph in the meantime, so the swap is a refinement, not a fix.
+        let system_font_loaded = false;
 
         // フォント優先順位: システム > バンドル > egui デフォルト
         // 日本語 UI なので日本語フォントを先頭に配置する
@@ -195,6 +192,7 @@ impl WavesPreviewer {
         }
 
         ctx.set_fonts(fonts);
+        Self::spawn_system_font_upgrade(ctx, system_candidates);
 
         // egui keeps separate dark/light styles and, with the default
         // ThemePreference::System, swaps the active one when the OS reports
@@ -225,6 +223,52 @@ impl WavesPreviewer {
         // DPI スケーリングは native_pixels_per_point × zoom_factor で一元管理
         // 明示的に 1.0 を設定しておくことで widget 個別スケールとの混在を防ぐ
         ctx.set_zoom_factor(1.0);
+    }
+
+    /// Read the best available system CJK font on a worker and install it
+    /// ahead of the bundled one once it lands. A failure here is silent by
+    /// design: the embedded NotoSansJP already covers the UI, so there is
+    /// nothing for the user to act on.
+    fn spawn_system_font_upgrade(ctx: &egui::Context, candidates: &'static [&'static str]) {
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("neowaves-font-load".to_string())
+            .spawn(move || {
+                crate::app::threading::lower_current_thread_priority();
+                let mut loaded: Option<Vec<u8>> = None;
+                for path in candidates {
+                    if let Ok(bytes) = std::fs::read(path) {
+                        loaded = Some(bytes);
+                        break;
+                    }
+                }
+                let Some(bytes) = loaded else {
+                    return;
+                };
+                let mut fonts = FontDefinitions::default();
+                fonts.font_data.insert(
+                    "noto_sans_jp".into(),
+                    Arc::new(FontData::from_static(include_bytes!(
+                        "../../assets/fonts/NotoSansJP-Regular.otf"
+                    ))),
+                );
+                fonts
+                    .font_data
+                    .insert("jp_system".into(), FontData::from_owned(bytes).into());
+                for family in [&FontFamily::Proportional, &FontFamily::Monospace] {
+                    let Some(list) = fonts.families.get_mut(family) else {
+                        continue;
+                    };
+                    list.insert(0, "noto_sans_jp".into());
+                    list.insert(0, "jp_system".into());
+                }
+                ctx.set_fonts(fonts);
+                ctx.request_repaint();
+            });
+        if spawned.is_err() {
+            // Out of threads: the bundled font stays, which is a complete
+            // fallback rather than a degraded one.
+        }
     }
 
     pub(super) fn ensure_theme_visuals(&self, ctx: &egui::Context) {

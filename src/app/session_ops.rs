@@ -758,6 +758,10 @@ impl super::WavesPreviewer {
         }
     }
 
+    /// Blocking close, kept for the CLI, the kittest harness and unit tests
+    /// that need the file on disk when the call returns. The GUI uses
+    /// `request_close_project_with_autosave`.
+    #[allow(dead_code)]
     pub(super) fn close_project_with_autosave(&mut self) -> Result<(), String> {
         if let Some(path) = self.project_path.clone() {
             // Blocking: the session state is torn down right after, so the
@@ -765,6 +769,27 @@ impl super::WavesPreviewer {
             self.save_project_as_blocking(path)?;
         }
         self.close_project();
+        Ok(())
+    }
+
+    /// Interactive close. Writing a session's sidecars means encoding a WAV
+    /// per edited tab and virtual item, which blocked the UI thread for as
+    /// long as that took. Save on the worker instead and tear the session
+    /// down when it lands; the existing busy overlay covers the wait with a
+    /// message rather than a frozen window.
+    pub(super) fn request_close_project_with_autosave(&mut self) -> Result<(), String> {
+        let Some(path) = self.project_path.clone() else {
+            self.close_project();
+            return Ok(());
+        };
+        self.save_project_as(path)?;
+        if self.session_save_state.is_some() {
+            // The worker owns it now; `drain_session_save` closes on success.
+            self.close_after_session_save = true;
+        } else {
+            // Nothing to write (the save completed inline), so close now.
+            self.close_project();
+        }
         Ok(())
     }
 
@@ -1837,13 +1862,26 @@ impl super::WavesPreviewer {
             return;
         };
         self.session_save_state = None;
+        let close_when_done = std::mem::take(&mut self.close_after_session_save);
         match result {
             Ok(path) => {
                 self.debug_log(format!("session saved: {}", path.display()));
                 self.finish_session_save(path);
+                if close_when_done {
+                    self.close_project();
+                }
             }
             Err(err) => {
                 self.debug_log(format!("session save error: {err}"));
+                if close_when_done {
+                    // Keep the session open on a failed autosave, the way
+                    // the blocking close does -- tearing it down here would
+                    // discard the edits the save could not persist.
+                    self.push_toast(
+                        super::types::ToastSeverity::Error,
+                        format!("Session close autosave failed: {err}"),
+                    );
+                }
             }
         }
         ctx.request_repaint();
@@ -2100,7 +2138,7 @@ impl super::WavesPreviewer {
             base_dir,
             file_exists,
         } = parsed;
-        let mut project = *project;
+        let project = *project;
 
         let project_path = path.clone();
         self.close_project();

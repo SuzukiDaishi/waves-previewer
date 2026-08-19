@@ -975,6 +975,78 @@ impl WavesPreviewer {
         }
     }
 
+    /// A frame this slow is long enough for the window to stop answering,
+    /// so it is worth naming rather than just counting.
+    const LONG_FRAME_MS: f32 = 250.0;
+    /// Enough history to see a pattern, short enough to read at a glance.
+    const LONG_FRAME_HISTORY: usize = 16;
+
+    /// Note a frame that ran long, with whatever was active while it ran.
+    /// This is the record a "it freezes on my machine" report can quote
+    /// without needing the reporter to reproduce it under a profiler.
+    fn record_long_frame(&mut self, frame_ms: f32) {
+        if frame_ms < Self::LONG_FRAME_MS {
+            return;
+        }
+        let mut active: Vec<&str> = Vec::new();
+        if self.project_open_state.is_some() {
+            active.push("session-open");
+        }
+        if self.scan_in_progress {
+            active.push("scan");
+        }
+        if self.sort_job_active() {
+            active.push("sort");
+        }
+        if self.filter_job_active() {
+            active.push("filter");
+        }
+        if self.editor_decode_state.is_some() {
+            active.push("editor-decode");
+        }
+        if self.editor_apply_state.is_some() {
+            active.push("editor-apply");
+        }
+        if self.processing.is_some() {
+            active.push("processing");
+        }
+        if self.export_state.is_some() {
+            active.push("export");
+        }
+        if self.session_save_state.is_some() {
+            active.push("session-save");
+        }
+        if !self.meta_inflight.is_empty() {
+            active.push("meta");
+        }
+        if !self.spectro_inflight.is_empty() {
+            active.push("spectrogram");
+        }
+        if !self.editor_feature_inflight.is_empty() {
+            active.push("features");
+        }
+        if self.bulk_resample_state.is_some() {
+            active.push("bulk-resample");
+        }
+        if self.inspection_run_state.is_some() {
+            active.push("inspection");
+        }
+        let deferred = self.frame_budget.deferred_count();
+        if deferred > 0 {
+            active.push("budget-deferred");
+        }
+        let detail = if active.is_empty() {
+            format!("idle/ui (tier {})", self.perf.tier.as_str())
+        } else {
+            format!("{} (tier {})", active.join("+"), self.perf.tier.as_str())
+        };
+        self.debug_log(format!("long frame {frame_ms:.0}ms: {detail}"));
+        if self.debug.long_frames.len() >= Self::LONG_FRAME_HISTORY {
+            self.debug.long_frames.pop_back();
+        }
+        self.debug.long_frames.push_front((frame_ms, detail));
+    }
+
     /// True while the staged startup work still has steps left to run.
     fn startup_maintenance_finished(&self) -> bool {
         self.startup_paths_applied && self.startup_maintenance_step >= 7
@@ -1069,6 +1141,7 @@ impl WavesPreviewer {
         if self.debug.frame_peak_ms < self.debug.frame_last_ms {
             self.debug.frame_peak_ms = self.debug.frame_last_ms;
         }
+        self.record_long_frame(frame_ms as f32);
         // Sustained slow frames mean this machine cannot afford the slice
         // sizes it was given; drop a tier so every budget shrinks at once.
         if self.perf.note_frame_ms(self.debug.frame_last_ms) {

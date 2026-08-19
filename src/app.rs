@@ -912,6 +912,9 @@ pub struct WavesPreviewer {
     /// Bumped per session open so a parse worker whose result arrives
     /// after the user started another open can be dropped.
     project_open_generation: u64,
+    /// Set when an interactive Session Close is waiting on its async
+    /// autosave; `drain_session_save` tears the session down once written.
+    close_after_session_save: bool,
     theme_mode: ThemeMode,
     item_bg_mode: ItemBgMode,
     show_rename_dialog: bool,

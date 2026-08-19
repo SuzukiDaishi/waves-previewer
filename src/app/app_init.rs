@@ -389,6 +389,7 @@ impl WavesPreviewer {
             project_open_pending: None,
             project_open_state: None,
             project_open_generation: 0,
+            close_after_session_save: false,
             theme_mode: ThemeMode::Dark,
             item_bg_mode: ItemBgMode::Standard,
             show_rename_dialog: false,
