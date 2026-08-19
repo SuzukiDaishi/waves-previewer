@@ -4,7 +4,7 @@ UI / Audio 高速化を調査するときの読み順と、巨大ファイルの
 
 ## Reading Order
 
-1. `docs/UI_FREEZE_COUNTERMEASURES_20260819.md` で「応答なし」対策として実施済みの内容（性能ティア / フレーム予算 / セッション段階読み込み / アイドル時スリープ）を確認する。
+1. `docs/UI_FREEZE_COUNTERMEASURES_20260819.md` で「応答なし」対策として実施済みの内容を確認する。第1ラウンド = 低スペックPC（性能ティア / フレーム予算 / セッション段階読み込み / アイドル時スリープ）、第2ラウンド = ファイルサーバ（UIスレッドから fs を叩かない / path_status / リモート時の背景処理絞り込み）。
 2. `docs/UI_PERFORMANCE_IMPROVEMENT_CANDIDATES_20260606.md` で残りの候補と優先度を確認する。
 3. `src/app/frame_ops.rs` と `src/app/logic.rs` で frame 内に残っている仕事を確認する。
 4. list 系なら `src/app/ui/list.rs`, `src/app/ui/list/table.rs`, `src/app/search_ops.rs`, `src/app/list_state_ops.rs`, `src/app/meta_ops.rs` を読む。
