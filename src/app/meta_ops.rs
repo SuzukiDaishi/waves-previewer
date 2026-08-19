@@ -94,6 +94,33 @@ impl super::WavesPreviewer {
         }
     }
 
+    /// Note whether the list now lives on a network share, and resize the
+    /// metadata pool if that changed. Called whenever the list is replaced
+    /// (folder scan, session open, explicit file load) -- the pool's worker
+    /// count comes from this, and a share cannot serve local-disk
+    /// concurrency without starving whatever the user opened.
+    pub(super) fn refresh_root_locality(&mut self) {
+        // Judge by an actual item rather than the root: a session has no
+        // root at all, and its files are what the workers will be reading.
+        let sample = self
+            .root
+            .clone()
+            .or_else(|| self.items.first().map(|item| item.path.clone()));
+        let remote = sample
+            .as_deref()
+            .map(crate::audio_io::is_remote_file_path)
+            .unwrap_or(false);
+        if self.perf.set_remote_root(remote) {
+            self.debug_log(format!(
+                "list root locality: {}",
+                if remote { "remote" } else { "local" }
+            ));
+            if self.meta_pool.is_some() {
+                self.reset_meta_pool();
+            }
+        }
+    }
+
     /// Cancel any queued or running metadata job for a path (e.g. when the
     /// file is removed from the list) and clear the inflight marker so the
     /// row can be re-requested later if it comes back.
@@ -121,7 +148,10 @@ impl super::WavesPreviewer {
         } else {
             crate::app::LIST_BG_META_INFLIGHT_LIMIT.saturating_mul(2)
         };
-        self.meta_inflight.len() >= cap
+        // These limits were tuned against a local disk. A share cannot serve
+        // that many concurrent reads without starving whatever the user is
+        // waiting on, so scale them down when the root is remote.
+        self.meta_inflight.len() >= self.perf.background_io_budget(cap)
     }
 
     pub(super) fn queue_meta_for_path(&mut self, path: &PathBuf, priority: bool) {
@@ -259,16 +289,20 @@ impl super::WavesPreviewer {
         }
         let total = self.files.len();
         self.list_meta_prefetch_cursor %= total;
-        let queue_budget = if sort_meta_prefetch || sort_transcript_prefetch {
-            crate::app::LIST_META_PREFETCH_BUDGET.saturating_mul(4)
-        } else {
-            crate::app::LIST_META_PREFETCH_BUDGET
-        };
-        let inflight_cap = if sort_meta_prefetch || sort_transcript_prefetch {
-            crate::app::LIST_BG_META_INFLIGHT_LIMIT.saturating_mul(2)
-        } else {
-            crate::app::LIST_BG_META_INFLIGHT_LIMIT
-        };
+        let queue_budget =
+            self.perf
+                .background_io_budget(if sort_meta_prefetch || sort_transcript_prefetch {
+                    crate::app::LIST_META_PREFETCH_BUDGET.saturating_mul(4)
+                } else {
+                    crate::app::LIST_META_PREFETCH_BUDGET
+                });
+        let inflight_cap =
+            self.perf
+                .background_io_budget(if sort_meta_prefetch || sort_transcript_prefetch {
+                    crate::app::LIST_BG_META_INFLIGHT_LIMIT.saturating_mul(2)
+                } else {
+                    crate::app::LIST_BG_META_INFLIGHT_LIMIT
+                });
         // Bound the per-frame walk as well: once most rows are resolved this
         // loop is a pure scan, and walking all 500k rows every frame costs
         // tens of ms. The cursor keeps advancing, so coverage is unchanged.

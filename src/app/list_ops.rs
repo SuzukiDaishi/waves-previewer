@@ -162,6 +162,7 @@ impl super::WavesPreviewer {
             self.apply_external_mapping();
         }
         self.refresh_filter_then_sort();
+        self.refresh_root_locality();
         self.ensure_meta_pool();
     }
 
@@ -201,6 +202,7 @@ impl super::WavesPreviewer {
                 }
             }
         }
+        self.refresh_root_locality();
         self.ensure_meta_pool();
     }
 }

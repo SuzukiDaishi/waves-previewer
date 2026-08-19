@@ -1963,6 +1963,7 @@ impl super::WavesPreviewer {
             self.item_index.insert(id, self.items.len());
             self.items.push(item);
         }
+        self.refresh_root_locality();
         self.ensure_meta_pool();
     }
 }

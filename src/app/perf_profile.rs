@@ -100,6 +100,11 @@ pub struct PerfProfile {
     /// Debug window can show "High, demoted to Normal".
     pub base_tier: PerfTier,
     pub preference: PerfTierPreference,
+    /// True when the list's root lives on a network share. Background
+    /// sweeps then take a fraction of the concurrency they would locally:
+    /// the bottleneck is the link, and saturating it starves whatever the
+    /// user is actually waiting on.
+    pub remote_root: bool,
     slow_frame_streak: u32,
 }
 
@@ -135,13 +140,24 @@ impl PerfProfile {
             tier,
             base_tier,
             preference,
+            remote_root: false,
             slow_frame_streak: 0,
         }
     }
 
+    /// Record whether the current list root is on a network share. Returns
+    /// true when this changed, so the caller can rebuild pools sized from it.
+    pub fn set_remote_root(&mut self, remote: bool) -> bool {
+        let changed = self.remote_root != remote;
+        self.remote_root = remote;
+        changed
+    }
+
     /// Re-apply a changed Settings choice without losing the detected cores.
     pub fn set_preference(&mut self, preference: PerfTierPreference) {
+        let remote_root = self.remote_root;
         *self = Self::from_cores(self.cores, preference);
+        self.remote_root = remote_root;
     }
 
     /// Feed each finished frame's wall time in. Returns true when the tier
@@ -204,6 +220,12 @@ impl PerfProfile {
 
     /// Concurrent heavy restore/decode jobs during a session open.
     pub fn restore_concurrency(&self) -> usize {
+        if self.remote_root {
+            // Two streams keep a share busy without thrashing its queue;
+            // more just makes every one of them finish later, and the
+            // status line stall longer.
+            return 2.min(self.cores.max(1));
+        }
         match self.tier {
             PerfTier::Low => 1,
             PerfTier::Normal => self.cores.saturating_sub(1).clamp(1, 3),
@@ -224,10 +246,25 @@ impl PerfProfile {
 
     /// Worker count for the list metadata pool.
     pub fn meta_pool_workers(&self) -> usize {
+        if self.remote_root {
+            // More readers do not make a share faster; they make every
+            // read slower and crowd out the file the user opened.
+            return 2.min(self.cores).max(1);
+        }
         match self.tier {
             PerfTier::Low => 1,
             PerfTier::Normal => self.cores.saturating_sub(1).clamp(1, 4),
             PerfTier::High => self.cores.saturating_sub(1).clamp(1, 6),
+        }
+    }
+
+    /// Scale a locally-tuned background sweep budget for the current root.
+    /// Used for the list metadata prefetch queue and its in-flight cap.
+    pub fn background_io_budget(&self, local_budget: usize) -> usize {
+        if self.remote_root {
+            (local_budget / 4).max(1)
+        } else {
+            local_budget.max(1)
         }
     }
 }
@@ -333,6 +370,52 @@ mod tests {
         }
         assert_eq!(profile.tier, PerfTier::High);
         assert!(!profile.demoted_from_hardware());
+    }
+
+    #[test]
+    fn a_remote_root_throttles_every_background_reader() {
+        let mut local = PerfProfile::from_cores(16, PerfTierPreference::Auto);
+        let local_meta = local.meta_pool_workers();
+        let local_restore = local.restore_concurrency();
+        let local_budget = local.background_io_budget(64);
+
+        assert!(
+            local.set_remote_root(true),
+            "first change should report true"
+        );
+        assert!(
+            !local.set_remote_root(true),
+            "setting the same value again is not a change"
+        );
+
+        // A share is not made faster by more readers; it is made slower,
+        // and the file the user opened waits behind them.
+        assert!(local.meta_pool_workers() < local_meta);
+        assert!(local.restore_concurrency() < local_restore);
+        assert!(local.background_io_budget(64) < local_budget);
+        // ...but never to zero, or the list would never resolve at all.
+        assert!(local.meta_pool_workers() >= 1);
+        assert!(local.restore_concurrency() >= 1);
+        assert!(local.background_io_budget(1) >= 1);
+    }
+
+    #[test]
+    fn a_single_core_remote_machine_still_gets_one_reader() {
+        let mut profile = PerfProfile::from_cores(1, PerfTierPreference::Auto);
+        profile.set_remote_root(true);
+        assert_eq!(profile.meta_pool_workers(), 1);
+        assert_eq!(profile.restore_concurrency(), 1);
+    }
+
+    #[test]
+    fn changing_the_tier_keeps_the_root_locality() {
+        let mut profile = PerfProfile::from_cores(16, PerfTierPreference::Auto);
+        profile.set_remote_root(true);
+        profile.set_preference(PerfTierPreference::Pinned(PerfTier::High));
+        assert!(
+            profile.remote_root,
+            "a Settings change must not silently un-throttle a network share"
+        );
     }
 
     #[test]

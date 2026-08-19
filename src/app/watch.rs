@@ -11,6 +11,38 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn a_fast_walk_keeps_the_configured_interval() {
+        let delay = next_walk_delay(3_000, Duration::from_millis(50));
+        assert_eq!(delay, Duration::from_millis(3_000));
+    }
+
+    #[test]
+    fn a_slow_walk_backs_off_proportionally() {
+        // A share where one pass takes 30s must not be re-walked in 3s.
+        let delay = next_walk_delay(3_000, Duration::from_secs(30));
+        assert_eq!(delay, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn the_backoff_is_capped_so_the_watch_cannot_switch_itself_off() {
+        // A server that hung for ten minutes and then recovered should not
+        // silently disable the watch for the rest of the session.
+        let delay = next_walk_delay(3_000, Duration::from_secs(600));
+        assert_eq!(delay, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn a_zero_interval_still_has_a_floor() {
+        let delay = next_walk_delay(0, Duration::ZERO);
+        assert_eq!(delay, Duration::from_millis(20));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WatchEvent {
     Added(PathBuf),
@@ -28,6 +60,26 @@ impl WatchEvent {
 
 /// (mtime, len) per supported audio file under the root.
 pub type WatchSnapshot = HashMap<PathBuf, (Option<SystemTime>, u64)>;
+
+/// How long to wait before walking the root again.
+///
+/// The configured interval is a floor. Above it the delay tracks the cost
+/// of the walk itself: a share where one pass takes 30 seconds gets a two
+/// minute gap rather than being re-walked 3 seconds later, which on a slow
+/// link is the difference between a watch and a denial of service against
+/// the load the user is waiting on.
+///
+/// Capped so a pathological one-off (a server that hung for ten minutes and
+/// then recovered) cannot silently turn the watch off for the session.
+fn next_walk_delay(interval_ms: u64, last_walk: Duration) -> Duration {
+    const BACKOFF_FACTOR: u32 = 4;
+    const MAX_DELAY: Duration = Duration::from_secs(300);
+    let floor = Duration::from_millis(interval_ms.max(20));
+    last_walk
+        .saturating_mul(BACKOFF_FACTOR)
+        .max(floor)
+        .min(MAX_DELAY)
+}
 
 /// Diff two snapshots into events, sorted by path for determinism.
 pub fn diff_snapshots(old: &WatchSnapshot, new: &WatchSnapshot) -> Vec<WatchEvent> {
@@ -152,8 +204,15 @@ pub fn spawn_folder_watch(root: PathBuf, interval_ms: u64, skip_dotfiles: bool) 
                 let mut pending: HashMap<PathBuf, WatchEvent> = HashMap::new();
                 let mut pending_since: Option<Instant> = None;
                 let mut was_suspended = false;
+                // On a file server one walk can take far longer than the
+                // poll interval, so a fixed interval means walking
+                // continuously -- competing for the link with whatever the
+                // user is actually waiting on. Wait a multiple of however
+                // long the last walk took instead, so the watch costs a
+                // bounded share of the connection no matter how slow it is.
+                let mut next_sleep = Duration::from_millis(interval_ms.max(20));
                 loop {
-                    std::thread::sleep(Duration::from_millis(interval_ms.max(20)));
+                    std::thread::sleep(next_sleep);
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
@@ -161,7 +220,9 @@ pub fn spawn_folder_watch(root: PathBuf, interval_ms: u64, skip_dotfiles: bool) 
                         was_suspended = true;
                         continue;
                     }
+                    let walk_started = Instant::now();
                     let new = scan_snapshot(&root, skip_dotfiles);
+                    next_sleep = next_walk_delay(interval_ms, walk_started.elapsed());
                     if was_suspended || snapshot.is_none() {
                         was_suspended = false;
                         snapshot = Some(new);
@@ -282,6 +343,10 @@ impl crate::app::WavesPreviewer {
         // Bulk operations and rescans pause polling (their writes / churn
         // would spam events); the poller rebaselines when they finish.
         let busy = self.busy_overlay_blocking()
+            // A restore is already reading this share as fast as it can;
+            // re-walking the tree underneath it just takes bandwidth away
+            // from the thing the user is waiting on.
+            || self.session_open_in_progress()
             || self.scan_in_progress
             || self.export_state.is_some()
             || self.bulk_resample_state.is_some()
