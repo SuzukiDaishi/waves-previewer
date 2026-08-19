@@ -97,17 +97,23 @@ impl WavesPreviewer {
                 ui.close();
             }
         });
-        let transcript_targets: Vec<_> = selected
-            .iter()
-            .filter(|path| {
-                self.item_for_path(path)
-                    .map(|item| item.source == crate::app::types::MediaSource::File)
-                    .unwrap_or(false)
-                    && path.is_file()
-                    && crate::audio_io::is_supported_audio_path(path)
-            })
-            .cloned()
-            .collect();
+        // The menu re-runs this every frame it is open, over the whole
+        // selection. Statting here would be one blocking syscall per
+        // selected file per frame -- on a share, a hung menu. Resolve
+        // existence through the background service instead.
+        let mut transcript_targets: Vec<std::path::PathBuf> = Vec::new();
+        for path in selected.iter() {
+            let is_file_source = self
+                .item_for_path(path)
+                .map(|item| item.source == crate::app::types::MediaSource::File)
+                .unwrap_or(false);
+            if is_file_source
+                && crate::audio_io::is_supported_audio_path(path)
+                && self.path_is_file_cached(path)
+            {
+                transcript_targets.push(path.clone());
+            }
+        }
         let transcript_running = self.transcript_ai_is_running();
         let transcript_ready = self.transcript_ai_menu_enabled();
         let has_transcript_targets = !transcript_targets.is_empty();
@@ -147,20 +153,23 @@ impl WavesPreviewer {
                 ui.close();
             }
         }
-        let can_convert_bits = !selected.is_empty()
-            && selected.iter().all(|p| {
-                let is_wav = p
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.eq_ignore_ascii_case("wav"))
-                    .unwrap_or(false);
-                is_wav
-                    && p.is_file()
-                    && self
-                        .item_for_path(p)
-                        .map(|item| item.source == crate::app::types::MediaSource::File)
-                        .unwrap_or(false)
-            });
+        let mut can_convert_bits = !selected.is_empty();
+        for p in selected.iter() {
+            if !can_convert_bits {
+                break;
+            }
+            let is_wav = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("wav"))
+                .unwrap_or(false);
+            let is_file_source = self
+                .item_for_path(p)
+                .map(|item| item.source == crate::app::types::MediaSource::File)
+                .unwrap_or(false);
+            // Same reasoning as the transcript targets above: no stat here.
+            can_convert_bits = is_wav && is_file_source && self.path_is_file_cached(p);
+        }
         let convert_targets = if can_convert_bits {
             selected.clone()
         } else {

@@ -473,6 +473,11 @@ impl WavesPreviewer {
             self.debug.frame_samples
         ));
         lines.push(format!(
+            "path_probes: {} pending, {} queued since start",
+            self.path_status.pending_count(),
+            self.path_status.queued_total()
+        ));
+        lines.push(format!(
             "perf_tier: {} ({} cores{})",
             self.perf.tier.as_str(),
             self.perf.cores,

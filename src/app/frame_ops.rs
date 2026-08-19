@@ -137,7 +137,6 @@ impl WavesPreviewer {
                 }
             }};
         }
-        self.begin_frame_fs_exists_budget();
         if had_ui_input {
             self.debug.ui_input_started_at = Some(frame_started);
         }
@@ -208,6 +207,13 @@ impl WavesPreviewer {
         self.tick_audio_device_watch(frame_started);
         self.drain_editor_apply_jobs(ctx);
         self.drain_mix_audition(ctx);
+        deferrable!({
+            // Applying an answer only touches a hash map, but a screen of
+            // rows resolving at once still deserves a cap.
+            if self.path_status.drain(256) > 0 {
+                ctx.request_repaint();
+            }
+        });
         deferrable!(self.tick_folder_watch(ctx));
         deferrable!(self.poll_resample_fallbacks());
         self.drain_editor_wave_cache_jobs(ctx);
@@ -1101,6 +1107,7 @@ impl WavesPreviewer {
             || self.audio_bootstrap_rx.is_some()
             || !self.startup_maintenance_finished()
             || self.meta_pool_has_pending_work()
+            || self.path_status.has_pending()
             || !self.toasts.is_empty();
         let repaint_ms = if fast_repaint {
             Some(16)

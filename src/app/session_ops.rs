@@ -2307,6 +2307,14 @@ impl super::WavesPreviewer {
         }
         self.apply_spectro_config(spectro_config_from_project(&project.spectrogram));
 
+        // The parse worker already statted these; handing the answers to
+        // the path-status service saves the list from re-probing every row
+        // it draws right after the open.
+        self.path_status.clear();
+        for (raw, exists) in project.list.files.iter().zip(file_exists.iter()) {
+            self.path_status
+                .preload(&resolve_path(raw, &base_dir), *exists);
+        }
         if !project.list.files.is_empty() {
             self.reset_list_from_project(&project.list.files, &base_dir, &file_exists);
             self.after_add_refresh();
