@@ -601,10 +601,16 @@ mod tests {
     #[test]
     fn substring_search_matches_the_list_note() {
         let item = item_with_note("kick_01.wav", "needs a longer tail");
-        assert!(WavesPreviewer::item_matches_query_lower(&item, "longer tail"));
+        assert!(WavesPreviewer::item_matches_query_lower(
+            &item,
+            "longer tail"
+        ));
         // Case-insensitive, like every other field the search covers.
         let shouty = item_with_note("kick_01.wav", "NEEDS A LONGER TAIL");
-        assert!(WavesPreviewer::item_matches_query_lower(&shouty, "longer tail"));
+        assert!(WavesPreviewer::item_matches_query_lower(
+            &shouty,
+            "longer tail"
+        ));
     }
 
     #[test]

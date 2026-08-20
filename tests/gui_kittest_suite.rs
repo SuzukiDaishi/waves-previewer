@@ -8997,7 +8997,6 @@ mod kittest_suite {
         );
     }
 
-
     /// The list note is edited inline in the list and stored in the session,
     /// but the top search box never looked at it.
     #[test]
@@ -9074,7 +9073,6 @@ mod kittest_suite {
         assert_eq!(matched[0], expected);
     }
 
-
     /// "How many files are loaded" outranks "is the waveform drawn". The row
     /// waveform needs a full file decode per visible row, and with the Wave
     /// column on by default those decodes were queued from the first frame of a
@@ -9124,7 +9122,6 @@ mod kittest_suite {
         harness.state_mut().test_force_scan_in_progress(false);
         assert!(!harness.state().test_list_meta_detail_is_header_only());
     }
-
 
     /// Clicking partway along a row's waveform must start playback from that
     /// point. A plain wav row reaches the whole-file streaming transport (which
@@ -9213,7 +9210,6 @@ mod kittest_suite {
         );
     }
 
-
     /// A waveform click always parks the position, but it must not override the
     /// user's transport preferences: with Auto Play off and nothing already
     /// sounding, the position is set and Space is left to start playback.
@@ -9258,7 +9254,6 @@ mod kittest_suite {
         );
     }
 
-
     /// Not an assertion test: renders the list with a seek in progress so the
     /// playhead, the progress fill and the undecoded shading can be eyeballed
     /// at the real row height. Run with:
@@ -9298,7 +9293,6 @@ mod kittest_suite {
         eprintln!("[shot] wrote {}", out.display());
     }
 
-
     /// Screenshot of the list scrolled to its end, showing the end-of-list row.
     ///   cargo test --features kittest_render -- --ignored end_of_list_screenshot --nocapture
     #[cfg(feature = "kittest_render")]
@@ -9324,11 +9318,11 @@ mod kittest_suite {
         image
             .save(out_dir.join("list_end_of_list.png"))
             .expect("save screenshot");
-        eprintln!("[shot] wrote {}", out_dir.join("list_end_of_list.png").display());
+        eprintln!(
+            "[shot] wrote {}",
+            out_dir.join("list_end_of_list.png").display()
+        );
     }
-
-
-
 
     /// The list ends with a row stating the total. Reaching it is what tells
     /// the user they are at the end -- previously they had to infer it from a
@@ -9373,5 +9367,4 @@ mod kittest_suite {
         assert_eq!(harness.state().test_list_scroll_row(), 0);
         assert!(harness.state().test_list_end_row_fully_visible());
     }
-
 }

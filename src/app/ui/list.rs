@@ -40,7 +40,6 @@ pub(super) struct ListViewMetrics {
     pub(super) visible_rows: usize,
 }
 
-
 impl crate::app::WavesPreviewer {
     /// First-run empty state: no folder open and nothing loaded. Shows a
     /// centered onboarding panel instead of an empty table. Returns true

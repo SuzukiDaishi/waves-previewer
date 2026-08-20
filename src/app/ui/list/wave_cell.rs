@@ -346,10 +346,8 @@ impl crate::app::WavesPreviewer {
                     err_h = err_max;
                 }
                 let wave_h = (rect2.height() - err_h).max(1.0);
-                let wave_rect = egui::Rect::from_min_size(
-                    rect2.min,
-                    egui::vec2(rect2.width(), wave_h),
-                );
+                let wave_rect =
+                    egui::Rect::from_min_size(rect2.min, egui::vec2(rect2.width(), wave_h));
                 let error_rect = egui::Rect::from_min_size(
                     egui::pos2(rect2.min.x, rect2.max.y - err_h),
                     egui::vec2(rect2.width(), err_h),
@@ -378,14 +376,11 @@ impl crate::app::WavesPreviewer {
                     );
                 }
             }
-            if let Some(overlay) =
-                self.resolve_list_wave_overlay_info(cell.path)
-            {
+            if let Some(overlay) = self.resolve_list_wave_overlay_info(cell.path) {
                 self.paint_list_wave_overlay(ui, wave_rect, &overlay);
             }
             if let (Some(text), Some(err_rect)) = (error_text, error_rect) {
-                let text_pos =
-                    egui::pos2(err_rect.left() + 4.0, err_rect.center().y);
+                let text_pos = egui::pos2(err_rect.left() + 4.0, err_rect.center().y);
                 let mut font_size = cell.text_height * 0.85;
                 if font_size < 10.0 {
                     font_size = 10.0;
@@ -427,8 +422,8 @@ impl crate::app::WavesPreviewer {
                 outcome.interacted_with_control = true;
                 outcome.focus_list = true;
                 if let Some(pos) = resp2.interact_pointer_pos() {
-                    let frac = ((pos.x - wave_rect.left()) / wave_rect.width().max(1.0))
-                        .clamp(0.0, 1.0);
+                    let frac =
+                        ((pos.x - wave_rect.left()) / wave_rect.width().max(1.0)).clamp(0.0, 1.0);
                     outcome.seek_request = Some(ListSeekRequest {
                         row: cell.row_idx,
                         frac,

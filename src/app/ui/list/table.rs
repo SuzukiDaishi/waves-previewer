@@ -120,7 +120,6 @@ impl WavesPreviewer {
         self.files.len().saturating_add(1)
     }
 
-
     /// Update the row-window scroll state from wheel input, selection
     /// auto-scroll, and list length. Runs before the table is built so this
     /// frame renders the final window (no one-frame lag on jumps).
@@ -611,10 +610,7 @@ mod tests {
     fn a_taller_measured_pitch_yields_fewer_rows() {
         let derived = list_fully_visible_rows(563.0, 29.0, 3.0);
         let measured = list_fully_visible_rows(563.0, 32.0, 3.0);
-        assert!(
-            measured < derived,
-            "derived={derived} measured={measured}"
-        );
+        assert!(measured < derived, "derived={derived} measured={measured}");
     }
 
     /// N rows occupy `N * pitch - spacing_y`: there is no trailing gap after
@@ -643,7 +639,10 @@ mod tests {
 
     #[test]
     fn the_end_marker_states_the_total() {
-        assert_eq!(format_list_end_marker(178, 178, false), "End of list - 178 files");
+        assert_eq!(
+            format_list_end_marker(178, 178, false),
+            "End of list - 178 files"
+        );
         assert_eq!(format_list_end_marker(1, 1, false), "End of list - 1 file");
     }
 

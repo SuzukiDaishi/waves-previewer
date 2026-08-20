@@ -1015,12 +1015,18 @@ mod list_status_tests {
 
     #[test]
     fn an_idle_list_shows_a_bare_count() {
-        assert_eq!(format_list_rows_status(512_000, 512_000, 0, false), "Files: 512000");
+        assert_eq!(
+            format_list_rows_status(512_000, 512_000, 0, false),
+            "Files: 512000"
+        );
     }
 
     #[test]
     fn a_filtered_idle_list_shows_visible_over_total() {
-        assert_eq!(format_list_rows_status(512_000, 1_204, 0, true), "Files: 1204 / 512000");
+        assert_eq!(
+            format_list_rows_status(512_000, 1_204, 0, true),
+            "Files: 1204 / 512000"
+        );
     }
 
     /// The number the user is watching during a load: rows listed so far, plus
@@ -1058,7 +1064,10 @@ mod list_status_tests {
             format_list_meta_status(0, true).as_deref(),
             Some("Waves: after listing")
         );
-        assert_eq!(format_list_meta_status(192, false).as_deref(), Some("Meta: 192"));
+        assert_eq!(
+            format_list_meta_status(192, false).as_deref(),
+            Some("Meta: 192")
+        );
         assert_eq!(
             format_list_meta_status(192, true).as_deref(),
             Some("Meta: 192 (waves after listing)")

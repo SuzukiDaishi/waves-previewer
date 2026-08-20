@@ -232,8 +232,7 @@ impl super::WavesPreviewer {
                 return;
             }
             self.meta_inflight.insert(path.clone());
-            self.debug.meta_task_header_count =
-                self.debug.meta_task_header_count.saturating_add(1);
+            self.debug.meta_task_header_count = self.debug.meta_task_header_count.saturating_add(1);
             if priority {
                 pool.enqueue_front(meta::MetaTask::Header(path.clone()));
             } else {
@@ -288,8 +287,7 @@ impl super::WavesPreviewer {
                 return;
             }
             self.meta_inflight.insert(path.clone());
-            self.debug.meta_task_decode_count =
-                self.debug.meta_task_decode_count.saturating_add(1);
+            self.debug.meta_task_decode_count = self.debug.meta_task_decode_count.saturating_add(1);
             let task = meta::MetaTask::Decode(path.clone());
             if priority {
                 pool.enqueue_front(task);
