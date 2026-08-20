@@ -420,6 +420,43 @@ mod kittest_suite {
         }
     }
 
+    /// Find a list row whose duration is known and long enough to seek within.
+    ///
+    /// `wait_for_scan` only waits for the *listing*; durations arrive later
+    /// from the metadata pool, which is slower when the suite runs in parallel.
+    /// Metadata is queued for visible rows first, so the first screenful
+    /// resolves; pump frames until one does.
+    fn wait_for_seekable_row(
+        harness: &mut Harness<'static, WavesPreviewer>,
+        min_secs: f64,
+        ext: Option<&str>,
+    ) -> usize {
+        let start = Instant::now();
+        loop {
+            let found = (0..harness.state().files.len()).find(|&r| {
+                let ext_ok = ext.is_none_or(|want| {
+                    path_for_row(harness.state(), r)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        == Some(want)
+                });
+                ext_ok
+                    && harness
+                        .state()
+                        .test_row_duration_secs(r)
+                        .is_some_and(|d| d > min_secs)
+            });
+            if let Some(row) = found {
+                return row;
+            }
+            assert!(
+                start.elapsed() < SCAN_TIMEOUT,
+                "no row reached a known duration > {min_secs}s (ext={ext:?})"
+            );
+            harness.run_steps(1);
+        }
+    }
+
     fn wait_for_tab(harness: &mut Harness<'static, WavesPreviewer>) {
         let start = Instant::now();
         loop {
@@ -9100,16 +9137,7 @@ mod kittest_suite {
         harness.state_mut().test_set_auto_play_list_nav(true);
 
         // Pick a wav row long enough that half of it is unambiguous.
-        let row = (0..harness.state().files.len())
-            .find(|&r| {
-                let path = path_for_row(harness.state(), r);
-                path.extension().and_then(|e| e.to_str()) == Some("wav")
-                    && harness
-                        .state()
-                        .test_row_duration_secs(r)
-                        .is_some_and(|d| d > 0.5)
-            })
-            .expect("need one wav row with a known duration");
+        let row = wait_for_seekable_row(&mut harness, 0.5, Some("wav"));
         let duration = harness.state().test_row_duration_secs(row).unwrap();
 
         harness.state_mut().test_select_row_with_autoscroll(row);
@@ -9150,18 +9178,7 @@ mod kittest_suite {
         let mut harness = harness_with_startup(cfg);
         wait_for_scan(&mut harness);
 
-        let row = (0..harness.state().files.len())
-            .find(|&r| {
-                path_for_row(harness.state(), r)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    == Some("mp3")
-                    && harness
-                        .state()
-                        .test_row_duration_secs(r)
-                        .is_some_and(|d| d > 10.0)
-            })
-            .expect("need one long mp3 row");
+        let row = wait_for_seekable_row(&mut harness, 10.0, Some("mp3"));
         let duration = harness.state().test_row_duration_secs(row).unwrap();
 
         harness.state_mut().test_select_row_with_autoscroll(row);
@@ -9207,14 +9224,7 @@ mod kittest_suite {
         harness.state_mut().test_set_auto_play_list_nav(false);
         assert!(!harness.state().test_auto_play_list_nav());
 
-        let row = (0..harness.state().files.len())
-            .find(|&r| {
-                harness
-                    .state()
-                    .test_row_duration_secs(r)
-                    .is_some_and(|d| d > 0.5)
-            })
-            .expect("need a row with a known duration");
+        let row = wait_for_seekable_row(&mut harness, 0.5, None);
 
         harness.state_mut().test_select_row_with_autoscroll(row);
         harness.run_steps(4);
@@ -9246,6 +9256,46 @@ mod kittest_suite {
             harness.state().test_list_has_focus(),
             "a waveform click must leave the list focused so Space can play"
         );
+    }
+
+
+    /// Not an assertion test: renders the list with a seek in progress so the
+    /// playhead, the progress fill and the undecoded shading can be eyeballed
+    /// at the real row height. Run with:
+    ///   cargo test --features kittest_render -- --ignored seek_bar_screenshot --nocapture
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    #[ignore]
+    fn seek_bar_screenshot() {
+        let out_dir = std::path::PathBuf::from(
+            std::env::var("NEOWAVES_SHOT_DIR").unwrap_or_else(|_| "/tmp".to_string()),
+        );
+        std::fs::create_dir_all(&out_dir).ok();
+
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        let row = wait_for_seekable_row(&mut harness, 0.5, None);
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(6);
+        harness.state_mut().test_list_seek_row_frac(row, 0.45);
+        harness.run_steps(6);
+
+        // Also assert what the picture is supposed to show, so this cannot
+        // quietly become a screenshot of nothing.
+        let frac = harness
+            .state()
+            .test_list_playhead_frac()
+            .expect("the sounding row should report a playhead");
+        assert!(
+            (frac - 0.45).abs() < 0.1,
+            "playhead should be drawn near the seek position, got {frac}"
+        );
+
+        let image = harness.render().expect("render image");
+        let out = out_dir.join("list_seek_bar.png");
+        image.save(&out).expect("save screenshot");
+        eprintln!("[shot] wrote {}", out.display());
     }
 
 }
