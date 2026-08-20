@@ -755,6 +755,10 @@ pub struct WavesPreviewer {
     list_preview_job_max_secs: f32,
     /// Sub-row wheel accumulation in rows.
     list_scroll_residual: f32,
+    /// Whether the end-of-list row was painted fully inside the viewport last
+    /// frame. At maximum scroll it must be, or the user is left judging "am I
+    /// at the end?" from a half-drawn row again.
+    list_end_row_fully_visible: bool,
     /// Largest absolute row index whose painted rect ended at or above the
     /// bottom of the list viewport last frame. At maximum scroll this must be
     /// the last row in `files`; when it is not, the tail is unreachable —

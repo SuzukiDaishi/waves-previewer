@@ -1263,6 +1263,17 @@ impl super::WavesPreviewer {
         });
     }
 
+    /// Absolute index of the end-of-list row: one past the last file.
+    pub fn test_list_end_row_index(&self) -> usize {
+        self.files.len()
+    }
+
+    /// True when the end-of-list row was painted fully inside the viewport on
+    /// the previous frame -- i.e. scrolling really did reach the end.
+    pub fn test_list_end_row_fully_visible(&self) -> bool {
+        self.list_end_row_fully_visible
+    }
+
     pub fn test_list_has_focus(&self) -> bool {
         self.list_has_focus
     }

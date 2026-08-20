@@ -258,6 +258,7 @@ impl WavesPreviewer {
             list_preview_job_max_secs: 0.0,
             list_scroll_residual: 0.0,
             list_last_fully_visible_row: None,
+            list_end_row_fully_visible: false,
             scroll_to_selected: false,
             last_list_scroll_at: None,
             auto_play_list_nav: false,

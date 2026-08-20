@@ -9298,4 +9298,80 @@ mod kittest_suite {
         eprintln!("[shot] wrote {}", out.display());
     }
 
+
+    /// Screenshot of the list scrolled to its end, showing the end-of-list row.
+    ///   cargo test --features kittest_render -- --ignored end_of_list_screenshot --nocapture
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    #[ignore]
+    fn end_of_list_screenshot() {
+        let out_dir = std::path::PathBuf::from(
+            std::env::var("NEOWAVES_SHOT_DIR").unwrap_or_else(|_| "/tmp".to_string()),
+        );
+        std::fs::create_dir_all(&out_dir).ok();
+
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_list_scroll_to_end();
+        harness.run_steps(4);
+
+        assert!(
+            harness.state().test_list_end_row_fully_visible(),
+            "the picture is supposed to show the end-of-list row"
+        );
+
+        let image = harness.render().expect("render image");
+        image
+            .save(out_dir.join("list_end_of_list.png"))
+            .expect("save screenshot");
+        eprintln!("[shot] wrote {}", out_dir.join("list_end_of_list.png").display());
+    }
+
+
+
+
+    /// The list ends with a row stating the total. Reaching it is what tells
+    /// the user they are at the end -- previously they had to infer it from a
+    /// half-drawn row, and a row clipped by the viewport looked exactly like a
+    /// row with more below it.
+    #[test]
+    fn scrolling_to_the_end_shows_the_end_of_list_row() {
+        for count in [1usize, 5, 400, 4_000] {
+            let mut harness = harness_with_startup(StartupConfig {
+                dummy_list_count: Some(count),
+                ..StartupConfig::default()
+            });
+            harness.run_steps(3);
+            harness.state_mut().test_list_scroll_to_end();
+            harness.run_steps(3);
+
+            assert!(
+                harness.state().test_list_end_row_fully_visible(),
+                "count={count}: end-of-list row was not fully on screen \
+                 (scroll_row={}, last_fully_visible={:?})",
+                harness.state().test_list_scroll_row(),
+                harness.state().test_list_last_fully_visible_row()
+            );
+            // ...and the last actual file sits above it, still fully visible.
+            assert_eq!(
+                harness.state().test_list_last_fully_visible_row(),
+                Some(count - 1),
+                "count={count}: last file not fully on screen"
+            );
+        }
+    }
+
+    /// A list shorter than the viewport never scrolls, but must still show the
+    /// closing row.
+    #[test]
+    fn a_short_list_still_shows_the_end_of_list_row() {
+        let mut harness = harness_with_startup(StartupConfig {
+            dummy_list_count: Some(3),
+            ..StartupConfig::default()
+        });
+        harness.run_steps(3);
+        assert_eq!(harness.state().test_list_scroll_row(), 0);
+        assert!(harness.state().test_list_end_row_fully_visible());
+    }
+
 }

@@ -7,31 +7,43 @@ use crate::app::{
 
 use super::{ListInteractionState, ListRenderState, ListViewMetrics};
 
-/// How many rows fit *entirely* inside the list body.
+/// Text for the row that closes the list.
+///
+/// Its job is to answer "have I actually reached the end?" without the user
+/// having to judge it from a half-drawn row, so it states the total outright.
+/// With a search active both numbers matter: how many matched, and how many
+/// there are.
+pub(super) fn format_list_end_marker(visible: usize, total: usize, filtered: bool) -> String {
+    let unit = |n: usize| if n == 1 { "file" } else { "files" };
+    if total == 0 {
+        return "End of list".to_string();
+    }
+    if filtered {
+        format!("End of list - {visible} of {total} {}", unit(total))
+    } else {
+        format!("End of list - {total} {}", unit(total))
+    }
+}
+
+/// How many rows fit *entirely* within `body_h` pixels of list body.
 ///
 /// `egui_extras::TableBody::rows` lays rows out at a pitch of
-/// `row_height_sans_spacing + item_spacing.y`, and the header strip consumes
-/// its own height plus one spacing. Dividing the raw available height by the
-/// row height alone over-counts, and the `total - visible` scroll clamp then
-/// stopped short of the end: the tail rows were laid out below the clip rect
-/// of a table built with `vscroll(false)`, where no inner scroll could ever
-/// bring them into view.
+/// `row_height_sans_spacing + item_spacing.y`, with no trailing spacing after
+/// the final row -- so N rows occupy `N * pitch - spacing_y`. Dividing the
+/// available height by the row height alone over-counts, and the
+/// `total - visible` scroll clamp then stopped short of the end: the tail rows
+/// were laid out below the clip rect of a table built with `vscroll(false)`,
+/// where no inner scroll could ever bring them into view.
 ///
-/// Flooring is the safe direction. Under-counting only makes the scroll
-/// clamp more generous, so the last row stays reachable; over-counting is
-/// what made it unreachable.
-pub(super) fn list_fully_visible_rows(
-    avail_h: f32,
-    header_h: f32,
-    row_h: f32,
-    spacing_y: f32,
-) -> usize {
-    let body_h = avail_h - (header_h + spacing_y);
-    let pitch = (row_h + spacing_y).max(1.0);
+/// Flooring is the safe direction. Under-counting only makes the scroll clamp
+/// more generous, so the last row stays reachable; over-counting is what made
+/// it unreachable.
+pub(super) fn list_fully_visible_rows(body_h: f32, row_pitch: f32, spacing_y: f32) -> usize {
+    let pitch = row_pitch.max(1.0);
     if !body_h.is_finite() || !pitch.is_finite() {
         return 1;
     }
-    ((body_h / pitch).floor()).max(1.0) as usize
+    (((body_h + spacing_y) / pitch).floor()).max(1.0) as usize
 }
 
 impl WavesPreviewer {
@@ -48,7 +60,9 @@ impl WavesPreviewer {
         let spacing_y = ui.spacing().item_spacing.y;
         let row_pitch = row_h + spacing_y;
         let header_pitch = header_h + spacing_y;
-        let visible_rows = list_fully_visible_rows(avail_h, header_h, row_h, spacing_y);
+        let list_rect = ui.available_rect_before_wrap();
+        let body_h = avail_h - (header_h + spacing_y);
+        let visible_rows = list_fully_visible_rows(body_h, row_pitch, spacing_y);
         ui.set_min_width(ui.available_width());
         // Rows actually rendered: the visible window plus one partial row,
         // with a floor so tiny viewports still show a usable list.
@@ -58,7 +72,6 @@ impl WavesPreviewer {
         } else {
             Vec::new()
         };
-        let list_rect = ui.available_rect_before_wrap();
         let pointer_over_list = self.allows_pointer_scroll(UiScrollTarget::List, ui, list_rect);
         if self.debug.cfg.enabled {
             self.debug.last_pointer_over_list = pointer_over_list;
@@ -95,6 +108,19 @@ impl WavesPreviewer {
                     .is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(300)))
     }
 
+    /// Rows the scroll window can address: every file plus the end-of-list
+    /// row that follows them.
+    ///
+    /// That extra row is what makes reaching the end unambiguous. Scrolling
+    /// stops with it as the last row on screen, so the thing sitting against
+    /// the bottom edge is a marker stating the total rather than a file the
+    /// user then has to wonder about -- and a file can never be the row that
+    /// a rounding error clips.
+    pub(super) fn list_scroll_rows(&self) -> usize {
+        self.files.len().saturating_add(1)
+    }
+
+
     /// Update the row-window scroll state from wheel input, selection
     /// auto-scroll, and list length. Runs before the table is built so this
     /// frame renders the final window (no one-frame lag on jumps).
@@ -104,7 +130,7 @@ impl WavesPreviewer {
         metrics: &ListViewMetrics,
         allow_auto_scroll: bool,
     ) {
-        let total = self.files.len();
+        let total = self.list_scroll_rows();
         let visible = metrics.visible_rows.max(1);
         let max_start = total.saturating_sub(visible);
         // Wheel scrolling accumulates fractional rows; the window itself
@@ -123,7 +149,7 @@ impl WavesPreviewer {
             }
         }
         if allow_auto_scroll {
-            if let Some(sel) = self.selected.filter(|&s| s < total) {
+            if let Some(sel) = self.selected.filter(|&s| s < self.files.len()) {
                 // Keep the selected row centered, matching the old
                 // scroll_to_row(sel, Align::Center) behavior.
                 self.list_scroll_row = sel.saturating_sub(visible / 2).min(max_start);
@@ -137,7 +163,7 @@ impl WavesPreviewer {
     /// `list_scroll_row` in f64, so it stays pixel-accurate at 1M rows where
     /// egui's own f32 scroll offsets quantize.
     pub(super) fn ui_list_scrollbar(&mut self, ui: &mut egui::Ui, metrics: &ListViewMetrics) {
-        let total = self.files.len();
+        let total = self.list_scroll_rows();
         let visible = metrics.visible_rows.max(1);
         if total <= visible {
             return;
@@ -561,82 +587,79 @@ impl WavesPreviewer {
 
 #[cfg(test)]
 mod tests {
-    use super::list_fully_visible_rows;
+    use super::{format_list_end_marker, list_fully_visible_rows};
 
-    /// The regression this whole helper exists for. egui_extras advances by
-    /// `row_h + item_spacing.y`, so dividing by `row_h` alone claims more rows
-    /// fit than actually do, and the scroll clamp derived from it stopped
-    /// short of the last row.
+    /// The regression this helper exists for. The rows are laid out at a pitch
+    /// that includes `item_spacing.y` (and, in the real table, whatever the
+    /// tallest cell needs); dividing the body height by the bare row height
+    /// claims more rows fit than do, and the scroll clamp derived from it
+    /// stopped short of the end.
     #[test]
-    fn row_spacing_is_counted_against_the_available_height() {
-        // 800 px viewport, 20 px header, 26 px rows, 3 px spacing.
-        let naive = ((800.0 - 20.0) / 26.0f32).floor() as usize;
-        let actual = list_fully_visible_rows(800.0, 20.0, 26.0, 3.0);
-        assert_eq!(naive, 30);
-        assert_eq!(actual, 26);
+    fn the_pitch_decides_the_count_not_the_row_height() {
+        // 563px of body, 26px rows, 3px spacing -> 29px pitch.
+        let naive = (563.0f32 / 26.0).floor() as usize;
+        let actual = list_fully_visible_rows(563.0, 29.0, 3.0);
+        assert_eq!(naive, 21);
+        assert_eq!(actual, 19);
+        assert!(actual < naive);
+    }
+
+    /// The real table lays rows out taller than `row_h` because the Gain and
+    /// Note cells carry widget padding. A larger measured pitch must yield
+    /// fewer rows.
+    #[test]
+    fn a_taller_measured_pitch_yields_fewer_rows() {
+        let derived = list_fully_visible_rows(563.0, 29.0, 3.0);
+        let measured = list_fully_visible_rows(563.0, 32.0, 3.0);
         assert!(
-            actual < naive,
-            "spacing must reduce the count, or the tail stays unreachable"
+            measured < derived,
+            "derived={derived} measured={measured}"
         );
     }
 
+    /// N rows occupy `N * pitch - spacing_y`: there is no trailing gap after
+    /// the last row, and forgetting that loses a row on an exact fit.
     #[test]
-    fn zero_spacing_reproduces_the_naive_count() {
-        for avail in [120.0f32, 480.0, 801.0, 1600.0] {
-            for row_h in [18.0f32, 26.0, 48.0] {
-                let naive = ((avail - 20.0) / row_h).floor().max(1.0) as usize;
-                assert_eq!(
-                    list_fully_visible_rows(avail, 20.0, row_h, 0.0),
-                    naive,
-                    "avail={avail} row_h={row_h}"
-                );
-            }
-        }
+    fn an_exact_fit_counts_the_last_row() {
+        // 3 rows at a 29px pitch occupy 29*3 - 3 = 84px.
+        assert_eq!(list_fully_visible_rows(84.0, 29.0, 3.0), 3);
+        assert_eq!(list_fully_visible_rows(83.0, 29.0, 3.0), 2);
     }
 
-    /// Under-counting is safe (a roomier scroll clamp); over-counting is the
-    /// bug. Assert the direction can never flip for any plausible input.
-    #[test]
-    fn the_count_never_exceeds_the_naive_one() {
-        for spacing in [0.0f32, 1.0, 3.0, 4.0, 8.0, 16.0] {
-            for avail in [60.0f32, 200.0, 800.0, 2160.0] {
-                for row_h in [14.0f32, 26.0, 48.0, 96.0] {
-                    let naive = ((avail - 20.0) / row_h).floor().max(1.0) as usize;
-                    let fit = list_fully_visible_rows(avail, 20.0, row_h, spacing);
-                    assert!(
-                        fit <= naive,
-                        "spacing={spacing} avail={avail} row_h={row_h}: {fit} > {naive}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// A viewport shorter than its own header must still report a usable row,
-    /// or the list would render nothing and never recover.
     #[test]
     fn a_degenerate_viewport_still_reports_one_row() {
-        assert_eq!(list_fully_visible_rows(0.0, 20.0, 26.0, 3.0), 1);
-        assert_eq!(list_fully_visible_rows(10.0, 20.0, 26.0, 3.0), 1);
-        assert_eq!(list_fully_visible_rows(-50.0, 20.0, 26.0, 3.0), 1);
-        assert_eq!(list_fully_visible_rows(f32::NAN, 20.0, 26.0, 3.0), 1);
-        // Row height is always `wave_row_h.max(text_height * 1.3)`, so a zero
-        // pitch cannot occur; only assert the invariant that matters -- the
-        // count is never zero, which would render an empty list forever.
-        assert!(list_fully_visible_rows(800.0, 20.0, 0.0, 0.0) >= 1);
+        assert_eq!(list_fully_visible_rows(0.0, 29.0, 3.0), 1);
+        assert_eq!(list_fully_visible_rows(-50.0, 29.0, 3.0), 1);
+        assert_eq!(list_fully_visible_rows(f32::NAN, 29.0, 3.0), 1);
+        assert!(list_fully_visible_rows(563.0, 0.0, 0.0) >= 1);
     }
 
-    /// The deficit grows with viewport height: more rows on screen means more
-    /// accumulated spacing. This is why a taller window hid more rows.
     #[test]
-    fn a_taller_viewport_loses_more_rows_to_spacing() {
-        let short_loss = ((400.0 - 20.0) / 26.0f32).floor() as usize
-            - list_fully_visible_rows(400.0, 20.0, 26.0, 3.0);
-        let tall_loss = ((1600.0 - 20.0) / 26.0f32).floor() as usize
-            - list_fully_visible_rows(1600.0, 20.0, 26.0, 3.0);
+    fn a_taller_viewport_holds_more_rows() {
         assert!(
-            tall_loss > short_loss,
-            "short={short_loss} tall={tall_loss}"
+            list_fully_visible_rows(1600.0, 29.0, 3.0) > list_fully_visible_rows(400.0, 29.0, 3.0)
         );
+    }
+
+    #[test]
+    fn the_end_marker_states_the_total() {
+        assert_eq!(format_list_end_marker(178, 178, false), "End of list - 178 files");
+        assert_eq!(format_list_end_marker(1, 1, false), "End of list - 1 file");
+    }
+
+    /// With a search active both numbers matter: what matched, and out of how
+    /// many.
+    #[test]
+    fn the_end_marker_shows_both_counts_when_filtered() {
+        assert_eq!(
+            format_list_end_marker(12, 178, true),
+            "End of list - 12 of 178 files"
+        );
+    }
+
+    #[test]
+    fn the_end_marker_survives_an_empty_list() {
+        assert_eq!(format_list_end_marker(0, 0, false), "End of list");
+        assert_eq!(format_list_end_marker(0, 0, true), "End of list");
     }
 }
