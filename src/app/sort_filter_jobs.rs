@@ -363,6 +363,12 @@ impl WavesPreviewer {
         if item.display_folder.to_lowercase().contains(query_lower) {
             return true;
         }
+        // The list note, ahead of the transcript and the metadata summary:
+        // it is short, and the emptiness guard keeps the `to_lowercase`
+        // allocation off the overwhelming majority of rows that have no note.
+        if !item.note.is_empty() && item.note.to_lowercase().contains(query_lower) {
+            return true;
+        }
         if let Some(t) = item.transcript.as_ref() {
             if t.full_text.to_lowercase().contains(query_lower) {
                 return true;
@@ -384,6 +390,9 @@ impl WavesPreviewer {
 
     fn item_matches_regex(item: &MediaItem, re: &regex::Regex) -> bool {
         if re.is_match(&item.display_name) || re.is_match(&item.display_folder) {
+            return true;
+        }
+        if !item.note.is_empty() && re.is_match(&item.note) {
             return true;
         }
         if let Some(t) = item.transcript.as_ref() {
@@ -558,5 +567,72 @@ impl WavesPreviewer {
             }
         }
         busy
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn item_with_note(name: &str, note: &str) -> MediaItem {
+        let path = PathBuf::from(format!("/audio/{name}"));
+        MediaItem {
+            id: 1,
+            audio_asset: crate::audio_asset::AudioAssetDescriptor::external(path.clone()),
+            path,
+            display_name: name.to_string(),
+            display_folder: std::sync::Arc::from("audio"),
+            source: super::super::types::MediaSource::File,
+            meta: None,
+            pending_gain_db: 0.0,
+            note: note.to_string(),
+            editor_notes: Vec::new(),
+            status: super::super::types::MediaStatus::Ok,
+            transcript: None,
+            transcript_document: None,
+            transcript_language: None,
+            external: None,
+            virtual_audio: None,
+            virtual_state: None,
+        }
+    }
+
+    #[test]
+    fn substring_search_matches_the_list_note() {
+        let item = item_with_note("kick_01.wav", "needs a longer tail");
+        assert!(WavesPreviewer::item_matches_query_lower(&item, "longer tail"));
+        // Case-insensitive, like every other field the search covers.
+        let shouty = item_with_note("kick_01.wav", "NEEDS A LONGER TAIL");
+        assert!(WavesPreviewer::item_matches_query_lower(&shouty, "longer tail"));
+    }
+
+    #[test]
+    fn substring_search_does_not_match_an_empty_note() {
+        let item = item_with_note("kick_01.wav", "");
+        assert!(!WavesPreviewer::item_matches_query_lower(&item, "tail"));
+        // A row whose note is set must not match a term that appears in
+        // neither the note nor any other searched field.
+        let noted = item_with_note("kick_01.wav", "needs a longer tail");
+        assert!(!WavesPreviewer::item_matches_query_lower(&noted, "reverb"));
+    }
+
+    #[test]
+    fn substring_search_still_matches_the_filename() {
+        let item = item_with_note("kick_01.wav", "unrelated");
+        assert!(WavesPreviewer::item_matches_query_lower(&item, "kick"));
+    }
+
+    #[test]
+    fn regex_search_matches_the_list_note() {
+        let item = item_with_note("kick_01.wav", "retake at 120bpm");
+        let re = regex::RegexBuilder::new(r"\d+bpm")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        assert!(WavesPreviewer::item_matches_regex(&item, &re));
+
+        let empty = item_with_note("kick_01.wav", "");
+        assert!(!WavesPreviewer::item_matches_regex(&empty, &re));
     }
 }

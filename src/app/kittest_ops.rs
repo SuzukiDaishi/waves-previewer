@@ -1232,6 +1232,22 @@ impl super::WavesPreviewer {
         self.search_deadline = None;
     }
 
+    pub fn test_set_search_use_regex(&mut self, enabled: bool) {
+        self.search_use_regex = enabled;
+    }
+
+    /// Set the search query and let the normal sort/filter machinery decide
+    /// between the synchronous pass and the sliced `FilterJob`. Unlike
+    /// `test_set_search_query`, which always takes the synchronous path, this
+    /// is how a large list is actually filtered -- the two paths share their
+    /// match predicate and must not drift apart.
+    pub fn test_apply_search_via_jobs(&mut self, query: &str) {
+        self.search_query = query.to_string();
+        self.refresh_filter_then_sort();
+        self.search_dirty = false;
+        self.search_deadline = None;
+    }
+
     pub fn test_replace_with_files(&mut self, paths: &[PathBuf]) {
         self.replace_with_files(paths);
         self.after_add_refresh();

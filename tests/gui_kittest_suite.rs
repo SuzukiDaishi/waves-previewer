@@ -8960,4 +8960,81 @@ mod kittest_suite {
         );
     }
 
+
+    /// The list note is edited inline in the list and stored in the session,
+    /// but the top search box never looked at it.
+    #[test]
+    fn search_matches_the_list_note() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let total = harness.state().files.len();
+        assert!(total >= 3, "need a few rows, got {total}");
+
+        harness.state_mut().items[1].note = "retake with a longer tail".to_string();
+        harness.state_mut().test_set_search_query("longer tail");
+        harness.run_steps(2);
+
+        let matched = harness.state().test_visible_list_paths();
+        assert_eq!(
+            matched.len(),
+            1,
+            "only the noted row should match, got {matched:?}"
+        );
+        assert_eq!(matched[0], harness.state().items[1].path);
+    }
+
+    #[test]
+    fn search_matches_the_list_note_with_regex() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        assert!(harness.state().files.len() >= 3);
+
+        harness.state_mut().items[1].note = "retake at 120bpm".to_string();
+        harness.state_mut().test_set_search_use_regex(true);
+        harness.state_mut().test_set_search_query(r"\d+bpm");
+        harness.run_steps(2);
+
+        let matched = harness.state().test_visible_list_paths();
+        assert_eq!(matched.len(), 1, "got {matched:?}");
+        assert_eq!(matched[0], harness.state().items[1].path);
+    }
+
+    /// A list above `list_sync_threshold()` filters in per-frame slices via
+    /// `FilterJob` instead of one synchronous pass. Both paths route through the
+    /// same predicate, and this pins that down: a note-only match must survive
+    /// the sliced path too.
+    #[test]
+    fn sliced_filter_job_matches_the_note_too() {
+        let mut harness = harness_with_startup(StartupConfig {
+            // Above the highest `list_sync_threshold()` (50k) so the sliced
+            // path is taken on every performance tier.
+            dummy_list_count: Some(60_000),
+            ..StartupConfig::default()
+        });
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_files_len(), 60_000);
+
+        harness.state_mut().items[42].note = "zzq-unique-note-marker".to_string();
+        let expected = harness.state().items[42].path.clone();
+
+        harness
+            .state_mut()
+            .test_apply_search_via_jobs("zzq-unique-note-marker");
+        assert!(
+            harness.state().test_sort_job_active(),
+            "60k rows should have taken the sliced filter path"
+        );
+
+        let mut frames = 0;
+        while harness.state().test_sort_job_active() {
+            harness.step();
+            frames += 1;
+            assert!(frames < 20_000, "sliced filter never settled");
+        }
+
+        let matched = harness.state().test_visible_list_paths();
+        assert_eq!(matched.len(), 1, "got {} matches", matched.len());
+        assert_eq!(matched[0], expected);
+    }
+
 }
