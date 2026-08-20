@@ -2920,6 +2920,7 @@ impl WavesPreviewer {
             tab.loop_region_committed = state.loop_region_committed;
             tab.selection_anchor_sample = None;
             tab.dragging_marker = None;
+            tab.selection_edge_drag_anchor = None;
             tab.preview_offset_samples = None;
             tab.last_amplitude_nav_rect = None;
             tab.last_amplitude_viewport_rect = None;

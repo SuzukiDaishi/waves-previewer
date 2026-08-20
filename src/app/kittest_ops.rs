@@ -2958,6 +2958,24 @@ impl super::WavesPreviewer {
         ))
     }
 
+    /// Canvas-relative x of a display sample's *boundary* — where the
+    /// selection rect and its grab handles sit.
+    pub fn test_editor_display_sample_boundary_x_offset(
+        &self,
+        display_sample: usize,
+    ) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        let display_len = Self::editor_display_samples_len(tab);
+        Some(Self::editor_display_sample_boundary_x_for_tab(
+            tab,
+            0.0,
+            tab.last_wave_w.max(1.0),
+            display_len,
+            display_sample,
+        ))
+    }
+
     pub fn test_editor_x_offset_to_display_sample(&self, x_offset: f32) -> Option<usize> {
         let tab_idx = self.active_tab?;
         let tab = self.tabs.get(tab_idx)?;

@@ -5,6 +5,7 @@ All notable changes in this repository (hand-written).
 ## Unreleased
 
 ### Editor: one range on the waveform
+- **Selection edges can be dragged**: adjusting a range meant redrawing it from scratch — Shift+click only ever moved the edge away from the drag's anchor, so after a left-to-right drag the start could not be pulled back at all. Both edges now carry a grab handle and can be dragged to lengthen or shorten the range, in every tool, with the opposite edge staying put. `Alt` snaps to a zero crossing and the playhead snaps as it does when drawing a selection, so a nudged edge lands where a fresh drag would. Dragging an edge past the other flips the range, exactly like drawing one. Speed and Time Stretch already use the selection's right edge for their own stretch gesture, so there only the left edge is draggable — and only the left handle is drawn, so what is shown matches what can be grabbed.
 - **The orange Trim band is gone**: the waveform drew a second, orange range for the Trim tool on top of the blue selection. Nothing in the UI had set that range for some time — only Auto Trim wrote it, and Auto Trim writes the *same* span to the selection, so one range was being drawn twice and read as "a range you had to establish separately". Hovering its edges even produced a resize cursor, for a drag that was never implemented. The selection is now the only range the waveform draws, and the header no longer labels a range it isn't drawing.
 
 ### Editor: selection shortcuts

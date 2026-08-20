@@ -9484,4 +9484,210 @@ mod kittest_suite {
         let orange = image.pixels().filter(|p| is_band_orange(p)).count();
         assert_eq!(orange, 0, "found {orange} orange trim-band pixels");
     }
+
+    /// Position the pointer on a selection edge's grab handle.
+    fn editor_pos_at_selection_boundary(
+        harness: &Harness<'static, WavesPreviewer>,
+        display_sample: usize,
+    ) -> egui::Pos2 {
+        let x = harness
+            .state()
+            .test_editor_display_sample_boundary_x_offset(display_sample)
+            .expect("boundary x");
+        editor_canvas_pos_at_x_offset(harness, x)
+    }
+
+    fn editor_selection(harness: &Harness<'static, WavesPreviewer>) -> (usize, usize) {
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let (a, b) = harness.state().tabs[tab_idx].selection.expect("selection");
+        if a <= b {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    }
+
+    /// The request this implements: after selecting, nudge an edge to fine-tune
+    /// the range instead of redrawing the whole selection.
+    #[test]
+    fn selection_edge_drag_extends_and_shrinks() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let (start_before, end_before) = editor_selection(&harness);
+
+        // Grab the end handle and pull it right.
+        let from = editor_pos_at_selection_boundary(&harness, end_before);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 90.0, from.y));
+        let (start_after, end_after) = editor_selection(&harness);
+        assert_eq!(start_after, start_before, "the far edge must stay put");
+        assert!(
+            end_after > end_before,
+            "end should extend: {end_before} -> {end_after}"
+        );
+
+        // ...and push it back left to shorten.
+        let from = editor_pos_at_selection_boundary(&harness, end_after);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x - 60.0, from.y));
+        let (start_final, end_final) = editor_selection(&harness);
+        assert_eq!(
+            start_final, start_before,
+            "the far edge must still stay put"
+        );
+        assert!(
+            end_final < end_after,
+            "end should shrink: {end_after} -> {end_final}"
+        );
+    }
+
+    /// Dragging the start must leave the anchor on the end, so a following
+    /// Shift+click or Shift+Arrow keeps moving the edge the user just moved.
+    #[test]
+    fn selection_edge_drag_keeps_the_anchor_on_the_opposite_edge() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.60));
+        harness.run_steps(2);
+        let (start, end) = editor_selection(&harness);
+
+        let from = editor_pos_at_selection_boundary(&harness, start);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 40.0, from.y));
+
+        assert_eq!(
+            harness.state().test_tab_selection_anchor(),
+            Some(end),
+            "anchor should sit on the edge that stayed put"
+        );
+    }
+
+    /// A grab with no movement reads to egui as a click, and the click handler
+    /// clears the selection and seeks. `suppress_seek` has to survive the
+    /// release frame or fine-tuning would destroy the thing being tuned.
+    #[test]
+    fn selection_edge_grab_without_movement_keeps_the_selection() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.60));
+        harness.run_steps(2);
+        let before = editor_selection(&harness);
+
+        let at = editor_pos_at_selection_boundary(&harness, before.1);
+        editor_pointer_drag(&mut harness, at, at);
+
+        assert_eq!(
+            editor_selection(&harness),
+            before,
+            "a click on a handle must not clear the selection"
+        );
+    }
+
+    /// Clicking well inside the selection is still a seek that clears it —
+    /// the grab must not swallow the whole range.
+    #[test]
+    fn clicking_inside_the_selection_still_clears_it() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.20, 0.80));
+        harness.run_steps(2);
+        let (start, end) = editor_selection(&harness);
+
+        let mid = editor_pos_at_selection_boundary(&harness, (start + end) / 2);
+        editor_pointer_drag(&mut harness, mid, mid);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert!(
+            harness.state().tabs[tab_idx].selection.is_none(),
+            "a click away from the handles should still seek and clear"
+        );
+    }
+
+    /// The selection is tool-independent, so its handles are too.
+    #[test]
+    fn selection_edge_drag_works_outside_the_trim_tool() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let (_, end_before) = editor_selection(&harness);
+
+        let from = editor_pos_at_selection_boundary(&harness, end_before);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 80.0, from.y));
+
+        assert!(
+            editor_selection(&harness).1 > end_before,
+            "edge drag should work with the Gain tool active"
+        );
+    }
+
+    /// Speed/TimeStretch already own the selection's right edge as a stretch
+    /// gesture. The selection drag must not race it — but the left edge, which
+    /// that tool does not use, stays adjustable.
+    #[test]
+    fn the_stretch_tool_keeps_its_own_right_edge_gesture() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::TimeStretch));
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let (start_before, end_before) = editor_selection(&harness);
+
+        let from = editor_pos_at_selection_boundary(&harness, end_before);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 70.0, from.y));
+        assert_eq!(
+            editor_selection(&harness).1,
+            end_before,
+            "the stretch tool owns the right edge; the selection must not move"
+        );
+
+        let from = editor_pos_at_selection_boundary(&harness, start_before);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 40.0, from.y));
+        assert!(
+            editor_selection(&harness).0 > start_before,
+            "the left edge is still adjustable in the stretch tool"
+        );
+    }
+
+    /// Screenshot of the selection with its grab handles.
+    ///   cargo test --features kittest_render -- --ignored selection_handles_screenshot --nocapture
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    #[ignore]
+    fn selection_handles_screenshot() {
+        let out_dir = std::path::PathBuf::from(
+            std::env::var("NEOWAVES_SHOT_DIR").unwrap_or_else(|_| "/tmp".to_string()),
+        );
+        std::fs::create_dir_all(&out_dir).ok();
+
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.60));
+        harness.run_steps(3);
+
+        let image = harness.render().expect("render image");
+        image
+            .save(out_dir.join("editor_selection_handles.png"))
+            .expect("save screenshot");
+        eprintln!(
+            "[shot] wrote {}",
+            out_dir.join("editor_selection_handles.png").display()
+        );
+    }
 }

@@ -2295,6 +2295,13 @@ pub struct EditorTab {
     pub tool_state: ToolState,       // simple per-tool parameters
     pub loop_mode: LoopMode,         // Off / On (whole) / Marker
     pub dragging_marker: Option<MarkerKind>, // transient while dragging A/B
+    /// Transient: dragging one edge of the primary selection.
+    ///
+    /// Holds the *anchor* — the edge that stays put — rather than which edge
+    /// was grabbed. Dragging past the anchor then flips the range exactly like
+    /// a fresh drag-select does, instead of the grabbed handle swapping
+    /// identity with the fixed one mid-gesture.
+    pub selection_edge_drag_anchor: Option<usize>,
     // Preview audio state (non-destructive): tool-driven preview, cleared on tool/tab/view changes
     pub preview_audio_tool: Option<ToolKind>,
     /// Audition buffer that produced the visible green preview waveform.
@@ -2551,6 +2558,7 @@ impl EditorTab {
             tool_state: crate::app::types::ToolState::default_values(),
             loop_mode: crate::app::types::LoopMode::Off,
             dragging_marker: None,
+            selection_edge_drag_anchor: None,
             preview_audio_tool: None,
             preview_audio_buffer: None,
             active_tool_last: None,
