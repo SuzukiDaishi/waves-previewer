@@ -9037,4 +9037,55 @@ mod kittest_suite {
         assert_eq!(matched[0], expected);
     }
 
+
+    /// "How many files are loaded" outranks "is the waveform drawn". The row
+    /// waveform needs a full file decode per visible row, and with the Wave
+    /// column on by default those decodes were queued from the first frame of a
+    /// folder load, competing with the walker for the same disk and worker
+    /// pool. They must now wait until every row is listed.
+    ///
+    /// A real scan of a small folder finishes inside one frame, so the scanning
+    /// state is held explicitly rather than raced.
+    #[test]
+    fn a_running_scan_queues_no_full_decodes() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+
+        // Both `Header` and `Decode` read the whole file (Header does the
+        // header pass and the decode in one task); only `HeaderOnly` is cheap.
+        let decoding_tasks = |h: &Harness<'static, WavesPreviewer>| {
+            let (_, header, decode) = h.state().test_meta_task_counts();
+            header + decode
+        };
+
+        // Baseline: with the scan finished, visible rows do ask for a decode.
+        let mut frames = 0;
+        while decoding_tasks(&harness) == 0 {
+            harness.run_steps(1);
+            frames += 1;
+            assert!(frames < 600, "no decode was ever queued on an idle list");
+        }
+        assert!(!harness.state().test_list_meta_detail_is_header_only());
+
+        // Now hold the list in the scanning state.
+        harness.state_mut().test_force_scan_in_progress(true);
+        harness.run_steps(1);
+        assert!(
+            harness.state().test_list_meta_detail_is_header_only(),
+            "a live scan must withhold the thumb"
+        );
+        let during_scan = decoding_tasks(&harness);
+        harness.run_steps(30);
+        assert_eq!(
+            decoding_tasks(&harness),
+            during_scan,
+            "no file decode may be queued while the scan is listing rows"
+        );
+
+        // ...and the thumbs resume once it finishes, because
+        // `queue_full_meta_for_path` re-queues a row that only has header data.
+        harness.state_mut().test_force_scan_in_progress(false);
+        assert!(!harness.state().test_list_meta_detail_is_header_only());
+    }
+
 }

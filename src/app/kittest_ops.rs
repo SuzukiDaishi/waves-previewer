@@ -1232,6 +1232,27 @@ impl super::WavesPreviewer {
         self.search_deadline = None;
     }
 
+    /// Hold the list in its "scan is still listing rows" state so a test can
+    /// check what the row loop is allowed to queue there. A real scan of a
+    /// small folder finishes inside one frame, which is too fast to observe.
+    pub fn test_force_scan_in_progress(&mut self, in_progress: bool) {
+        self.scan_in_progress = in_progress;
+    }
+
+    /// `(header_only, header, decode)` list metadata tasks enqueued so far.
+    /// `header` and `decode` both read the whole file; `header_only` does not.
+    pub fn test_meta_task_counts(&self) -> (u64, u64, u64) {
+        (
+            self.debug.meta_task_header_only_count,
+            self.debug.meta_task_header_count,
+            self.debug.meta_task_decode_count,
+        )
+    }
+
+    pub fn test_list_meta_detail_is_header_only(&self) -> bool {
+        self.list_meta_detail_is_header_only()
+    }
+
     pub fn test_set_search_use_regex(&mut self, enabled: bool) {
         self.search_use_regex = enabled;
     }

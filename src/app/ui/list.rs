@@ -289,6 +289,10 @@ impl crate::app::WavesPreviewer {
         // Hoisted out of the row loop: read once per frame, and needed inside
         // the closure that borrows self mutably.
         let uses_hours = self.list_length_uses_hours();
+        // One decision per frame, not per row: it cannot vary between rows, and
+        // reading `files.len()` forty times a frame buys nothing.
+        let meta_detail = self.list_meta_detail_now();
+        let meta_wants_thumb = meta_detail == crate::app::meta_ops::ListMetaDetail::Thumb;
         let blank_threshold_dbfs = self.blank_threshold_dbfs;
         // Compile the search highlight regex once per frame instead of per row.
         let highlight_re = self.cached_highlight_regex();
@@ -350,24 +354,15 @@ impl crate::app::WavesPreviewer {
                             missing_paths.push(path_owned.clone());
                             return;
                         }
-                        let large_bg_list =
-                            self.item_bg_mode != crate::app::types::ItemBgMode::Standard
-                                && self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD;
                         let near_selected = self
                             .selected
                             .map(|sel| sel.abs_diff(row_idx) <= 2)
                             .unwrap_or(false);
                         if !is_virtual {
-                            if large_bg_list {
-                                self.queue_header_meta_for_path(&path_owned, near_selected);
-                                if !self.transcript_ai_inflight.contains(&path_owned) {
-                                    self.queue_transcript_for_path(&path_owned, near_selected);
-                                }
-                            } else {
-                                self.queue_meta_for_path(&path_owned, true);
-                                if !self.transcript_ai_inflight.contains(&path_owned) {
-                                    self.queue_transcript_for_path(&path_owned, true);
-                                }
+                            let priority = meta_wants_thumb || near_selected;
+                            self.queue_list_meta_for_path(&path_owned, priority);
+                            if !self.transcript_ai_inflight.contains(&path_owned) {
+                                self.queue_transcript_for_path(&path_owned, priority);
                             }
                             if !metadata_columns.is_empty() {
                                 self.queue_metadata_summary_for_path(
@@ -465,7 +460,18 @@ impl crate::app::WavesPreviewer {
                                 item.transcript_language.clone(),
                             )
                         };
-                        if !is_virtual && (needs_bg_full || needs_wave_meta || needs_lufs_meta) {
+                        // A full decode is what produces the row waveform, the
+                        // dBFS/LUFS row tint and the loudness columns -- and it
+                        // is the most expensive thing a visible row can ask for.
+                        // It waits until the scan has finished listing every
+                        // file; the thumbs then fill in for the rows on screen,
+                        // because `queue_full_meta_for_path` (unlike
+                        // `queue_meta_for_path`) re-queues a row that already
+                        // has header-only metadata.
+                        if !is_virtual
+                            && meta_wants_thumb
+                            && (needs_bg_full || needs_wave_meta || needs_lufs_meta)
+                        {
                             self.queue_full_meta_for_path(&path_owned, near_selected);
                         }
                         let is_selected = self.selected_multi.contains(&row_idx);

@@ -4906,6 +4906,15 @@ pub struct DebugState {
     pub plugin_stale_drop_count: u64,
     pub plugin_worker_timeout_count: u64,
     pub plugin_native_fallback_count: u64,
+    /// List metadata tasks actually enqueued, by depth. `header_only` is the
+    /// cheap one (header fields plus a 0.25s peak estimate); `header` and
+    /// `decode` both read the whole file to build the waveform thumb and the
+    /// loudness columns, and are what the list withholds while a folder scan is
+    /// still listing rows — these make that policy observable rather than
+    /// merely claimed.
+    pub meta_task_header_only_count: u64,
+    pub meta_task_header_count: u64,
+    pub meta_task_decode_count: u64,
 }
 
 impl DebugState {
@@ -5010,6 +5019,9 @@ impl DebugState {
             plugin_stale_drop_count: 0,
             plugin_worker_timeout_count: 0,
             plugin_native_fallback_count: 0,
+            meta_task_header_only_count: 0,
+            meta_task_header_count: 0,
+            meta_task_decode_count: 0,
         }
     }
 }

@@ -508,11 +508,9 @@ impl WavesPreviewer {
                 .unwrap_or(start)
                 .min(self.files.len() - 1);
             let look_back = 8usize;
-            let look_ahead = if self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD {
-                16usize
-            } else {
-                48usize
-            };
+            let detail = self.list_meta_detail_now();
+            let shallow = detail == crate::app::meta_ops::ListMetaDetail::HeaderOnly;
+            let look_ahead = if shallow { 16usize } else { 48usize };
             let prefetch_start = start.saturating_sub(look_back);
             let prefetch_end = (end + look_ahead).min(self.files.len() - 1);
             for idx in prefetch_start..=prefetch_end {
@@ -522,11 +520,7 @@ impl WavesPreviewer {
                 if self.is_virtual_path(&path) {
                     continue;
                 }
-                if self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD {
-                    self.queue_header_meta_for_path(&path, false);
-                } else {
-                    self.queue_meta_for_path(&path, false);
-                }
+                self.queue_list_meta_for_path(&path, false);
             }
         }
         self.queue_list_preview_prefetch_for_rows(

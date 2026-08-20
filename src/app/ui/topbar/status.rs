@@ -59,6 +59,53 @@ struct TopbarActivityItem {
     cancel: Option<TopbarActivityCancel>,
 }
 
+/// Primary row-count readout.
+///
+/// The old single `Files: N ?` conflated two different waits behind one `?`:
+/// the walker still finding files, and the metadata workers still reading
+/// tags. They have different causes and different fixes, and only the first
+/// changes the number of rows — which is the number the user is watching
+/// during a load. So the row count says how far the listing has got, and
+/// metadata readiness is reported separately by `format_list_meta_status`.
+pub(crate) fn format_list_rows_status(
+    applied: usize,
+    visible: usize,
+    discovered: usize,
+    filtered: bool,
+) -> String {
+    let mut out = if filtered {
+        format!("Files: {visible} / {applied}")
+    } else {
+        format!("Files: {applied}")
+    };
+    // `(+N)` reads as "this many more are already found and queued to be
+    // listed". Omitted when the appender has caught up, so a finished list
+    // never shows a dangling `(+0)`.
+    if discovered > applied {
+        out.push_str(&format!(" (+{})", discovered - applied));
+    }
+    out
+}
+
+/// Metadata / waveform readiness, deliberately separate from the row count.
+///
+/// There is no cheap count of "rows with no metadata" — that is an O(files)
+/// sweep every frame — so this reports what is actually known: how many reads
+/// are in flight, and whether the waveform decodes are being withheld until
+/// the listing finishes. Returns `None` when idle so the steady state costs no
+/// allocation.
+pub(crate) fn format_list_meta_status(
+    meta_inflight: usize,
+    waves_deferred: bool,
+) -> Option<String> {
+    match (meta_inflight, waves_deferred) {
+        (0, false) => None,
+        (0, true) => Some("Waves: after listing".to_string()),
+        (n, false) => Some(format!("Meta: {n}")),
+        (n, true) => Some(format!("Meta: {n} (waves after listing)")),
+    }
+}
+
 impl WavesPreviewer {
     pub(super) fn ui_topbar_status_row(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let available_w = ui.available_width();
@@ -105,20 +152,27 @@ impl WavesPreviewer {
         if has_status {
             ui.separator();
             if total_all > 0 {
-                let scanning = self.scan_in_progress;
-                let loading = scanning || !self.meta_inflight.is_empty();
-                let label = if self.search_query.is_empty() {
-                    if loading {
-                        format!("Files: {} ?", total_all)
-                    } else {
-                        format!("Files: {}", total_all)
-                    }
-                } else if loading {
-                    format!("Files: {} / {} ?", total_vis, total_all)
+                let discovered = if self.scan_in_progress {
+                    self.scan_discovered_count()
                 } else {
-                    format!("Files: {} / {}", total_vis, total_all)
+                    0
                 };
-                ui.label(RichText::new(label).monospace());
+                ui.label(
+                    RichText::new(format_list_rows_status(
+                        total_all,
+                        total_vis,
+                        discovered,
+                        !self.search_query.is_empty(),
+                    ))
+                    .monospace(),
+                );
+                if let Some(meta) = format_list_meta_status(
+                    self.meta_inflight.len(),
+                    self.list_columns.wave && self.list_meta_detail_is_header_only(),
+                ) {
+                    ui.separator();
+                    ui.label(RichText::new(meta).weak());
+                }
             }
             if dirty_gains > 0 {
                 ui.separator();
@@ -952,5 +1006,62 @@ mod loudness_readout_tests {
             "M -23.1  S -22.9  TP -1.2"
         );
         assert_eq!(f(Some(-120.0), None, Some(0.0)), "M -inf  S -  TP +0.0");
+    }
+}
+
+#[cfg(test)]
+mod list_status_tests {
+    use super::{format_list_meta_status, format_list_rows_status};
+
+    #[test]
+    fn an_idle_list_shows_a_bare_count() {
+        assert_eq!(format_list_rows_status(512_000, 512_000, 0, false), "Files: 512000");
+    }
+
+    #[test]
+    fn a_filtered_idle_list_shows_visible_over_total() {
+        assert_eq!(format_list_rows_status(512_000, 1_204, 0, true), "Files: 1204 / 512000");
+    }
+
+    /// The number the user is watching during a load: rows listed so far, plus
+    /// how many more the walker has already found.
+    #[test]
+    fn a_running_scan_shows_what_is_still_queued() {
+        assert_eq!(
+            format_list_rows_status(128_540, 128_540, 512_000, false),
+            "Files: 128540 (+383460)"
+        );
+        assert_eq!(
+            format_list_rows_status(128_540, 1_204, 512_000, true),
+            "Files: 1204 / 128540 (+383460)"
+        );
+    }
+
+    /// A finished list must never show a dangling `(+0)`, and the walker's
+    /// count can legitimately lag the appender (batches already applied).
+    #[test]
+    fn the_pending_suffix_is_omitted_once_the_appender_caught_up() {
+        for discovered in [0usize, 1, 500, 512_000] {
+            let out = format_list_rows_status(512_000, 512_000, discovered, false);
+            assert_eq!(out, "Files: 512000", "discovered={discovered}");
+        }
+    }
+
+    #[test]
+    fn meta_status_is_absent_when_there_is_nothing_to_report() {
+        assert_eq!(format_list_meta_status(0, false), None);
+    }
+
+    #[test]
+    fn meta_status_separates_reads_in_flight_from_deferred_waves() {
+        assert_eq!(
+            format_list_meta_status(0, true).as_deref(),
+            Some("Waves: after listing")
+        );
+        assert_eq!(format_list_meta_status(192, false).as_deref(), Some("Meta: 192"));
+        assert_eq!(
+            format_list_meta_status(192, true).as_deref(),
+            Some("Meta: 192 (waves after listing)")
+        );
     }
 }
