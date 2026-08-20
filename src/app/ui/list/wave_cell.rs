@@ -9,6 +9,7 @@ use std::path::Path;
 use egui::{Color32, Sense};
 
 use crate::app::helpers::{amp_to_color, db_to_amp};
+use crate::app::list_seek_ops::{ListSeekRequest, ListWavePlayheadInfo};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ListWaveOverlayInfo {
@@ -191,7 +192,100 @@ impl crate::app::WavesPreviewer {
                 egui::Stroke::new(1.0, marker_color),
             );
         }
-    }}
+    }
+
+    /// Playback chrome layered over the row waveform: how far playback has got,
+    /// how far the decode reaches, and where a parked seek is aiming.
+    ///
+    /// Separate from `paint_list_wave_overlay` on purpose. That one draws
+    /// marker/loop geometry from a `PartialEq` struct used for change
+    /// detection; this changes every frame while playing.
+    fn paint_list_wave_playhead(
+        &self,
+        ui: &mut egui::Ui,
+        wave_rect: egui::Rect,
+        info: &ListWavePlayheadInfo,
+        hover_frac: Option<f32>,
+    ) {
+        let x_at = |frac: f32| wave_rect.left() + frac.clamp(0.0, 1.0) * wave_rect.width();
+        let palette = self.palette();
+
+        // What has been played, so the cell reads as a progress bar at a glance
+        // instead of relying on a 1px playhead being spotted in a 26px row.
+        if let Some(frac) = info.play_frac {
+            let end_x = x_at(frac);
+            if end_x > wave_rect.left() {
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        wave_rect.left_top(),
+                        egui::pos2(end_x, wave_rect.bottom()),
+                    ),
+                    0.0,
+                    palette.playing_text.gamma_multiply(0.14),
+                );
+            }
+        }
+
+        // The undecoded tail cannot be seeked into immediately; shading it
+        // explains the wait instead of leaving the click feeling ignored.
+        if info.decoded_frac < 0.999 {
+            let start_x = x_at(info.decoded_frac);
+            if start_x < wave_rect.right() {
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(start_x, wave_rect.top()),
+                        wave_rect.right_bottom(),
+                    ),
+                    0.0,
+                    ui.style().visuals.extreme_bg_color.gamma_multiply(0.35),
+                );
+            }
+        }
+
+        if let Some(frac) = hover_frac {
+            let x = x_at(frac);
+            ui.painter().line_segment(
+                [
+                    egui::pos2(x, wave_rect.top()),
+                    egui::pos2(x, wave_rect.bottom()),
+                ],
+                egui::Stroke::new(
+                    1.0,
+                    ui.style()
+                        .visuals
+                        .widgets
+                        .hovered
+                        .fg_stroke
+                        .color
+                        .gamma_multiply(0.5),
+                ),
+            );
+        }
+
+        // Where a seek is aiming while the decode catches up.
+        if let Some(frac) = info.pending_frac {
+            let x = x_at(frac);
+            ui.painter().line_segment(
+                [
+                    egui::pos2(x, wave_rect.top()),
+                    egui::pos2(x, wave_rect.bottom()),
+                ],
+                egui::Stroke::new(1.0, palette.attention_fill_weak),
+            );
+        }
+
+        if let Some(frac) = info.play_frac {
+            let x = x_at(frac);
+            ui.painter().line_segment(
+                [
+                    egui::pos2(x, wave_rect.top()),
+                    egui::pos2(x, wave_rect.bottom()),
+                ],
+                egui::Stroke::new(if info.playing { 2.0 } else { 1.0 }, palette.playing_text),
+            );
+        }
+    }
+}
 
 /// Everything the Wave cell needs from the row loop. Passed as a struct
 /// because the row already owns these and the alternative is a seven-argument
@@ -203,12 +297,26 @@ pub(super) struct ListWaveCellCtx<'a> {
     pub(super) text_height: f32,
     pub(super) row_bg: Option<Color32>,
     pub(super) row_fg: Option<Color32>,
+    /// Resolved once per frame for whichever row is sounding; `Some` only for
+    /// that row, so the rest of the list costs one path comparison.
+    pub(super) playhead: Option<&'a ListWavePlayheadInfo>,
 }
 
 /// What the cell decided, applied by the row loop once its borrows are done.
 #[derive(Default)]
 pub(super) struct ListWaveCellOutcome {
     pub(super) clicked_to_load: bool,
+    /// Set while the pointer is pressed or dragged inside the waveform, so the
+    /// row loop does not read the same drag as a file drag-out to the OS. Never
+    /// set on hover -- that would disable drag-out permanently.
+    pub(super) interacted_with_control: bool,
+    /// A seek the row loop applies once the table's borrows are released.
+    pub(super) seek_request: Option<ListSeekRequest>,
+    /// Give the list keyboard focus, as a click on any other cell does. The
+    /// row's own click handling is skipped once `interacted_with_control` is
+    /// set, and without this a waveform click would leave Space inert -- which
+    /// is how playback starts when Auto Play is off.
+    pub(super) focus_list: bool,
 }
 
 impl crate::app::WavesPreviewer {
@@ -226,7 +334,7 @@ impl crate::app::WavesPreviewer {
             ui.visuals_mut().override_text_color = cell.row_fg;
             let (rect2, resp2) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), cell.row_h * 0.9),
-                Sense::click(),
+                Sense::click_and_drag(),
             );
             let error_text = self
                 .meta_for_path(cell.path)
@@ -294,9 +402,44 @@ impl crate::app::WavesPreviewer {
                     self.palette().error_text,
                 );
             }
+            // A fraction can only become a time once the duration is known,
+            // which the header pass resolves before any decode. Until then the
+            // cell keeps its old select-and-load behaviour.
+            let seekable = self.list_row_duration_secs(cell.path).is_some();
+            let hover_frac = (seekable && resp2.hovered())
+                .then(|| ui.input(|i| i.pointer.latest_pos()))
+                .flatten()
+                .map(|pos| {
+                    ((pos.x - wave_rect.left()) / wave_rect.width().max(1.0)).clamp(0.0, 1.0)
+                });
+            self.paint_list_wave_playhead(
+                ui,
+                wave_rect,
+                cell.playhead.unwrap_or(&ListWavePlayheadInfo::default()),
+                hover_frac,
+            );
+
             let resp2 = self.attach_row_context_menu(resp2, cell.row_idx, ctx);
-            if resp2.clicked_by(egui::PointerButton::Primary) {
+            let scrubbing = resp2.dragged_by(egui::PointerButton::Primary);
+            let pressed = resp2.is_pointer_button_down_on() || scrubbing;
+            if seekable && (pressed || resp2.clicked_by(egui::PointerButton::Primary)) {
+                // Claim the drag so the row does not start a file drag-out.
+                outcome.interacted_with_control = true;
+                outcome.focus_list = true;
+                if let Some(pos) = resp2.interact_pointer_pos() {
+                    let frac = ((pos.x - wave_rect.left()) / wave_rect.width().max(1.0))
+                        .clamp(0.0, 1.0);
+                    outcome.seek_request = Some(ListSeekRequest {
+                        row: cell.row_idx,
+                        frac,
+                        scrubbing,
+                    });
+                }
+            } else if resp2.clicked_by(egui::PointerButton::Primary) {
                 outcome.clicked_to_load = true;
+            }
+            if seekable && resp2.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
         });
         outcome

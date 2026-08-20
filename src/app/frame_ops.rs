@@ -194,6 +194,10 @@ impl WavesPreviewer {
             "drain_list_preview_results",
             self.drain_list_preview_results()
         );
+        // Not behind `deferrable!`: the user is synchronously waiting to hear
+        // the seek they just asked for, and this returns immediately when
+        // nothing is parked.
+        self.apply_pending_list_seek();
         trace_stage!(
             "drain_list_preview_prefetch_results",
             self.drain_list_preview_prefetch_results()

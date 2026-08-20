@@ -9088,4 +9088,164 @@ mod kittest_suite {
         assert!(!harness.state().test_list_meta_detail_is_header_only());
     }
 
+
+    /// Clicking partway along a row's waveform must start playback from that
+    /// point. A plain wav row reaches the whole-file streaming transport (which
+    /// `select_and_load` activates when Auto Play is on), so there is nothing
+    /// to wait for and the seek applies immediately.
+    #[test]
+    fn list_wave_seek_moves_the_playhead_on_a_wav_row() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+
+        // Pick a wav row long enough that half of it is unambiguous.
+        let row = (0..harness.state().files.len())
+            .find(|&r| {
+                let path = path_for_row(harness.state(), r);
+                path.extension().and_then(|e| e.to_str()) == Some("wav")
+                    && harness
+                        .state()
+                        .test_row_duration_secs(r)
+                        .is_some_and(|d| d > 0.5)
+            })
+            .expect("need one wav row with a known duration");
+        let duration = harness.state().test_row_duration_secs(row).unwrap();
+
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(4);
+
+        harness.state_mut().test_list_seek_row_frac(row, 0.5);
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness.state().test_list_seek_pending_frac(),
+            None,
+            "a whole-file transport should not need to park the seek"
+        );
+        let at = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("playback position");
+        let want = duration * 0.5;
+        assert!(
+            (at - want).abs() < duration * 0.1,
+            "expected ~{want:.3}s, got {at:.3}s (duration {duration:.3}s)"
+        );
+    }
+
+    /// An mp3 row plays from a decoded buffer that starts as a ~1.2s prefix, so
+    /// a seek near the end of the file lands beyond what has been decoded. It
+    /// must be parked (not clamped to the prefix, which would silently play the
+    /// wrong part) and applied once the decode reaches it.
+    #[test]
+    fn list_wave_seek_past_the_prefix_is_parked_then_applied() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_samples/bgms");
+        if !dir.is_dir() {
+            eprintln!("skipping: {} not present", dir.display());
+            return;
+        }
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(dir);
+        let mut harness = harness_with_startup(cfg);
+        wait_for_scan(&mut harness);
+
+        let row = (0..harness.state().files.len())
+            .find(|&r| {
+                path_for_row(harness.state(), r)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    == Some("mp3")
+                    && harness
+                        .state()
+                        .test_row_duration_secs(r)
+                        .is_some_and(|d| d > 10.0)
+            })
+            .expect("need one long mp3 row");
+        let duration = harness.state().test_row_duration_secs(row).unwrap();
+
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(4);
+
+        harness.state_mut().test_list_seek_row_frac(row, 0.8);
+        let parked = harness.state().test_list_seek_pending_frac();
+        assert_eq!(
+            parked,
+            Some(0.8),
+            "a seek past the decoded prefix must be parked, not clamped"
+        );
+
+        // The decode is progressive; the parked seek retires when it arrives.
+        let start = Instant::now();
+        while harness.state().test_list_seek_pending_frac().is_some() {
+            harness.run_steps(1);
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "parked seek never retired"
+            );
+        }
+
+        let at = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("playback position");
+        let want = duration * 0.8;
+        assert!(
+            (at - want).abs() < duration * 0.1,
+            "expected ~{want:.1}s, got {at:.1}s (duration {duration:.1}s)"
+        );
+    }
+
+
+    /// A waveform click always parks the position, but it must not override the
+    /// user's transport preferences: with Auto Play off and nothing already
+    /// sounding, the position is set and Space is left to start playback.
+    #[test]
+    fn list_wave_seek_does_not_start_playback_when_auto_play_is_off() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(false);
+        assert!(!harness.state().test_auto_play_list_nav());
+
+        let row = (0..harness.state().files.len())
+            .find(|&r| {
+                harness
+                    .state()
+                    .test_row_duration_secs(r)
+                    .is_some_and(|d| d > 0.5)
+            })
+            .expect("need a row with a known duration");
+
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(4);
+        harness.state_mut().test_list_seek_row_frac(row, 0.5);
+        harness.run_steps(4);
+
+        // With Auto Play off the preview decodes without emitting partials, so
+        // the seek is parked until the buffer lands. Let it retire.
+        let start = Instant::now();
+        while harness.state().test_list_seek_pending_frac().is_some() {
+            harness.run_steps(1);
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "parked seek never retired"
+            );
+        }
+
+        assert!(
+            !harness.state().test_audio_is_playing(),
+            "a waveform click must not start playback when Auto Play is off"
+        );
+        // ...but the position is armed and the list holds focus, so Space works.
+        let at = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("position should be armed even though nothing is playing");
+        assert!(at > 0.0, "seek position was not armed: {at}");
+        assert!(
+            harness.state().test_list_has_focus(),
+            "a waveform click must leave the list focused so Space can play"
+        );
+    }
+
 }

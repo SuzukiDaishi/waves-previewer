@@ -1253,6 +1253,42 @@ impl super::WavesPreviewer {
         self.list_meta_detail_is_header_only()
     }
 
+    /// Request a seek at `frac` of the whole file on the given row, exactly as
+    /// clicking that point of the row's waveform does.
+    pub fn test_list_seek_row_frac(&mut self, row: usize, frac: f32) {
+        self.apply_list_seek_request(crate::app::list_seek_ops::ListSeekRequest {
+            row,
+            frac,
+            scrubbing: false,
+        });
+    }
+
+    pub fn test_list_has_focus(&self) -> bool {
+        self.list_has_focus
+    }
+
+    /// Whole-file duration of a row from cached metadata, if known.
+    pub fn test_row_duration_secs(&self, row: usize) -> Option<f64> {
+        let path = self.path_for_row(row)?.clone();
+        self.list_row_duration_secs(&path)
+    }
+
+    /// Whole-file fraction of a seek parked until the decode reaches it.
+    pub fn test_list_seek_pending_frac(&self) -> Option<f32> {
+        self.list_seek_pending.as_ref().map(|p| p.frac)
+    }
+
+    /// Current list playhead as a whole-file fraction, or `None` when the list
+    /// is silent.
+    pub fn test_list_playhead_frac(&self) -> Option<f32> {
+        self.resolve_list_playhead_frame()
+            .and_then(|frame| frame.info.play_frac)
+    }
+
+    pub fn test_playback_source_time_sec(&self) -> Option<f64> {
+        self.playback_current_source_time_sec()
+    }
+
     pub fn test_set_search_use_regex(&mut self, enabled: bool) {
         self.search_use_regex = enabled;
     }

@@ -66,6 +66,7 @@ pub mod keymap;
 mod kittest_ops;
 mod list_ops;
 mod list_preview_ops;
+mod list_seek_ops;
 mod list_state_ops;
 mod list_undo;
 mod loading_ops;
@@ -744,6 +745,14 @@ pub struct WavesPreviewer {
     /// scrolls by row index (usize), so a 1M-row list never touches egui's
     /// f32 scroll offsets (which quantize above ~16.7M px of content).
     list_scroll_row: usize,
+    /// A seek requested from a row waveform that the decoded preview buffer
+    /// does not reach yet. See `list_seek_ops`.
+    list_seek_pending: Option<list_seek_ops::ListSeekPending>,
+    /// `max_secs` the active list-preview job was spawned with. `0.0` means
+    /// "decode to the end of the file" -- the existing convention in
+    /// `spawn_list_preview_async`, which nothing recorded, so a seek past the
+    /// decoded extent could not tell whether a full decode was already coming.
+    list_preview_job_max_secs: f32,
     /// Sub-row wheel accumulation in rows.
     list_scroll_residual: f32,
     /// Largest absolute row index whose painted rect ended at or above the

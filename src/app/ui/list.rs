@@ -113,6 +113,9 @@ impl crate::app::WavesPreviewer {
         // One decision per frame, not per row: it cannot vary between rows, and
         // reading `files.len()` forty times a frame buys nothing.
         let meta_detail = self.list_meta_detail_now();
+        // Resolved once: only the sounding row draws a playhead, so the rest of
+        // the loop pays one path comparison.
+        let playhead_frame = self.resolve_list_playhead_frame();
         let meta_wants_thumb = meta_detail == crate::app::meta_ops::ListMetaDetail::Thumb;
         let blank_threshold_dbfs = self.blank_threshold_dbfs;
         // Compile the search highlight regex once per frame instead of per row.
@@ -132,6 +135,9 @@ impl crate::app::WavesPreviewer {
         let mut to_open: Option<PathBuf> = None;
         let mut visible_first_row: Option<usize> = None;
         let mut visible_last_row: Option<usize> = None;
+        // Applied after the table closes: `select_and_load` can remove a
+        // missing row, which would mutate `items` mid-iteration.
+        let mut wave_seek_request: Option<crate::app::list_seek_ops::ListSeekRequest> = None;
         // Rows the table lays out past the bottom of the viewport are clipped,
         // not scrollable into view (the table is built with `vscroll(false)`).
         // Tracking the last row that actually fitted lets the scroll clamp be
@@ -1354,10 +1360,25 @@ impl crate::app::WavesPreviewer {
                                         text_height,
                                         row_bg,
                                         row_fg,
+                                        playhead: playhead_frame
+                                            .as_ref()
+                                            .filter(|frame| frame.path == path_owned)
+                                            .map(|frame| &frame.info),
                                     },
                                 );
                                 if outcome.clicked_to_load {
                                     clicked_to_load = true;
+                                }
+                                if outcome.interacted_with_control {
+                                    interacted_with_control = true;
+                                }
+                                if outcome.focus_list {
+                                    ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                                    list_has_focus = true;
+                                    self.search_has_focus = false;
+                                }
+                                if let Some(req) = outcome.seek_request {
+                                    wave_seek_request = Some(req);
                                 }
                             }
                         }
@@ -1431,6 +1452,9 @@ impl crate::app::WavesPreviewer {
             });
 
         self.list_last_fully_visible_row = last_fully_visible_row;
+        if let Some(req) = wave_seek_request {
+            self.apply_list_seek_request(req);
+        }
         self.ui_list_scrollbar(ui, &metrics);
         self.commit_list_col_widths(ctx);
 

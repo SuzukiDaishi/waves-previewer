@@ -18,6 +18,7 @@ impl WavesPreviewer {
         self.scan_load_kind = None;
         self.scan_pending_target = None;
         self.scan_found_live = None;
+        self.clear_list_seek_pending();
     }
 
     /// Dropping a million MediaItems (plus the path/index maps) frees ~1GB
