@@ -1,5 +1,5 @@
 use super::keymap::{self, Action};
-use super::types::{EditorPrimaryView, LoopMode, ToolKind, UndoScope, ViewMode};
+use super::types::{EditorPrimaryView, EditorTab, LoopMode, ToolKind, UndoScope, ViewMode};
 
 impl super::WavesPreviewer {
     pub(super) fn list_focus_id() -> egui::Id {
@@ -497,33 +497,10 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn all_selected_ranges(&self, tab_idx: usize) -> Vec<(usize, usize)> {
-        let Some(tab) = self.tabs.get(tab_idx) else {
-            return vec![];
-        };
-        let mut ranges: Vec<(usize, usize)> = tab
-            .extra_selections
-            .iter()
-            .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
-            .filter(|&(a, b)| b > a)
-            .collect();
-        if let Some((a0, b0)) = tab.selection {
-            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-            if b > a {
-                ranges.push((a, b));
-            }
-        }
-        ranges.sort();
-        let mut merged: Vec<(usize, usize)> = Vec::new();
-        for (s, e) in ranges {
-            if let Some(last) = merged.last_mut() {
-                if s <= last.1 {
-                    last.1 = last.1.max(e);
-                    continue;
-                }
-            }
-            merged.push((s, e));
-        }
-        merged
+        self.tabs
+            .get(tab_idx)
+            .map(EditorTab::all_selected_ranges)
+            .unwrap_or_default()
     }
 
     fn selected_range(&self, tab_idx: usize) -> Option<(usize, usize)> {

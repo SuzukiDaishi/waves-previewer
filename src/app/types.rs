@@ -2434,6 +2434,39 @@ pub struct SpectralBrushStamp {
 }
 
 impl EditorTab {
+    /// Every selected range as sorted, merged, non-empty `[start, end)` spans:
+    /// `extra_selections` plus the primary `selection`.
+    ///
+    /// The single source of truth for "what is selected". The Trim inspector
+    /// used to carry a verbatim copy of this, which could drift from what the
+    /// keyboard actions did.
+    pub fn all_selected_ranges(&self) -> Vec<(usize, usize)> {
+        let mut ranges: Vec<(usize, usize)> = self
+            .extra_selections
+            .iter()
+            .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
+            .filter(|&(a, b)| b > a)
+            .collect();
+        if let Some((a0, b0)) = self.selection {
+            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+            if b > a {
+                ranges.push((a, b));
+            }
+        }
+        ranges.sort();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (s, e) in ranges {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1 {
+                    last.1 = last.1.max(e);
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+        merged
+    }
+
     /// All-defaults constructor shared by every tab-creation site.
     /// Sites override only the fields that differ (cached restore vs
     /// fresh load) so new fields need exactly one default here.
@@ -5432,5 +5465,47 @@ mod transcript_document_tests {
         value.scale_time(0.0);
         assert_eq!(value.segments, segments);
         assert_eq!(value.freshness, TranscriptFreshness::Stale);
+    }
+}
+
+#[cfg(test)]
+mod editor_tab_selection_tests {
+    use super::EditorTab;
+
+    fn tab_with(selection: Option<(usize, usize)>, extras: &[(usize, usize)]) -> EditorTab {
+        let mut tab = EditorTab::new_base(std::path::PathBuf::from("/t.wav"), "t.wav".to_string());
+        tab.selection = selection;
+        tab.extra_selections = extras.to_vec();
+        tab
+    }
+
+    #[test]
+    fn reversed_pairs_are_normalized() {
+        let tab = tab_with(Some((900, 100)), &[(500, 300)]);
+        assert_eq!(tab.all_selected_ranges(), vec![(100, 900)]);
+    }
+
+    #[test]
+    fn empty_ranges_are_dropped() {
+        let tab = tab_with(Some((400, 400)), &[(100, 100), (700, 800)]);
+        assert_eq!(tab.all_selected_ranges(), vec![(700, 800)]);
+        assert!(tab_with(None, &[]).all_selected_ranges().is_empty());
+    }
+
+    /// Overlapping and merely touching ranges collapse — the Trim inspector
+    /// relies on this so Apply cannot act on the same samples twice.
+    #[test]
+    fn overlapping_and_touching_ranges_merge() {
+        let tab = tab_with(Some((150, 250)), &[(100, 200), (250, 300)]);
+        assert_eq!(tab.all_selected_ranges(), vec![(100, 300)]);
+    }
+
+    #[test]
+    fn disjoint_ranges_stay_separate_and_sorted() {
+        let tab = tab_with(Some((100, 200)), &[(700, 800), (400, 500)]);
+        assert_eq!(
+            tab.all_selected_ranges(),
+            vec![(100, 200), (400, 500), (700, 800)]
+        );
     }
 }

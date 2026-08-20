@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::app::input_focus::UiScrollTarget;
+use crate::app::keymap::Action;
 use crate::app::music_onnx;
 use crate::app::render::overlay as ov;
 use crate::app::render::waveform_pyramid as wf_cache;
@@ -3256,6 +3257,20 @@ impl crate::app::WavesPreviewer {
         {
             self.request_plugin_scan_if_needed();
         }
+
+        // Chord labels for the Trim inspector's hover texts. Resolved here
+        // because the `&mut self.tabs[tab_idx]` borrow below rules out calling
+        // `self` methods, and read through the override map so a rebound key
+        // shows the key the user actually has.
+        let chord_label = |app: &Self, action: Action| -> String {
+            app.keymap_effective_chord(action)
+                .map(|(mods, key)| crate::app::keymap::chord_text(mods, key))
+                .unwrap_or_else(|| "(unassigned)".to_string())
+        };
+        let trim_keys = chord_label(self, Action::EditorTrimSelection);
+        let mute_keys = chord_label(self, Action::EditorMuteSelection);
+        let cut_keys = chord_label(self, Action::EditorDeleteSelection);
+        let virtual_keys = chord_label(self, Action::EditorVirtualTrim);
 
         let avail = ui.available_size();
         // pending actions to perform after UI borrows end
@@ -9437,32 +9452,7 @@ impl crate::app::WavesPreviewer {
                                         let s = ui.style_mut();
                                         s.spacing.item_spacing = egui::vec2(6.0, 6.0);
                                         s.spacing.button_padding = egui::vec2(6.0, 3.0);
-                                        let selected_trim_ranges = {
-                                            let mut ranges: Vec<(usize, usize)> = tab
-                                                .extra_selections
-                                                .iter()
-                                                .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
-                                                .filter(|&(a, b)| b > a)
-                                                .collect();
-                                            if let Some((a0, b0)) = tab.selection {
-                                                let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                                if b > a {
-                                                    ranges.push((a, b));
-                                                }
-                                            }
-                                            ranges.sort();
-                                            let mut merged: Vec<(usize, usize)> = Vec::new();
-                                            for (s, e) in ranges {
-                                                if let Some(last) = merged.last_mut() {
-                                                    if s <= last.1 {
-                                                        last.1 = last.1.max(e);
-                                                        continue;
-                                                    }
-                                                }
-                                                merged.push((s, e));
-                                            }
-                                            merged
-                                        };
+                                        let selected_trim_ranges = tab.all_selected_ranges();
                                         let selected_trim_count = selected_trim_ranges.len();
                                         let range_opt = selected_trim_ranges.first().copied();
 
@@ -9473,8 +9463,11 @@ impl crate::app::WavesPreviewer {
                                             .data_mut(|data| {
                                                 *data.get_temp_mut_or(trim_mode_id, 2_u8)
                                             });
+                                        let mode_hint = "What Preview and Apply do with the \
+selected range. Cut = remove it and close the gap. Mute = silence it, keeping the length. \
+Trim = keep only it and discard the rest.";
                                         ui.horizontal_wrapped(|ui| {
-                                            ui.label("Mode");
+                                            ui.label("Mode").on_hover_text(mode_hint);
                                             egui::ComboBox::from_id_salt(trim_mode_id)
                                                 .selected_text(match trim_mode {
                                                     0 => "Cut",
@@ -9494,11 +9487,20 @@ impl crate::app::WavesPreviewer {
                                             let has_range = range_opt.is_some();
                                             let range = range_opt.unwrap_or((0, 0));
                                             let has_multi_selected_trim = selected_trim_count > 1;
+                                            let multi_note = if has_multi_selected_trim {
+                                                format!(" ({selected_trim_count} selected ranges)")
+                                            } else {
+                                                String::new()
+                                            };
                                             if ui
                                                 .add_enabled(
                                                     has_range && preview_button_enabled,
                                                     egui::Button::new("Preview"),
                                                 )
+                                                .on_hover_text(format!(
+                                                    "Hear the result without changing the file. \
+The green overlay shows it; Esc discards it.{multi_note}"
+                                                ))
                                                 .clicked()
                                             {
                                                 let mut playback = tab.ch_samples.clone();
@@ -9551,8 +9553,28 @@ impl crate::app::WavesPreviewer {
                                                 stop_playback = true;
                                                 tab.preview_audio_tool = Some(ToolKind::Trim);
                                             }
+                                            // Name the equivalent key: the whole
+                                            // "do I have to press Set first?"
+                                            // confusion came from the panel never
+                                            // saying that the keys act on the
+                                            // selection directly.
+                                            let apply_hint = match trim_mode {
+                                                0 => format!(
+                                                    "Remove the selected range and close the gap. \
+Same as {cut_keys}. Undoable.{multi_note}"
+                                                ),
+                                                1 => format!(
+                                                    "Silence the selected range, keeping its \
+length. Same as {mute_keys}. Undoable.{multi_note}"
+                                                ),
+                                                _ => format!(
+                                                    "Keep only the selected range and discard the \
+rest. Same as {trim_keys}. Undoable.{multi_note}"
+                                                ),
+                                            };
                                             if ui
                                                 .add_enabled(has_range && !apply_busy, egui::Button::new("Apply"))
+                                                .on_hover_text(apply_hint)
                                                 .clicked()
                                             {
                                                 match trim_mode {
@@ -9580,7 +9602,11 @@ impl crate::app::WavesPreviewer {
                                                     has_range && !apply_busy,
                                                     egui::Button::new("Add Trim As Virtual"),
                                                 )
-                                                .on_hover_text("Add the trim range as a virtual item (V)")
+                                                .on_hover_text(format!(
+                                                    "Export the selected range as a separate item \
+in the list, leaving this file untouched. Nothing is written to disk until you save it. One new \
+item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{multi_note}"
+                                                ))
                                                 .clicked()
                                             {
                                                 if has_multi_selected_trim {
@@ -9814,6 +9840,10 @@ impl crate::app::WavesPreviewer {
                                             }
                                             if ui
                                                 .add_enabled(at_running, egui::Button::new("Cancel"))
+                                                .on_hover_text(
+                                                    "Stop the running Auto Trim detection. \
+(The Trim preview above is discarded with Esc.)",
+                                                )
                                                 .clicked()
                                             {
                                                 do_cancel_auto_trim = Some(tab_idx);
