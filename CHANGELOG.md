@@ -4,6 +4,9 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### Editor: one range on the waveform
+- **The orange Trim band is gone**: the waveform drew a second, orange range for the Trim tool on top of the blue selection. Nothing in the UI had set that range for some time — only Auto Trim wrote it, and Auto Trim writes the *same* span to the selection, so one range was being drawn twice and read as "a range you had to establish separately". Hovering its edges even produced a resize cursor, for a drag that was never implemented. The selection is now the only range the waveform draws, and the header no longer labels a range it isn't drawing.
+
 ### Editor: selection shortcuts
 - **`Ctrl+M` mutes the selection**: silencing a range meant switching the Trim tool to Mode=Mute and pressing Apply. It now has a key, alongside `T` (trim to selection) and `V` (export as a new list item). `Ctrl` rather than a bare `M`, which is already "add a marker".
 - **Cut moved from `C` to `Delete`**: deleting the selection and closing the gap is the Trim tool's Cut, and `Delete` is the key people reach for. `C` is now unassigned — pressing it does nothing, which is the safe failure for a key that used to delete audio. Anyone who had already rebound this action keeps their binding, and `C` can be restored from Help > Customize Shortcuts.

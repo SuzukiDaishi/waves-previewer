@@ -6932,31 +6932,6 @@ impl crate::app::WavesPreviewer {
                     }
                 }
 
-                // Trim overlay (set range): orange to distinguish from generic blue selection.
-                if let Some((a0, b0)) = tab.trim_range {
-                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                    if b >= tab.view_offset {
-                        let vis = (wave_w * spp).ceil() as usize;
-                        let end = tab.view_offset.saturating_add(vis).min(tab.samples_len);
-                        if a <= end {
-                            let ax = to_x(a);
-                            let bx = to_x(b);
-                            let trim_rect = egui::Rect::from_min_max(
-                                egui::pos2(ax, rect.top()),
-                                egui::pos2(bx, rect.bottom()),
-                            );
-                            let fill = Color32::from_rgba_unmultiplied(255, 140, 0, 34);
-                            let stroke = Color32::from_rgba_unmultiplied(255, 140, 0, 190);
-                            painter.rect_filled(trim_rect, 0.0, fill);
-                            painter.rect_stroke(
-                                trim_rect,
-                                0.0,
-                                egui::Stroke::new(1.0, stroke),
-                                egui::StrokeKind::Inside,
-                            );
-                        }
-                    }
-                }
 
                 // Marker overlay
                 if !tab.markers.is_empty() {
@@ -7299,16 +7274,6 @@ impl crate::app::WavesPreviewer {
                         match tab.active_tool {
                             ToolKind::LoopEdit => {
                                 if let Some((a0, b0)) = tab.loop_region {
-                                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                    let ax = to_x(a);
-                                    let bx = to_x(b);
-                                    if near(ax) || near(bx) {
-                                        hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
-                                    }
-                                }
-                            }
-                            ToolKind::Trim => {
-                                if let Some((a0, b0)) = tab.trim_range {
                                     let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
                                     let ax = to_x(a);
                                     let bx = to_x(b);
@@ -7986,10 +7951,12 @@ impl crate::app::WavesPreviewer {
                         }
                     });
                     let sr = sr_ctx.max(1.0);
+                    // Only ranges the waveform actually draws: the blue
+                    // selection and the loop region. `trim_range` used to sit
+                    // between them and could label a range that is not painted.
                     let range_info = tab
                         .selection
                         .map(|r| ("Selection", r))
-                        .or_else(|| tab.trim_range.map(|r| ("Trim", r)))
                         .or_else(|| tab.loop_region.map(|r| ("Loop", r)));
                     if let Some((kind, (a0, b0))) = range_info {
                         let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };

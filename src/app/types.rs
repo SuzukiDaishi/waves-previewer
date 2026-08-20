@@ -2222,6 +2222,10 @@ pub struct EditorTab {
     pub loop_markers_saved: Option<(usize, usize)>,
     pub loop_markers_dirty: bool,
     // Trim-specific A/B range (independent from loop)
+    /// Legacy Trim-tool range. No longer painted or hover-tested — the blue
+    /// selection is the single visible range on the waveform — and kept only
+    /// for `.nwsess` / undo-snapshot compatibility, the Auto Trim mirror, and
+    /// the `V` shortcut's fallback.
     pub trim_range: Option<(usize, usize)>,
     pub loop_xfade_samples: usize, // crossfade length in samples (device SR)
     pub loop_xfade_shape: LoopXfadeShape, // blend shape

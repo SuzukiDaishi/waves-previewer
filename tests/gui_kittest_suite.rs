@@ -9449,4 +9449,39 @@ mod kittest_suite {
             "no destructive key may edit audio that the Metadata view is hiding"
         );
     }
+
+    /// The Trim tool used to paint an orange band for `trim_range` on top of
+    /// the blue selection. After Auto Trim both hold the same span, so the one
+    /// range was drawn twice and read as "a second range you had to set" —
+    /// which is exactly the misunderstanding this removal addresses. Assert on
+    /// pixels, because only a render can catch the paint coming back.
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn no_orange_trim_band_is_painted() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        assert!(harness.state_mut().test_set_trim_range_frac(0.20, 0.60));
+        harness.run_steps(3);
+        assert!(
+            harness.state().tabs[harness.state().active_tab.expect("active tab")]
+                .trim_range
+                .is_some(),
+            "the range must still be set, or this test proves nothing"
+        );
+
+        let image = harness.render().expect("render image");
+        // The retired band's stroke was (255,140,0) at alpha 190; over the dark
+        // canvas that lands near (195,110,7). Match that hue specifically --
+        // green well under 3/4 of red, almost no blue -- rather than "warm",
+        // which also catches the gold (195,166,77) label text in the inspector.
+        let is_band_orange = |p: &image::Rgba<u8>| {
+            let [r, g, b, _a] = p.0;
+            r > 180 && (g as f32) < (r as f32) * 0.72 && b < 60
+        };
+        let orange = image.pixels().filter(|p| is_band_orange(p)).count();
+        assert_eq!(orange, 0, "found {orange} orange trim-band pixels");
+    }
 }
