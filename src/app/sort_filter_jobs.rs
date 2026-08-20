@@ -14,10 +14,10 @@ use std::time::UNIX_EPOCH;
 use super::types::{MediaId, MediaItem, SortDir, SortKey};
 use super::WavesPreviewer;
 
-/// Lists at or below this size sort/filter synchronously in one frame.
-pub(super) const LIST_JOB_SYNC_THRESHOLD: usize = 50_000;
-/// Per-frame time budget for the sliced decorate / filter passes.
-pub(super) const LIST_JOB_FRAME_BUDGET_MS: f64 = 2.0;
+// The sync threshold and the slice budget both come from `PerfProfile`
+// (src/app/perf_profile.rs): a two-core machine takes seconds over what a
+// developer workstation finishes in one frame, so these cannot be one
+// hard-coded number. See `list_sync_threshold()` / `list_job_frame_budget_ms()`.
 
 /// Owned sort key so the comparison sort can run off the UI thread.
 pub(super) enum OwnedKey {
@@ -61,11 +61,16 @@ pub(super) struct FilterJob {
 }
 
 impl WavesPreviewer {
+    /// Lists at or below this size sort/filter synchronously in one frame.
+    pub(super) fn list_sync_threshold(&self) -> usize {
+        self.perf.list_sync_threshold()
+    }
+
     fn list_job_frame_budget_ms(&self) -> f64 {
         if self.playback_is_playing_now() || self.playback_session.is_playing {
             0.25
         } else {
-            LIST_JOB_FRAME_BUDGET_MS
+            self.perf.list_job_frame_budget_ms()
         }
     }
 
@@ -205,7 +210,7 @@ impl WavesPreviewer {
     /// large lists build the sort snapshot over multiple frames and sort on a
     /// worker thread while the UI keeps the old order.
     pub(super) fn request_sort(&mut self) {
-        if self.files.len() <= LIST_JOB_SYNC_THRESHOLD || self.sort_dir == SortDir::None {
+        if self.files.len() <= self.list_sync_threshold() || self.sort_dir == SortDir::None {
             // Cancel any stale async job so its result cannot overwrite the
             // fresh synchronous order.
             self.sort_request_seq = self.sort_request_seq.wrapping_add(1);
@@ -438,7 +443,7 @@ impl WavesPreviewer {
     /// result (then re-sort) when done.
     pub(super) fn refresh_filter_then_sort(&mut self) {
         let query = self.search_query.trim().to_string();
-        if query.is_empty() || self.items.len() <= LIST_JOB_SYNC_THRESHOLD {
+        if query.is_empty() || self.items.len() <= self.list_sync_threshold() {
             self.filter_job = None;
             self.apply_filter_from_search();
             if self.sort_dir != SortDir::None {

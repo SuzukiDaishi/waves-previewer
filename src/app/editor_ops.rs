@@ -146,11 +146,20 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn drain_editor_wave_cache_jobs(&mut self, ctx: &egui::Context) {
+        // Each result clones a full waveform + pyramid into every matching
+        // tab; two of those is already a lot of copying for one frame.
+        const MAX_PER_FRAME: usize = 2;
         let mut results = Vec::new();
         if let Some(rx) = &self.editor_wave_cache_rx {
             while let Ok(msg) = rx.try_recv() {
                 results.push(msg);
+                if results.len() >= MAX_PER_FRAME {
+                    break;
+                }
             }
+        }
+        if results.len() >= MAX_PER_FRAME {
+            ctx.request_repaint();
         }
         for (path, generation, waveform_minmax, waveform_pyramid) in results {
             if self.editor_wave_cache_generation.get(&path).copied() != Some(generation) {
@@ -3602,6 +3611,11 @@ impl crate::app::WavesPreviewer {
     /// true so the caller refuses to spawn a second one (the busy tab's UI is
     /// disabled, but other tabs' Apply buttons and hotkeys can still race).
     pub(super) fn editor_apply_slot_busy_toast(&mut self) -> bool {
+        // A restore in flight still owns the tab set; an apply started now
+        // could target a tab the restore is about to replace.
+        if self.session_open_busy_toast() {
+            return true;
+        }
         if self.editor_apply_state.is_some() {
             self.push_toast(
                 crate::app::types::ToastSeverity::Info,

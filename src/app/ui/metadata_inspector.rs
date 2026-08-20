@@ -251,18 +251,28 @@ impl crate::app::WavesPreviewer {
         }
     }
 
-    fn metadata_source_for_tab(&self, tab_idx: usize) -> Option<(PathBuf, bool)> {
-        let tab = self.tabs.get(tab_idx)?;
-        if !self.is_virtual_path(&tab.path) {
-            return tab.path.is_file().then(|| (tab.path.clone(), false));
+    /// The file whose metadata this tab should show.
+    ///
+    /// Runs every frame the inspector is visible, so it must not stat: on a
+    /// share that would be one blocking syscall per frame. `path_status`
+    /// answers from cache and probes in the background, and a path it has
+    /// not resolved yet counts as present -- the metadata read that follows
+    /// is itself async and reports its own failure if the file is gone.
+    fn metadata_source_for_tab(&mut self, tab_idx: usize) -> Option<(PathBuf, bool)> {
+        let tab_path = self.tabs.get(tab_idx)?.path.clone();
+        if !self.is_virtual_path(&tab_path) {
+            return self
+                .path_is_file_cached(&tab_path)
+                .then(|| (tab_path, false));
         }
-        let mut current = tab.path.clone();
+        let mut current = tab_path;
         for _ in 0..16 {
             let item = self.item_for_path(&current)?;
             let source = item.virtual_state.as_ref().map(|state| &state.source)?;
             match source {
                 VirtualSourceRef::FilePath(path) => {
-                    return path.is_file().then(|| (path.clone(), true));
+                    let path = path.clone();
+                    return self.path_is_file_cached(&path).then_some((path, true));
                 }
                 VirtualSourceRef::VirtualPath(path) => current = path.clone(),
                 VirtualSourceRef::Sidecar(_) => return None,

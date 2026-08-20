@@ -117,6 +117,26 @@ impl WavesPreviewer {
                 }
             }};
         }
+        // Background threads push into channels this loop polls; once the
+        // loop is allowed to sleep they need a way to ask for a frame.
+        crate::ui_wake::register_ui_context(ctx);
+        // One shared deadline for everything marked deferrable below. The
+        // per-subsystem budgets are additive on their own; this caps the sum.
+        self.frame_budget
+            .begin(frame_started, self.perf.frame_budget());
+        // Runs whatever `$body` is unless the frame budget is already spent,
+        // in which case the work stays queued and a repaint is requested at
+        // the end of the frame. Only for drains the user is not waiting on
+        // synchronously -- latency-critical work below is called directly.
+        macro_rules! deferrable {
+            ($body:expr) => {{
+                if self.frame_budget.should_continue() {
+                    $body;
+                } else {
+                    self.frame_budget.note_deferred();
+                }
+            }};
+        }
         if had_ui_input {
             self.debug.ui_input_started_at = Some(frame_started);
         }
@@ -149,11 +169,14 @@ impl WavesPreviewer {
                 ctx.request_repaint();
             }
         });
-        trace_stage!("pump_list_meta_prefetch", self.pump_list_meta_prefetch());
-        trace_stage!(
+        deferrable!(trace_stage!(
+            "pump_list_meta_prefetch",
+            self.pump_list_meta_prefetch()
+        ));
+        deferrable!(trace_stage!(
             "pump_metadata_summary_prefetch",
             self.pump_metadata_summary_prefetch()
-        );
+        ));
         self.process_ipc_requests();
         self.apply_pending_transcript_seek();
         self.process_tool_results();
@@ -177,15 +200,22 @@ impl WavesPreviewer {
         );
         self.drain_editor_decode();
         self.drain_heavy_overlay_results();
-        self.drain_auto_trim_results();
-        self.poll_auto_trim_live_rerun();
-        self.drain_loop_detect_results();
+        deferrable!(self.drain_auto_trim_results());
+        deferrable!(self.poll_auto_trim_live_rerun());
+        deferrable!(self.drain_loop_detect_results());
         self.drain_recording_events();
         self.tick_audio_device_watch(frame_started);
         self.drain_editor_apply_jobs(ctx);
         self.drain_mix_audition(ctx);
-        self.tick_folder_watch(ctx);
-        self.poll_resample_fallbacks();
+        deferrable!({
+            // Applying an answer only touches a hash map, but a screen of
+            // rows resolving at once still deserves a cap.
+            if self.path_status.drain(256) > 0 {
+                ctx.request_repaint();
+            }
+        });
+        deferrable!(self.tick_folder_watch(ctx));
+        deferrable!(self.poll_resample_fallbacks());
         self.drain_editor_wave_cache_jobs(ctx);
         self.poll_editor_play_selection(ctx);
         self.drain_session_save(ctx);
@@ -194,19 +224,22 @@ impl WavesPreviewer {
         self.drain_plugin_jobs(ctx);
         self.poll_plugin_auto_preview(ctx);
         self.poll_variation_audition(ctx);
-        self.drain_duplicate_scan(ctx);
-        self.drain_transcript_model_download_results(ctx);
-        self.drain_transcript_ai_results(ctx);
-        self.drain_music_model_download_results(ctx);
-        self.drain_music_ai_results(ctx);
+        deferrable!(self.drain_duplicate_scan(ctx));
+        deferrable!(self.drain_transcript_model_download_results(ctx));
+        deferrable!(self.drain_transcript_ai_results(ctx));
+        deferrable!(self.drain_music_model_download_results(ctx));
+        deferrable!(self.drain_music_ai_results(ctx));
         self.drain_music_preview_results(ctx);
-        self.enforce_music_stem_cache_policy();
-        trace_stage!("drain_meta_updates", self.drain_meta_updates(ctx));
-        trace_stage!(
+        deferrable!(self.enforce_music_stem_cache_policy());
+        deferrable!(trace_stage!(
+            "drain_meta_updates",
+            self.drain_meta_updates(ctx)
+        ));
+        deferrable!(trace_stage!(
             "drain_metadata_summary_updates",
             self.drain_metadata_summary_updates(ctx)
-        );
-        self.drain_external_load_results(ctx);
+        ));
+        deferrable!(self.drain_external_load_results(ctx));
         self.check_csv_export_completion();
         self.tick_bulk_resample();
         if self.bulk_resample_state.is_some() {
@@ -216,18 +249,23 @@ impl WavesPreviewer {
         if self.batch_loudnorm_state.is_some() {
             ctx.request_repaint();
         }
-        self.apply_spectrogram_updates(ctx);
-        self.apply_feature_analysis_updates(ctx);
-        self.apply_editor_viewport_render_updates(ctx);
+        deferrable!(self.apply_spectrogram_updates(ctx));
+        deferrable!(self.apply_feature_analysis_updates(ctx));
+        deferrable!(self.apply_editor_viewport_render_updates(ctx));
         self.drain_export_results(ctx);
-        self.drain_lufs_recalc_results();
+        deferrable!(self.drain_lufs_recalc_results());
         if self.inspection_run_state.is_some() {
-            self.drain_inspection_results(ctx);
+            deferrable!(self.drain_inspection_results(ctx));
         }
         self.drain_effect_graph_runner(ctx);
         self.tick_playback_fx_state(ctx);
-        self.pump_lufs_recalc_worker();
+        deferrable!(self.pump_lufs_recalc_worker());
         self.tick_processing_state(ctx);
+        // Anything skipped above must come back promptly, or a backlog
+        // would sit until the next unrelated repaint.
+        if self.frame_budget.has_deferred_work() {
+            ctx.request_repaint();
+        }
     }
 
     fn run_frame_workspace(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
@@ -944,6 +982,93 @@ impl WavesPreviewer {
         }
     }
 
+    /// A frame this slow is long enough for the window to stop answering,
+    /// so it is worth naming rather than just counting.
+    const LONG_FRAME_MS: f32 = 250.0;
+    /// Enough history to see a pattern, short enough to read at a glance.
+    const LONG_FRAME_HISTORY: usize = 16;
+
+    /// Note a frame that ran long, with whatever was active while it ran.
+    /// This is the record a "it freezes on my machine" report can quote
+    /// without needing the reporter to reproduce it under a profiler.
+    fn record_long_frame(&mut self, frame_ms: f32) {
+        if frame_ms < Self::LONG_FRAME_MS {
+            return;
+        }
+        let mut active: Vec<&str> = Vec::new();
+        if self.project_open_state.is_some() {
+            active.push("session-open");
+        }
+        if self.scan_in_progress {
+            active.push("scan");
+        }
+        if self.sort_job_active() {
+            active.push("sort");
+        }
+        if self.filter_job_active() {
+            active.push("filter");
+        }
+        if self.editor_decode_state.is_some() {
+            active.push("editor-decode");
+        }
+        if self.editor_apply_state.is_some() {
+            active.push("editor-apply");
+        }
+        if self.processing.is_some() {
+            active.push("processing");
+        }
+        if self.export_state.is_some() {
+            active.push("export");
+        }
+        if self.session_save_state.is_some() {
+            active.push("session-save");
+        }
+        if !self.meta_inflight.is_empty() {
+            active.push("meta");
+        }
+        if !self.spectro_inflight.is_empty() {
+            active.push("spectrogram");
+        }
+        if !self.editor_feature_inflight.is_empty() {
+            active.push("features");
+        }
+        if self.bulk_resample_state.is_some() {
+            active.push("bulk-resample");
+        }
+        if self.inspection_run_state.is_some() {
+            active.push("inspection");
+        }
+        let deferred = self.frame_budget.deferred_count();
+        if deferred > 0 {
+            active.push("budget-deferred");
+        }
+        let detail = if active.is_empty() {
+            format!("idle/ui (tier {})", self.perf.tier.as_str())
+        } else {
+            format!("{} (tier {})", active.join("+"), self.perf.tier.as_str())
+        };
+        self.debug_log(format!("long frame {frame_ms:.0}ms: {detail}"));
+        if self.debug.long_frames.len() >= Self::LONG_FRAME_HISTORY {
+            self.debug.long_frames.pop_back();
+        }
+        self.debug.long_frames.push_front((frame_ms, detail));
+    }
+
+    /// True while the staged startup work still has steps left to run.
+    fn startup_maintenance_finished(&self) -> bool {
+        self.startup_paths_applied && self.startup_maintenance_step >= 7
+    }
+
+    /// True while a metadata/transcript worker still owes this frame loop a
+    /// result. The pools feed themselves from the per-frame pump, so as long
+    /// as anything is in flight the loop has to keep coming back.
+    fn meta_pool_has_pending_work(&self) -> bool {
+        !self.meta_inflight.is_empty()
+            || !self.transcript_inflight.is_empty()
+            || !self.transcript_ai_inflight.is_empty()
+            || !self.metadata_summary_inflight.is_empty()
+    }
+
     fn run_frame_finish(&mut self, ctx: &egui::Context, frame_started: Instant) {
         let scroll_target = self.current_ui_scroll_target();
         self.ui_scroll_focus.finish_frame(scroll_target);
@@ -974,18 +1099,45 @@ impl WavesPreviewer {
             || self.sort_job_active()
             || self.filter_job_active()
             || !self.editor_feature_inflight.is_empty();
+        // Anything still working needs the loop to come back on its own.
+        // Everything here either polls a channel per frame or advances a
+        // timer, so leaving one out would stall that work until the user
+        // happened to move the mouse.
+        let background_work = self.frame_budget.has_deferred_work()
+            || self.audio_bootstrap_rx.is_some()
+            || !self.startup_maintenance_finished()
+            || self.meta_pool_has_pending_work()
+            || self.path_status.has_pending()
+            || !self.toasts.is_empty();
         let repaint_ms = if fast_repaint {
-            16
+            Some(16)
         } else if progress_repaint {
-            50
+            Some(50)
         } else if self.zoo_enabled && self.is_list_workspace_active() {
-            50
+            Some(50)
         } else if self.zoo_enabled {
-            33
+            Some(33)
+        } else if background_work {
+            Some(80)
+        } else if self.audio.has_output_stream() {
+            // The output device poll only advances when this loop runs, so
+            // a fully asleep app would stop noticing an endpoint being
+            // unplugged. One frame a second keeps that working at a
+            // fraction of the old 12fps idle cost. (During playback the
+            // fast path above already covers it.)
+            Some(1_000)
         } else {
-            80
+            // Genuinely idle: no timer to service and no channel with
+            // anything coming. Asking for another frame here is what kept
+            // the app repainting at 12fps forever, which on a weak GPU is
+            // real CPU the UI thread has to win back from the workers.
+            // Input wakes egui on its own; background threads call
+            // `ui_wake::wake_ui()`.
+            None
         };
-        ctx.request_repaint_after(Duration::from_millis(repaint_ms));
+        if let Some(ms) = repaint_ms {
+            ctx.request_repaint_after(Duration::from_millis(ms));
+        }
         if let Some(started_at) = self.debug.ui_input_started_at.take() {
             let elapsed_ms = started_at.elapsed().as_secs_f32() * 1000.0;
             self.debug_push_ui_input_to_paint_sample(elapsed_ms);
@@ -996,6 +1148,17 @@ impl WavesPreviewer {
         self.debug.frame_samples = self.debug.frame_samples.saturating_add(1);
         if self.debug.frame_peak_ms < self.debug.frame_last_ms {
             self.debug.frame_peak_ms = self.debug.frame_last_ms;
+        }
+        self.record_long_frame(frame_ms as f32);
+        // Sustained slow frames mean this machine cannot afford the slice
+        // sizes it was given; drop a tier so every budget shrinks at once.
+        if self.perf.note_frame_ms(self.debug.frame_last_ms) {
+            let tier = self.perf.tier;
+            self.debug_log(format!(
+                "perf tier demoted to {} after sustained slow frames (last {:.1}ms)",
+                tier.as_str(),
+                self.debug.frame_last_ms
+            ));
         }
     }
 }

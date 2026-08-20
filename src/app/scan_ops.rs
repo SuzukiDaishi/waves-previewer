@@ -114,6 +114,9 @@ impl WavesPreviewer {
                 ListLoadKind::Folder => self.reset_list_contents_for_folder_load(),
                 ListLoadKind::Files => self.reset_list_contents_for_explicit_replace(),
             }
+            // The root is set by now, so the pool about to be built is
+            // sized for the right kind of storage.
+            self.refresh_root_locality();
         } else {
             self.clear_list_load_runtime();
             self.ensure_meta_pool();

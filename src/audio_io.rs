@@ -404,7 +404,13 @@ fn looks_like_unc_path(value: &str) -> bool {
         || (lower.starts_with("\\\\") && !lower.starts_with("\\\\?\\"))
 }
 
-fn is_remote_file_path(path: &Path) -> bool {
+/// True when `path` lives on a network share.
+///
+/// Remote paths need different handling all over the app: a single stat can
+/// block for an SMB timeout, so it must never run on the UI thread, and
+/// background sweeps have to back off rather than saturate the link the
+/// user is waiting on.
+pub fn is_remote_file_path(path: &Path) -> bool {
     let value = path.to_string_lossy();
     if looks_like_unc_path(&value) {
         return true;

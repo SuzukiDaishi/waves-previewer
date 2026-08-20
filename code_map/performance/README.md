@@ -4,14 +4,15 @@ UI / Audio 高速化を調査するときの読み順と、巨大ファイルの
 
 ## Reading Order
 
-1. `docs/UI_PERFORMANCE_IMPROVEMENT_CANDIDATES_20260606.md` で候補と優先度を確認する。
-2. `src/app/frame_ops.rs` と `src/app/logic.rs` で frame 内に残っている仕事を確認する。
-3. list 系なら `src/app/ui/list.rs`, `src/app/ui/list/table.rs`, `src/app/search_ops.rs`, `src/app/list_state_ops.rs`, `src/app/meta_ops.rs` を読む。
-4. list preview / MP3 系なら `src/app/list_preview_ops.rs`, `src/audio_io.rs`, `src/audio.rs`, `src/app/preview_ops.rs` を読む。
-5. editor 系なら `src/app/ui/editor.rs`, `src/app/editor_decode_ops.rs`, `src/app/editor_viewport.rs`, `src/app/spectrogram_jobs.rs`, `src/app/editor_ops.rs` を読む。
-6. loading / progress / cancel 表示なら `src/app/loading_ops.rs`, `src/app/ui/topbar/status.rs`, `src/app/frame_ops.rs` を読む。
-7. bulk resample の frame 分割なら `src/app/resample_ops.rs` と `src/app/loading_ops.rs` を読む。
-8. job 分離方針を見るなら `src/app/threading.rs`, `src/app/types.rs`, 各 `*_ops.rs` の `std::thread::spawn` / channel / generation check を横断する。
+1. `docs/UI_FREEZE_COUNTERMEASURES_20260819.md` で「応答なし」対策として実施済みの内容を確認する。第1ラウンド = 低スペックPC（性能ティア / フレーム予算 / セッション段階読み込み / アイドル時スリープ）、第2ラウンド = ファイルサーバ（UIスレッドから fs を叩かない / path_status / リモート時の背景処理絞り込み）。
+2. `docs/UI_PERFORMANCE_IMPROVEMENT_CANDIDATES_20260606.md` で残りの候補と優先度を確認する。
+3. `src/app/frame_ops.rs` と `src/app/logic.rs` で frame 内に残っている仕事を確認する。
+4. list 系なら `src/app/ui/list.rs`, `src/app/ui/list/table.rs`, `src/app/search_ops.rs`, `src/app/list_state_ops.rs`, `src/app/meta_ops.rs` を読む。
+5. list preview / MP3 系なら `src/app/list_preview_ops.rs`, `src/audio_io.rs`, `src/audio.rs`, `src/app/preview_ops.rs` を読む。
+6. editor 系なら `src/app/ui/editor.rs`, `src/app/editor_decode_ops.rs`, `src/app/editor_viewport.rs`, `src/app/spectrogram_jobs.rs`, `src/app/editor_ops.rs` を読む。
+7. loading / progress / cancel 表示なら `src/app/loading_ops.rs`, `src/app/ui/topbar/status.rs`, `src/app/frame_ops.rs` を読む。
+8. bulk resample の frame 分割なら `src/app/resample_ops.rs` と `src/app/loading_ops.rs` を読む。
+9. job 分離方針を見るなら `src/app/threading.rs`, `src/app/types.rs`, 各 `*_ops.rs` の `std::thread::spawn` / channel / generation check を横断する。
 
 ## Large Files And Split Status
 

@@ -52,6 +52,7 @@ mod external_load_jobs;
 mod external_load_ops;
 mod external_ops;
 pub mod fingerprint;
+mod frame_budget;
 mod frame_ops;
 mod gain_ops;
 mod helpers;
@@ -79,6 +80,8 @@ mod metadata_list_ops;
 mod music_ai_ops;
 mod music_onnx;
 mod native_drag;
+mod path_status;
+mod perf_profile;
 mod plugin_ops;
 pub mod plugin_preset_ops;
 mod preview;
@@ -673,10 +676,10 @@ pub struct WavesPreviewer {
     /// the list is reloaded.
     list_max_duration_secs: f32,
     list_art_textures: HashMap<PathBuf, egui::TextureHandle>,
-    /// TTL cache for `Path::is_file()` checks in the list view. Probing the
-    /// filesystem for every visible row on every frame stalls the UI thread,
-    /// especially on network shares.
-    fs_exists_cache: rustc_hash::FxHashMap<PathBuf, (bool, std::time::Instant)>,
+    /// Background "does this path exist" service. On a network share a
+    /// single `stat` can block for the SMB timeout, so the UI thread takes
+    /// none of them: it reads this cache and a worker does the syscalls.
+    path_status: crate::app::path_status::PathStatusService,
     /// Compiled highlight regex for the current `(search_query, search_use_regex)`.
     /// `None` inner value means the query does not compile / is empty.
     search_highlight_cache: Option<(String, bool, Option<regex::Regex>)>,
@@ -831,6 +834,13 @@ pub struct WavesPreviewer {
     plugin_rack_worker: Arc<std::sync::Mutex<Option<crate::plugin::client::RackWorkerClient>>>,
     plugin_job_id: u64,
     plugin_temp_seq: u64,
+    /// Machine tier and every UI-thread budget derived from it. Read this
+    /// instead of hard-coding a threshold, so a low-spec machine takes
+    /// smaller slices everywhere at once.
+    perf: crate::app::perf_profile::PerfProfile,
+    /// Shared deadline for the deferrable drains in `run_frame_pre_ui`, so
+    /// their individual budgets cannot add up into a long frame.
+    frame_budget: crate::app::frame_budget::FrameBudget,
     zoo_enabled: bool,
     zoo_walk_enabled: bool,
     zoo_voice_enabled: bool,
@@ -900,6 +910,12 @@ pub struct WavesPreviewer {
     recent_sessions: Vec<PathBuf>,
     project_open_pending: Option<PathBuf>,
     project_open_state: Option<ProjectOpenState>,
+    /// Bumped per session open so a parse worker whose result arrives
+    /// after the user started another open can be dropped.
+    project_open_generation: u64,
+    /// Set when an interactive Session Close is waiting on its async
+    /// autosave; `drain_session_save` tears the session down once written.
+    close_after_session_save: bool,
     theme_mode: ThemeMode,
     item_bg_mode: ItemBgMode,
     show_rename_dialog: bool,

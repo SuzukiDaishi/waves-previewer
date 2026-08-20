@@ -20,13 +20,207 @@ use super::project::{
     ProjectExternalSource, ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList,
     ProjectListColumns, ProjectListItem, ProjectSampleRateOverride, ProjectToolState,
     ProjectTranscriptDocument, ProjectTranscriptLanguage, ProjectVirtualItem, ProjectVirtualOp,
-    ProjectVirtualSource, SessionPathMode,
+    ProjectVirtualSource, SessionPathMode, SessionPathRepair,
 };
 use super::types::{LoopXfadeShape, MediaSource, VirtualOp, VirtualSourceRef, VirtualState};
+
+/// A session document that has been read, version-checked and had its
+/// source paths repaired -- everything that can be done without touching
+/// app state, and therefore everything that can run off the UI thread.
+pub(super) struct ParsedSession {
+    pub path: PathBuf,
+    /// Boxed: `ProjectFile` is large and this crosses a channel.
+    pub project: Box<ProjectFile>,
+    pub path_repair: SessionPathRepair,
+    pub session_path_mode: SessionPathMode,
+    pub base_dir: PathBuf,
+    /// Whether each entry of `project.list.files` exists on disk, in the
+    /// same order. Computed on the worker: the UI thread used to stat every
+    /// path itself while building the list, which on a large session or a
+    /// network share is the single longest blocking step of an open.
+    pub file_exists: Vec<bool>,
+    /// Existence of every *other* path the restore has to check — tab
+    /// sources, virtual sources, managed assets, external data sources.
+    /// The apply stage runs on the UI thread, so it must look answers up
+    /// here rather than take a syscall that could block on an SMB timeout.
+    ///
+    /// A path absent from the map counts as present: the restore then takes
+    /// its normal route and whatever it tries next reports its own failure,
+    /// which is what happened before the map existed.
+    pub other_exists: rustc_hash::FxHashMap<PathBuf, bool>,
+}
+
+/// Audio a session restore needs, decoded ahead of the apply stage.
+///
+/// The apply stage used to call `load_sidecar_audio` / `decode_audio_multi`
+/// inline, once per virtual item, cached edit, tab and preview overlay, all
+/// inside the frame that opened the session. Decoding is the dominant cost
+/// of restoring a session with edits, so it happens on workers first and
+/// the apply stage only looks results up here.
+#[derive(Default)]
+pub(super) struct SessionAudioPrefetch {
+    /// Keyed by the document's raw sidecar reference, as written.
+    sidecars: std::collections::HashMap<String, (Vec<Vec<f32>>, u32)>,
+    /// Sidecars already normalized and cached for the editor.
+    prepared: std::collections::HashMap<String, PreparedSidecar>,
+    /// Keyed by the resolved source path.
+    files: std::collections::HashMap<PathBuf, (Vec<Vec<f32>>, u32)>,
+}
+
+impl SessionAudioPrefetch {
+    /// Take the decoded sidecar, if it decoded.
+    ///
+    /// Taking (rather than cloning) keeps one copy of each buffer in
+    /// memory, which matters for a session full of long edits. A miss --
+    /// the decode failed, the reference was not collected, or a second
+    /// call for a reference two parts of the document share -- puts the
+    /// caller back on the inline decode it always had.
+    pub(super) fn take_sidecar(&mut self, raw: &str) -> Option<(Vec<Vec<f32>>, u32)> {
+        self.sidecars.remove(raw)
+    }
+
+    pub(super) fn take_file(&mut self, path: &Path) -> Option<(Vec<Vec<f32>>, u32)> {
+        self.files.remove(path)
+    }
+
+    /// Take a sidecar the worker already normalized and cached. Same
+    /// take-not-clone rule as `take_sidecar`.
+    pub(super) fn take_prepared(&mut self, raw: &str) -> Option<PreparedSidecar> {
+        self.prepared.remove(raw)
+    }
+}
+
+/// A sidecar that the restore turns into an editor buffer. Normalizing it
+/// to the output rate and building its waveform pyramid are both O(n) passes
+/// over the whole clip; done on the UI thread, once per edited tab, they are
+/// what is left of a frozen session open after the decode moved to workers.
+#[derive(Clone, Copy)]
+struct SidecarPrep {
+    /// `buffer_sample_rate` as stored in the document, if it has one.
+    stored_buffer_sr: Option<u32>,
+    out_sr: u32,
+    quality: crate::wave::ResampleQuality,
+}
+
+/// A sidecar decoded, resampled and turned into editor caches, ready for the
+/// apply stage to move into place without touching the samples again.
+pub(super) struct PreparedSidecar {
+    pub channels: Vec<Vec<f32>>,
+    pub buffer_sample_rate: u32,
+    pub samples_len: usize,
+    pub waveform_minmax: Vec<(f32, f32)>,
+    pub waveform_pyramid:
+        Option<std::sync::Arc<crate::app::render::waveform_pyramid::WaveformPyramidSet>>,
+}
+
+/// One thing to decode before the apply stage runs.
+enum PrefetchRequest {
+    Sidecar {
+        raw: String,
+        /// Set for sidecars the restore turns into editor buffers; the
+        /// worker then does the resample and cache build too.
+        prep: Option<SidecarPrep>,
+    },
+    File {
+        path: PathBuf,
+    },
+}
+
+enum PrefetchResult {
+    Sidecar {
+        raw: String,
+        channels: Vec<Vec<f32>>,
+        sample_rate: u32,
+    },
+    Prepared {
+        raw: String,
+        prepared: Box<PreparedSidecar>,
+    },
+    File {
+        path: PathBuf,
+        channels: Vec<Vec<f32>>,
+        sample_rate: u32,
+    },
+}
+
+/// A step of the decode stage, reported as it happens so a long load shows
+/// movement instead of a bare elapsed counter.
+pub(super) enum PrefetchProgress {
+    Started { label: String },
+    Finished { label: String },
+}
+
+/// What the topbar shows about a session open in progress.
+#[derive(Default)]
+pub(super) struct SessionOpenProgress {
+    pub done: usize,
+    pub total: usize,
+    /// Items a worker has started but not finished, oldest first. The first
+    /// entry is what a stalled load is stuck on.
+    pub in_flight: Vec<String>,
+    /// When `done` last changed. A load that stops moving for long enough is
+    /// reported as waiting on the server rather than left looking hung.
+    pub last_progress_at: Option<Instant>,
+}
+
+impl SessionOpenProgress {
+    /// Nothing has completed for this long -> say what we are waiting on.
+    const STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+
+    pub fn fraction(&self) -> Option<f32> {
+        (self.total > 0).then(|| (self.done as f32 / self.total as f32).clamp(0.0, 1.0))
+    }
+
+    pub fn stalled_on(&self) -> Option<&str> {
+        let since = self.last_progress_at?;
+        if since.elapsed() < Self::STALL_AFTER {
+            return None;
+        }
+        self.in_flight.first().map(String::as_str)
+    }
+}
+
+/// Which part of opening a session is currently running.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum SessionOpenPhase {
+    /// Waiting for the first frame to paint, so the user sees the status
+    /// line before anything expensive starts.
+    Announced,
+    /// A worker is reading and repairing the document.
+    Parsing,
+    /// Workers are decoding the session's edited audio and virtual sources.
+    Decoding,
+    /// The parsed document is being applied to app state.
+    Applying,
+}
+
+impl SessionOpenPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionOpenPhase::Announced | SessionOpenPhase::Parsing => "Reading session",
+            SessionOpenPhase::Decoding => "Decoding session audio",
+            SessionOpenPhase::Applying => "Restoring session",
+        }
+    }
+}
 
 pub(super) struct ProjectOpenState {
     pub started_at: Instant,
     pub shown: bool,
+    pub phase: SessionOpenPhase,
+    /// Result channel for the parse worker.
+    pub parse_rx: Option<std::sync::mpsc::Receiver<Result<ParsedSession, String>>>,
+    /// Result channel for the decode stage, which returns the parsed
+    /// document alongside the audio it decoded.
+    pub decode_rx: Option<std::sync::mpsc::Receiver<(ParsedSession, SessionAudioPrefetch)>>,
+    /// Per-item progress from the decode workers.
+    pub progress_rx: Option<std::sync::mpsc::Receiver<PrefetchProgress>>,
+    pub progress: SessionOpenProgress,
+    /// Bumped per open; a worker whose generation no longer matches has
+    /// been superseded (the user opened another session) and its result is
+    /// dropped rather than applied over the newer one.
+    pub generation: u64,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(windows)]
@@ -73,6 +267,367 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// The staged open must reach exactly the state the one-shot open
+    /// reaches. `open_project_file` is the one-shot path (CLI, kittest);
+    /// the GUI runs the same parse on a worker and applies the result, so
+    /// splitting the two must not change what lands in app state.
+    #[test]
+    fn staged_open_matches_the_one_shot_open() {
+        let dir = temp_dir("staged_parity");
+        let audio = dir.join("tone.wav");
+        crate::wave::export_channels_audio(&[vec![0.1, -0.1, 0.2]], 48_000, &audio)
+            .expect("write fixture");
+        let session = dir.join("parity.nwsess");
+        {
+            let mut app =
+                crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+            app.replace_with_files(&[audio.clone()]);
+            app.save_project_as_blocking(session.clone())
+                .expect("save session");
+        }
+
+        let mut one_shot =
+            crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+        one_shot
+            .open_project_file(session.clone())
+            .expect("one-shot open");
+
+        // The staged path: parse off-thread, then apply.
+        let parsed = crate::app::WavesPreviewer::parse_session_document(session.clone())
+            .expect("parse session");
+        let mut staged =
+            crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+        staged.apply_parsed_session(parsed).expect("staged apply");
+
+        let paths_of = |app: &crate::app::WavesPreviewer| -> Vec<PathBuf> {
+            app.items.iter().map(|item| item.path.clone()).collect()
+        };
+        assert_eq!(paths_of(&one_shot), paths_of(&staged));
+        assert_eq!(one_shot.files.len(), staged.files.len());
+        assert_eq!(one_shot.tabs.len(), staged.tabs.len());
+        assert_eq!(one_shot.project_path, staged.project_path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A file listed by the session but gone from disk must still be marked
+    /// missing. The stat moved to the parse worker, so the flag now travels
+    /// in `ParsedSession::file_exists` rather than being taken on the UI
+    /// thread while building rows.
+    #[test]
+    fn a_missing_file_is_still_flagged_after_the_stat_moved_to_the_worker() {
+        let dir = temp_dir("missing_flag");
+        let present = dir.join("present.wav");
+        let absent = dir.join("absent.wav");
+        crate::wave::export_channels_audio(&[vec![0.1, 0.2]], 48_000, &present)
+            .expect("write fixture");
+        let session = dir.join("missing.nwsess");
+        {
+            let mut app =
+                crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+            app.replace_with_files(&[present.clone()]);
+            app.save_project_as_blocking(session.clone())
+                .expect("save session");
+        }
+        // Add a path that never existed, the way a session outlives a file.
+        let text = std::fs::read_to_string(&session).expect("read session");
+        let mut saved = deserialize_project(&text).expect("parse session");
+        saved.list.files.push(absent.to_string_lossy().to_string());
+        std::fs::write(&session, serialize_project(&saved).expect("serialize"))
+            .expect("rewrite session");
+
+        let parsed = crate::app::WavesPreviewer::parse_session_document(session.clone())
+            .expect("parse session");
+        assert_eq!(parsed.file_exists.len(), parsed.project.list.files.len());
+        let mut app =
+            crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+        app.apply_parsed_session(parsed).expect("apply");
+
+        let absent_status = app
+            .item_for_path(&absent)
+            .map(|item| item.status.clone())
+            .expect("absent row present in the list");
+        assert!(
+            matches!(
+                absent_status,
+                super::super::types::MediaStatus::DecodeFailed(_)
+            ),
+            "a session row whose file is gone must still read as missing, got {absent_status:?}"
+        );
+        let present_status = app
+            .item_for_path(&present)
+            .map(|item| item.status.clone())
+            .expect("present row");
+        assert!(matches!(
+            present_status,
+            super::super::types::MediaStatus::Ok
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Prefetching the audio must not change the restored state: the apply
+    /// stage reads decoded buffers out of the prefetch instead of decoding
+    /// inline, and a session with an edited tab must come back identical
+    /// either way.
+    #[test]
+    fn prefetched_audio_restores_the_same_session_as_inline_decoding() {
+        let dir = temp_dir("prefetch_parity");
+        let audio = dir.join("edit.wav");
+        crate::wave::export_channels_audio(&[vec![0.3, -0.3, 0.1, 0.0]], 48_000, &audio)
+            .expect("write fixture");
+        let session = dir.join("prefetch.nwsess");
+        {
+            let mut app =
+                crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+            app.replace_with_files(&[audio.clone()]);
+            app.open_or_activate_tab(&audio);
+            // A sidecar is only written for a dirty tab with samples, and a
+            // session with no sidecar would exercise nothing here.
+            let tab = app.tabs.first_mut().expect("tab opened");
+            tab.ch_samples = vec![vec![0.5, -0.25, 0.125, -0.0625]];
+            tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
+            tab.samples_len = 4;
+            tab.buffer_sample_rate = 48_000;
+            tab.dirty = true;
+            app.save_project_as_blocking(session.clone())
+                .expect("save session");
+        }
+
+        let inline_parsed = crate::app::WavesPreviewer::parse_session_document(session.clone())
+            .expect("parse for inline");
+        let mut inline =
+            crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+        inline
+            .apply_parsed_session(inline_parsed)
+            .expect("inline apply");
+
+        let prefetched_parsed = crate::app::WavesPreviewer::parse_session_document(session.clone())
+            .expect("parse for prefetch");
+        // Collecting reads the output rate and resampler quality off the
+        // app, so it needs one to ask.
+        let staged_probe =
+            crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+        let requests = staged_probe.collect_prefetch_requests(&prefetched_parsed);
+        assert!(
+            !requests.is_empty(),
+            "the fixture must produce something to prefetch, or this proves nothing"
+        );
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let prefetch = crate::app::WavesPreviewer::run_audio_prefetch(
+            &prefetched_parsed.path.clone(),
+            requests,
+            2,
+            &cancel,
+            None,
+        );
+        assert!(
+            !prefetch.prepared.is_empty(),
+            "the tab's edited audio should have been prepared off the UI thread"
+        );
+        // Prove the worker did the whole job, not just the decode: the
+        // buffer is normalized and the editor's waveform caches are built,
+        // so the apply stage only moves them into place.
+        assert!(
+            prefetch.prepared.values().any(|prep| {
+                prep.channels.as_slice() == [vec![0.5f32, -0.25, 0.125, -0.0625]]
+                    && prep.samples_len == 4
+                    && !prep.waveform_minmax.is_empty()
+                    && prep.waveform_pyramid.is_some()
+            }),
+            "prepared sidecar should carry the saved audio and its caches, got {:?}",
+            prefetch
+                .prepared
+                .values()
+                .map(|p| (
+                    p.channels.len(),
+                    p.samples_len,
+                    p.waveform_minmax.len(),
+                    p.waveform_pyramid.is_some()
+                ))
+                .collect::<Vec<_>>()
+        );
+        let mut staged =
+            crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+        staged
+            .apply_parsed_session_with_audio(prefetched_parsed, prefetch)
+            .expect("prefetched apply");
+
+        // Opening the tab moves the restored edit out of `edited_cache` and
+        // hands the audio to the async editor decode, which a headless app
+        // never pumps -- so compare the state the apply itself produced.
+        assert_eq!(inline.items.len(), staged.items.len());
+        assert_eq!(inline.tabs.len(), staged.tabs.len());
+        assert!(!inline.tabs.is_empty(), "the fixture should restore a tab");
+        for (a, b) in inline.tabs.iter().zip(staged.tabs.iter()) {
+            assert_eq!(a.path, b.path);
+            assert_eq!(a.dirty, b.dirty);
+            assert_eq!(a.buffer_sample_rate, b.buffer_sample_rate);
+            assert_eq!(a.samples_len_visual, b.samples_len_visual);
+        }
+        assert_eq!(
+            inline.tabs[0].samples_len_visual, 4,
+            "the restored tab should carry the saved edit's length"
+        );
+        assert!(inline.tabs[0].dirty, "the saved tab was dirty");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A cancelled prefetch must stop pulling work rather than decoding the
+    /// whole queue anyway.
+    #[test]
+    fn a_cancelled_prefetch_stops_decoding() {
+        let dir = temp_dir("prefetch_cancel");
+        let session = dir.join("cancel.nwsess");
+        std::fs::write(&session, "").expect("touch session");
+        let requests: Vec<_> = (0..64)
+            .map(|i| PrefetchRequest::File {
+                path: dir.join(format!("never_{i}.wav")),
+            })
+            .collect();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        let prefetch =
+            crate::app::WavesPreviewer::run_audio_prefetch(&session, requests, 2, &cancel, None);
+
+        assert!(
+            prefetch.files.is_empty() && prefetch.sidecars.is_empty(),
+            "a cancelled prefetch must not return decoded audio"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The apply stage runs on the UI thread, so it must not stat: on a
+    /// share one `stat` can block for the SMB timeout. Every existence
+    /// question is answered on the parse worker instead. This checks the
+    /// answers actually arrive, for a tab whose file is gone — the case the
+    /// apply stage used to probe itself, once per tab.
+    #[test]
+    fn a_missing_tab_source_is_resolved_by_the_parse_worker() {
+        let dir = temp_dir("tab_probe");
+        let audio = dir.join("tab.wav");
+        crate::wave::export_channels_audio(&[vec![0.2, -0.2]], 48_000, &audio)
+            .expect("write fixture");
+        let session = dir.join("tab_probe.nwsess");
+        {
+            let mut app =
+                crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+            app.replace_with_files(&[audio.clone()]);
+            app.open_or_activate_tab(&audio);
+            app.save_project_as_blocking(session.clone())
+                .expect("save session");
+        }
+        // The file disappears between saving and reopening, the way a
+        // session outlives what it points at.
+        std::fs::remove_file(&audio).expect("remove fixture");
+
+        let parsed = crate::app::WavesPreviewer::parse_session_document(session.clone())
+            .expect("parse session");
+
+        assert_eq!(
+            parsed.other_exists.get(&audio),
+            Some(&false),
+            "the parse worker should have probed the tab's source"
+        );
+        // A path the collector does not cover is simply absent, which the
+        // apply stage reads as present: it then takes its normal route and
+        // reports its own failure.
+        assert!(!parsed
+            .other_exists
+            .contains_key(&dir.join("never_referenced.wav")));
+
+        let mut app =
+            crate::app::WavesPreviewer::new_headless(Default::default()).expect("headless app");
+        app.apply_parsed_session(parsed).expect("apply");
+        assert!(
+            app.tabs.iter().any(|tab| tab.path == audio),
+            "the tab should still be restored so the user can see what is missing"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A long load must show movement, not just a rising second counter:
+    /// that is the difference between "working" and "hung" to the user.
+    #[test]
+    fn the_prefetch_reports_progress_per_item() {
+        let dir = temp_dir("progress");
+        let session = dir.join("progress.nwsess");
+        std::fs::write(&session, "").expect("touch session");
+        // Three sidecars that will not decode. Failures still have to be
+        // reported as progress, or a session full of missing edits would
+        // sit at 0/3 forever.
+        let requests: Vec<_> = ["a.wav", "b.wav", "c.wav"]
+            .into_iter()
+            .map(|name| PrefetchRequest::Sidecar {
+                raw: format!("sidecars/{name}"),
+                prep: None,
+            })
+            .collect();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        crate::app::WavesPreviewer::run_audio_prefetch(&session, requests, 2, &cancel, Some(tx));
+
+        let mut started = Vec::new();
+        let mut finished = Vec::new();
+        while let Ok(update) = rx.try_recv() {
+            match update {
+                PrefetchProgress::Started { label } => started.push(label),
+                PrefetchProgress::Finished { label } => finished.push(label),
+            }
+        }
+        started.sort();
+        finished.sort();
+        assert_eq!(started, vec!["a.wav", "b.wav", "c.wav"]);
+        assert_eq!(finished, vec!["a.wav", "b.wav", "c.wav"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The label is what the user sees while a share is slow, so it has to
+    /// be the file name rather than the document's internal reference.
+    #[test]
+    fn progress_labels_are_file_names() {
+        assert_eq!(
+            crate::app::WavesPreviewer::prefetch_request_label(&PrefetchRequest::Sidecar {
+                raw: "sidecars/session_tab_0.wav".to_string(),
+                prep: None,
+            }),
+            "session_tab_0.wav"
+        );
+        assert_eq!(
+            crate::app::WavesPreviewer::prefetch_request_label(&PrefetchRequest::File {
+                path: PathBuf::from("/mnt/share/kicks/kick_01.wav"),
+            }),
+            "kick_01.wav"
+        );
+    }
+
+    /// A load that stops moving has to say so, and only after long enough
+    /// that a merely slow file does not trip it.
+    #[test]
+    fn a_stalled_load_names_what_it_is_waiting_on() {
+        let mut progress = SessionOpenProgress {
+            done: 3,
+            total: 10,
+            in_flight: vec!["slow.wav".to_string(), "next.wav".to_string()],
+            last_progress_at: Some(Instant::now()),
+        };
+        assert_eq!(progress.stalled_on(), None, "fresh progress is not stalled");
+        assert_eq!(progress.fraction(), Some(0.3));
+
+        progress.last_progress_at = Some(
+            Instant::now() - SessionOpenProgress::STALL_AFTER - std::time::Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            progress.stalled_on(),
+            Some("slow.wav"),
+            "a stalled load should name the oldest item still in flight"
+        );
+
+        // Nothing in flight means nothing to blame, even when stalled.
+        progress.in_flight.clear();
+        assert_eq!(progress.stalled_on(), None);
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -437,6 +992,10 @@ impl super::WavesPreviewer {
         }
     }
 
+    /// Blocking close, kept for the CLI, the kittest harness and unit tests
+    /// that need the file on disk when the call returns. The GUI uses
+    /// `request_close_project_with_autosave`.
+    #[allow(dead_code)]
     pub(super) fn close_project_with_autosave(&mut self) -> Result<(), String> {
         if let Some(path) = self.project_path.clone() {
             // Blocking: the session state is torn down right after, so the
@@ -447,30 +1006,288 @@ impl super::WavesPreviewer {
         Ok(())
     }
 
+    /// Interactive close. Writing a session's sidecars means encoding a WAV
+    /// per edited tab and virtual item, which blocked the UI thread for as
+    /// long as that took. Save on the worker instead and tear the session
+    /// down when it lands; the existing busy overlay covers the wait with a
+    /// message rather than a frozen window.
+    pub(super) fn request_close_project_with_autosave(&mut self) -> Result<(), String> {
+        let Some(path) = self.project_path.clone() else {
+            self.close_project();
+            return Ok(());
+        };
+        self.save_project_as(path)?;
+        if self.session_save_state.is_some() {
+            // The worker owns it now; `drain_session_save` closes on success.
+            self.close_after_session_save = true;
+        } else {
+            // Nothing to write (the save completed inline), so close now.
+            self.close_project();
+        }
+        Ok(())
+    }
+
     pub(super) fn queue_project_open(&mut self, path: PathBuf) {
+        // Supersede any open still in flight: its worker result will be
+        // dropped on generation mismatch rather than applied over this one.
+        if let Some(previous) = self.project_open_state.as_ref() {
+            previous
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.project_open_generation = self.project_open_generation.wrapping_add(1);
         self.project_open_pending = Some(path);
         self.project_open_state = Some(ProjectOpenState {
             started_at: Instant::now(),
             shown: false,
+            phase: SessionOpenPhase::Announced,
+            parse_rx: None,
+            decode_rx: None,
+            progress_rx: None,
+            progress: SessionOpenProgress::default(),
+            generation: self.project_open_generation,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
     }
 
+    /// Hand the parsed document to a coordinator thread that decodes every
+    /// sidecar and virtual source the restore needs, then returns both.
+    /// Decoding is the dominant cost of restoring a session with edits, and
+    /// doing it here keeps it entirely off the UI thread.
+    fn begin_session_audio_prefetch(
+        &mut self,
+        parsed: ParsedSession,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let requests = self.collect_prefetch_requests(&parsed);
+        let Some(state) = self.project_open_state.as_mut() else {
+            return;
+        };
+        if requests.is_empty() {
+            // Nothing to decode: apply straight away rather than paying for
+            // a thread and a frame of latency.
+            state.phase = SessionOpenPhase::Applying;
+            if let Err(err) = self.apply_parsed_session(parsed) {
+                self.debug_log(format!("session open error: {err}"));
+                self.push_toast(
+                    super::types::ToastSeverity::Error,
+                    format!("Session open failed: {err}"),
+                );
+            }
+            self.project_open_state = None;
+            return;
+        }
+        let concurrency = self.perf.restore_concurrency();
+        let total = requests.len();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("neowaves-session-audio".to_string())
+            .spawn(move || {
+                crate::app::threading::lower_current_thread_priority();
+                let prefetch = Self::run_audio_prefetch(
+                    &parsed.path.clone(),
+                    requests,
+                    concurrency,
+                    &cancel,
+                    Some(progress_tx),
+                );
+                let _ = tx.send((parsed, prefetch));
+                crate::ui_wake::wake_ui();
+            });
+        let Some(state) = self.project_open_state.as_mut() else {
+            return;
+        };
+        match spawned {
+            Ok(_) => {
+                state.decode_rx = Some(rx);
+                state.progress_rx = Some(progress_rx);
+                state.progress = SessionOpenProgress {
+                    total,
+                    last_progress_at: Some(Instant::now()),
+                    ..Default::default()
+                };
+                state.phase = SessionOpenPhase::Decoding;
+            }
+            Err(err) => {
+                self.debug_log(format!("session decode thread failed: {err}"));
+                self.project_open_state = None;
+            }
+        }
+    }
+
+    /// True while a session open is in flight. Callers that mutate session
+    /// state (save, export, destructive edits) refuse while this holds, so
+    /// a half-restored document is never written back or edited.
+    pub(super) fn session_open_in_progress(&self) -> bool {
+        self.project_open_state.is_some()
+    }
+
+    /// Guard for anything that writes session state while a restore is
+    /// running: toast + true when the caller must refuse. Reading the list,
+    /// scrolling and playback stay available -- only writes are held back,
+    /// because the document is only partly applied.
+    pub(super) fn session_open_busy_toast(&mut self) -> bool {
+        if !self.session_open_in_progress() {
+            return false;
+        }
+        self.push_toast(
+            super::types::ToastSeverity::Info,
+            "The session is still opening — wait for it or cancel it from the topbar",
+        );
+        true
+    }
+
+    pub(super) fn cancel_session_open(&mut self) {
+        let Some(state) = self.project_open_state.take() else {
+            return;
+        };
+        state
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.project_open_pending = None;
+        // A cancelled open must not leave a half-applied document behind:
+        // the parse phase has not touched app state yet, but the apply
+        // phase has, so clear back to an empty session either way.
+        if state.phase == SessionOpenPhase::Applying {
+            self.close_project();
+        }
+        self.push_toast(super::types::ToastSeverity::Info, "Session open cancelled");
+    }
+
+    /// Drive the staged session open. Reading and repairing the document
+    /// runs on a worker (the path repair stats every referenced file);
+    /// applying it happens on the UI thread once the worker lands.
     pub(super) fn tick_project_open(&mut self) {
         let Some(state) = self.project_open_state.as_mut() else {
             return;
         };
+        // Paint one frame with the status line before starting work, so the
+        // window is visibly alive before the first expensive step.
         if !state.shown {
             state.shown = true;
             return;
         }
-        let Some(path) = self.project_open_pending.take() else {
-            self.project_open_state = None;
-            return;
-        };
-        if let Err(err) = self.open_project_file(path) {
-            self.debug_log(format!("session open error: {err}"));
+        match state.phase {
+            SessionOpenPhase::Announced => {
+                let Some(path) = self.project_open_pending.take() else {
+                    self.project_open_state = None;
+                    return;
+                };
+                let (tx, rx) = std::sync::mpsc::channel();
+                let spawned = std::thread::Builder::new()
+                    .name("neowaves-session-parse".to_string())
+                    .spawn(move || {
+                        crate::app::threading::lower_current_thread_priority();
+                        let _ = tx.send(Self::parse_session_document(path));
+                        crate::ui_wake::wake_ui();
+                    });
+                let Some(state) = self.project_open_state.as_mut() else {
+                    return;
+                };
+                match spawned {
+                    Ok(_) => {
+                        state.parse_rx = Some(rx);
+                        state.phase = SessionOpenPhase::Parsing;
+                    }
+                    Err(err) => {
+                        self.debug_log(format!("session parse thread failed: {err}"));
+                        self.project_open_state = None;
+                    }
+                }
+            }
+            SessionOpenPhase::Parsing => {
+                let Some(rx) = state.parse_rx.as_ref() else {
+                    self.project_open_state = None;
+                    return;
+                };
+                let generation = state.generation;
+                let cancel = std::sync::Arc::clone(&state.cancel);
+                match rx.try_recv() {
+                    Ok(result) => {
+                        state.parse_rx = None;
+                        // The user may have started another open while this
+                        // one was parsing; that one owns the app state now.
+                        if generation != self.project_open_generation {
+                            self.project_open_state = None;
+                            return;
+                        }
+                        let parsed = match result {
+                            Ok(parsed) => parsed,
+                            Err(err) => {
+                                self.debug_log(format!("session open error: {err}"));
+                                self.push_toast(
+                                    super::types::ToastSeverity::Error,
+                                    format!("Session open failed: {err}"),
+                                );
+                                self.project_open_state = None;
+                                return;
+                            }
+                        };
+                        self.begin_session_audio_prefetch(parsed, cancel);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.debug_log("session parse worker disconnected".to_string());
+                        self.project_open_state = None;
+                    }
+                }
+            }
+            SessionOpenPhase::Decoding => {
+                if let Some(progress_rx) = state.progress_rx.as_ref() {
+                    while let Ok(update) = progress_rx.try_recv() {
+                        match update {
+                            PrefetchProgress::Started { label } => {
+                                state.progress.in_flight.push(label);
+                            }
+                            PrefetchProgress::Finished { label } => {
+                                if let Some(pos) =
+                                    state.progress.in_flight.iter().position(|l| *l == label)
+                                {
+                                    state.progress.in_flight.remove(pos);
+                                }
+                                state.progress.done = state.progress.done.saturating_add(1);
+                                state.progress.last_progress_at = Some(Instant::now());
+                            }
+                        }
+                    }
+                }
+                let Some(rx) = state.decode_rx.as_ref() else {
+                    self.project_open_state = None;
+                    return;
+                };
+                let generation = state.generation;
+                match rx.try_recv() {
+                    Ok((parsed, prefetch)) => {
+                        state.decode_rx = None;
+                        state.progress_rx = None;
+                        state.phase = SessionOpenPhase::Applying;
+                        if generation != self.project_open_generation {
+                            self.project_open_state = None;
+                            return;
+                        }
+                        if let Err(err) = self.apply_parsed_session_with_audio(parsed, prefetch) {
+                            self.debug_log(format!("session open error: {err}"));
+                            self.push_toast(
+                                super::types::ToastSeverity::Error,
+                                format!("Session open failed: {err}"),
+                            );
+                        }
+                        self.project_open_state = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.debug_log("session decode worker disconnected".to_string());
+                        self.project_open_state = None;
+                    }
+                }
+            }
+            SessionOpenPhase::Applying => {
+                // Applying completes within the frame that starts it; a
+                // state left here means that frame returned early.
+                self.project_open_state = None;
+            }
         }
-        self.project_open_state = None;
     }
 
     pub(super) fn is_session_path(path: &Path) -> bool {
@@ -478,6 +1295,36 @@ impl super::WavesPreviewer {
             .and_then(|s| s.to_str())
             .map(|s| s.eq_ignore_ascii_case("nwsess") || s.eq_ignore_ascii_case("nwproj"))
             .unwrap_or(false)
+    }
+
+    /// Fallback for a sidecar the prefetch did not cover: the same work as
+    /// `prepare_sidecar`, on this thread, plus the legacy-document warning
+    /// the worker cannot log.
+    fn prepare_sidecar_on_ui(
+        &mut self,
+        path: &Path,
+        channels: Vec<Vec<f32>>,
+        sidecar_sr: u32,
+        stored_buffer_sr: Option<u32>,
+        source_label: &str,
+    ) -> PreparedSidecar {
+        let (channels, buffer_sr) = self.normalize_loaded_sidecar_buffer(
+            path,
+            channels,
+            sidecar_sr.max(1),
+            stored_buffer_sr,
+            source_label,
+        );
+        let samples_len = channels.first().map(|c| c.len()).unwrap_or(0);
+        let (waveform_minmax, waveform_pyramid) =
+            Self::build_editor_waveform_cache(&channels, samples_len);
+        PreparedSidecar {
+            channels,
+            buffer_sample_rate: buffer_sr,
+            samples_len,
+            waveform_minmax,
+            waveform_pyramid,
+        }
     }
 
     fn normalize_loaded_sidecar_buffer(
@@ -1261,6 +2108,11 @@ impl super::WavesPreviewer {
         if self.session_save_state.is_some() {
             return Err("session save already in progress".to_string());
         }
+        // Saving a partly-restored document would write the half of it that
+        // has been applied over the complete file on disk.
+        if self.session_open_in_progress() {
+            return Err("session is still opening".to_string());
+        }
         let (path, project, jobs) = self.build_session_save_plan(path)?;
         let job_count = jobs.len();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1304,19 +2156,37 @@ impl super::WavesPreviewer {
             return;
         };
         self.session_save_state = None;
+        let close_when_done = std::mem::take(&mut self.close_after_session_save);
         match result {
             Ok(path) => {
                 self.debug_log(format!("session saved: {}", path.display()));
                 self.finish_session_save(path);
+                if close_when_done {
+                    self.close_project();
+                }
             }
             Err(err) => {
                 self.debug_log(format!("session save error: {err}"));
+                if close_when_done {
+                    // Keep the session open on a failed autosave, the way
+                    // the blocking close does -- tearing it down here would
+                    // discard the edits the save could not persist.
+                    self.push_toast(
+                        super::types::ToastSeverity::Error,
+                        format!("Session close autosave failed: {err}"),
+                    );
+                }
             }
         }
         ctx.request_repaint();
     }
 
-    pub(super) fn open_project_file(&mut self, path: PathBuf) -> Result<(), String> {
+    /// Read and normalize a session document. Touches only the filesystem
+    /// and the parsed document, never `self`, so the GUI runs it on a
+    /// worker thread (see `tick_project_open`): the path repair alone
+    /// stats every file the session references, which on a large session
+    /// or a network share is seconds of blocking I/O.
+    pub(super) fn parse_session_document(path: PathBuf) -> Result<ParsedSession, String> {
         let path = if path.is_absolute() {
             path
         } else {
@@ -1337,6 +2207,391 @@ impl super::WavesPreviewer {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
+        let file_exists = project
+            .list
+            .files
+            .iter()
+            .map(|raw| resolve_path(raw, &base_dir).is_file())
+            .collect();
+        let other_exists = Self::probe_session_paths(&project, &base_dir);
+        Ok(ParsedSession {
+            path,
+            project: Box::new(project),
+            path_repair,
+            session_path_mode,
+            base_dir,
+            file_exists,
+            other_exists,
+        })
+    }
+
+    /// Stat every path the apply stage would otherwise have to check, while
+    /// still on the parse worker. Each of these was a blocking syscall on
+    /// the UI thread — one per tab, per virtual item, per external source —
+    /// and on a share any one of them can stall for the SMB timeout.
+    fn probe_session_paths(
+        project: &ProjectFile,
+        base_dir: &Path,
+    ) -> rustc_hash::FxHashMap<PathBuf, bool> {
+        let mut out: rustc_hash::FxHashMap<PathBuf, bool> = Default::default();
+        let probe = |path: PathBuf, out: &mut rustc_hash::FxHashMap<PathBuf, bool>| {
+            if let std::collections::hash_map::Entry::Vacant(slot) = out.entry(path.clone()) {
+                slot.insert(path.is_file());
+            }
+        };
+        for tab in &project.tabs {
+            probe(resolve_path(&tab.path, base_dir), &mut out);
+        }
+        for entry in &project.list.virtual_items {
+            if entry.source.kind.eq_ignore_ascii_case("file") {
+                if let Some(raw) = entry.source.path.as_deref() {
+                    probe(resolve_path(raw, base_dir), &mut out);
+                }
+            }
+        }
+        for manifest in &project.assets {
+            probe(resolve_path(&manifest.location, base_dir), &mut out);
+        }
+        // External sources are checked with `exists()` rather than
+        // `is_file()`, but a directory there is already unusable, so one
+        // probe covers both.
+        if let Some(external) = project.app.external_state.as_ref() {
+            for source in &external.sources {
+                probe(resolve_path(&source.path, base_dir), &mut out);
+            }
+        }
+        out
+    }
+
+    /// Everything the restore will need to decode, in document order.
+    /// Collected from the parsed document so the decodes can be spread over
+    /// workers before any of them blocks a frame.
+    fn collect_prefetch_requests(&self, parsed: &ParsedSession) -> Vec<PrefetchRequest> {
+        let project = &parsed.project;
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let quality = Self::to_wave_resample_quality(self.src_quality);
+        let mut requests: Vec<PrefetchRequest> = Vec::new();
+        let mut seen_sidecars: std::collections::HashSet<String> = Default::default();
+        let mut seen_files: std::collections::HashSet<PathBuf> = Default::default();
+        let mut push_sidecar =
+            |raw: &str, prep: Option<SidecarPrep>, requests: &mut Vec<PrefetchRequest>| {
+                if raw.trim().is_empty() {
+                    return;
+                }
+                if seen_sidecars.insert(raw.to_string()) {
+                    requests.push(PrefetchRequest::Sidecar {
+                        raw: raw.to_string(),
+                        prep,
+                    });
+                }
+            };
+        // Virtual sidecars are consumed raw (the restore resamples them to
+        // the item's own rate, not the output rate), so they get no prep.
+        for entry in &project.list.virtual_items {
+            if let Some(raw) = entry.sidecar_audio.as_deref() {
+                push_sidecar(raw, None, &mut requests);
+            }
+            // Sidecar-kind sources keep their tag in source.path.
+            if entry.source.kind.eq_ignore_ascii_case("sidecar") {
+                if let Some(raw) = entry.source.path.as_deref() {
+                    push_sidecar(raw, None, &mut requests);
+                }
+            }
+        }
+        // Cached edits and tab edits become editor buffers: prepare them.
+        for edit in &project.cached_edits {
+            let prep = SidecarPrep {
+                stored_buffer_sr: edit.buffer_sample_rate,
+                out_sr,
+                quality,
+            };
+            push_sidecar(&edit.edited_audio, Some(prep), &mut requests);
+        }
+        for tab in &project.tabs {
+            if let Some(raw) = tab.edited_audio.as_deref() {
+                let prep = SidecarPrep {
+                    stored_buffer_sr: tab.buffer_sample_rate,
+                    out_sr,
+                    quality,
+                };
+                push_sidecar(raw, Some(prep), &mut requests);
+            }
+            // The preview overlay is resampled to the output rate but has no
+            // waveform cache of its own, so it stays a raw fetch.
+            if let Some(raw) = tab.preview_audio.as_deref() {
+                push_sidecar(raw, None, &mut requests);
+            }
+        }
+        // Virtual items rebuilt from a raw file source, and managed assets
+        // small enough to stay resident, are decoded from real paths.
+        for entry in &project.list.virtual_items {
+            if entry.sidecar_audio.is_some() {
+                continue;
+            }
+            if entry.source.kind.eq_ignore_ascii_case("file") {
+                if let Some(raw) = entry.source.path.as_deref() {
+                    let path = resolve_path(raw, &parsed.base_dir);
+                    if seen_files.insert(path.clone()) {
+                        requests.push(PrefetchRequest::File { path });
+                    }
+                }
+            }
+        }
+        requests
+    }
+
+    /// Decode `requests` across `concurrency` low-priority workers.
+    ///
+    /// Failures are simply absent from the result: every call site already
+    /// had an error path for a decode that did not work (a missing sidecar,
+    /// an unreadable source), and reproducing the message here would report
+    /// it twice.
+    fn run_audio_prefetch(
+        project_path: &Path,
+        requests: Vec<PrefetchRequest>,
+        concurrency: usize,
+        cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        progress: Option<std::sync::mpsc::Sender<PrefetchProgress>>,
+    ) -> SessionAudioPrefetch {
+        use std::sync::atomic::Ordering;
+
+        let mut prefetch = SessionAudioPrefetch::default();
+        if requests.is_empty() {
+            return prefetch;
+        }
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(
+            requests
+                .into_iter()
+                .collect::<std::collections::VecDeque<_>>(),
+        ));
+        let (tx, rx) = std::sync::mpsc::channel::<PrefetchResult>();
+        let workers = concurrency.max(1);
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let queue = std::sync::Arc::clone(&queue);
+            let tx = tx.clone();
+            let cancel = std::sync::Arc::clone(cancel);
+            let project_path = project_path.to_path_buf();
+            let progress = progress.clone();
+            let handle = std::thread::Builder::new()
+                .name("neowaves-session-decode".to_string())
+                .spawn(move || {
+                    crate::app::threading::lower_current_thread_priority();
+                    loop {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let Some(request) =
+                            queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front()
+                        else {
+                            break;
+                        };
+                        // Name the item before touching it: the read below
+                        // is where a load off a share appears to hang, and
+                        // this is what the status line has to show.
+                        let label = Self::prefetch_request_label(&request);
+                        if let Some(progress) = progress.as_ref() {
+                            let _ = progress.send(PrefetchProgress::Started {
+                                label: label.clone(),
+                            });
+                            crate::ui_wake::wake_ui();
+                        }
+                        let sent = match request {
+                            PrefetchRequest::Sidecar { raw, prep } => {
+                                match load_sidecar_audio(&project_path, &raw) {
+                                    Ok((channels, sr, _)) => match prep {
+                                        Some(prep) => tx.send(PrefetchResult::Prepared {
+                                            raw,
+                                            prepared: Box::new(Self::prepare_sidecar(
+                                                channels, sr, prep,
+                                            )),
+                                        }),
+                                        None => tx.send(PrefetchResult::Sidecar {
+                                            raw,
+                                            channels,
+                                            sample_rate: sr,
+                                        }),
+                                    },
+                                    Err(_) => Ok(()),
+                                }
+                            }
+                            PrefetchRequest::File { path } => {
+                                match crate::audio_io::decode_audio_multi(&path) {
+                                    Ok((channels, sr)) => tx.send(PrefetchResult::File {
+                                        path,
+                                        channels,
+                                        sample_rate: sr,
+                                    }),
+                                    Err(_) => Ok(()),
+                                }
+                            }
+                        };
+                        if let Some(progress) = progress.as_ref() {
+                            let _ = progress.send(PrefetchProgress::Finished { label });
+                            crate::ui_wake::wake_ui();
+                        }
+                        if sent.is_err() {
+                            break;
+                        }
+                    }
+                });
+            match handle {
+                Ok(handle) => handles.push(handle),
+                // Out of threads: the remaining queue is decoded by whoever
+                // is already running, or inline below if none started.
+                Err(_) => break,
+            }
+        }
+        drop(tx);
+        if handles.is_empty() {
+            // No worker started at all -- decode inline rather than opening
+            // the session with every edit missing.
+            let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+            while let Some(request) = queue.pop_front() {
+                match request {
+                    PrefetchRequest::Sidecar { raw, prep } => {
+                        if let Ok((channels, sr, _)) = load_sidecar_audio(project_path, &raw) {
+                            match prep {
+                                Some(prep) => {
+                                    prefetch
+                                        .prepared
+                                        .insert(raw, Self::prepare_sidecar(channels, sr, prep));
+                                }
+                                None => {
+                                    prefetch.sidecars.insert(raw, (channels, sr));
+                                }
+                            }
+                        }
+                    }
+                    PrefetchRequest::File { path } => {
+                        if let Ok((channels, sr)) = crate::audio_io::decode_audio_multi(&path) {
+                            prefetch.files.insert(path, (channels, sr));
+                        }
+                    }
+                }
+            }
+            return prefetch;
+        }
+        while let Ok(result) = rx.recv() {
+            match result {
+                PrefetchResult::Sidecar {
+                    raw,
+                    channels,
+                    sample_rate,
+                } => {
+                    prefetch.sidecars.insert(raw, (channels, sample_rate));
+                }
+                PrefetchResult::Prepared { raw, prepared } => {
+                    prefetch.prepared.insert(raw, *prepared);
+                }
+                PrefetchResult::File {
+                    path,
+                    channels,
+                    sample_rate,
+                } => {
+                    prefetch.files.insert(path, (channels, sample_rate));
+                }
+            }
+        }
+        for handle in handles {
+            let _ = handle.join();
+        }
+        prefetch
+    }
+
+    /// What to call an item in the status line: the file name, which is
+    /// what the user recognises, not the raw document reference.
+    fn prefetch_request_label(request: &PrefetchRequest) -> String {
+        let raw: &str = match request {
+            PrefetchRequest::Sidecar { raw, .. } => raw.as_str(),
+            PrefetchRequest::File { path } => {
+                return path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("(file)")
+                    .to_string();
+            }
+        };
+        Path::new(raw)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(raw)
+            .to_string()
+    }
+
+    /// Normalize a decoded sidecar to the output rate and build its editor
+    /// waveform caches. Two O(n) passes over the clip -- on the UI thread,
+    /// once per edited tab, this is what a session open still spent its
+    /// frame on after the decode itself moved to a worker.
+    ///
+    /// Pure: no `self`, so it runs wherever the decode does.
+    fn prepare_sidecar(
+        mut channels: Vec<Vec<f32>>,
+        sidecar_sr: u32,
+        prep: SidecarPrep,
+    ) -> PreparedSidecar {
+        let out_sr = prep.out_sr.max(1);
+        // A legacy sidecar with no stored rate is assumed to already be at
+        // the output rate when its own rate differs -- same rule the UI-side
+        // path used, kept so old sessions restore identically.
+        let mut buffer_sr = prep.stored_buffer_sr.filter(|v| *v > 0).unwrap_or_else(|| {
+            if sidecar_sr.max(1) != out_sr {
+                out_sr
+            } else {
+                sidecar_sr.max(1)
+            }
+        });
+        if buffer_sr != out_sr {
+            for ch in channels.iter_mut() {
+                *ch = crate::wave::resample_quality(ch, buffer_sr, out_sr, prep.quality);
+            }
+            buffer_sr = out_sr;
+        }
+        let samples_len = channels.first().map(|c| c.len()).unwrap_or(0);
+        let (waveform_minmax, waveform_pyramid) =
+            Self::build_editor_waveform_cache(&channels, samples_len);
+        PreparedSidecar {
+            channels,
+            buffer_sample_rate: buffer_sr,
+            samples_len,
+            waveform_minmax,
+            waveform_pyramid,
+        }
+    }
+
+    /// Blocking open, kept for the CLI, the kittest harness and unit tests.
+    /// The GUI goes through `tick_project_open` instead so the parse and the
+    /// heavy restore do not land on one frame.
+    pub(super) fn open_project_file(&mut self, path: PathBuf) -> Result<(), String> {
+        let parsed = Self::parse_session_document(path)?;
+        self.apply_parsed_session(parsed)
+    }
+
+    /// Apply a parsed document. `prefetch` holds audio already decoded off
+    /// the UI thread; anything missing from it falls back to the inline
+    /// decode this function always did, so a caller may pass an empty one.
+    pub(super) fn apply_parsed_session(&mut self, parsed: ParsedSession) -> Result<(), String> {
+        self.apply_parsed_session_with_audio(parsed, SessionAudioPrefetch::default())
+    }
+
+    pub(super) fn apply_parsed_session_with_audio(
+        &mut self,
+        parsed: ParsedSession,
+        mut prefetch: SessionAudioPrefetch,
+    ) -> Result<(), String> {
+        let ParsedSession {
+            path,
+            project,
+            path_repair,
+            session_path_mode,
+            base_dir,
+            file_exists,
+            other_exists,
+        } = parsed;
+        // Every existence question the restore asks was answered on the
+        // parse worker; the UI thread must not add a syscall of its own.
+        let path_exists = |path: &Path| other_exists.get(path).copied().unwrap_or(true);
+        let project = *project;
 
         let project_path = path.clone();
         self.close_project();
@@ -1509,8 +2764,19 @@ impl super::WavesPreviewer {
         }
         self.apply_spectro_config(spectro_config_from_project(&project.spectrogram));
 
+        // The parse worker already statted these; handing the answers to
+        // the path-status service saves the list from re-probing every row
+        // it draws right after the open.
+        self.path_status.clear();
+        for (raw, exists) in project.list.files.iter().zip(file_exists.iter()) {
+            self.path_status
+                .preload(&resolve_path(raw, &base_dir), *exists);
+        }
+        for (path, exists) in other_exists.iter() {
+            self.path_status.preload(path, *exists);
+        }
         if !project.list.files.is_empty() {
-            self.reset_list_from_project(&project.list.files, &base_dir);
+            self.reset_list_from_project(&project.list.files, &base_dir, &file_exists);
             self.after_add_refresh();
         } else if let Some(root) = project.list.root.as_ref() {
             let root_path = resolve_path(root, &base_dir);
@@ -1538,7 +2804,7 @@ impl super::WavesPreviewer {
                         if let Some(manifest) = manifest.filter(|asset| asset.backing == "managed")
                         {
                             let managed_path = resolve_path(&manifest.location, &base_dir);
-                            if managed_path.is_file() {
+                            if path_exists(&managed_path) {
                                 let mut descriptor =
                                     crate::audio_asset::AudioAssetDescriptor::managed(managed_path);
                                 if let Some(id) =
@@ -1556,13 +2822,24 @@ impl super::WavesPreviewer {
                                 descriptor.frame_count =
                                     manifest.frame_count.or(descriptor.frame_count);
                                 let resident_cache = if descriptor.may_reside_in_memory() {
-                                    crate::audio_io::decode_audio_multi(
-                                        descriptor.backing.file_path().unwrap_or(Path::new("")),
-                                    )
-                                    .ok()
-                                    .map(|(channels, _)| {
-                                        std::sync::Arc::new(AudioBuffer::from_channels(channels))
-                                    })
+                                    let asset_path = descriptor
+                                        .backing
+                                        .file_path()
+                                        .unwrap_or(Path::new(""))
+                                        .to_path_buf();
+                                    prefetch
+                                        .take_file(&asset_path)
+                                        .map(|(channels, _)| channels)
+                                        .or_else(|| {
+                                            crate::audio_io::decode_audio_multi(&asset_path)
+                                                .ok()
+                                                .map(|(channels, _)| channels)
+                                        })
+                                        .map(|channels| {
+                                            std::sync::Arc::new(AudioBuffer::from_channels(
+                                                channels,
+                                            ))
+                                        })
                                 } else {
                                     None
                                 };
@@ -1627,8 +2904,11 @@ impl super::WavesPreviewer {
                     //    edits (gain/fade/normalize/trim) the op_chain cannot
                     //    express. Reconstruct from source only when it's absent.
                     if let Some(raw) = entry.sidecar_audio.as_ref() {
-                        match load_sidecar_audio(&project_path, raw) {
-                            Ok((channels, sr, _)) => {
+                        match prefetch.take_sidecar(raw).map(Ok).unwrap_or_else(|| {
+                            load_sidecar_audio(&project_path, raw)
+                                .map(|(channels, sr, _)| (channels, sr))
+                        }) {
+                            Ok((channels, sr)) => {
                                 channels_opt = Some(channels);
                                 sample_rate = sr.max(1);
                             }
@@ -1643,9 +2923,11 @@ impl super::WavesPreviewer {
                     if channels_opt.is_none() {
                         match &source {
                             VirtualSourceRef::FilePath(src_path) => {
-                                if src_path.is_file() {
-                                    if let Ok((channels, sr)) =
-                                        crate::audio_io::decode_audio_multi(src_path)
+                                if path_exists(src_path) {
+                                    if let Some((channels, sr)) =
+                                        prefetch.take_file(src_path).or_else(|| {
+                                            crate::audio_io::decode_audio_multi(src_path).ok()
+                                        })
                                     {
                                         channels_opt = Some(channels);
                                         channels_from_raw_source = true;
@@ -1692,8 +2974,12 @@ impl super::WavesPreviewer {
                                 // Sidecar-kind sources keep their tag in source.path
                                 // (the sidecar_audio field was already tried above).
                                 if let Some(raw) = entry.source.path.as_ref() {
-                                    if let Ok((channels, sr, _)) =
-                                        load_sidecar_audio(&project_path, raw)
+                                    if let Some((channels, sr)) =
+                                        prefetch.take_sidecar(raw).or_else(|| {
+                                            load_sidecar_audio(&project_path, raw)
+                                                .ok()
+                                                .map(|(channels, sr, _)| (channels, sr))
+                                        })
                                     {
                                         channels_opt = Some(channels);
                                         sample_rate = sr.max(1);
@@ -1931,7 +3217,7 @@ impl super::WavesPreviewer {
             let mut missing_errors = Vec::new();
             for source in external_state.sources.iter() {
                 let source_path = resolve_path(&source.path, &base_dir);
-                if source_path.exists() {
+                if path_exists(&source_path) {
                     self.queue_external_load_with_settings(
                         source_path,
                         source.sheet_name.clone(),
@@ -1958,20 +3244,28 @@ impl super::WavesPreviewer {
         let out_sr = self.audio.shared.out_sample_rate;
         for edit in project.cached_edits.iter() {
             let path = resolve_path(&edit.path, &base_dir);
-            let edited = load_sidecar_audio(&project_path, &edit.edited_audio).ok();
-            let Some((chans, sr, _)) = edited else {
+            // Normalized and cached on the decode worker; the fallback is
+            // the old inline path, for a sidecar the prefetch missed.
+            let edited = prefetch.take_prepared(&edit.edited_audio).or_else(|| {
+                let (chans, sr, _) = load_sidecar_audio(&project_path, &edit.edited_audio).ok()?;
+                Some(self.prepare_sidecar_on_ui(
+                    &path,
+                    chans,
+                    sr,
+                    edit.buffer_sample_rate,
+                    "cached edit",
+                ))
+            });
+            let Some(prepared) = edited else {
                 continue;
             };
-            let (chans, buffer_sr) = self.normalize_loaded_sidecar_buffer(
-                &path,
-                chans,
-                sr.max(1),
-                edit.buffer_sample_rate,
-                "cached edit",
-            );
-            let samples_len = chans.get(0).map(|c| c.len()).unwrap_or(0);
-            let (waveform, waveform_pyramid) =
-                super::WavesPreviewer::build_editor_waveform_cache(&chans, samples_len);
+            let PreparedSidecar {
+                channels: chans,
+                buffer_sample_rate: buffer_sr,
+                samples_len,
+                waveform_minmax: waveform,
+                waveform_pyramid,
+            } = prepared;
             let bits = self.effective_bits_for_path(&path).unwrap_or(32);
             let display_meta = Some(super::WavesPreviewer::build_meta_from_audio(
                 &chans,
@@ -2042,21 +3336,27 @@ impl super::WavesPreviewer {
         for tab in project.tabs.iter() {
             let tab_path = resolve_path(&tab.path, &base_dir);
             let edited = if let Some(raw) = tab.edited_audio.as_ref() {
-                load_sidecar_audio(&project_path, raw).ok()
+                prefetch.take_prepared(raw).or_else(|| {
+                    let (chans, sr, _) = load_sidecar_audio(&project_path, raw).ok()?;
+                    Some(self.prepare_sidecar_on_ui(
+                        &tab_path,
+                        chans,
+                        sr,
+                        tab.buffer_sample_rate,
+                        "tab edit",
+                    ))
+                })
             } else {
                 None
             };
-            if let Some((chans, sr, _)) = edited {
-                let (chans, buffer_sr) = self.normalize_loaded_sidecar_buffer(
-                    &tab_path,
-                    chans,
-                    sr.max(1),
-                    tab.buffer_sample_rate,
-                    "tab edit",
-                );
-                let samples_len = chans.get(0).map(|c| c.len()).unwrap_or(0);
-                let (waveform, waveform_pyramid) =
-                    super::WavesPreviewer::build_editor_waveform_cache(&chans, samples_len);
+            if let Some(prepared) = edited {
+                let PreparedSidecar {
+                    channels: chans,
+                    buffer_sample_rate: buffer_sr,
+                    samples_len,
+                    waveform_minmax: waveform,
+                    waveform_pyramid,
+                } = prepared;
                 let bits = self.effective_bits_for_path(&tab_path).unwrap_or(32);
                 let display_meta = Some(super::WavesPreviewer::build_meta_from_audio(
                     &chans,
@@ -2117,7 +3417,7 @@ impl super::WavesPreviewer {
                     },
                 );
             }
-            if !tab_path.is_file() {
+            if !path_exists(&tab_path) {
                 let fallback_sr = self.audio.shared.out_sample_rate.max(1);
                 if let Some(item) = self.item_for_path_mut(&tab_path) {
                     item.source = MediaSource::Virtual;
@@ -2150,7 +3450,11 @@ impl super::WavesPreviewer {
                 let mut preview_overlay = None;
                 let mut preview_tool = None;
                 if let Some(raw) = tab.preview_audio.as_ref() {
-                    if let Ok((mut chans, sr, _)) = load_sidecar_audio(&project_path, raw) {
+                    if let Some((mut chans, sr)) = prefetch.take_sidecar(raw).or_else(|| {
+                        load_sidecar_audio(&project_path, raw)
+                            .ok()
+                            .map(|(chans, sr, _)| (chans, sr))
+                    }) {
                         if sr != out_sr {
                             for ch in chans.iter_mut() {
                                 *ch = self.resample_mono_with_quality(ch, sr, out_sr);

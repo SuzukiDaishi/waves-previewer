@@ -59,10 +59,9 @@ impl WavesPreviewer {
             Arc::new(Mutex::new(paths.iter().cloned().enumerate().collect()));
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel::<(usize, Option<FileFingerprint>)>();
-        let workers = std::thread::available_parallelism()
-            .map(|n| (n.get() / 2).max(1))
-            .unwrap_or(1)
-            .min(DUPLICATE_MAX_WORKERS)
+        let workers = self
+            .perf
+            .scan_pool_workers(DUPLICATE_MAX_WORKERS)
             .min(total.max(1));
         for _ in 0..workers {
             let queue = Arc::clone(&queue);

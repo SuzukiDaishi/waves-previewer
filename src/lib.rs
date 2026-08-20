@@ -13,6 +13,7 @@ pub mod markers;
 pub mod metadata;
 pub mod meter;
 pub mod plugin;
+pub mod ui_wake;
 pub mod wav_stream;
 pub mod wave;
 

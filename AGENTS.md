@@ -28,6 +28,9 @@ Repository Layout
     - `render/`: waveform/spectrogram rendering helpers.
     - `*_ops.rs`: operation logic split by domain (input, clipboard, session, loading, editor apply, loudnorm, resample, meta, preview, export, external load).
     - `app_init.rs`: startup/build orchestration for `WavesPreviewer`.
+    - `perf_profile.rs`: machine performance tier (Low/Normal/High) and every UI-thread budget derived from it — list sort/filter thresholds, frame budget, worker-pool sizes. Read a budget from here rather than adding a constant.
+    - `frame_budget.rs`: the shared per-frame deadline the deferrable drains in `frame_ops.rs` consult.
+    - `path_status.rs`: background "does this path exist" service. UI code asks this, never the filesystem.
     - `frame_ops.rs`: per-frame `eframe::App::update` orchestration.
     - `tab_ops.rs`: open/activate tab helpers.
     - `editor_decode_ops.rs`: background editor decode spawn/drain helpers.
@@ -50,6 +53,7 @@ Repository Layout
   - `src/lib.rs`: crate entry.
   - `src/audio*.rs`, `src/wave.rs`, `src/markers.rs`, `src/loop_markers.rs`: audio I/O and DSP utilities.
   - `src/ipc.rs`: IPC message definitions.
+  - `src/ui_wake.rs`: process-wide handle for waking the UI thread from a background thread (the frame loop sleeps when idle, so a thread pushing into a channel the UI polls must ask for a frame).
   - `src/kittest.rs`: kittest feature helpers.
 - `tests/`: integration tests (including kittest harness).
 - `target/`: Cargo build artifacts (generated).
@@ -136,6 +140,10 @@ Implementation Principles
 - Keep the list view fast (large file counts must stay responsive).
 - Editor can be slower, but must always show progress/feedback and allow cancel.
 - Avoid blocking the UI thread; heavy work should run in background tasks.
+- Size per-frame work from `perf_profile.rs`, not from a new constant: the same number that is fine on an 8-core workstation is seconds of frozen window on a 2-core laptop.
+- A new per-frame drain belongs behind the `deferrable!` guard in `frame_ops.rs` unless the user is synchronously waiting on it, and needs a cap on how much it applies per frame.
+- **Never call the filesystem from the UI thread** — no `is_file`, `exists`, `metadata`, `read`, or `walkdir` on any path the user supplied. On a network share one of those blocks for the SMB timeout, which is a hung window on its own; a per-frame budget does not help. Ask `path_status.rs` for existence, and put anything else on a worker. (Paths the app owns — its own prefs and config — are the only exception.)
+- Background sweeps against a user path must back off from their own measured cost, and check `perf_profile.rs` for whether the root is remote before choosing a concurrency.
 - Preserve original files unless the user explicitly saves destructive edits.
 - Prefer progressive loading for long audio (preview first, full decode later).
 

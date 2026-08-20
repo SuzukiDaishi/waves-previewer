@@ -4853,6 +4853,11 @@ pub struct DebugState {
     pub frame_peak_ms: f32,
     pub frame_sum_ms: f64,
     pub frame_samples: u64,
+    /// The slowest recent frames, newest first, as
+    /// `(milliseconds, what was running)`. A user reporting "it froze" can
+    /// read the cause off the Debug window instead of having to reproduce
+    /// it under a profiler.
+    pub long_frames: VecDeque<(f32, String)>,
     pub started_at: Instant,
     pub ui_input_started_at: Option<Instant>,
     pub ui_input_to_paint_ms: VecDeque<f32>,
@@ -4954,6 +4959,7 @@ impl DebugState {
             dummy_list_count: 300000,
             frame_last_ms: 0.0,
             frame_peak_ms: 0.0,
+            long_frames: VecDeque::new(),
             frame_sum_ms: 0.0,
             frame_samples: 0,
             started_at: Instant::now(),

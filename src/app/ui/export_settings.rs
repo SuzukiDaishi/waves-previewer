@@ -426,6 +426,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                             ui.separator();
+                            ui.label("Performance:");
+                            self.ui_performance_tier_setting(ui);
+                            ui.separator();
                             ui.label("Editor:");
                             let mut eps = self.zero_cross_epsilon;
                             if ui
@@ -742,6 +745,60 @@ impl crate::app::WavesPreviewer {
                 });
             }
             self.show_export_settings = open;
+        }
+    }
+
+    /// Machine tier picker. "Auto" follows the core count and demotes itself
+    /// when frames stay slow; pinning a tier is for the cases auto cannot
+    /// see (a busy machine, a remote desktop, a VM with lying core counts).
+    fn ui_performance_tier_setting(&mut self, ui: &mut egui::Ui) {
+        use crate::app::perf_profile::{PerfTier, PerfTierPreference};
+
+        let mut preference = self.perf.preference;
+        let current_label = match preference {
+            PerfTierPreference::Auto => format!("Auto ({})", self.perf.tier.as_str()),
+            PerfTierPreference::Pinned(tier) => tier.label().to_string(),
+        };
+        ui.horizontal(|ui| {
+            ui.label("Responsiveness:");
+            egui::ComboBox::from_id_salt("perf_tier_combo")
+                .selected_text(current_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut preference, PerfTierPreference::Auto, "Auto");
+                    for tier in [PerfTier::Low, PerfTier::Normal, PerfTier::High] {
+                        ui.selectable_value(
+                            &mut preference,
+                            PerfTierPreference::Pinned(tier),
+                            tier.label(),
+                        );
+                    }
+                });
+        });
+        if preference != self.perf.preference {
+            self.perf.set_preference(preference);
+            self.save_prefs();
+            // The metadata pool sizes itself from the tier, so a change only
+            // takes effect on the next pool. Rebuild it now.
+            self.reset_meta_pool();
+        }
+        ui.label(
+            egui::RichText::new(format!(
+                "{} cores detected. Lower tiers do less work per frame, so the window stays                  responsive on slow machines at the cost of slower bulk operations.",
+                self.perf.cores
+            ))
+            .small()
+            .weak(),
+        );
+        if self.perf.demoted_from_hardware() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Auto lowered this to {} after sustained slow frames (hardware suggests {}).",
+                    self.perf.tier.as_str(),
+                    self.perf.base_tier.as_str()
+                ))
+                .small()
+                .weak(),
+            );
         }
     }
 }

@@ -46,30 +46,20 @@ impl WavesPreviewer {
             .is_some()
     }
 
-    /// `Path::is_file()` with a short TTL cache. The list view calls this for
-    /// every visible row; doing a real stat() per row per frame stalls the UI
-    /// thread (badly so on network shares). Stale entries refresh within 2s.
+    /// Whether the list should treat `path` as a real file.
+    ///
+    /// Never stats: on a network share one `stat` against an unresponsive
+    /// server blocks for the SMB timeout, and one of those on the UI thread
+    /// is a hung window. The answer comes from `path_status`, whose worker
+    /// takes the syscall; a path not probed yet reads as present so the list
+    /// does not flash grey while a share is being walked.
     pub(super) fn path_is_file_cached(&mut self, path: &Path) -> bool {
-        const TTL: std::time::Duration = std::time::Duration::from_secs(2);
-        let now = std::time::Instant::now();
-        if let Some((exists, checked_at)) = self.fs_exists_cache.get(path) {
-            if now.duration_since(*checked_at) < TTL {
-                return *exists;
-            }
-        }
-        let exists = path.is_file();
-        // Bound memory on very large lists; entries repopulate on demand.
-        if self.fs_exists_cache.len() >= 100_000 {
-            self.fs_exists_cache.clear();
-        }
-        self.fs_exists_cache
-            .insert(path.to_path_buf(), (exists, now));
-        exists
+        self.path_status.status(path).treat_as_present()
     }
 
     /// Drop a single cached existence entry (call after deleting/renaming a file).
     pub(super) fn invalidate_fs_exists_cache_for_path(&mut self, path: &Path) {
-        self.fs_exists_cache.remove(path);
+        self.path_status.invalidate(path);
     }
 
     pub(super) fn item_for_id(&self, id: MediaId) -> Option<&MediaItem> {

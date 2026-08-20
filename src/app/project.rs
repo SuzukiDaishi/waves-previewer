@@ -1911,9 +1911,25 @@ impl super::WavesPreviewer {
         self.session_path_mode = SessionPathMode::Absolute;
     }
 
-    pub(super) fn reset_list_from_project(&mut self, raw_paths: &[String], base_dir: &Path) {
+    /// `exists` is parallel to `raw_paths` and comes from the parse worker
+    /// (`ParsedSession::file_exists`). Statting here instead would put one
+    /// blocking syscall per row on the UI thread; a session listing a few
+    /// thousand files on a network share spent seconds in this loop alone.
+    /// A short slice (older callers, or a truncated document) is treated as
+    /// "unknown, assume present" -- the metadata worker flags a file it
+    /// cannot decode anyway.
+    pub(super) fn reset_list_from_project(
+        &mut self,
+        raw_paths: &[String],
+        base_dir: &Path,
+        exists: &[bool],
+    ) {
         self.root = None;
         self.note_files_membership_changed();
+        // Freeing a large previous list inline stalls the UI for hundreds of
+        // ms (the same reason folder loads use this); hand it to a
+        // low-priority thread instead.
+        self.drop_list_contents_in_background();
         self.files.clear();
         self.items.clear();
         self.item_index.clear();
@@ -1935,10 +1951,10 @@ impl super::WavesPreviewer {
         self.reset_all_feature_analysis_state();
         self.clear_scan_state();
         self.list_max_duration_secs = 0.0;
-        for raw in raw_paths {
+        for (idx, raw) in raw_paths.iter().enumerate() {
             let p = resolve_path(raw, base_dir);
             let mut item = self.make_media_item(p.clone());
-            if !p.is_file() {
+            if !exists.get(idx).copied().unwrap_or(true) {
                 item.status = super::types::MediaStatus::DecodeFailed(describe_missing(&p));
                 item.meta = Some(Box::new(missing_file_meta(&p)));
             }
@@ -1947,6 +1963,7 @@ impl super::WavesPreviewer {
             self.item_index.insert(id, self.items.len());
             self.items.push(item);
         }
+        self.refresh_root_locality();
         self.ensure_meta_pool();
     }
 }
