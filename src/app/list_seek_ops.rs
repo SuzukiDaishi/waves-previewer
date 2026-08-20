@@ -84,14 +84,16 @@ pub(crate) fn list_seek_frac_to_source_time(frac: f32, duration_secs: f64) -> f6
 }
 
 pub(crate) fn list_play_frac_from_source_time(source_time_sec: f64, duration_secs: f64) -> f32 {
-    if !(duration_secs > 0.0) || !source_time_sec.is_finite() {
+    if duration_secs <= 0.0 || duration_secs.is_nan() || !source_time_sec.is_finite() {
         return 0.0;
     }
     ((source_time_sec / duration_secs) as f32).clamp(0.0, 1.0)
 }
 
 pub(crate) fn list_decoded_frac(decoded_source_secs: f64, duration_secs: f64) -> f32 {
-    if !(duration_secs > 0.0) {
+    // An unknown duration must read as fully decoded, or the whole row would be
+    // shaded as unseekable.
+    if duration_secs <= 0.0 || duration_secs.is_nan() {
         return 1.0;
     }
     ((decoded_source_secs / duration_secs) as f32).clamp(0.0, 1.0)
@@ -275,7 +277,7 @@ impl WavesPreviewer {
         // The decode finished without reaching the target: a shorter file than
         // the metadata claimed, or a decode error. Land on what we have rather
         // than waiting forever. This is the termination condition - no timer.
-        if !self.list_preview_rx.is_some() {
+        if self.list_preview_rx.is_none() {
             self.clear_list_seek_pending();
             self.playback_seek_to_source_time(self.mode, decoded.max(0.0));
             if pending.resume_playing {
