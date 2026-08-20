@@ -3036,6 +3036,49 @@ impl crate::app::WavesPreviewer {
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
     }
 
+    /// Mute several ranges as ONE edit.
+    ///
+    /// Calling `editor_apply_mute_range` in a loop pushes an undo entry per
+    /// range, so Ctrl+Z would only un-mute the last one — while the toast and
+    /// the inspector both promise a single undo. Trim and delete already have
+    /// their multi-range counterparts for the same reason.
+    pub(super) fn editor_apply_mute_multi_ranges(
+        &mut self,
+        tab_idx: usize,
+        ranges: Vec<(usize, usize)>,
+    ) {
+        let undo_state = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let ranges: Vec<(usize, usize)> = ranges
+                .into_iter()
+                .map(|(s, e)| if s <= e { (s, e) } else { (e, s) })
+                .filter(|&(s, e)| e > s && e <= tab.samples_len)
+                .collect();
+            if ranges.is_empty() {
+                return;
+            }
+            let undo_state = Self::capture_undo_state_labeled(tab, "Mute Range");
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
+                for &(s, e) in &ranges {
+                    let end = e.min(ch.len());
+                    for i in s.min(end)..end {
+                        ch[i] = 0.0;
+                    }
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            undo_state
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
     #[allow(dead_code)]
     pub(super) fn editor_apply_fade_range(
         &mut self,

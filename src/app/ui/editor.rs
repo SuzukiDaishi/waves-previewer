@@ -13587,9 +13587,14 @@ impl crate::app::WavesPreviewer {
             }
         }
         if let Some((s, e)) = do_mute {
-            self.editor_apply_mute_range(tab_idx, (s, e));
-            for (es, ee) in do_mute_extra {
-                self.editor_apply_mute_range(tab_idx, (es, ee));
+            if do_mute_extra.is_empty() {
+                self.editor_apply_mute_range(tab_idx, (s, e));
+            } else {
+                // One edit, one undo step. Muting each range separately left
+                // Ctrl+Z un-muting only the last one.
+                let mut ranges = vec![(s, e)];
+                ranges.extend(do_mute_extra);
+                self.editor_apply_mute_multi_ranges(tab_idx, ranges);
             }
         }
         if do_spectral_mute {

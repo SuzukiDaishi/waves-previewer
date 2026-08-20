@@ -9367,4 +9367,86 @@ mod kittest_suite {
         assert_eq!(harness.state().test_list_scroll_row(), 0);
         assert!(harness.state().test_list_end_row_fully_visible());
     }
+
+    /// `Delete` is now the editor's Cut, and the list and the effect graph
+    /// already use Delete for their own removals. Each is scoped to its own
+    /// workspace; this pins that down in both directions, because a leak here
+    /// destroys audio (or list rows) the user never targeted.
+    #[test]
+    fn editor_delete_key_does_not_leak_between_workspaces() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert!(harness.state_mut().test_set_selection_frac(0.4, 0.6));
+        harness.run_steps(1);
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+
+        // Showing the list, with the editor tab still open in the background.
+        harness.state_mut().test_switch_to_list_workspace();
+        harness.run_steps(1);
+        harness.key_press(Key::Delete);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_len,
+            len_before,
+            "Delete in the list workspace must not edit a background editor tab"
+        );
+
+        // The Recording workspace is the case that actually needs the editor
+        // guard: unlike the list and the effect graph, nothing there consumes
+        // Delete first, so an unguarded binding would silently cut audio in a
+        // tab that is not on screen.
+        harness.state_mut().test_open_recording_tab();
+        harness.run_steps(1);
+        harness.key_press(Key::Delete);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_len,
+            len_before,
+            "Delete in the recording workspace must not edit a background editor tab"
+        );
+
+        // Back in the editor it performs the cut.
+        harness.state_mut().test_set_workspace_editor();
+        harness.run_steps(1);
+        harness.key_press(Key::Delete);
+        harness.run_steps(2);
+        assert!(
+            harness.state().tabs[tab_idx].samples_len < len_before,
+            "Delete in the editor workspace should cut the selection"
+        );
+    }
+
+    /// The Metadata inspector replaces the waveform, so the destructive
+    /// selection keys stand down there — Delete especially, which people press
+    /// reflexively in a table of fields.
+    #[test]
+    fn destructive_keys_stand_down_in_the_metadata_view() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert!(harness.state_mut().test_set_selection_frac(0.4, 0.6));
+        harness.run_steps(1);
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+
+        assert!(harness.state_mut().test_set_metadata_view(false));
+        harness.run_steps(1);
+
+        for key in [Key::Delete, Key::T] {
+            harness.key_press(key);
+            harness.run_steps(2);
+        }
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::M);
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_len,
+            len_before,
+            "no destructive key may edit audio that the Metadata view is hiding"
+        );
+    }
 }

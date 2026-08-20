@@ -48,6 +48,7 @@ pub enum Action {
     EditorToggleZeroCross,
     EditorDeleteSelection,
     EditorTrimSelection,
+    EditorMuteSelection,
     EditorVirtualTrim,
     EditorDigitSeek,
     EditorArrowKeys,
@@ -378,7 +379,10 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorDeleteSelection,
         context: KeyContext::Editor,
-        chord: Some((Mods::None, Key::C)),
+        // Delete rather than `C`: this is the Trim inspector's Cut, and Delete
+        // is what a sound designer reaches for. The list and the effect graph
+        // also use Delete, but each is scoped to its own workspace.
+        chord: Some((Mods::None, Key::Delete)),
         keys_label: "",
         desc: "Delete the selection and join (undoable)",
         dispatch: Dispatch::Table,
@@ -389,6 +393,15 @@ pub const KEYMAP: &[KeyBinding] = &[
         chord: Some((Mods::None, Key::T)),
         keys_label: "",
         desc: "Trim to the selection (undoable)",
+        dispatch: Dispatch::Table,
+    },
+    KeyBinding {
+        action: Action::EditorMuteSelection,
+        context: KeyContext::Editor,
+        // Bare `M` is already "add a marker", so mute takes the Ctrl chord.
+        chord: Some((Mods::Command, Key::M)),
+        keys_label: "",
+        desc: "Mute the selection (undoable)",
         dispatch: Dispatch::Table,
     },
     KeyBinding {

@@ -3654,6 +3654,12 @@ impl super::WavesPreviewer {
         self.workspace_view = crate::app::types::WorkspaceView::List;
     }
 
+    /// Test-only: switch the active workspace back to the editor, mirroring
+    /// the tab-strip click. The counterpart of `test_switch_to_list_workspace`.
+    pub fn test_set_workspace_editor(&mut self) {
+        self.workspace_view = crate::app::types::WorkspaceView::Editor;
+    }
+
     /// Test-only: switch the active editor tab to the read-only Metadata
     /// primary view without depending on combo-box hit testing.
     pub fn test_set_metadata_view(&mut self, hex: bool) -> bool {

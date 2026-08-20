@@ -4,6 +4,12 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### Editor: selection shortcuts
+- **`Ctrl+M` mutes the selection**: silencing a range meant switching the Trim tool to Mode=Mute and pressing Apply. It now has a key, alongside `T` (trim to selection) and `V` (export as a new list item). `Ctrl` rather than a bare `M`, which is already "add a marker".
+- **Cut moved from `C` to `Delete`**: deleting the selection and closing the gap is the Trim tool's Cut, and `Delete` is the key people reach for. `C` is now unassigned — pressing it does nothing, which is the safe failure for a key that used to delete audio. Anyone who had already rebound this action keeps their binding, and `C` can be restored from Help > Customize Shortcuts.
+- **The destructive selection keys no longer reach a tab you cannot see**: `T`, `V`, `Delete` and `Ctrl+M` now require the editor workspace to actually be on screen, and stand down while the Metadata inspector is showing. Previously `T` and `V` fired whenever an editor tab existed at all, so they could trim audio while the list or the recording view was in front — and `Delete`, which people press reflexively in a table of metadata fields, would have inherited that.
+- **Muting several ranges at once is one undo step**: the Trim tool's Mode=Mute Apply muted each selected range as its own edit, so `Ctrl+Z` un-muted only the last one while the UI promised a single undo. Trim and Cut already had multi-range counterparts; Mute now has one too, and both the button and the new shortcut use it.
+
 ### List view
 - **The list ends with a row that states the total**: scrolling to the bottom left the user judging "am I at the end?" from the last row on screen, and a row clipped by the viewport edge looks exactly like a row with more below it. The list now closes with an `End of list - 178 files` row (`End of list - 12 of 178 files` while a search is active). Reaching it is the signal, and the count answers "how many are there" without reading it off the top bar.
   - It also removes the failure mode entirely rather than only reporting it: the closing row occupies the last scroll position, so the row sitting against the bottom edge is always the marker. A file can no longer be the row that a rounding error in the viewport arithmetic clips — the marker absorbs it. Regression coverage asserts the marker is painted fully inside the viewport at maximum scroll for lists of 1, 5, 400 and 4,000 rows, and for a list shorter than the viewport.
