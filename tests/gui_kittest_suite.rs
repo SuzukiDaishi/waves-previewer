@@ -8858,4 +8858,106 @@ mod kittest_suite {
             .save(out_dir.join("07_reset_aligned.png"))
             .expect("save reset aligned Pencil draft");
     }
+
+    /// The list hand-rolls its vertical virtualization: `TableBuilder` is built
+    /// with `vscroll(false)` and only the visible row window is handed to it.
+    /// The window size used to be computed as `(avail_h - header_h) / row_h`,
+    /// ignoring the `item_spacing.y` that `TableBody::rows` actually adds
+    /// between rows. That over-counted how many rows fit, so the scroll clamp
+    /// `total - visible` stopped short and the last few rows were laid out
+    /// below the clip rect with no inner scroll able to reveal them.
+    ///
+    /// Asserting on `test_list_scroll_row` cannot catch this -- the rows *were*
+    /// in the rendered window. Only the painted rect proves it.
+    #[test]
+    fn list_tail_is_reachable_at_max_scroll() {
+        let mut harness = harness_with_startup(StartupConfig {
+            dummy_list_count: Some(400),
+            ..StartupConfig::default()
+        });
+        harness.run_steps(3);
+        let last = harness.state().test_files_len() - 1;
+        assert_eq!(last, 399);
+
+        harness.state_mut().test_list_scroll_to_end();
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness.state().test_list_last_fully_visible_row(),
+            Some(last),
+            "last row not fully on screen at max scroll (scroll_row={})",
+            harness.state().test_list_scroll_row()
+        );
+    }
+
+    /// End selects the final row and the auto-scroll centers it, clamped to the
+    /// same maximum. With the inflated window size the selection landed in a
+    /// window slot that was painted off-screen: the row was selected but
+    /// invisible.
+    #[test]
+    fn end_key_puts_the_last_row_fully_on_screen() {
+        let mut harness = harness_with_startup(StartupConfig {
+            dummy_list_count: Some(400),
+            ..StartupConfig::default()
+        });
+        harness.run_steps(3);
+        let last = harness.state().test_files_len() - 1;
+
+        assert!(harness.state_mut().test_select_row_with_autoscroll(last));
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().test_list_last_fully_visible_row(),
+            Some(last),
+            "End-selected last row not fully on screen (scroll_row={})",
+            harness.state().test_list_scroll_row()
+        );
+    }
+
+    /// The user's report, reproduced literally: keep turning the wheel over the
+    /// list and the tail must arrive. This also covers the pixels-to-rows
+    /// conversion, which divided by the row height instead of the row pitch and
+    /// so under-scrolled by `spacing_y / row_h` per notch.
+    #[test]
+    fn wheel_scrolling_reaches_the_last_row() {
+        let mut harness = harness_with_startup(StartupConfig {
+            dummy_list_count: Some(300),
+            ..StartupConfig::default()
+        });
+        harness.run_steps(3);
+        let last = harness.state().test_files_len() - 1;
+
+        // The wheel handler only runs while the pointer is over the list and
+        // the list owns the scroll surface, so park the pointer there first.
+        harness.hover_at(egui::pos2(640.0, 200.0));
+        harness.run_steps(1);
+
+        let mut settled = 0;
+        for _ in 0..400 {
+            let before = harness.state().test_list_scroll_row();
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -8.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::default(),
+            });
+            harness.run_steps(1);
+            if harness.state().test_list_scroll_row() == before {
+                settled += 1;
+                if settled >= 5 {
+                    break;
+                }
+            } else {
+                settled = 0;
+            }
+        }
+
+        assert_eq!(
+            harness.state().test_list_last_fully_visible_row(),
+            Some(last),
+            "wheel scrolling never reached the last row (scroll_row={})",
+            harness.state().test_list_scroll_row()
+        );
+    }
+
 }

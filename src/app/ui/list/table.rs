@@ -7,6 +7,33 @@ use crate::app::{
 
 use super::{ListInteractionState, ListRenderState, ListViewMetrics};
 
+/// How many rows fit *entirely* inside the list body.
+///
+/// `egui_extras::TableBody::rows` lays rows out at a pitch of
+/// `row_height_sans_spacing + item_spacing.y`, and the header strip consumes
+/// its own height plus one spacing. Dividing the raw available height by the
+/// row height alone over-counts, and the `total - visible` scroll clamp then
+/// stopped short of the end: the tail rows were laid out below the clip rect
+/// of a table built with `vscroll(false)`, where no inner scroll could ever
+/// bring them into view.
+///
+/// Flooring is the safe direction. Under-counting only makes the scroll
+/// clamp more generous, so the last row stays reachable; over-counting is
+/// what made it unreachable.
+pub(super) fn list_fully_visible_rows(
+    avail_h: f32,
+    header_h: f32,
+    row_h: f32,
+    spacing_y: f32,
+) -> usize {
+    let body_h = avail_h - (header_h + spacing_y);
+    let pitch = (row_h + spacing_y).max(1.0);
+    if !body_h.is_finite() || !pitch.is_finite() {
+        return 1;
+    }
+    ((body_h / pitch).floor()).max(1.0) as usize
+}
+
 impl WavesPreviewer {
     pub(super) fn list_view_metrics(&mut self, ui: &mut egui::Ui) -> ListViewMetrics {
         let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
@@ -18,7 +45,10 @@ impl WavesPreviewer {
             self.wave_row_h.max(text_height * 1.3)
         };
         let avail_h = ui.available_height();
-        let visible_rows = ((avail_h - header_h) / row_h).floor().max(1.0) as usize;
+        let spacing_y = ui.spacing().item_spacing.y;
+        let row_pitch = row_h + spacing_y;
+        let header_pitch = header_h + spacing_y;
+        let visible_rows = list_fully_visible_rows(avail_h, header_h, row_h, spacing_y);
         ui.set_min_width(ui.available_width());
         // Rows actually rendered: the visible window plus one partial row,
         // with a floor so tiny viewports still show a usable list.
@@ -37,10 +67,12 @@ impl WavesPreviewer {
             avail_h,
             external_cols,
             header_h,
+            header_pitch,
             list_rect,
             pointer_over_list,
             row_count,
             row_h,
+            row_pitch,
             text_height,
             visible_rows,
         }
@@ -80,7 +112,7 @@ impl WavesPreviewer {
         if metrics.pointer_over_list {
             let dy = ctx.input(|i| i.smooth_scroll_delta.y);
             if dy != 0.0 && total > visible {
-                self.list_scroll_residual -= dy / metrics.row_h.max(1.0);
+                self.list_scroll_residual -= dy / metrics.row_pitch.max(1.0);
                 let whole = self.list_scroll_residual.trunc();
                 if whole != 0.0 {
                     self.list_scroll_residual -= whole;
@@ -115,7 +147,7 @@ impl WavesPreviewer {
         let bar_rect = egui::Rect::from_min_max(
             egui::pos2(
                 list_rect.right() - BAR_W,
-                list_rect.top() + metrics.header_h,
+                list_rect.top() + metrics.header_pitch,
             ),
             list_rect.right_bottom(),
         );
@@ -530,5 +562,87 @@ impl WavesPreviewer {
             || self.pending_gain_count_throttled() > 0
             || !self.sample_rate_override.is_empty()
             || !self.bit_depth_override.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::list_fully_visible_rows;
+
+    /// The regression this whole helper exists for. egui_extras advances by
+    /// `row_h + item_spacing.y`, so dividing by `row_h` alone claims more rows
+    /// fit than actually do, and the scroll clamp derived from it stopped
+    /// short of the last row.
+    #[test]
+    fn row_spacing_is_counted_against_the_available_height() {
+        // 800 px viewport, 20 px header, 26 px rows, 3 px spacing.
+        let naive = ((800.0 - 20.0) / 26.0f32).floor() as usize;
+        let actual = list_fully_visible_rows(800.0, 20.0, 26.0, 3.0);
+        assert_eq!(naive, 30);
+        assert_eq!(actual, 26);
+        assert!(
+            actual < naive,
+            "spacing must reduce the count, or the tail stays unreachable"
+        );
+    }
+
+    #[test]
+    fn zero_spacing_reproduces_the_naive_count() {
+        for avail in [120.0f32, 480.0, 801.0, 1600.0] {
+            for row_h in [18.0f32, 26.0, 48.0] {
+                let naive = ((avail - 20.0) / row_h).floor().max(1.0) as usize;
+                assert_eq!(
+                    list_fully_visible_rows(avail, 20.0, row_h, 0.0),
+                    naive,
+                    "avail={avail} row_h={row_h}"
+                );
+            }
+        }
+    }
+
+    /// Under-counting is safe (a roomier scroll clamp); over-counting is the
+    /// bug. Assert the direction can never flip for any plausible input.
+    #[test]
+    fn the_count_never_exceeds_the_naive_one() {
+        for spacing in [0.0f32, 1.0, 3.0, 4.0, 8.0, 16.0] {
+            for avail in [60.0f32, 200.0, 800.0, 2160.0] {
+                for row_h in [14.0f32, 26.0, 48.0, 96.0] {
+                    let naive = ((avail - 20.0) / row_h).floor().max(1.0) as usize;
+                    let fit = list_fully_visible_rows(avail, 20.0, row_h, spacing);
+                    assert!(
+                        fit <= naive,
+                        "spacing={spacing} avail={avail} row_h={row_h}: {fit} > {naive}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A viewport shorter than its own header must still report a usable row,
+    /// or the list would render nothing and never recover.
+    #[test]
+    fn a_degenerate_viewport_still_reports_one_row() {
+        assert_eq!(list_fully_visible_rows(0.0, 20.0, 26.0, 3.0), 1);
+        assert_eq!(list_fully_visible_rows(10.0, 20.0, 26.0, 3.0), 1);
+        assert_eq!(list_fully_visible_rows(-50.0, 20.0, 26.0, 3.0), 1);
+        assert_eq!(list_fully_visible_rows(f32::NAN, 20.0, 26.0, 3.0), 1);
+        // Row height is always `wave_row_h.max(text_height * 1.3)`, so a zero
+        // pitch cannot occur; only assert the invariant that matters -- the
+        // count is never zero, which would render an empty list forever.
+        assert!(list_fully_visible_rows(800.0, 20.0, 0.0, 0.0) >= 1);
+    }
+
+    /// The deficit grows with viewport height: more rows on screen means more
+    /// accumulated spacing. This is why a taller window hid more rows.
+    #[test]
+    fn a_taller_viewport_loses_more_rows_to_spacing() {
+        let short_loss = ((400.0 - 20.0) / 26.0f32).floor() as usize
+            - list_fully_visible_rows(400.0, 20.0, 26.0, 3.0);
+        let tall_loss = ((1600.0 - 20.0) / 26.0f32).floor() as usize
+            - list_fully_visible_rows(1600.0, 20.0, 26.0, 3.0);
+        assert!(
+            tall_loss > short_loss,
+            "short={short_loss} tall={tall_loss}"
+        );
     }
 }

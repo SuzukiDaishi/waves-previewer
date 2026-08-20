@@ -23,10 +23,17 @@ pub(super) struct ListViewMetrics {
     pub(super) avail_h: f32,
     pub(super) external_cols: Vec<String>,
     pub(super) header_h: f32,
+    /// `header_h` plus the one item spacing the header strip adds below
+    /// itself. The body starts here, not at `header_h`.
+    pub(super) header_pitch: f32,
     pub(super) list_rect: egui::Rect,
     pub(super) pointer_over_list: bool,
     pub(super) row_count: usize,
     pub(super) row_h: f32,
+    /// Vertical distance between consecutive row tops, i.e. what
+    /// `egui_extras::TableBody::rows` actually advances by. Row *height*
+    /// alone is not it: the table adds `item_spacing.y` between rows.
+    pub(super) row_pitch: f32,
     pub(super) text_height: f32,
     pub(super) visible_rows: usize,
 }
@@ -274,6 +281,7 @@ impl crate::app::WavesPreviewer {
             highlight_text_job_with_regex,
         };
         use crate::app::list_state_ops::QaStatus;
+        self.list_last_fully_visible_row = None;
         if self.ui_list_empty_state(ui) {
             return;
         }
@@ -299,6 +307,12 @@ impl crate::app::WavesPreviewer {
         let mut to_open: Option<PathBuf> = None;
         let mut visible_first_row: Option<usize> = None;
         let mut visible_last_row: Option<usize> = None;
+        // Rows the table lays out past the bottom of the viewport are clipped,
+        // not scrollable into view (the table is built with `vscroll(false)`).
+        // Tracking the last row that actually fitted lets the scroll clamp be
+        // verified against pixels instead of index arithmetic.
+        let list_bottom = metrics.list_rect.bottom();
+        let mut last_fully_visible_row: Option<usize> = None;
         let allow_auto_scroll = self.list_allow_auto_scroll(ctx, &metrics, key_moved);
         self.update_list_scroll_state(ctx, &metrics, allow_auto_scroll);
         let (table, filler_cols, header_dirty) = self.build_list_table(ui, &metrics);
@@ -1594,6 +1608,11 @@ impl crate::app::WavesPreviewer {
                         });
                         // row-level interaction (must call response() after at least one col())
                         let resp = self.attach_row_context_menu(row.response(), row_idx, ctx);
+                        if resp.rect.bottom() <= list_bottom + 0.5 {
+                            last_fully_visible_row = Some(
+                                last_fully_visible_row.map_or(row_idx, |v: usize| v.max(row_idx)),
+                            );
+                        }
                         let drag_started =
                             resp.drag_started_by(egui::PointerButton::Primary);
                         if drag_started
@@ -1649,6 +1668,7 @@ impl crate::app::WavesPreviewer {
                 });
             });
 
+        self.list_last_fully_visible_row = last_fully_visible_row;
         self.ui_list_scrollbar(ui, &metrics);
         self.commit_list_col_widths(ctx);
 

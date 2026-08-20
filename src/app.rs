@@ -746,6 +746,14 @@ pub struct WavesPreviewer {
     list_scroll_row: usize,
     /// Sub-row wheel accumulation in rows.
     list_scroll_residual: f32,
+    /// Largest absolute row index whose painted rect ended at or above the
+    /// bottom of the list viewport last frame. At maximum scroll this must be
+    /// the last row in `files`; when it is not, the tail is unreachable —
+    /// which is exactly the bug the row-pitch fix addresses. Recorded as an
+    /// observation for the regression tests and the Debug window; never fed
+    /// back into layout, or the window size and the rows it measures would
+    /// chase each other frame to frame.
+    list_last_fully_visible_row: Option<usize>,
     scroll_to_selected: bool,
     last_list_scroll_at: Option<std::time::Instant>,
     auto_play_list_nav: bool,

@@ -538,6 +538,21 @@ impl super::WavesPreviewer {
         self.list_scroll_row
     }
 
+    /// Last row whose painted rect fitted inside the list viewport on the
+    /// previous frame. `test_list_scroll_row` only says which rows were handed
+    /// to the table; rows laid out past the bottom are clipped with no way to
+    /// scroll them in, so this is the one that can prove the tail is reachable.
+    pub fn test_list_last_fully_visible_row(&self) -> Option<usize> {
+        self.list_last_fully_visible_row
+    }
+
+    /// Scroll the row window to its clamped maximum, as dragging the custom
+    /// scrollbar to the bottom of its track does.
+    pub fn test_list_scroll_to_end(&mut self) {
+        self.list_scroll_row = usize::MAX;
+        self.list_scroll_residual = 0.0;
+    }
+
     pub fn test_ui_scroll_focus_name(&self) -> &'static str {
         match self.ui_scroll_focus.active() {
             Some(super::input_focus::UiScrollTarget::List) => "list",
