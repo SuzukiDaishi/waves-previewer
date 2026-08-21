@@ -399,7 +399,7 @@ mod ui_focus_input_regressions {
     }
 
     #[test]
-    fn scroll_focus_routes_wheel_to_clicked_settings_or_list_only() {
+    fn wheel_follows_the_pointer_between_settings_and_list() {
         let dir = make_temp_dir("scroll_surface_focus");
         for i in 0..40 {
             let wav = dir.join(format!("scroll_focus_{i:02}.wav"));
@@ -409,14 +409,14 @@ mod ui_focus_input_regressions {
         let mut harness = harness_with_folder(dir.clone());
         wait_for_scan(&mut harness);
         harness.run_steps(3);
-        assert_eq!(harness.state().test_ui_scroll_focus_name(), "list");
+        assert_eq!(harness.state().test_ui_input_focus_name(), "list");
 
         harness.state_mut().test_set_show_export_settings(true);
         harness.run_steps(3);
         assert!(
             harness
                 .state()
-                .test_ui_scroll_focus_is_floating("settings_window"),
+                .test_ui_input_focus_is_floating("settings_window"),
             "a newly opened Settings window must receive scroll focus"
         );
 
@@ -435,37 +435,41 @@ mod ui_focus_input_regressions {
             "the List must not scroll behind Settings"
         );
 
-        // Hover alone does not transfer focus to the uncovered List.
+        // The wheel follows the pointer: moving onto the uncovered List
+        // scrolls it without needing a click first.
         let uncovered_list_pos = egui::pos2(1180.0, 300.0);
         wheel_at(&mut harness, uncovered_list_pos, -180.0);
-        assert_eq!(harness.state().test_list_scroll_row(), list_before);
-        assert_eq!(settings_scroll_offset(&harness), settings_after);
-
-        // The click is not swallowed: it selects the background scroll surface.
-        click_at(&mut harness, uncovered_list_pos);
-        assert_eq!(harness.state().test_ui_scroll_focus_name(), "list");
-        wheel_at(&mut harness, uncovered_list_pos, -180.0);
         let list_after = harness.state().test_list_scroll_row();
-        assert!(list_after > list_before, "the clicked List should scroll");
-        assert_eq!(settings_scroll_offset(&harness), settings_after);
+        assert!(
+            list_after > list_before,
+            "hovering the List should be enough to scroll it: {list_before} -> {list_after}"
+        );
+        assert_eq!(
+            settings_scroll_offset(&harness),
+            settings_after,
+            "Settings must not scroll while the pointer is over the List"
+        );
 
-        // Merely hovering Settings again must not steal focus or leak to List.
-        wheel_at(&mut harness, settings_pos, -180.0);
-        assert_eq!(harness.state().test_list_scroll_row(), list_after);
-        assert_eq!(settings_scroll_offset(&harness), settings_after);
+        // The click is not swallowed: it still selects the background surface.
+        click_at(&mut harness, uncovered_list_pos);
+        assert_eq!(harness.state().test_ui_input_focus_name(), "list");
 
-        // Clicking the Settings title bar restores Settings as the sole target.
-        click_at(&mut harness, egui::pos2(640.0, 50.0));
-        assert!(harness
-            .state()
-            .test_ui_scroll_focus_is_floating("settings_window"));
+        // Moving back over Settings hands the wheel straight back, and the
+        // List behind it stays put -- this is the reported bug.
         wheel_at(&mut harness, settings_pos, -180.0);
-        assert!(settings_scroll_offset(&harness) > settings_after + 1.0);
-        assert_eq!(harness.state().test_list_scroll_row(), list_after);
+        assert!(
+            settings_scroll_offset(&harness) > settings_after + 1.0,
+            "hovering Settings should scroll Settings"
+        );
+        assert_eq!(
+            harness.state().test_list_scroll_row(),
+            list_after,
+            "the List must not scroll behind Settings, even after being clicked"
+        );
 
         harness.state_mut().test_set_show_export_settings(false);
         harness.run_steps(2);
-        assert_eq!(harness.state().test_ui_scroll_focus_name(), "list");
+        assert_eq!(harness.state().test_ui_input_focus_name(), "list");
 
         // Multiple floating windows use MRU restoration rather than falling
         // through to whichever happens to render first.
@@ -477,17 +481,17 @@ mod ui_focus_input_regressions {
         harness.run_steps(2);
         assert!(harness
             .state()
-            .test_ui_scroll_focus_is_floating("transcription_settings_window"));
+            .test_ui_input_focus_is_floating("transcription_settings_window"));
         harness
             .state_mut()
             .test_set_show_transcription_settings(false);
         harness.run_steps(2);
         assert!(harness
             .state()
-            .test_ui_scroll_focus_is_floating("settings_window"));
+            .test_ui_input_focus_is_floating("settings_window"));
         harness.state_mut().test_set_show_export_settings(false);
         harness.run_steps(2);
-        assert_eq!(harness.state().test_ui_scroll_focus_name(), "list");
+        assert_eq!(harness.state().test_ui_input_focus_name(), "list");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -503,7 +507,7 @@ mod ui_focus_input_regressions {
         assert!(harness.state_mut().test_open_tab_for_path(&wav));
         wait_for_editor_ready(&mut harness);
         harness.run_steps(3);
-        assert_eq!(harness.state().test_ui_scroll_focus_name(), "editor");
+        assert_eq!(harness.state().test_ui_input_focus_name(), "editor");
 
         let before = harness
             .state()
@@ -514,7 +518,7 @@ mod ui_focus_input_regressions {
         harness.run_steps(3);
         assert!(harness
             .state()
-            .test_ui_scroll_focus_is_floating("settings_window"));
+            .test_ui_input_focus_is_floating("settings_window"));
         let settings_rect = settings_window_rect(&harness);
         let inspector_left = harness
             .state()
@@ -536,7 +540,7 @@ mod ui_focus_input_regressions {
 
         click_at(&mut harness, canvas_pos);
         assert_eq!(
-            harness.state().test_ui_scroll_focus_name(),
+            harness.state().test_ui_input_focus_name(),
             "editor",
             "click at {canvas_pos:?} should be outside Settings {settings_rect:?} and before inspector x={inspector_left}"
         );
@@ -560,7 +564,7 @@ mod ui_focus_input_regressions {
         wait_for_scan(&mut harness);
         harness.state_mut().test_open_effect_graph_workspace();
         harness.run_steps(3);
-        assert_eq!(harness.state().test_ui_scroll_focus_name(), "effect_graph");
+        assert_eq!(harness.state().test_ui_input_focus_name(), "effect_graph");
         let before = harness.state().test_effect_graph_canvas_zoom();
 
         harness.state_mut().test_set_show_export_settings(true);
@@ -586,13 +590,127 @@ mod ui_focus_input_regressions {
         );
 
         click_at(&mut harness, canvas_pos);
-        assert_eq!(harness.state().test_ui_scroll_focus_name(), "effect_graph");
+        assert_eq!(harness.state().test_ui_input_focus_name(), "effect_graph");
         command_wheel_at(&mut harness, canvas_pos, 120.0);
         assert_ne!(
             harness.state().test_effect_graph_canvas_zoom(),
             before,
             "clicked Effect Graph should accept wheel zoom"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A caret in a dialog owns Ctrl+A, Delete and Space. The list behind it
+    /// must not select all its rows, delete them, or start playback.
+    #[test]
+    fn text_edit_focus_scopes_keys_to_the_field() {
+        let dir = make_temp_dir("scoped_keys");
+        for i in 0..4 {
+            let wav = dir.join(format!("scoped_keys_{i}.wav"));
+            write_fixture_wav(&wav, 48_000, 0.3);
+        }
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_and_load_row(0));
+        harness.run_steps(2);
+
+        let files_before = harness.state().test_files_len();
+        let selected_before = harness.state().test_selected_multi_len();
+        assert!(
+            selected_before < files_before,
+            "precondition: not everything is selected yet"
+        );
+
+        harness
+            .state_mut()
+            .test_set_export_name_template("scoped_keys_token");
+        harness.state_mut().test_set_show_export_settings(true);
+        harness.run_steps(3);
+        {
+            let template_node = text_input_by_value(&harness, "scoped_keys_token");
+            template_node.click();
+        }
+        harness.run_steps(2);
+        assert!(
+            harness.state().test_input_scope_text_editing(),
+            "clicking the Settings text field must put a caret in it"
+        );
+        assert!(
+            !harness.state().test_list_owns_surface_keys(),
+            "the List must not own surface keys while a dialog field has the caret"
+        );
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_selected_multi_len(),
+            selected_before,
+            "Ctrl+A belongs to the focused text field, not the list behind it"
+        );
+
+        harness.key_press(Key::Delete);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_files_len(),
+            files_before,
+            "Delete must not remove list rows while a dialog field has the caret"
+        );
+
+        assert!(!harness.state().test_audio_is_playing());
+        harness.key_press(Key::Space);
+        harness.run_steps(2);
+        assert!(
+            !harness.state().test_audio_is_playing(),
+            "Space types a space in the field; it must not toggle playback"
+        );
+
+        // Closing the dialog hands the keys back to the list.
+        harness.state_mut().test_set_show_export_settings(false);
+        harness.run_steps(3);
+        assert!(harness.state().test_list_owns_surface_keys());
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_selected_multi_len(),
+            files_before,
+            "Ctrl+A selects the whole list again once the dialog is closed"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A dialog with no text field at all still owns the unmodified keys while
+    /// it is the surface the user is in.
+    #[test]
+    fn open_dialog_owns_surface_keys_without_a_text_field() {
+        let dir = make_temp_dir("dialog_owns_keys");
+        for i in 0..4 {
+            let wav = dir.join(format!("dialog_owns_{i}.wav"));
+            write_fixture_wav(&wav, 48_000, 0.3);
+        }
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_and_load_row(0));
+        harness.run_steps(2);
+        let files_before = harness.state().test_files_len();
+
+        harness.state_mut().test_set_show_list_columns_window(true);
+        harness.run_steps(3);
+        assert!(
+            !harness.state().test_list_owns_surface_keys(),
+            "an open dialog owns the frame's surface keys"
+        );
+
+        harness.key_press(Key::Delete);
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_files_len(), files_before);
+
+        harness.state_mut().test_set_show_list_columns_window(false);
+        harness.run_steps(3);
+        assert!(harness.state().test_list_owns_surface_keys());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -657,8 +775,11 @@ mod ui_focus_input_regressions {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A topbar DragValue in text-entry mode owns its arrows; the list behind
+    /// it must not move too. Leaving the field hands them straight back, so
+    /// the list never ends up permanently unnavigable.
     #[test]
-    fn list_arrow_navigation_recovers_after_dragvalue_text_focus() {
+    fn dragvalue_text_entry_owns_arrows_then_returns_them() {
         let dir = make_temp_dir("arrow_dragvalue_recover");
         for i in 0..3 {
             let wav = dir.join(format!("arrow_dragvalue_{i}.wav"));
@@ -683,10 +804,31 @@ mod ui_focus_input_regressions {
         harness.run_steps(1);
         harness.key_press(Key::Backspace);
         harness.run_steps(1);
+        assert!(
+            harness.state().test_input_scope_text_editing(),
+            "a clicked DragValue is a live text entry in egui"
+        );
 
         harness.key_press(Key::ArrowDown);
         harness.run_steps(2);
+        let during = harness
+            .state()
+            .test_selected_path()
+            .cloned()
+            .expect("selected during edit");
+        assert_eq!(
+            during, before,
+            "ArrowDown belongs to the field being edited, not to the list behind it"
+        );
 
+        // Escape leaves the field and returns keyboard ownership to the list.
+        harness.key_press(Key::Escape);
+        harness.run_steps(2);
+        assert!(!harness.state().test_input_scope_text_editing());
+        assert!(harness.state().test_list_owns_surface_keys());
+
+        harness.key_press(Key::ArrowDown);
+        harness.run_steps(2);
         let after = harness
             .state()
             .test_selected_path()
@@ -694,7 +836,7 @@ mod ui_focus_input_regressions {
             .expect("selected after");
         assert_ne!(
             after, before,
-            "ArrowDown should move selection even after DragValue text focus"
+            "ArrowDown should move the list again once the field is left"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

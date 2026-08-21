@@ -553,22 +553,33 @@ impl super::WavesPreviewer {
         self.list_scroll_residual = 0.0;
     }
 
-    pub fn test_ui_scroll_focus_name(&self) -> &'static str {
-        match self.ui_scroll_focus.active() {
-            Some(super::input_focus::UiScrollTarget::List) => "list",
-            Some(super::input_focus::UiScrollTarget::Editor) => "editor",
-            Some(super::input_focus::UiScrollTarget::EffectGraph) => "effect_graph",
-            Some(super::input_focus::UiScrollTarget::Recording) => "recording",
-            Some(super::input_focus::UiScrollTarget::Floating(_)) => "floating",
+    pub fn test_ui_input_focus_name(&self) -> &'static str {
+        match self.ui_input_focus.active() {
+            Some(super::input_focus::UiSurface::List) => "list",
+            Some(super::input_focus::UiSurface::Editor) => "editor",
+            Some(super::input_focus::UiSurface::EffectGraph) => "effect_graph",
+            Some(super::input_focus::UiSurface::Recording) => "recording",
+            Some(super::input_focus::UiSurface::Floating(_)) => "floating",
             None => "none",
         }
     }
 
-    pub fn test_ui_scroll_focus_is_floating(&self, id: &str) -> bool {
-        self.ui_scroll_focus.active()
-            == Some(super::input_focus::UiScrollTarget::Floating(egui::Id::new(
+    pub fn test_ui_input_focus_is_floating(&self, id: &str) -> bool {
+        self.ui_input_focus.active()
+            == Some(super::input_focus::UiSurface::Floating(egui::Id::new(
                 id,
             )))
+    }
+
+    /// Whether a caret is live somewhere in the UI this frame.
+    pub fn test_input_scope_text_editing(&self) -> bool {
+        self.input_scope.text_editing
+    }
+
+    /// Whether the List currently owns surface-scoped keys (Delete, Ctrl+A,
+    /// arrows). False while a dialog or another workspace owns them.
+    pub fn test_list_owns_surface_keys(&self) -> bool {
+        self.surface_keys_allowed(super::input_focus::UiSurface::List)
     }
 
     pub fn test_sort_job_active(&self) -> bool {

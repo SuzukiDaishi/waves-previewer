@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::app::input_focus::UiScrollTarget;
+use crate::app::input_focus::UiSurface;
 use crate::app::keymap::Action;
 use crate::app::music_onnx;
 use crate::app::render::overlay as ov;
@@ -2671,8 +2671,8 @@ impl crate::app::WavesPreviewer {
         ctx: &egui::Context,
         tab_idx: usize,
     ) {
-        let editor_scroll_active = self.ui_scroll_focus.is_active(UiScrollTarget::Editor);
-        let editor_scroll_source = self.scroll_source_for(UiScrollTarget::Editor);
+        let editor_scroll_active = self.ui_input_focus.is_active(UiSurface::Editor);
+        let editor_scroll_source = self.scroll_source_for(UiSurface::Editor);
         if self.tabs[tab_idx].primary_view == EditorPrimaryView::Metadata {
             self.ui_metadata_inspector(ui, ctx, tab_idx);
             return;
@@ -3047,7 +3047,7 @@ impl crate::app::WavesPreviewer {
         } else {
             0.0
         };
-        if !ctx.egui_wants_keyboard_input() && tab_samples_len > 0 {
+        if self.surface_keys_allowed(UiSurface::Editor) && tab_samples_len > 0 {
             let mods = ctx.input(|i| i.modifiers);
             let ctrl = mods.ctrl || mods.command;
             let shift = mods.shift;
@@ -3471,6 +3471,8 @@ impl crate::app::WavesPreviewer {
         } else {
             avail.y
         };
+        // Resolved before `self` is borrowed by the body closure below.
+        let editor_keys_allowed = self.surface_keys_allowed(UiSurface::Editor);
         {
             let mut draw_editor_body = |ui: &mut egui::Ui| {
                 let tab = &mut self.tabs[tab_idx];
@@ -4604,10 +4606,7 @@ impl crate::app::WavesPreviewer {
             }
 
             // Handle interactions (seek, zoom, pan, selection)
-            if view_mode == ViewMode::Waveform
-                && display_samples_len > 0
-                && !ctx.egui_wants_keyboard_input()
-            {
+            if view_mode == ViewMode::Waveform && display_samples_len > 0 && editor_keys_allowed {
                 let zoom_in = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
                 let zoom_out = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
                 if zoom_in || zoom_out {

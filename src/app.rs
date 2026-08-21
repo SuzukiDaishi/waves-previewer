@@ -120,7 +120,7 @@ mod zoo_ops;
 pub use self::cli_ops::run_cli;
 #[cfg(feature = "kittest")]
 use self::dialogs::TestDialogQueue;
-use self::input_focus::UiScrollFocusState;
+use self::input_focus::{InputScope, UiInputFocusState};
 use self::render::waveform_pyramid::WaveformScratch;
 use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
@@ -776,8 +776,10 @@ pub struct WavesPreviewer {
     suppress_list_enter: bool,
     list_has_focus: bool,
     search_has_focus: bool,
-    /// Runtime-only click focus for wheel/trackpad input routing.
-    ui_scroll_focus: UiScrollFocusState,
+    /// Runtime-only ownership of wheel/trackpad and keyboard input.
+    ui_input_focus: UiInputFocusState,
+    /// This frame's resolved input scope: who may act on a key press.
+    input_scope: InputScope,
     // original order snapshot for tri-state sort
     original_files: Vec<MediaId>,
     // search

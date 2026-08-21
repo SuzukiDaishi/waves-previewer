@@ -1238,7 +1238,7 @@ impl WavesPreviewer {
     }
 
     pub(super) fn debug_tick(&mut self, ctx: &egui::Context) {
-        if ctx.input(|i| i.key_pressed(egui::Key::F12)) {
+        if self.global_keys_allowed() && ctx.input(|i| i.key_pressed(egui::Key::F12)) {
             self.debug.cfg.enabled = true;
             self.debug.show_window = !self.debug.show_window;
         }

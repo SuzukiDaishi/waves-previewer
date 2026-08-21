@@ -530,7 +530,7 @@ impl super::WavesPreviewer {
         if !self.is_effect_graph_workspace_active() {
             return;
         }
-        let allow = !ctx.egui_wants_keyboard_input();
+        let allow = self.surface_keys_allowed(super::input_focus::UiSurface::EffectGraph);
         let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
         let down_c = ctx.input(|i| i.key_down(egui::Key::C));
         let down_v = ctx.input(|i| i.key_down(egui::Key::V));
@@ -601,7 +601,7 @@ impl super::WavesPreviewer {
         let Some(tab_idx) = self.active_tab else {
             return;
         };
-        if ctx.egui_wants_keyboard_input() {
+        if !self.surface_keys_allowed(super::input_focus::UiSurface::Editor) {
             return;
         }
         let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
@@ -735,7 +735,10 @@ impl super::WavesPreviewer {
         }
         let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
         let list_focus = self.list_has_focus || ctx.memory(|m| m.has_focus(Self::list_focus_id()));
-        let allow = !search_focused
+        // Ctrl+C/V belong to whatever text field has the caret, and to the
+        // dialog on top when one is up -- not to the list behind them.
+        let allow = self.surface_keys_allowed(super::input_focus::UiSurface::List)
+            && !search_focused
             && (list_focus || self.selected.is_some() || !self.selected_multi.is_empty());
         let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
         let down_c = ctx.input(|i| i.key_down(egui::Key::C));

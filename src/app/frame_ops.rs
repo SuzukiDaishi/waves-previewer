@@ -99,8 +99,11 @@ impl WavesPreviewer {
         frame_started: Instant,
         had_ui_input: bool,
     ) {
-        let scroll_target = self.current_ui_scroll_target();
-        self.ui_scroll_focus.begin_frame(ctx, scroll_target);
+        let scroll_target = self.current_ui_surface();
+        self.ui_input_focus.begin_frame(ctx, scroll_target);
+        // Resolve once, before any handler runs, so every shortcut answers
+        // "am I allowed to act?" from the same snapshot.
+        self.resolve_input_scope(ctx);
         // Coarse per-stage tracing for benchmark hunts (NEOWAVES_BENCH_TRACE=1).
         macro_rules! trace_stage {
             ($name:expr, $body:expr) => {{
@@ -183,7 +186,7 @@ impl WavesPreviewer {
         self.process_tool_queue();
         trace_stage!("apply_search_if_due", self.apply_search_if_due());
         self.handle_screenshot_events(ctx);
-        if ctx.input(|i| i.key_pressed(Key::F9)) {
+        if self.global_keys_allowed() && ctx.input(|i| i.key_pressed(Key::F9)) {
             let path = self.default_screenshot_path();
             self.request_screenshot(ctx, path, false);
         }
@@ -422,8 +425,8 @@ impl WavesPreviewer {
                 }
             });
             ui.separator();
-            let scroll_target = self.current_ui_scroll_target();
-            self.ui_scroll_focus.begin_surface(scroll_target);
+            let scroll_target = self.current_ui_surface();
+            self.ui_input_focus.begin_surface(scroll_target);
             let workspace_rect = ui.available_rect_before_wrap();
             {
                 let _scroll_guard = self.pointer_scroll_input_guard(scroll_target, &ctx);
@@ -440,7 +443,7 @@ impl WavesPreviewer {
                     self.ui_list_view(ui, &ctx);
                 }
             }
-            self.ui_scroll_focus
+            self.ui_input_focus
                 .register_region(scroll_target, ui.layer_id(), workspace_rect);
         });
         activate_path
@@ -1074,8 +1077,8 @@ impl WavesPreviewer {
     }
 
     fn run_frame_finish(&mut self, ctx: &egui::Context, frame_started: Instant) {
-        let scroll_target = self.current_ui_scroll_target();
-        self.ui_scroll_focus.finish_frame(scroll_target);
+        let scroll_target = self.current_ui_surface();
+        self.ui_input_focus.finish_frame(scroll_target);
         let playing = self
             .audio
             .shared

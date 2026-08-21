@@ -1,5 +1,6 @@
 use egui::Sense;
 
+use crate::app::input_focus::UiSurface;
 use crate::app::WavesPreviewer;
 
 use super::{ListInteractionState, ListViewMetrics};
@@ -17,8 +18,9 @@ impl WavesPreviewer {
         let search_focused =
             ctx.memory(|m| m.has_focus(crate::app::WavesPreviewer::search_box_id()));
         let has_non_list_focus = focused_id.is_some() && focused_id != Some(list_focus_id);
-        let rename_modal_open = self.list_modal_open();
-        let allow_focus_reclaim = !rename_modal_open && !search_focused && !has_non_list_focus;
+        // Another surface (a dialog, the editor, the graph) owns the keys.
+        let list_owns_keys = self.surface_keys_allowed(UiSurface::List);
+        let allow_focus_reclaim = list_owns_keys && !search_focused && !has_non_list_focus;
         let focus_resp = ui.interact(metrics.list_rect, list_focus_id, Sense::click());
         if self.list_has_focus && !list_focus_now && allow_focus_reclaim {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
@@ -38,10 +40,18 @@ impl WavesPreviewer {
         }
 
         let mut key_moved = false;
-        let allow_list_keys = self.is_list_workspace_active()
-            && !self.files.is_empty()
-            && !search_focused
-            && !rename_modal_open;
+        // The list only acts on keys while the user is actually in it: no
+        // caret is live anywhere (a dialog's text field, an inline rename, the
+        // search box, a topbar DragValue in edit mode -- `list_owns_keys`
+        // folds in `text_edit_focused()`) and no other surface owns the
+        // frame's keys.
+        //
+        // Deliberately NOT gated on `has_non_list_focus`: a plain topbar
+        // button takes egui focus when clicked, and the list's arrows have to
+        // survive that. Keys the caret does want are handled by the widget
+        // itself -- `topbar/transport.rs:133` consumes a focused DragValue's
+        // arrows and hands focus back here.
+        let allow_list_keys = list_owns_keys && !self.files.is_empty() && !search_focused;
         if self.debug.cfg.enabled && self.is_list_workspace_active() && !self.files.is_empty() {
             let nav_key_pressed = ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowDown)
@@ -53,7 +63,7 @@ impl WavesPreviewer {
             });
             if nav_key_pressed && !allow_list_keys {
                 self.debug_trace_input(&format!(
-                    "list nav blocked (search_focused={search_focused}, has_non_list_focus={has_non_list_focus}, rename_modal_open={rename_modal_open})"
+                    "list nav blocked (search_focused={search_focused}, has_non_list_focus={has_non_list_focus}, list_owns_keys={list_owns_keys})"
                 ));
             }
         }
@@ -74,7 +84,7 @@ impl WavesPreviewer {
         } else {
             false
         };
-        if allow_list_keys && list_key_intent && !rename_modal_open {
+        if allow_list_keys && list_key_intent {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
             list_has_focus = true;
             self.list_has_focus = true;
@@ -129,8 +139,15 @@ impl WavesPreviewer {
         } else {
             false
         };
+        // Consumed, not just observed: an un-consumed Ctrl+A fires here *and*
+        // in whatever text field also saw it. Both spellings are consumed
+        // because a raw Ctrl (without egui-winit's paired `command` flag) is
+        // what some platforms and the test harness deliver.
         let pressed_ctrl_a = if allow_list_keys {
-            ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::A))
+            ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)
+                    | i.consume_key(egui::Modifiers::CTRL, egui::Key::A)
+            })
         } else {
             false
         };
@@ -279,18 +296,5 @@ impl WavesPreviewer {
             list_focus_id,
             list_has_focus,
         }
-    }
-
-    fn list_modal_open(&self) -> bool {
-        self.show_rename_dialog
-            || self.show_batch_rename_dialog
-            || self.show_export_settings
-            || self.show_list_columns_window
-            || self.show_transcription_settings
-            || self.show_resample_dialog
-            || self.show_leave_prompt
-            || self.show_external_dialog
-            || self.show_list_art_window
-            || self.inline_rename_path.is_some()
     }
 }
