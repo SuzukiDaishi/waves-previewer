@@ -2222,6 +2222,10 @@ pub struct EditorTab {
     pub loop_markers_saved: Option<(usize, usize)>,
     pub loop_markers_dirty: bool,
     // Trim-specific A/B range (independent from loop)
+    /// Legacy Trim-tool range. No longer painted or hover-tested — the blue
+    /// selection is the single visible range on the waveform — and kept only
+    /// for `.nwsess` / undo-snapshot compatibility, the Auto Trim mirror, and
+    /// the `V` shortcut's fallback.
     pub trim_range: Option<(usize, usize)>,
     pub loop_xfade_samples: usize, // crossfade length in samples (device SR)
     pub loop_xfade_shape: LoopXfadeShape, // blend shape
@@ -2291,6 +2295,13 @@ pub struct EditorTab {
     pub tool_state: ToolState,       // simple per-tool parameters
     pub loop_mode: LoopMode,         // Off / On (whole) / Marker
     pub dragging_marker: Option<MarkerKind>, // transient while dragging A/B
+    /// Transient: dragging one edge of the primary selection.
+    ///
+    /// Holds the *anchor* — the edge that stays put — rather than which edge
+    /// was grabbed. Dragging past the anchor then flips the range exactly like
+    /// a fresh drag-select does, instead of the grabbed handle swapping
+    /// identity with the fixed one mid-gesture.
+    pub selection_edge_drag_anchor: Option<usize>,
     // Preview audio state (non-destructive): tool-driven preview, cleared on tool/tab/view changes
     pub preview_audio_tool: Option<ToolKind>,
     /// Audition buffer that produced the visible green preview waveform.
@@ -2423,6 +2434,39 @@ pub struct SpectralBrushStamp {
 }
 
 impl EditorTab {
+    /// Every selected range as sorted, merged, non-empty `[start, end)` spans:
+    /// `extra_selections` plus the primary `selection`.
+    ///
+    /// The single source of truth for "what is selected". The Trim inspector
+    /// used to carry a verbatim copy of this, which could drift from what the
+    /// keyboard actions did.
+    pub fn all_selected_ranges(&self) -> Vec<(usize, usize)> {
+        let mut ranges: Vec<(usize, usize)> = self
+            .extra_selections
+            .iter()
+            .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
+            .filter(|&(a, b)| b > a)
+            .collect();
+        if let Some((a0, b0)) = self.selection {
+            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+            if b > a {
+                ranges.push((a, b));
+            }
+        }
+        ranges.sort();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (s, e) in ranges {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1 {
+                    last.1 = last.1.max(e);
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+        merged
+    }
+
     /// All-defaults constructor shared by every tab-creation site.
     /// Sites override only the fields that differ (cached restore vs
     /// fresh load) so new fields need exactly one default here.
@@ -2547,6 +2591,7 @@ impl EditorTab {
             tool_state: crate::app::types::ToolState::default_values(),
             loop_mode: crate::app::types::LoopMode::Off,
             dragging_marker: None,
+            selection_edge_drag_anchor: None,
             preview_audio_tool: None,
             preview_audio_buffer: None,
             active_tool_last: None,
@@ -4906,6 +4951,15 @@ pub struct DebugState {
     pub plugin_stale_drop_count: u64,
     pub plugin_worker_timeout_count: u64,
     pub plugin_native_fallback_count: u64,
+    /// List metadata tasks actually enqueued, by depth. `header_only` is the
+    /// cheap one (header fields plus a 0.25s peak estimate); `header` and
+    /// `decode` both read the whole file to build the waveform thumb and the
+    /// loudness columns, and are what the list withholds while a folder scan is
+    /// still listing rows — these make that policy observable rather than
+    /// merely claimed.
+    pub meta_task_header_only_count: u64,
+    pub meta_task_header_count: u64,
+    pub meta_task_decode_count: u64,
 }
 
 impl DebugState {
@@ -5010,6 +5064,9 @@ impl DebugState {
             plugin_stale_drop_count: 0,
             plugin_worker_timeout_count: 0,
             plugin_native_fallback_count: 0,
+            meta_task_header_only_count: 0,
+            meta_task_header_count: 0,
+            meta_task_decode_count: 0,
         }
     }
 }
@@ -5408,5 +5465,47 @@ mod transcript_document_tests {
         value.scale_time(0.0);
         assert_eq!(value.segments, segments);
         assert_eq!(value.freshness, TranscriptFreshness::Stale);
+    }
+}
+
+#[cfg(test)]
+mod editor_tab_selection_tests {
+    use super::EditorTab;
+
+    fn tab_with(selection: Option<(usize, usize)>, extras: &[(usize, usize)]) -> EditorTab {
+        let mut tab = EditorTab::new_base(std::path::PathBuf::from("/t.wav"), "t.wav".to_string());
+        tab.selection = selection;
+        tab.extra_selections = extras.to_vec();
+        tab
+    }
+
+    #[test]
+    fn reversed_pairs_are_normalized() {
+        let tab = tab_with(Some((900, 100)), &[(500, 300)]);
+        assert_eq!(tab.all_selected_ranges(), vec![(100, 900)]);
+    }
+
+    #[test]
+    fn empty_ranges_are_dropped() {
+        let tab = tab_with(Some((400, 400)), &[(100, 100), (700, 800)]);
+        assert_eq!(tab.all_selected_ranges(), vec![(700, 800)]);
+        assert!(tab_with(None, &[]).all_selected_ranges().is_empty());
+    }
+
+    /// Overlapping and merely touching ranges collapse — the Trim inspector
+    /// relies on this so Apply cannot act on the same samples twice.
+    #[test]
+    fn overlapping_and_touching_ranges_merge() {
+        let tab = tab_with(Some((150, 250)), &[(100, 200), (250, 300)]);
+        assert_eq!(tab.all_selected_ranges(), vec![(100, 300)]);
+    }
+
+    #[test]
+    fn disjoint_ranges_stay_separate_and_sorted() {
+        let tab = tab_with(Some((100, 200)), &[(700, 800), (400, 500)]);
+        assert_eq!(
+            tab.all_selected_ranges(),
+            vec![(100, 200), (400, 500), (700, 800)]
+        );
     }
 }

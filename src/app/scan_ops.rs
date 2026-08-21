@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::types::{
     ListLoadKind, PendingListLoadTarget, PendingListLoadTargetKind, ScanMessage, ScanRequestKind,
@@ -18,6 +18,7 @@ impl WavesPreviewer {
         self.scan_load_kind = None;
         self.scan_pending_target = None;
         self.scan_found_live = None;
+        self.clear_list_seek_pending();
     }
 
     /// Dropping a million MediaItems (plus the path/index maps) frees ~1GB
@@ -201,6 +202,19 @@ impl WavesPreviewer {
         }
     }
 
+    /// Files the walker has found so far, including the ones still queued in
+    /// `scan_pending_batches`. The atomic runs ahead of the batched `Progress`
+    /// messages, so it is the live number; `scan_found_count` is the last
+    /// message received. Take whichever is further along.
+    pub(super) fn scan_discovered_count(&self) -> usize {
+        let live = self
+            .scan_found_live
+            .as_ref()
+            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        self.scan_found_count.max(live)
+    }
+
     /// Grow the list containers toward the scanner's discovery count before
     /// the appender catches up. Directory discovery runs far ahead of the
     /// budgeted appends, so the reserve happens while the containers are
@@ -208,12 +222,7 @@ impl WavesPreviewer {
     /// mid-load (a several-hundred-ms UI stall at the 7/8 load-factor
     /// boundary), and the items vec re-copied hundreds of MB on growth.
     fn reserve_list_capacity_for_scan(&mut self) {
-        let live = self
-            .scan_found_live
-            .as_ref()
-            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(0);
-        let target = self.scan_found_count.max(live);
+        let target = self.scan_discovered_count();
         if target == 0 {
             return;
         }
@@ -308,12 +317,13 @@ impl WavesPreviewer {
 
         let start = Instant::now();
         // Keep directory ingestion moving during playback, but do not let
-        // PathBuf allocation/hash-map growth consume an audio/UI frame.
-        let budget = if self.playback_is_playing_now() || self.playback_session.is_playing {
-            Duration::from_micros(350)
-        } else {
-            Duration::from_millis(3)
-        };
+        // PathBuf allocation/hash-map growth consume an audio/UI frame. The
+        // size comes from the machine tier (see perf_profile.rs): the same
+        // slice that is nothing on a workstation is a dropped frame on a
+        // two-core laptop.
+        let budget = self
+            .perf
+            .list_append_budget(self.playback_is_playing_now() || self.playback_session.is_playing);
 
         loop {
             if start.elapsed() >= budget {

@@ -66,6 +66,7 @@ pub mod keymap;
 mod kittest_ops;
 mod list_ops;
 mod list_preview_ops;
+mod list_seek_ops;
 mod list_state_ops;
 mod list_undo;
 mod loading_ops;
@@ -744,8 +745,28 @@ pub struct WavesPreviewer {
     /// scrolls by row index (usize), so a 1M-row list never touches egui's
     /// f32 scroll offsets (which quantize above ~16.7M px of content).
     list_scroll_row: usize,
+    /// A seek requested from a row waveform that the decoded preview buffer
+    /// does not reach yet. See `list_seek_ops`.
+    list_seek_pending: Option<list_seek_ops::ListSeekPending>,
+    /// `max_secs` the active list-preview job was spawned with. `0.0` means
+    /// "decode to the end of the file" -- the existing convention in
+    /// `spawn_list_preview_async`, which nothing recorded, so a seek past the
+    /// decoded extent could not tell whether a full decode was already coming.
+    list_preview_job_max_secs: f32,
     /// Sub-row wheel accumulation in rows.
     list_scroll_residual: f32,
+    /// Whether the end-of-list row was painted fully inside the viewport last
+    /// frame. At maximum scroll it must be, or the user is left judging "am I
+    /// at the end?" from a half-drawn row again.
+    list_end_row_fully_visible: bool,
+    /// Largest absolute row index whose painted rect ended at or above the
+    /// bottom of the list viewport last frame. At maximum scroll this must be
+    /// the last row in `files`; when it is not, the tail is unreachable —
+    /// which is exactly the bug the row-pitch fix addresses. Recorded as an
+    /// observation for the regression tests and the Debug window; never fed
+    /// back into layout, or the window size and the rows it measures would
+    /// chase each other frame to frame.
+    list_last_fully_visible_row: Option<usize>,
     scroll_to_selected: bool,
     last_list_scroll_at: Option<std::time::Instant>,
     auto_play_list_nav: bool,
@@ -2899,6 +2920,7 @@ impl WavesPreviewer {
             tab.loop_region_committed = state.loop_region_committed;
             tab.selection_anchor_sample = None;
             tab.dragging_marker = None;
+            tab.selection_edge_drag_anchor = None;
             tab.preview_offset_samples = None;
             tab.last_amplitude_nav_rect = None;
             tab.last_amplitude_viewport_rect = None;

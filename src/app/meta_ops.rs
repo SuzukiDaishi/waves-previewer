@@ -2,7 +2,66 @@ use std::path::PathBuf;
 
 use super::{meta, transcript};
 
+/// How much metadata a visible list row may ask for right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ListMetaDetail {
+    /// Header fields only: no decode, no waveform thumb, no loudness. Enough
+    /// for a row to show its name, length and format.
+    HeaderOnly,
+    /// Header plus the decode that fills `FileMeta::thumb` and the loudness
+    /// columns.
+    Thumb,
+}
+
+/// Pure policy behind `list_meta_detail_now`.
+///
+/// While the folder scan is still appending rows, listing every file outranks
+/// drawing waveforms for the screenful that happens to be visible: the thumb
+/// needs a whole-file decode (`MetaTask::Header` does the header pass and that
+/// decode together, `MetaTask::Decode` the decode alone), and those reads
+/// compete with the walker for the same disk and the same worker pool.
+/// `MetaTask::HeaderOnly` skips the decode and still resolves the name, length,
+/// format and duration a row needs. Filenames first, thumbs once the list is
+/// complete.
+///
+/// The second condition is unchanged from the `large_bg_list` test this
+/// replaces, which was spelled out separately in the row loop and in the
+/// prefetch pass.
+pub(crate) fn list_meta_detail_for(
+    files_len: usize,
+    bg_mode_needs_meta: bool,
+    scan_in_progress: bool,
+) -> ListMetaDetail {
+    if scan_in_progress
+        || (bg_mode_needs_meta && files_len >= crate::app::LIST_BG_META_LARGE_THRESHOLD)
+    {
+        ListMetaDetail::HeaderOnly
+    } else {
+        ListMetaDetail::Thumb
+    }
+}
+
 impl super::WavesPreviewer {
+    pub(crate) fn list_meta_detail_now(&self) -> ListMetaDetail {
+        list_meta_detail_for(
+            self.files.len(),
+            self.item_bg_mode != crate::app::types::ItemBgMode::Standard,
+            self.scan_in_progress,
+        )
+    }
+
+    pub(crate) fn list_meta_detail_is_header_only(&self) -> bool {
+        self.list_meta_detail_now() == ListMetaDetail::HeaderOnly
+    }
+
+    /// Queue whatever depth of metadata the list is allowed to ask for now.
+    pub(super) fn queue_list_meta_for_path(&mut self, path: &PathBuf, priority: bool) {
+        match self.list_meta_detail_now() {
+            ListMetaDetail::HeaderOnly => self.queue_header_meta_for_path(path, priority),
+            ListMetaDetail::Thumb => self.queue_meta_for_path(path, priority),
+        }
+    }
+
     /// Debounce for re-sorting while metadata streams in. A full decorate +
     /// sort of a 100k+ item list costs tens of ms (hundreds at 500k), so
     /// large lists re-sort less often, and the interval additionally scales
@@ -173,6 +232,7 @@ impl super::WavesPreviewer {
                 return;
             }
             self.meta_inflight.insert(path.clone());
+            self.debug.meta_task_header_count = self.debug.meta_task_header_count.saturating_add(1);
             if priority {
                 pool.enqueue_front(meta::MetaTask::Header(path.clone()));
             } else {
@@ -200,6 +260,8 @@ impl super::WavesPreviewer {
                 return;
             }
             self.meta_inflight.insert(path.clone());
+            self.debug.meta_task_header_only_count =
+                self.debug.meta_task_header_only_count.saturating_add(1);
             let task = meta::MetaTask::HeaderOnly(path.clone());
             if priority {
                 pool.enqueue_front(task);
@@ -225,6 +287,7 @@ impl super::WavesPreviewer {
                 return;
             }
             self.meta_inflight.insert(path.clone());
+            self.debug.meta_task_decode_count = self.debug.meta_task_decode_count.saturating_add(1);
             let task = meta::MetaTask::Decode(path.clone());
             if priority {
                 pool.enqueue_front(task);
@@ -518,5 +581,63 @@ impl super::WavesPreviewer {
             // Avoid a stall by continuing to consume backlog in future frames.
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{list_meta_detail_for, ListMetaDetail};
+    use crate::app::LIST_BG_META_LARGE_THRESHOLD;
+
+    /// The user's stated priority: knowing how many files are loaded matters
+    /// more than seeing waveforms. While the scan runs, no row may ask for the
+    /// decode that draws one, at any list size or background mode.
+    #[test]
+    fn a_running_scan_always_withholds_the_thumb() {
+        for files_len in [0usize, 1, 100, LIST_BG_META_LARGE_THRESHOLD, 1_000_000] {
+            for bg_needs_meta in [false, true] {
+                assert_eq!(
+                    list_meta_detail_for(files_len, bg_needs_meta, true),
+                    ListMetaDetail::HeaderOnly,
+                    "files_len={files_len} bg={bg_needs_meta}"
+                );
+            }
+        }
+    }
+
+    /// Once the scan is done the policy must be exactly what it was before this
+    /// change: header-only only for a large list in a metadata-driven
+    /// background mode. Anything else would be an unrequested behaviour change.
+    #[test]
+    fn the_idle_policy_matches_the_previous_large_bg_list_test() {
+        for files_len in [
+            0usize,
+            LIST_BG_META_LARGE_THRESHOLD - 1,
+            LIST_BG_META_LARGE_THRESHOLD,
+            LIST_BG_META_LARGE_THRESHOLD + 1,
+        ] {
+            for bg_needs_meta in [false, true] {
+                let legacy_large_bg_list =
+                    bg_needs_meta && files_len >= LIST_BG_META_LARGE_THRESHOLD;
+                let expected = if legacy_large_bg_list {
+                    ListMetaDetail::HeaderOnly
+                } else {
+                    ListMetaDetail::Thumb
+                };
+                assert_eq!(
+                    list_meta_detail_for(files_len, bg_needs_meta, false),
+                    expected,
+                    "files_len={files_len} bg={bg_needs_meta}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_small_idle_list_in_standard_mode_gets_thumbs() {
+        assert_eq!(
+            list_meta_detail_for(200, false, false),
+            ListMetaDetail::Thumb
+        );
     }
 }

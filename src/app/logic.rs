@@ -1590,6 +1590,7 @@ impl super::WavesPreviewer {
         tab.tool_state = crate::app::types::ToolState::default_values();
         tab.loop_mode = crate::app::types::LoopMode::Off;
         tab.dragging_marker = None;
+        tab.selection_edge_drag_anchor = None;
         tab.preview_audio_tool = None;
         tab.preview_audio_buffer = None;
         tab.active_tool_last = None;
@@ -2510,7 +2511,8 @@ impl super::WavesPreviewer {
         // Preserve selection index if possible
         let selected_idx = self.selected.and_then(|i| self.files.get(i).copied());
         let query = self.search_query.trim().to_string();
-        // Search spans display name, folder, transcript, meta summary, and external fields.
+        // Search spans display name, folder, note, transcript, meta summary,
+        // and external fields.
         if query.is_empty() {
             self.files = self.items.iter().map(|item| item.id).collect();
         } else {

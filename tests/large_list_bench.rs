@@ -85,10 +85,17 @@ fn bench_virtualized_500k_rows() {
     assert!(harness.state_mut().test_select_row_with_autoscroll(last));
     harness.step();
     harness.step();
-    let scroll = harness.state().test_list_scroll_row();
-    assert!(
-        scroll <= last && last < scroll + 200,
-        "last row must be in the virtualized viewport: scroll={scroll}"
+    // The rendered row window is not the visible window: the list table is
+    // built with `vscroll(false)`, so a row laid out below the clip rect can
+    // never be scrolled into view. The old assertion here only checked that
+    // the row was inside the rendered window -- which it was, throughout a
+    // real bug that made the last few rows permanently unreachable. Assert
+    // the pixel fact instead.
+    assert_eq!(
+        harness.state().test_list_last_fully_visible_row(),
+        Some(last),
+        "last row not fully on screen: scroll_row={}",
+        harness.state().test_list_scroll_row()
     );
 
     eprintln!(
@@ -233,9 +240,16 @@ fn bench_load_large_folder() {
     harness.step();
     let scroll = harness.state().test_list_scroll_row();
     eprintln!("[bench] scroll to last row: selected={last} scroll_row={scroll}");
-    assert!(
-        scroll <= last && last < scroll + 200,
-        "selected row must be inside the visible window: scroll={scroll} last={last}"
+    // The rendered row window is not the visible window: the list table is
+    // built with `vscroll(false)`, so a row laid out below the clip rect can
+    // never be scrolled into view. The old assertion here only checked that
+    // the row was inside the rendered window -- which it was, throughout a
+    // real bug that made the last few rows permanently unreachable. Assert
+    // the pixel fact instead.
+    assert_eq!(
+        harness.state().test_list_last_fully_visible_row(),
+        Some(last),
+        "last row not fully on screen: scroll_row={scroll} last={last}"
     );
     assert!(harness.state_mut().test_select_row_with_autoscroll(0));
     harness.step();

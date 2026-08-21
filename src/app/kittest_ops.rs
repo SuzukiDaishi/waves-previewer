@@ -538,6 +538,21 @@ impl super::WavesPreviewer {
         self.list_scroll_row
     }
 
+    /// Last row whose painted rect fitted inside the list viewport on the
+    /// previous frame. `test_list_scroll_row` only says which rows were handed
+    /// to the table; rows laid out past the bottom are clipped with no way to
+    /// scroll them in, so this is the one that can prove the tail is reachable.
+    pub fn test_list_last_fully_visible_row(&self) -> Option<usize> {
+        self.list_last_fully_visible_row
+    }
+
+    /// Scroll the row window to its clamped maximum, as dragging the custom
+    /// scrollbar to the bottom of its track does.
+    pub fn test_list_scroll_to_end(&mut self) {
+        self.list_scroll_row = usize::MAX;
+        self.list_scroll_residual = 0.0;
+    }
+
     pub fn test_ui_scroll_focus_name(&self) -> &'static str {
         match self.ui_scroll_focus.active() {
             Some(super::input_focus::UiScrollTarget::List) => "list",
@@ -1213,6 +1228,90 @@ impl super::WavesPreviewer {
         self.search_query = query.to_string();
         self.apply_filter_from_search();
         self.apply_sort();
+        self.search_dirty = false;
+        self.search_deadline = None;
+    }
+
+    /// Hold the list in its "scan is still listing rows" state so a test can
+    /// check what the row loop is allowed to queue there. A real scan of a
+    /// small folder finishes inside one frame, which is too fast to observe.
+    pub fn test_force_scan_in_progress(&mut self, in_progress: bool) {
+        self.scan_in_progress = in_progress;
+    }
+
+    /// `(header_only, header, decode)` list metadata tasks enqueued so far.
+    /// `header` and `decode` both read the whole file; `header_only` does not.
+    pub fn test_meta_task_counts(&self) -> (u64, u64, u64) {
+        (
+            self.debug.meta_task_header_only_count,
+            self.debug.meta_task_header_count,
+            self.debug.meta_task_decode_count,
+        )
+    }
+
+    pub fn test_list_meta_detail_is_header_only(&self) -> bool {
+        self.list_meta_detail_is_header_only()
+    }
+
+    /// Request a seek at `frac` of the whole file on the given row, exactly as
+    /// clicking that point of the row's waveform does.
+    pub fn test_list_seek_row_frac(&mut self, row: usize, frac: f32) {
+        self.apply_list_seek_request(crate::app::list_seek_ops::ListSeekRequest {
+            row,
+            frac,
+            scrubbing: false,
+        });
+    }
+
+    /// Absolute index of the end-of-list row: one past the last file.
+    pub fn test_list_end_row_index(&self) -> usize {
+        self.files.len()
+    }
+
+    /// True when the end-of-list row was painted fully inside the viewport on
+    /// the previous frame -- i.e. scrolling really did reach the end.
+    pub fn test_list_end_row_fully_visible(&self) -> bool {
+        self.list_end_row_fully_visible
+    }
+
+    pub fn test_list_has_focus(&self) -> bool {
+        self.list_has_focus
+    }
+
+    /// Whole-file duration of a row from cached metadata, if known.
+    pub fn test_row_duration_secs(&self, row: usize) -> Option<f64> {
+        let path = self.path_for_row(row)?.clone();
+        self.list_row_duration_secs(&path)
+    }
+
+    /// Whole-file fraction of a seek parked until the decode reaches it.
+    pub fn test_list_seek_pending_frac(&self) -> Option<f32> {
+        self.list_seek_pending.as_ref().map(|p| p.frac)
+    }
+
+    /// Current list playhead as a whole-file fraction, or `None` when the list
+    /// is silent.
+    pub fn test_list_playhead_frac(&self) -> Option<f32> {
+        self.resolve_list_playhead_frame()
+            .and_then(|frame| frame.info.play_frac)
+    }
+
+    pub fn test_playback_source_time_sec(&self) -> Option<f64> {
+        self.playback_current_source_time_sec()
+    }
+
+    pub fn test_set_search_use_regex(&mut self, enabled: bool) {
+        self.search_use_regex = enabled;
+    }
+
+    /// Set the search query and let the normal sort/filter machinery decide
+    /// between the synchronous pass and the sliced `FilterJob`. Unlike
+    /// `test_set_search_query`, which always takes the synchronous path, this
+    /// is how a large list is actually filtered -- the two paths share their
+    /// match predicate and must not drift apart.
+    pub fn test_apply_search_via_jobs(&mut self, query: &str) {
+        self.search_query = query.to_string();
+        self.refresh_filter_then_sort();
         self.search_dirty = false;
         self.search_deadline = None;
     }
@@ -2859,6 +2958,24 @@ impl super::WavesPreviewer {
         ))
     }
 
+    /// Canvas-relative x of a display sample's *boundary* — where the
+    /// selection rect and its grab handles sit.
+    pub fn test_editor_display_sample_boundary_x_offset(
+        &self,
+        display_sample: usize,
+    ) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        let display_len = Self::editor_display_samples_len(tab);
+        Some(Self::editor_display_sample_boundary_x_for_tab(
+            tab,
+            0.0,
+            tab.last_wave_w.max(1.0),
+            display_len,
+            display_sample,
+        ))
+    }
+
     pub fn test_editor_x_offset_to_display_sample(&self, x_offset: f32) -> Option<usize> {
         let tab_idx = self.active_tab?;
         let tab = self.tabs.get(tab_idx)?;
@@ -3553,6 +3670,12 @@ impl super::WavesPreviewer {
     /// the "List" tab-strip click without depending on label-text queries.
     pub fn test_switch_to_list_workspace(&mut self) {
         self.workspace_view = crate::app::types::WorkspaceView::List;
+    }
+
+    /// Test-only: switch the active workspace back to the editor, mirroring
+    /// the tab-strip click. The counterpart of `test_switch_to_list_workspace`.
+    pub fn test_set_workspace_editor(&mut self) {
+        self.workspace_view = crate::app::types::WorkspaceView::Editor;
     }
 
     /// Test-only: switch the active editor tab to the read-only Metadata

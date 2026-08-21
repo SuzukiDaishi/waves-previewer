@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::app::input_focus::UiScrollTarget;
+use crate::app::keymap::Action;
 use crate::app::music_onnx;
 use crate::app::render::overlay as ov;
 use crate::app::render::waveform_pyramid as wf_cache;
@@ -131,6 +132,49 @@ impl EditorDisplayGeometry {
         let x = self.sample_center_x_unclamped(display_sample);
         x >= self.wave_left && x <= self.wave_left + self.wave_w
     }
+
+    /// Boundary x without the canvas clamp.
+    ///
+    /// `sample_boundary_x` clamps into the canvas, so a boundary scrolled off
+    /// to the left reports exactly `wave_left` — and anything hit-testing
+    /// against that finds a phantom handle pinned to the canvas edge. Handle
+    /// code must use this and ask `contains_boundary` separately.
+    fn sample_boundary_x_unclamped(&self, display_sample: usize) -> f32 {
+        let rel = ((display_sample as f64) - self.view_offset_exact) / self.spp.max(0.0001) as f64;
+        self.wave_left + rel as f32
+    }
+
+    fn contains_boundary(&self, display_sample: usize) -> bool {
+        let x = self.sample_boundary_x_unclamped(display_sample);
+        x >= self.wave_left && x <= self.wave_left + self.wave_w
+    }
+}
+
+/// Grab radius for the primary selection's edge handles.
+///
+/// Deliberately the tightest of the waveform radii (loop markers 7, stretch 8,
+/// edge fade 10, patchbay pins 18): these handles sit in the middle of the
+/// canvas where a plain click is the seek gesture, so every extra pixel is a
+/// pixel the user can no longer seek on. Staying strictly under the 8 px
+/// playhead snap in `to_range_selection_display_sample` also means grabbing a
+/// handle can never teleport the edge onto the playhead on the first frame.
+const SELECTION_EDGE_GRAB_RADIUS: f32 = 7.0;
+
+/// Nearest handle to `x` within `radius`, returning that handle's payload.
+///
+/// Ties resolve toward the later entry, so on a selection narrower than two
+/// grab radii the end handle wins and the range extends outward — which is
+/// the "lengthen it a bit" the feature is for. The loop-marker code does this
+/// with `if / else if`, which silently always prefers the first candidate.
+fn nearest_handle(candidates: &[(f32, usize)], x: f32, radius: f32) -> Option<usize> {
+    let mut best: Option<(f32, usize)> = None;
+    for &(handle_x, payload) in candidates {
+        let distance = (x - handle_x).abs();
+        if distance <= radius && best.is_none_or(|(d, _)| distance <= d) {
+            best = Some((distance, payload));
+        }
+    }
+    best.map(|(_, payload)| payload)
 }
 
 /// Find the nearest zero crossing (in either direction, max 48001 samples) using mixdown.
@@ -920,6 +964,29 @@ impl crate::app::WavesPreviewer {
             display_samples_len,
         )
         .sample_center_x(display_sample)
+    }
+
+    /// Boundary x for a display sample — where the selection rectangle and its
+    /// grab handles are drawn. `editor_display_sample_x_for_tab` returns the
+    /// sample *centre*, which is half a sample-per-pixel away and at deep zoom
+    /// misses the 7 px grab radius entirely.
+    #[cfg(feature = "kittest")]
+    pub(crate) fn editor_display_sample_boundary_x_for_tab(
+        tab: &EditorTab,
+        wave_left: f32,
+        wave_w: f32,
+        display_samples_len: usize,
+        display_sample: usize,
+    ) -> f32 {
+        EditorDisplayGeometry::new(
+            wave_left,
+            wave_w,
+            tab.samples_per_px,
+            tab.view_offset,
+            tab.view_offset_exact,
+            display_samples_len,
+        )
+        .sample_boundary_x(display_sample)
     }
 
     #[cfg(feature = "kittest")]
@@ -3190,6 +3257,20 @@ impl crate::app::WavesPreviewer {
         {
             self.request_plugin_scan_if_needed();
         }
+
+        // Chord labels for the Trim inspector's hover texts. Resolved here
+        // because the `&mut self.tabs[tab_idx]` borrow below rules out calling
+        // `self` methods, and read through the override map so a rebound key
+        // shows the key the user actually has.
+        let chord_label = |app: &Self, action: Action| -> String {
+            app.keymap_effective_chord(action)
+                .map(|(mods, key)| crate::app::keymap::chord_text(mods, key))
+                .unwrap_or_else(|| "(unassigned)".to_string())
+        };
+        let trim_keys = chord_label(self, Action::EditorTrimSelection);
+        let mute_keys = chord_label(self, Action::EditorMuteSelection);
+        let cut_keys = chord_label(self, Action::EditorDeleteSelection);
+        let virtual_keys = chord_label(self, Action::EditorVirtualTrim);
 
         let avail = ui.available_size();
         // pending actions to perform after UI borrows end
@@ -5894,6 +5975,97 @@ impl crate::app::WavesPreviewer {
                     }
                 }
             }
+            // Grab either edge of the primary selection to lengthen or shorten
+            // it. Tool-independent, like the selection itself, and placed
+            // before the drag-select block below so a grab on an existing edge
+            // wins over starting a fresh range on the same press.
+            if (pointer_over_waveform || tab.selection_edge_drag_anchor.is_some())
+                && !world_f0_editing
+                && !tool_gesture_active
+                && display_samples_len > 0
+                && tab.dragging_marker.is_none()
+            {
+                let sel = tab.selection.map(|(a0, b0)| {
+                    if a0 <= b0 {
+                        (a0, b0)
+                    } else {
+                        (b0, a0)
+                    }
+                });
+                match sel.filter(|&(a, b)| b > a) {
+                    Some((sel_s, sel_e)) => {
+                        // Candidates are (handle x, the anchor that stays put).
+                        // Speed/TimeStretch already own the selection's right
+                        // edge as a stretch gesture, so there we offer the left
+                        // edge only rather than arming two gestures on one press.
+                        let stretch_owns_end =
+                            matches!(tab.active_tool, ToolKind::Speed | ToolKind::TimeStretch);
+                        let mut candidates: Vec<(f32, usize)> = Vec::new();
+                        if geom.contains_boundary(sel_s) {
+                            candidates.push((geom.sample_boundary_x_unclamped(sel_s), sel_e));
+                        }
+                        if !stretch_owns_end && geom.contains_boundary(sel_e) {
+                            candidates.push((geom.sample_boundary_x_unclamped(sel_e), sel_s));
+                        }
+
+                        // Grab on the raw button press, not `drag_started_by`:
+                        // a handle has to respond without the drag threshold's
+                        // worth of movement.
+                        if tab.selection_edge_drag_anchor.is_none()
+                            && ui.input(|i| i.pointer.primary_pressed())
+                        {
+                            if let Some(pos) = ui
+                                .input(|i| i.pointer.press_origin())
+                                .or_else(|| ui.input(|i| i.pointer.hover_pos()))
+                            {
+                                if let Some(anchor) =
+                                    nearest_handle(&candidates, pos.x, SELECTION_EDGE_GRAB_RADIUS)
+                                {
+                                    tab.selection_edge_drag_anchor = Some(anchor);
+                                }
+                            }
+                        }
+
+                        if let Some(anchor) = tab.selection_edge_drag_anchor {
+                            if ui.input(|i| i.pointer.primary_down()) {
+                                // Only once the pointer has actually moved.
+                                // Handles are drawn on the sample *boundary*
+                                // but x -> sample is centre-based, so feeding
+                                // the press position straight back would shift
+                                // the edge by a sample on a bare click.
+                                let moved = ui
+                                    .input(|i| i.pointer.press_origin())
+                                    .zip(ui.input(|i| i.pointer.hover_pos()))
+                                    .is_none_or(|(origin, pos)| (pos.x - origin.x).abs() >= 0.5);
+                                if let Some(pos) =
+                                    ui.input(|i| i.pointer.hover_pos()).filter(|_| moved)
+                                {
+                                    let raw = to_range_selection_display_sample(pos.x);
+                                    let samp = if alt_now {
+                                        zc_snap_nearest(
+                                            &tab.ch_samples,
+                                            self.zero_cross_epsilon,
+                                            raw,
+                                        )
+                                    } else {
+                                        raw
+                                    };
+                                    Self::editor_set_selection_from_anchor(tab, anchor, samp);
+                                }
+                            } else {
+                                tab.selection_edge_drag_anchor = None;
+                            }
+                            // Held past the release frame as well: a grab with
+                            // no movement is reported as a click, and the
+                            // click handler would clear the whole selection.
+                            tool_gesture_active = true;
+                            suppress_seek = true;
+                        }
+                    }
+                    None => tab.selection_edge_drag_anchor = None,
+                }
+            }
+
             // Drag to select a range (independent of tool), unless we are dragging markers.
             // Alt+Drag: both endpoints snap to nearest zero crossing.
             // Ctrl+Drag: push current selection to extra_selections and start a new one.
@@ -6876,6 +7048,23 @@ impl crate::app::WavesPreviewer {
                                     egui::StrokeKind::Inside,
                                 );
                             }
+                            // Grab handles, so the edges read as draggable.
+                            // Opaque rather than the fill's alpha: this is a
+                            // target, not a tint. Skipped where the edge is
+                            // scrolled out of view, and on the right edge for
+                            // the two tools that own it as a stretch gesture.
+                            let handle_col = Color32::from_rgb(70, 140, 255);
+                            if geom.contains_boundary(a) {
+                                draw_handle(ax, handle_col);
+                            }
+                            if geom.contains_boundary(b)
+                                && !matches!(
+                                    tab.active_tool,
+                                    ToolKind::Speed | ToolKind::TimeStretch
+                                )
+                            {
+                                draw_handle(bx, handle_col);
+                            }
                         }
                     }
                 }
@@ -6932,31 +7121,6 @@ impl crate::app::WavesPreviewer {
                     }
                 }
 
-                // Trim overlay (set range): orange to distinguish from generic blue selection.
-                if let Some((a0, b0)) = tab.trim_range {
-                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                    if b >= tab.view_offset {
-                        let vis = (wave_w * spp).ceil() as usize;
-                        let end = tab.view_offset.saturating_add(vis).min(tab.samples_len);
-                        if a <= end {
-                            let ax = to_x(a);
-                            let bx = to_x(b);
-                            let trim_rect = egui::Rect::from_min_max(
-                                egui::pos2(ax, rect.top()),
-                                egui::pos2(bx, rect.bottom()),
-                            );
-                            let fill = Color32::from_rgba_unmultiplied(255, 140, 0, 34);
-                            let stroke = Color32::from_rgba_unmultiplied(255, 140, 0, 190);
-                            painter.rect_filled(trim_rect, 0.0, fill);
-                            painter.rect_stroke(
-                                trim_rect,
-                                0.0,
-                                egui::Stroke::new(1.0, stroke),
-                                egui::StrokeKind::Inside,
-                            );
-                        }
-                    }
-                }
 
                 // Marker overlay
                 if !tab.markers.is_empty() {
@@ -7291,24 +7455,35 @@ impl crate::app::WavesPreviewer {
                 // Cursor feedback for editor handles
                 if pointer_over_waveform {
                     let handle_radius = 7.0;
-                    if tab.dragging_marker.is_some() {
+                    if tab.dragging_marker.is_some()
+                        || tab.selection_edge_drag_anchor.is_some()
+                    {
                         hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
                     } else if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                         let x = pos.x;
                         let near = |hx: f32| (x - hx).abs() <= handle_radius;
+                        // The selection is tool-independent, so its edges are
+                        // checked before (and outside) the per-tool match.
+                        if let Some((a0, b0)) = tab.selection {
+                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                            if b > a {
+                                let stretch_owns_end = matches!(
+                                    tab.active_tool,
+                                    ToolKind::Speed | ToolKind::TimeStretch
+                                );
+                                if (geom.contains_boundary(a)
+                                    && near(geom.sample_boundary_x_unclamped(a)))
+                                    || (!stretch_owns_end
+                                        && geom.contains_boundary(b)
+                                        && near(geom.sample_boundary_x_unclamped(b)))
+                                {
+                                    hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
+                                }
+                            }
+                        }
                         match tab.active_tool {
                             ToolKind::LoopEdit => {
                                 if let Some((a0, b0)) = tab.loop_region {
-                                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                    let ax = to_x(a);
-                                    let bx = to_x(b);
-                                    if near(ax) || near(bx) {
-                                        hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
-                                    }
-                                }
-                            }
-                            ToolKind::Trim => {
-                                if let Some((a0, b0)) = tab.trim_range {
                                     let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
                                     let ax = to_x(a);
                                     let bx = to_x(b);
@@ -7986,10 +8161,12 @@ impl crate::app::WavesPreviewer {
                         }
                     });
                     let sr = sr_ctx.max(1.0);
+                    // Only ranges the waveform actually draws: the blue
+                    // selection and the loop region. `trim_range` used to sit
+                    // between them and could label a range that is not painted.
                     let range_info = tab
                         .selection
                         .map(|r| ("Selection", r))
-                        .or_else(|| tab.trim_range.map(|r| ("Trim", r)))
                         .or_else(|| tab.loop_region.map(|r| ("Loop", r)));
                     if let Some((kind, (a0, b0))) = range_info {
                         let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
@@ -9275,32 +9452,7 @@ impl crate::app::WavesPreviewer {
                                         let s = ui.style_mut();
                                         s.spacing.item_spacing = egui::vec2(6.0, 6.0);
                                         s.spacing.button_padding = egui::vec2(6.0, 3.0);
-                                        let selected_trim_ranges = {
-                                            let mut ranges: Vec<(usize, usize)> = tab
-                                                .extra_selections
-                                                .iter()
-                                                .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
-                                                .filter(|&(a, b)| b > a)
-                                                .collect();
-                                            if let Some((a0, b0)) = tab.selection {
-                                                let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                                if b > a {
-                                                    ranges.push((a, b));
-                                                }
-                                            }
-                                            ranges.sort();
-                                            let mut merged: Vec<(usize, usize)> = Vec::new();
-                                            for (s, e) in ranges {
-                                                if let Some(last) = merged.last_mut() {
-                                                    if s <= last.1 {
-                                                        last.1 = last.1.max(e);
-                                                        continue;
-                                                    }
-                                                }
-                                                merged.push((s, e));
-                                            }
-                                            merged
-                                        };
+                                        let selected_trim_ranges = tab.all_selected_ranges();
                                         let selected_trim_count = selected_trim_ranges.len();
                                         let range_opt = selected_trim_ranges.first().copied();
 
@@ -9311,8 +9463,11 @@ impl crate::app::WavesPreviewer {
                                             .data_mut(|data| {
                                                 *data.get_temp_mut_or(trim_mode_id, 2_u8)
                                             });
+                                        let mode_hint = "What Preview and Apply do with the \
+selected range. Cut = remove it and close the gap. Mute = silence it, keeping the length. \
+Trim = keep only it and discard the rest.";
                                         ui.horizontal_wrapped(|ui| {
-                                            ui.label("Mode");
+                                            ui.label("Mode").on_hover_text(mode_hint);
                                             egui::ComboBox::from_id_salt(trim_mode_id)
                                                 .selected_text(match trim_mode {
                                                     0 => "Cut",
@@ -9332,11 +9487,20 @@ impl crate::app::WavesPreviewer {
                                             let has_range = range_opt.is_some();
                                             let range = range_opt.unwrap_or((0, 0));
                                             let has_multi_selected_trim = selected_trim_count > 1;
+                                            let multi_note = if has_multi_selected_trim {
+                                                format!(" ({selected_trim_count} selected ranges)")
+                                            } else {
+                                                String::new()
+                                            };
                                             if ui
                                                 .add_enabled(
                                                     has_range && preview_button_enabled,
                                                     egui::Button::new("Preview"),
                                                 )
+                                                .on_hover_text(format!(
+                                                    "Hear the result without changing the file. \
+The green overlay shows it; Esc discards it.{multi_note}"
+                                                ))
                                                 .clicked()
                                             {
                                                 let mut playback = tab.ch_samples.clone();
@@ -9389,8 +9553,28 @@ impl crate::app::WavesPreviewer {
                                                 stop_playback = true;
                                                 tab.preview_audio_tool = Some(ToolKind::Trim);
                                             }
+                                            // Name the equivalent key: the whole
+                                            // "do I have to press Set first?"
+                                            // confusion came from the panel never
+                                            // saying that the keys act on the
+                                            // selection directly.
+                                            let apply_hint = match trim_mode {
+                                                0 => format!(
+                                                    "Remove the selected range and close the gap. \
+Same as {cut_keys}. Undoable.{multi_note}"
+                                                ),
+                                                1 => format!(
+                                                    "Silence the selected range, keeping its \
+length. Same as {mute_keys}. Undoable.{multi_note}"
+                                                ),
+                                                _ => format!(
+                                                    "Keep only the selected range and discard the \
+rest. Same as {trim_keys}. Undoable.{multi_note}"
+                                                ),
+                                            };
                                             if ui
                                                 .add_enabled(has_range && !apply_busy, egui::Button::new("Apply"))
+                                                .on_hover_text(apply_hint)
                                                 .clicked()
                                             {
                                                 match trim_mode {
@@ -9418,7 +9602,11 @@ impl crate::app::WavesPreviewer {
                                                     has_range && !apply_busy,
                                                     egui::Button::new("Add Trim As Virtual"),
                                                 )
-                                                .on_hover_text("Add the trim range as a virtual item (V)")
+                                                .on_hover_text(format!(
+                                                    "Export the selected range as a separate item \
+in the list, leaving this file untouched. Nothing is written to disk until you save it. One new \
+item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{multi_note}"
+                                                ))
                                                 .clicked()
                                             {
                                                 if has_multi_selected_trim {
@@ -9652,6 +9840,10 @@ impl crate::app::WavesPreviewer {
                                             }
                                             if ui
                                                 .add_enabled(at_running, egui::Button::new("Cancel"))
+                                                .on_hover_text(
+                                                    "Stop the running Auto Trim detection. \
+(The Trim preview above is discarded with Esc.)",
+                                                )
                                                 .clicked()
                                             {
                                                 do_cancel_auto_trim = Some(tab_idx);
@@ -13587,9 +13779,14 @@ impl crate::app::WavesPreviewer {
             }
         }
         if let Some((s, e)) = do_mute {
-            self.editor_apply_mute_range(tab_idx, (s, e));
-            for (es, ee) in do_mute_extra {
-                self.editor_apply_mute_range(tab_idx, (es, ee));
+            if do_mute_extra.is_empty() {
+                self.editor_apply_mute_range(tab_idx, (s, e));
+            } else {
+                // One edit, one undo step. Muting each range separately left
+                // Ctrl+Z un-muting only the last one.
+                let mut ranges = vec![(s, e)];
+                ranges.extend(do_mute_extra);
+                self.editor_apply_mute_multi_ranges(tab_idx, ranges);
             }
         }
         if do_spectral_mute {
@@ -13770,5 +13967,79 @@ impl crate::app::WavesPreviewer {
             }
         }
         self.ui_editor_zoo_overlay(ctx, Some(tab_idx), editor_panel_rect);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{nearest_handle, EditorDisplayGeometry, SELECTION_EDGE_GRAB_RADIUS};
+
+    fn geom(view_offset: usize, spp: f32) -> EditorDisplayGeometry {
+        EditorDisplayGeometry {
+            wave_left: 100.0,
+            wave_w: 800.0,
+            spp,
+            view_offset,
+            view_offset_exact: view_offset as f64,
+            display_samples_len: 100_000,
+            visible_count: (800.0 * spp) as usize,
+        }
+    }
+
+    #[test]
+    fn nearest_handle_ignores_anything_outside_the_radius() {
+        let candidates = [(200.0f32, 7usize), (400.0, 9)];
+        assert_eq!(nearest_handle(&candidates, 300.0, 7.0), None);
+        assert_eq!(nearest_handle(&[], 200.0, 7.0), None);
+    }
+
+    #[test]
+    fn nearest_handle_picks_the_closer_one() {
+        let candidates = [(200.0f32, 7usize), (208.0, 9)];
+        assert_eq!(nearest_handle(&candidates, 201.0, 7.0), Some(7));
+        assert_eq!(nearest_handle(&candidates, 207.0, 7.0), Some(9));
+    }
+
+    /// On a selection narrower than two grab radii both handles are in range.
+    /// The tie goes to the later candidate — the end — so the range extends
+    /// outward, which is the adjustment the feature exists for. The loop
+    /// marker code's `if / else if` would always take the start instead.
+    #[test]
+    fn nearest_handle_breaks_ties_toward_the_end() {
+        let candidates = [(200.0f32, 7usize), (200.0, 9)];
+        assert_eq!(nearest_handle(&candidates, 200.0, 7.0), Some(9));
+    }
+
+    /// The clamped `sample_boundary_x` reports `wave_left` for a boundary
+    /// scrolled off to the left, which would hit-test as a phantom handle
+    /// pinned to the canvas edge.
+    #[test]
+    fn offscreen_boundaries_are_excluded_rather_than_clamped_onto_the_edge() {
+        let g = geom(5_000, 1.0);
+        assert!(!g.contains_boundary(0));
+        assert_eq!(g.sample_boundary_x(0), g.wave_left);
+        assert!(g.sample_boundary_x_unclamped(0) < g.wave_left);
+
+        assert!(!g.contains_boundary(99_000));
+        assert!(g.sample_boundary_x_unclamped(99_000) > g.wave_left + g.wave_w);
+    }
+
+    #[test]
+    fn onscreen_boundaries_agree_with_the_clamped_helper() {
+        let g = geom(5_000, 1.0);
+        for sample in [5_000usize, 5_400, 5_799] {
+            assert!(g.contains_boundary(sample), "sample={sample}");
+            let a = g.sample_boundary_x_unclamped(sample);
+            let b = g.sample_boundary_x(sample);
+            assert!((a - b).abs() < 0.001, "sample={sample}: {a} vs {b}");
+        }
+    }
+
+    /// Staying strictly under the 8 px playhead snap means grabbing a handle
+    /// can never, on the first frame, teleport the edge onto the playhead.
+    #[test]
+    fn the_grab_radius_stays_under_the_playhead_snap() {
+        assert!(SELECTION_EDGE_GRAB_RADIUS < 8.0);
+        assert!(SELECTION_EDGE_GRAB_RADIUS > 0.0);
     }
 }

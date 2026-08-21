@@ -624,6 +624,17 @@ impl WavesPreviewer {
             "src_cache_hit_rate: {:.1}% (hits={} misses={})",
             src_hit_rate, self.debug.src_cache_hits, self.debug.src_cache_misses
         ));
+        // `header` and `decode` both read the whole file (the row waveform and
+        // the loudness columns need it); `header_only` does not. The first two
+        // should stay flat while a folder scan is still appending rows --
+        // filenames first.
+        lines.push(format!(
+            "meta_tasks: header_only={} header={} decode={} (detail_now={:?})",
+            self.debug.meta_task_header_only_count,
+            self.debug.meta_task_header_count,
+            self.debug.meta_task_decode_count,
+            self.list_meta_detail_now()
+        ));
         lines.push(format!(
             "plugin_scan_ms: {}",
             summarize(&self.debug.plugin_scan_ms)

@@ -420,6 +420,43 @@ mod kittest_suite {
         }
     }
 
+    /// Find a list row whose duration is known and long enough to seek within.
+    ///
+    /// `wait_for_scan` only waits for the *listing*; durations arrive later
+    /// from the metadata pool, which is slower when the suite runs in parallel.
+    /// Metadata is queued for visible rows first, so the first screenful
+    /// resolves; pump frames until one does.
+    fn wait_for_seekable_row(
+        harness: &mut Harness<'static, WavesPreviewer>,
+        min_secs: f64,
+        ext: Option<&str>,
+    ) -> usize {
+        let start = Instant::now();
+        loop {
+            let found = (0..harness.state().files.len()).find(|&r| {
+                let ext_ok = ext.is_none_or(|want| {
+                    path_for_row(harness.state(), r)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        == Some(want)
+                });
+                ext_ok
+                    && harness
+                        .state()
+                        .test_row_duration_secs(r)
+                        .is_some_and(|d| d > min_secs)
+            });
+            if let Some(row) = found {
+                return row;
+            }
+            assert!(
+                start.elapsed() < SCAN_TIMEOUT,
+                "no row reached a known duration > {min_secs}s (ext={ext:?})"
+            );
+            harness.run_steps(1);
+        }
+    }
+
     fn wait_for_tab(harness: &mut Harness<'static, WavesPreviewer>) {
         let start = Instant::now();
         loop {
@@ -8857,5 +8894,800 @@ mod kittest_suite {
             .expect("render reset aligned Pencil draft")
             .save(out_dir.join("07_reset_aligned.png"))
             .expect("save reset aligned Pencil draft");
+    }
+
+    /// The list hand-rolls its vertical virtualization: `TableBuilder` is built
+    /// with `vscroll(false)` and only the visible row window is handed to it.
+    /// The window size used to be computed as `(avail_h - header_h) / row_h`,
+    /// ignoring the `item_spacing.y` that `TableBody::rows` actually adds
+    /// between rows. That over-counted how many rows fit, so the scroll clamp
+    /// `total - visible` stopped short and the last few rows were laid out
+    /// below the clip rect with no inner scroll able to reveal them.
+    ///
+    /// Asserting on `test_list_scroll_row` cannot catch this -- the rows *were*
+    /// in the rendered window. Only the painted rect proves it.
+    #[test]
+    fn list_tail_is_reachable_at_max_scroll() {
+        let mut harness = harness_with_startup(StartupConfig {
+            dummy_list_count: Some(400),
+            ..StartupConfig::default()
+        });
+        harness.run_steps(3);
+        let last = harness.state().test_files_len() - 1;
+        assert_eq!(last, 399);
+
+        harness.state_mut().test_list_scroll_to_end();
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness.state().test_list_last_fully_visible_row(),
+            Some(last),
+            "last row not fully on screen at max scroll (scroll_row={})",
+            harness.state().test_list_scroll_row()
+        );
+    }
+
+    /// End selects the final row and the auto-scroll centers it, clamped to the
+    /// same maximum. With the inflated window size the selection landed in a
+    /// window slot that was painted off-screen: the row was selected but
+    /// invisible.
+    #[test]
+    fn end_key_puts_the_last_row_fully_on_screen() {
+        let mut harness = harness_with_startup(StartupConfig {
+            dummy_list_count: Some(400),
+            ..StartupConfig::default()
+        });
+        harness.run_steps(3);
+        let last = harness.state().test_files_len() - 1;
+
+        assert!(harness.state_mut().test_select_row_with_autoscroll(last));
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().test_list_last_fully_visible_row(),
+            Some(last),
+            "End-selected last row not fully on screen (scroll_row={})",
+            harness.state().test_list_scroll_row()
+        );
+    }
+
+    /// The user's report, reproduced literally: keep turning the wheel over the
+    /// list and the tail must arrive. This also covers the pixels-to-rows
+    /// conversion, which divided by the row height instead of the row pitch and
+    /// so under-scrolled by `spacing_y / row_h` per notch.
+    #[test]
+    fn wheel_scrolling_reaches_the_last_row() {
+        let mut harness = harness_with_startup(StartupConfig {
+            dummy_list_count: Some(300),
+            ..StartupConfig::default()
+        });
+        harness.run_steps(3);
+        let last = harness.state().test_files_len() - 1;
+
+        // The wheel handler only runs while the pointer is over the list and
+        // the list owns the scroll surface, so park the pointer there first.
+        harness.hover_at(egui::pos2(640.0, 200.0));
+        harness.run_steps(1);
+
+        let mut settled = 0;
+        for _ in 0..400 {
+            let before = harness.state().test_list_scroll_row();
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -8.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::default(),
+            });
+            harness.run_steps(1);
+            if harness.state().test_list_scroll_row() == before {
+                settled += 1;
+                if settled >= 5 {
+                    break;
+                }
+            } else {
+                settled = 0;
+            }
+        }
+
+        assert_eq!(
+            harness.state().test_list_last_fully_visible_row(),
+            Some(last),
+            "wheel scrolling never reached the last row (scroll_row={})",
+            harness.state().test_list_scroll_row()
+        );
+    }
+
+    /// The list note is edited inline in the list and stored in the session,
+    /// but the top search box never looked at it.
+    #[test]
+    fn search_matches_the_list_note() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let total = harness.state().files.len();
+        assert!(total >= 3, "need a few rows, got {total}");
+
+        harness.state_mut().items[1].note = "retake with a longer tail".to_string();
+        harness.state_mut().test_set_search_query("longer tail");
+        harness.run_steps(2);
+
+        let matched = harness.state().test_visible_list_paths();
+        assert_eq!(
+            matched.len(),
+            1,
+            "only the noted row should match, got {matched:?}"
+        );
+        assert_eq!(matched[0], harness.state().items[1].path);
+    }
+
+    #[test]
+    fn search_matches_the_list_note_with_regex() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        assert!(harness.state().files.len() >= 3);
+
+        harness.state_mut().items[1].note = "retake at 120bpm".to_string();
+        harness.state_mut().test_set_search_use_regex(true);
+        harness.state_mut().test_set_search_query(r"\d+bpm");
+        harness.run_steps(2);
+
+        let matched = harness.state().test_visible_list_paths();
+        assert_eq!(matched.len(), 1, "got {matched:?}");
+        assert_eq!(matched[0], harness.state().items[1].path);
+    }
+
+    /// A list above `list_sync_threshold()` filters in per-frame slices via
+    /// `FilterJob` instead of one synchronous pass. Both paths route through the
+    /// same predicate, and this pins that down: a note-only match must survive
+    /// the sliced path too.
+    #[test]
+    fn sliced_filter_job_matches_the_note_too() {
+        let mut harness = harness_with_startup(StartupConfig {
+            // Above the highest `list_sync_threshold()` (50k) so the sliced
+            // path is taken on every performance tier.
+            dummy_list_count: Some(60_000),
+            ..StartupConfig::default()
+        });
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_files_len(), 60_000);
+
+        harness.state_mut().items[42].note = "zzq-unique-note-marker".to_string();
+        let expected = harness.state().items[42].path.clone();
+
+        harness
+            .state_mut()
+            .test_apply_search_via_jobs("zzq-unique-note-marker");
+        assert!(
+            harness.state().test_sort_job_active(),
+            "60k rows should have taken the sliced filter path"
+        );
+
+        let mut frames = 0;
+        while harness.state().test_sort_job_active() {
+            harness.step();
+            frames += 1;
+            assert!(frames < 20_000, "sliced filter never settled");
+        }
+
+        let matched = harness.state().test_visible_list_paths();
+        assert_eq!(matched.len(), 1, "got {} matches", matched.len());
+        assert_eq!(matched[0], expected);
+    }
+
+    /// "How many files are loaded" outranks "is the waveform drawn". The row
+    /// waveform needs a full file decode per visible row, and with the Wave
+    /// column on by default those decodes were queued from the first frame of a
+    /// folder load, competing with the walker for the same disk and worker
+    /// pool. They must now wait until every row is listed.
+    ///
+    /// A real scan of a small folder finishes inside one frame, so the scanning
+    /// state is held explicitly rather than raced.
+    #[test]
+    fn a_running_scan_queues_no_full_decodes() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+
+        // Both `Header` and `Decode` read the whole file (Header does the
+        // header pass and the decode in one task); only `HeaderOnly` is cheap.
+        let decoding_tasks = |h: &Harness<'static, WavesPreviewer>| {
+            let (_, header, decode) = h.state().test_meta_task_counts();
+            header + decode
+        };
+
+        // Baseline: with the scan finished, visible rows do ask for a decode.
+        let mut frames = 0;
+        while decoding_tasks(&harness) == 0 {
+            harness.run_steps(1);
+            frames += 1;
+            assert!(frames < 600, "no decode was ever queued on an idle list");
+        }
+        assert!(!harness.state().test_list_meta_detail_is_header_only());
+
+        // Now hold the list in the scanning state.
+        harness.state_mut().test_force_scan_in_progress(true);
+        harness.run_steps(1);
+        assert!(
+            harness.state().test_list_meta_detail_is_header_only(),
+            "a live scan must withhold the thumb"
+        );
+        let during_scan = decoding_tasks(&harness);
+        harness.run_steps(30);
+        assert_eq!(
+            decoding_tasks(&harness),
+            during_scan,
+            "no file decode may be queued while the scan is listing rows"
+        );
+
+        // ...and the thumbs resume once it finishes, because
+        // `queue_full_meta_for_path` re-queues a row that only has header data.
+        harness.state_mut().test_force_scan_in_progress(false);
+        assert!(!harness.state().test_list_meta_detail_is_header_only());
+    }
+
+    /// Clicking partway along a row's waveform must start playback from that
+    /// point. A plain wav row reaches the whole-file streaming transport (which
+    /// `select_and_load` activates when Auto Play is on), so there is nothing
+    /// to wait for and the seek applies immediately.
+    #[test]
+    fn list_wave_seek_moves_the_playhead_on_a_wav_row() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+
+        // Pick a wav row long enough that half of it is unambiguous.
+        let row = wait_for_seekable_row(&mut harness, 0.5, Some("wav"));
+        let duration = harness.state().test_row_duration_secs(row).unwrap();
+
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(4);
+
+        harness.state_mut().test_list_seek_row_frac(row, 0.5);
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness.state().test_list_seek_pending_frac(),
+            None,
+            "a whole-file transport should not need to park the seek"
+        );
+        let at = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("playback position");
+        let want = duration * 0.5;
+        assert!(
+            (at - want).abs() < duration * 0.1,
+            "expected ~{want:.3}s, got {at:.3}s (duration {duration:.3}s)"
+        );
+    }
+
+    /// An mp3 row plays from a decoded buffer that starts as a ~1.2s prefix, so
+    /// a seek near the end of the file lands beyond what has been decoded. It
+    /// must be parked (not clamped to the prefix, which would silently play the
+    /// wrong part) and applied once the decode reaches it.
+    #[test]
+    fn list_wave_seek_past_the_prefix_is_parked_then_applied() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_samples/bgms");
+        if !dir.is_dir() {
+            eprintln!("skipping: {} not present", dir.display());
+            return;
+        }
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(dir);
+        let mut harness = harness_with_startup(cfg);
+        wait_for_scan(&mut harness);
+
+        let row = wait_for_seekable_row(&mut harness, 10.0, Some("mp3"));
+        let duration = harness.state().test_row_duration_secs(row).unwrap();
+
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(4);
+
+        harness.state_mut().test_list_seek_row_frac(row, 0.8);
+        let parked = harness.state().test_list_seek_pending_frac();
+        assert_eq!(
+            parked,
+            Some(0.8),
+            "a seek past the decoded prefix must be parked, not clamped"
+        );
+
+        // The decode is progressive; the parked seek retires when it arrives.
+        let start = Instant::now();
+        while harness.state().test_list_seek_pending_frac().is_some() {
+            harness.run_steps(1);
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "parked seek never retired"
+            );
+        }
+
+        let at = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("playback position");
+        let want = duration * 0.8;
+        assert!(
+            (at - want).abs() < duration * 0.1,
+            "expected ~{want:.1}s, got {at:.1}s (duration {duration:.1}s)"
+        );
+    }
+
+    /// A waveform click always parks the position, but it must not override the
+    /// user's transport preferences: with Auto Play off and nothing already
+    /// sounding, the position is set and Space is left to start playback.
+    #[test]
+    fn list_wave_seek_does_not_start_playback_when_auto_play_is_off() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(false);
+        assert!(!harness.state().test_auto_play_list_nav());
+
+        let row = wait_for_seekable_row(&mut harness, 0.5, None);
+
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(4);
+        harness.state_mut().test_list_seek_row_frac(row, 0.5);
+        harness.run_steps(4);
+
+        // With Auto Play off the preview decodes without emitting partials, so
+        // the seek is parked until the buffer lands. Let it retire.
+        let start = Instant::now();
+        while harness.state().test_list_seek_pending_frac().is_some() {
+            harness.run_steps(1);
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "parked seek never retired"
+            );
+        }
+
+        assert!(
+            !harness.state().test_audio_is_playing(),
+            "a waveform click must not start playback when Auto Play is off"
+        );
+        // ...but the position is armed and the list holds focus, so Space works.
+        let at = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("position should be armed even though nothing is playing");
+        assert!(at > 0.0, "seek position was not armed: {at}");
+        assert!(
+            harness.state().test_list_has_focus(),
+            "a waveform click must leave the list focused so Space can play"
+        );
+    }
+
+    /// Not an assertion test: renders the list with a seek in progress so the
+    /// playhead, the progress fill and the undecoded shading can be eyeballed
+    /// at the real row height. Run with:
+    ///   cargo test --features kittest_render -- --ignored seek_bar_screenshot --nocapture
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    #[ignore]
+    fn seek_bar_screenshot() {
+        let out_dir = std::path::PathBuf::from(
+            std::env::var("NEOWAVES_SHOT_DIR").unwrap_or_else(|_| "/tmp".to_string()),
+        );
+        std::fs::create_dir_all(&out_dir).ok();
+
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        let row = wait_for_seekable_row(&mut harness, 0.5, None);
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(6);
+        harness.state_mut().test_list_seek_row_frac(row, 0.45);
+        harness.run_steps(6);
+
+        // Also assert what the picture is supposed to show, so this cannot
+        // quietly become a screenshot of nothing.
+        let frac = harness
+            .state()
+            .test_list_playhead_frac()
+            .expect("the sounding row should report a playhead");
+        assert!(
+            (frac - 0.45).abs() < 0.1,
+            "playhead should be drawn near the seek position, got {frac}"
+        );
+
+        let image = harness.render().expect("render image");
+        let out = out_dir.join("list_seek_bar.png");
+        image.save(&out).expect("save screenshot");
+        eprintln!("[shot] wrote {}", out.display());
+    }
+
+    /// Screenshot of the list scrolled to its end, showing the end-of-list row.
+    ///   cargo test --features kittest_render -- --ignored end_of_list_screenshot --nocapture
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    #[ignore]
+    fn end_of_list_screenshot() {
+        let out_dir = std::path::PathBuf::from(
+            std::env::var("NEOWAVES_SHOT_DIR").unwrap_or_else(|_| "/tmp".to_string()),
+        );
+        std::fs::create_dir_all(&out_dir).ok();
+
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_list_scroll_to_end();
+        harness.run_steps(4);
+
+        assert!(
+            harness.state().test_list_end_row_fully_visible(),
+            "the picture is supposed to show the end-of-list row"
+        );
+
+        let image = harness.render().expect("render image");
+        image
+            .save(out_dir.join("list_end_of_list.png"))
+            .expect("save screenshot");
+        eprintln!(
+            "[shot] wrote {}",
+            out_dir.join("list_end_of_list.png").display()
+        );
+    }
+
+    /// The list ends with a row stating the total. Reaching it is what tells
+    /// the user they are at the end -- previously they had to infer it from a
+    /// half-drawn row, and a row clipped by the viewport looked exactly like a
+    /// row with more below it.
+    #[test]
+    fn scrolling_to_the_end_shows_the_end_of_list_row() {
+        for count in [1usize, 5, 400, 4_000] {
+            let mut harness = harness_with_startup(StartupConfig {
+                dummy_list_count: Some(count),
+                ..StartupConfig::default()
+            });
+            harness.run_steps(3);
+            harness.state_mut().test_list_scroll_to_end();
+            harness.run_steps(3);
+
+            assert!(
+                harness.state().test_list_end_row_fully_visible(),
+                "count={count}: end-of-list row was not fully on screen \
+                 (scroll_row={}, last_fully_visible={:?})",
+                harness.state().test_list_scroll_row(),
+                harness.state().test_list_last_fully_visible_row()
+            );
+            // ...and the last actual file sits above it, still fully visible.
+            assert_eq!(
+                harness.state().test_list_last_fully_visible_row(),
+                Some(count - 1),
+                "count={count}: last file not fully on screen"
+            );
+        }
+    }
+
+    /// A list shorter than the viewport never scrolls, but must still show the
+    /// closing row.
+    #[test]
+    fn a_short_list_still_shows_the_end_of_list_row() {
+        let mut harness = harness_with_startup(StartupConfig {
+            dummy_list_count: Some(3),
+            ..StartupConfig::default()
+        });
+        harness.run_steps(3);
+        assert_eq!(harness.state().test_list_scroll_row(), 0);
+        assert!(harness.state().test_list_end_row_fully_visible());
+    }
+
+    /// `Delete` is now the editor's Cut, and the list and the effect graph
+    /// already use Delete for their own removals. Each is scoped to its own
+    /// workspace; this pins that down in both directions, because a leak here
+    /// destroys audio (or list rows) the user never targeted.
+    #[test]
+    fn editor_delete_key_does_not_leak_between_workspaces() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert!(harness.state_mut().test_set_selection_frac(0.4, 0.6));
+        harness.run_steps(1);
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+
+        // Showing the list, with the editor tab still open in the background.
+        harness.state_mut().test_switch_to_list_workspace();
+        harness.run_steps(1);
+        harness.key_press(Key::Delete);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_len,
+            len_before,
+            "Delete in the list workspace must not edit a background editor tab"
+        );
+
+        // The Recording workspace is the case that actually needs the editor
+        // guard: unlike the list and the effect graph, nothing there consumes
+        // Delete first, so an unguarded binding would silently cut audio in a
+        // tab that is not on screen.
+        harness.state_mut().test_open_recording_tab();
+        harness.run_steps(1);
+        harness.key_press(Key::Delete);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_len,
+            len_before,
+            "Delete in the recording workspace must not edit a background editor tab"
+        );
+
+        // Back in the editor it performs the cut.
+        harness.state_mut().test_set_workspace_editor();
+        harness.run_steps(1);
+        harness.key_press(Key::Delete);
+        harness.run_steps(2);
+        assert!(
+            harness.state().tabs[tab_idx].samples_len < len_before,
+            "Delete in the editor workspace should cut the selection"
+        );
+    }
+
+    /// The Metadata inspector replaces the waveform, so the destructive
+    /// selection keys stand down there — Delete especially, which people press
+    /// reflexively in a table of fields.
+    #[test]
+    fn destructive_keys_stand_down_in_the_metadata_view() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert!(harness.state_mut().test_set_selection_frac(0.4, 0.6));
+        harness.run_steps(1);
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+
+        assert!(harness.state_mut().test_set_metadata_view(false));
+        harness.run_steps(1);
+
+        for key in [Key::Delete, Key::T] {
+            harness.key_press(key);
+            harness.run_steps(2);
+        }
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::M);
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_len,
+            len_before,
+            "no destructive key may edit audio that the Metadata view is hiding"
+        );
+    }
+
+    /// The Trim tool used to paint an orange band for `trim_range` on top of
+    /// the blue selection. After Auto Trim both hold the same span, so the one
+    /// range was drawn twice and read as "a second range you had to set" —
+    /// which is exactly the misunderstanding this removal addresses. Assert on
+    /// pixels, because only a render can catch the paint coming back.
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn no_orange_trim_band_is_painted() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        assert!(harness.state_mut().test_set_trim_range_frac(0.20, 0.60));
+        harness.run_steps(3);
+        assert!(
+            harness.state().tabs[harness.state().active_tab.expect("active tab")]
+                .trim_range
+                .is_some(),
+            "the range must still be set, or this test proves nothing"
+        );
+
+        let image = harness.render().expect("render image");
+        // The retired band's stroke was (255,140,0) at alpha 190; over the dark
+        // canvas that lands near (195,110,7). Match that hue specifically --
+        // green well under 3/4 of red, almost no blue -- rather than "warm",
+        // which also catches the gold (195,166,77) label text in the inspector.
+        let is_band_orange = |p: &image::Rgba<u8>| {
+            let [r, g, b, _a] = p.0;
+            r > 180 && (g as f32) < (r as f32) * 0.72 && b < 60
+        };
+        let orange = image.pixels().filter(|p| is_band_orange(p)).count();
+        assert_eq!(orange, 0, "found {orange} orange trim-band pixels");
+    }
+
+    /// Position the pointer on a selection edge's grab handle.
+    fn editor_pos_at_selection_boundary(
+        harness: &Harness<'static, WavesPreviewer>,
+        display_sample: usize,
+    ) -> egui::Pos2 {
+        let x = harness
+            .state()
+            .test_editor_display_sample_boundary_x_offset(display_sample)
+            .expect("boundary x");
+        editor_canvas_pos_at_x_offset(harness, x)
+    }
+
+    fn editor_selection(harness: &Harness<'static, WavesPreviewer>) -> (usize, usize) {
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let (a, b) = harness.state().tabs[tab_idx].selection.expect("selection");
+        if a <= b {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    }
+
+    /// The request this implements: after selecting, nudge an edge to fine-tune
+    /// the range instead of redrawing the whole selection.
+    #[test]
+    fn selection_edge_drag_extends_and_shrinks() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let (start_before, end_before) = editor_selection(&harness);
+
+        // Grab the end handle and pull it right.
+        let from = editor_pos_at_selection_boundary(&harness, end_before);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 90.0, from.y));
+        let (start_after, end_after) = editor_selection(&harness);
+        assert_eq!(start_after, start_before, "the far edge must stay put");
+        assert!(
+            end_after > end_before,
+            "end should extend: {end_before} -> {end_after}"
+        );
+
+        // ...and push it back left to shorten.
+        let from = editor_pos_at_selection_boundary(&harness, end_after);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x - 60.0, from.y));
+        let (start_final, end_final) = editor_selection(&harness);
+        assert_eq!(
+            start_final, start_before,
+            "the far edge must still stay put"
+        );
+        assert!(
+            end_final < end_after,
+            "end should shrink: {end_after} -> {end_final}"
+        );
+    }
+
+    /// Dragging the start must leave the anchor on the end, so a following
+    /// Shift+click or Shift+Arrow keeps moving the edge the user just moved.
+    #[test]
+    fn selection_edge_drag_keeps_the_anchor_on_the_opposite_edge() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.60));
+        harness.run_steps(2);
+        let (start, end) = editor_selection(&harness);
+
+        let from = editor_pos_at_selection_boundary(&harness, start);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 40.0, from.y));
+
+        assert_eq!(
+            harness.state().test_tab_selection_anchor(),
+            Some(end),
+            "anchor should sit on the edge that stayed put"
+        );
+    }
+
+    /// A grab with no movement reads to egui as a click, and the click handler
+    /// clears the selection and seeks. `suppress_seek` has to survive the
+    /// release frame or fine-tuning would destroy the thing being tuned.
+    #[test]
+    fn selection_edge_grab_without_movement_keeps_the_selection() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.60));
+        harness.run_steps(2);
+        let before = editor_selection(&harness);
+
+        let at = editor_pos_at_selection_boundary(&harness, before.1);
+        editor_pointer_drag(&mut harness, at, at);
+
+        assert_eq!(
+            editor_selection(&harness),
+            before,
+            "a click on a handle must not clear the selection"
+        );
+    }
+
+    /// Clicking well inside the selection is still a seek that clears it —
+    /// the grab must not swallow the whole range.
+    #[test]
+    fn clicking_inside_the_selection_still_clears_it() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.20, 0.80));
+        harness.run_steps(2);
+        let (start, end) = editor_selection(&harness);
+
+        let mid = editor_pos_at_selection_boundary(&harness, (start + end) / 2);
+        editor_pointer_drag(&mut harness, mid, mid);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert!(
+            harness.state().tabs[tab_idx].selection.is_none(),
+            "a click away from the handles should still seek and clear"
+        );
+    }
+
+    /// The selection is tool-independent, so its handles are too.
+    #[test]
+    fn selection_edge_drag_works_outside_the_trim_tool() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let (_, end_before) = editor_selection(&harness);
+
+        let from = editor_pos_at_selection_boundary(&harness, end_before);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 80.0, from.y));
+
+        assert!(
+            editor_selection(&harness).1 > end_before,
+            "edge drag should work with the Gain tool active"
+        );
+    }
+
+    /// Speed/TimeStretch already own the selection's right edge as a stretch
+    /// gesture. The selection drag must not race it — but the left edge, which
+    /// that tool does not use, stays adjustable.
+    #[test]
+    fn the_stretch_tool_keeps_its_own_right_edge_gesture() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::TimeStretch));
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let (start_before, end_before) = editor_selection(&harness);
+
+        let from = editor_pos_at_selection_boundary(&harness, end_before);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 70.0, from.y));
+        assert_eq!(
+            editor_selection(&harness).1,
+            end_before,
+            "the stretch tool owns the right edge; the selection must not move"
+        );
+
+        let from = editor_pos_at_selection_boundary(&harness, start_before);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 40.0, from.y));
+        assert!(
+            editor_selection(&harness).0 > start_before,
+            "the left edge is still adjustable in the stretch tool"
+        );
+    }
+
+    /// Screenshot of the selection with its grab handles.
+    ///   cargo test --features kittest_render -- --ignored selection_handles_screenshot --nocapture
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    #[ignore]
+    fn selection_handles_screenshot() {
+        let out_dir = std::path::PathBuf::from(
+            std::env::var("NEOWAVES_SHOT_DIR").unwrap_or_else(|_| "/tmp".to_string()),
+        );
+        std::fs::create_dir_all(&out_dir).ok();
+
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.60));
+        harness.run_steps(3);
+
+        let image = harness.render().expect("render image");
+        image
+            .save(out_dir.join("editor_selection_handles.png"))
+            .expect("save screenshot");
+        eprintln!(
+            "[shot] wrote {}",
+            out_dir.join("editor_selection_handles.png").display()
+        );
     }
 }

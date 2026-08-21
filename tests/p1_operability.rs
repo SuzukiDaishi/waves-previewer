@@ -4,7 +4,7 @@ mod p1_operability {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use egui::Key;
+    use egui::{Key, Modifiers};
     use egui_kittest::Harness;
     use neowaves::app::ToolKind;
     use neowaves::kittest::harness_with_startup;
@@ -485,9 +485,42 @@ mod p1_operability {
             "expected trim toast, got {toasts:?}"
         );
 
+        // Ctrl+M silences the selection without changing its length. Bare `M`
+        // is "add a marker", which is why mute took the Ctrl chord.
+        assert!(harness.state_mut().test_set_selection_frac(0.3, 0.5));
+        harness.run_steps(1);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::M);
+        harness.run_steps(2);
+        let toasts = harness.state().test_toast_messages();
+        assert!(
+            toasts
+                .iter()
+                .any(|m| m.contains("Muted selection (Ctrl+Z to undo)")),
+            "expected mute toast, got {toasts:?}"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_len,
+            len_before,
+            "mute must silence the range, not shorten it"
+        );
+        {
+            let tab = &harness.state().tabs[tab_idx];
+            let s = (tab.samples_len as f32 * 0.3) as usize;
+            let e = (tab.samples_len as f32 * 0.5) as usize;
+            let peak = tab
+                .ch_samples
+                .iter()
+                .flat_map(|ch| ch[s..e].iter())
+                .fold(0.0f32, |acc, v| acc.max(v.abs()));
+            assert_eq!(peak, 0.0, "muted span should be silent, peak was {peak}");
+        }
+
+        // Delete performs the Trim inspector's Cut (it replaced `C`).
         assert!(harness.state_mut().test_set_selection_frac(0.1, 0.2));
         harness.run_steps(1);
-        harness.key_press(Key::C);
+        harness.key_press(Key::Delete);
         harness.run_steps(2);
         let toasts = harness.state().test_toast_messages();
         assert!(

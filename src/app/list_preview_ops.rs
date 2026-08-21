@@ -53,6 +53,8 @@ impl super::WavesPreviewer {
     pub(super) fn cancel_list_preview_job(&mut self) {
         self.list_preview_rx = None;
         self.list_preview_partial_ready = false;
+        // The decode this seek was waiting on is gone.
+        self.clear_list_seek_pending();
         self.list_preview_job_id = self.list_preview_job_id.wrapping_add(1);
         self.list_preview_job_epoch
             .store(self.list_preview_job_id, Ordering::Relaxed);
@@ -195,6 +197,9 @@ impl super::WavesPreviewer {
         let job_id = self.list_preview_job_id;
         self.list_preview_job_epoch.store(job_id, Ordering::Relaxed);
         self.list_preview_partial_ready = false;
+        // Recorded so a seek past the decoded extent can tell whether a
+        // whole-file decode (`max_secs == 0.0`) is already on the way.
+        self.list_preview_job_max_secs = max_secs;
         let job_epoch = self.list_preview_job_epoch.clone();
         let settings = self.preview_settings_for_path(&path);
         let (tx, rx) = mpsc::channel::<ListPreviewResult>();

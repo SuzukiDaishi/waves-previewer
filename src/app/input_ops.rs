@@ -1,5 +1,5 @@
 use super::keymap::{self, Action};
-use super::types::{LoopMode, ToolKind, UndoScope, ViewMode};
+use super::types::{EditorPrimaryView, EditorTab, LoopMode, ToolKind, UndoScope, ViewMode};
 
 impl super::WavesPreviewer {
     pub(super) fn list_focus_id() -> egui::Id {
@@ -296,64 +296,6 @@ impl super::WavesPreviewer {
                         tab.snap_zero_cross = !tab.snap_zero_cross;
                     }
                 }
-                if self.keymap_consume(ctx, Action::EditorDeleteSelection)
-                    && !self.editor_apply_busy_toast_for_tab(tab_idx)
-                {
-                    let ranges = self.all_selected_ranges(tab_idx);
-                    let fired = if ranges.len() > 1 {
-                        self.editor_delete_multi_ranges_and_join(tab_idx, ranges);
-                        true
-                    } else if let Some((s, e)) = self.selected_range(tab_idx) {
-                        self.editor_delete_range_and_join(tab_idx, (s, e));
-                        true
-                    } else {
-                        false
-                    };
-                    if fired {
-                        self.push_toast(
-                            super::types::ToastSeverity::Info,
-                            "Deleted selection (Ctrl+Z to undo)",
-                        );
-                    }
-                }
-                if self.keymap_consume(ctx, Action::EditorTrimSelection)
-                    && !self.editor_apply_busy_toast_for_tab(tab_idx)
-                {
-                    let ranges = self.all_selected_ranges(tab_idx);
-                    let fired = if ranges.len() > 1 {
-                        self.editor_apply_trim_multi_ranges(tab_idx, ranges);
-                        true
-                    } else if let Some((s, e)) = self.selected_range(tab_idx) {
-                        self.editor_apply_trim_range(tab_idx, (s, e));
-                        true
-                    } else {
-                        false
-                    };
-                    if fired {
-                        self.push_toast(
-                            super::types::ToastSeverity::Info,
-                            "Trimmed to selection (Ctrl+Z to undo)",
-                        );
-                    }
-                }
-                if self.keymap_consume(ctx, Action::EditorVirtualTrim)
-                    && !self.editor_apply_busy_toast_for_tab(tab_idx)
-                {
-                    let ranges = self.all_selected_ranges(tab_idx);
-                    if ranges.len() > 1 {
-                        if let Some(path) = self.tabs.get(tab_idx).map(|t| t.path.clone()) {
-                            let mut iter = ranges.into_iter();
-                            if let Some((s, e)) = iter.next() {
-                                self.begin_trim_virtual_job(tab_idx, (s, e));
-                            }
-                            for (s, e) in iter {
-                                self.virtual_trim_queue.push_back((path.clone(), s, e));
-                            }
-                        }
-                    } else {
-                        self.try_add_trim_range_as_virtual_shortcut(tab_idx);
-                    }
-                }
                 // Digit seek: keyboard row order 1..9,0 spans start -> end
                 // (1 = 0%, 2 = 1/9, ..., 9 = 8/9, 0 = 100%). See CONTROLS.md.
                 const DIGIT_SEEK: [(egui::Key, usize); 10] = [
@@ -377,6 +319,101 @@ impl super::WavesPreviewer {
                 // actually being visible so a background tab never swallows
                 // list-context keys (Home/End) or Escape.
                 if self.is_editor_workspace_active() {
+                    // The destructive selection keys additionally stand down
+                    // while the Metadata inspector is up: the waveform is not
+                    // on screen there, and Delete in particular is a key
+                    // people press reflexively in a metadata table.
+                    let audio_visible = self
+                        .tabs
+                        .get(tab_idx)
+                        .is_some_and(|t| t.primary_view != EditorPrimaryView::Metadata);
+                    if audio_visible {
+                        if self.keymap_consume(ctx, Action::EditorTrimSelection)
+                            && !self.editor_apply_busy_toast_for_tab(tab_idx)
+                        {
+                            let ranges = self.all_selected_ranges(tab_idx);
+                            let fired = if ranges.len() > 1 {
+                                self.editor_apply_trim_multi_ranges(tab_idx, ranges);
+                                true
+                            } else if let Some((s, e)) = self.selected_range(tab_idx) {
+                                self.editor_apply_trim_range(tab_idx, (s, e));
+                                true
+                            } else {
+                                false
+                            };
+                            if fired {
+                                self.push_toast(
+                                    super::types::ToastSeverity::Info,
+                                    "Trimmed to selection (Ctrl+Z to undo)",
+                                );
+                            }
+                        }
+                        if self.keymap_consume(ctx, Action::EditorVirtualTrim)
+                            && !self.editor_apply_busy_toast_for_tab(tab_idx)
+                        {
+                            let ranges = self.all_selected_ranges(tab_idx);
+                            if ranges.len() > 1 {
+                                if let Some(path) = self.tabs.get(tab_idx).map(|t| t.path.clone()) {
+                                    let mut iter = ranges.into_iter();
+                                    if let Some((s, e)) = iter.next() {
+                                        self.begin_trim_virtual_job(tab_idx, (s, e));
+                                    }
+                                    for (s, e) in iter {
+                                        self.virtual_trim_queue.push_back((path.clone(), s, e));
+                                    }
+                                }
+                            } else {
+                                self.try_add_trim_range_as_virtual_shortcut(tab_idx);
+                            }
+                        }
+                        // Delete is shared with the list and the effect graph,
+                        // whose handlers run earlier in the frame under their own
+                        // workspace guards. This one must be scoped the same way
+                        // or a background editor tab would eat the list's Delete.
+                        if self.keymap_consume(ctx, Action::EditorDeleteSelection)
+                            && !self.editor_apply_busy_toast_for_tab(tab_idx)
+                        {
+                            let ranges = self.all_selected_ranges(tab_idx);
+                            let fired = if ranges.len() > 1 {
+                                self.editor_delete_multi_ranges_and_join(tab_idx, ranges);
+                                true
+                            } else if let Some((s, e)) = self.selected_range(tab_idx) {
+                                self.editor_delete_range_and_join(tab_idx, (s, e));
+                                true
+                            } else {
+                                false
+                            };
+                            if fired {
+                                self.push_toast(
+                                    super::types::ToastSeverity::Info,
+                                    "Deleted selection (Ctrl+Z to undo)",
+                                );
+                            }
+                        }
+                        // Mute every selected range, matching what the Trim
+                        // inspector's Mode=Mute Apply does (primary + extras) so
+                        // the key and the button cannot disagree.
+                        if self.keymap_consume(ctx, Action::EditorMuteSelection)
+                            && !self.editor_apply_busy_toast_for_tab(tab_idx)
+                        {
+                            let ranges = self.all_selected_ranges(tab_idx);
+                            let fired = if ranges.len() > 1 {
+                                self.editor_apply_mute_multi_ranges(tab_idx, ranges);
+                                true
+                            } else if let Some((s, e)) = self.selected_range(tab_idx) {
+                                self.editor_apply_mute_range(tab_idx, (s, e));
+                                true
+                            } else {
+                                false
+                            };
+                            if fired {
+                                self.push_toast(
+                                    super::types::ToastSeverity::Info,
+                                    "Muted selection (Ctrl+Z to undo)",
+                                );
+                            }
+                        }
+                    }
                     if self.keymap_consume(ctx, Action::EditorSeekStart) {
                         self.seek_to_fraction_in_active_tab(0, 9);
                     }
@@ -460,33 +497,10 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn all_selected_ranges(&self, tab_idx: usize) -> Vec<(usize, usize)> {
-        let Some(tab) = self.tabs.get(tab_idx) else {
-            return vec![];
-        };
-        let mut ranges: Vec<(usize, usize)> = tab
-            .extra_selections
-            .iter()
-            .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
-            .filter(|&(a, b)| b > a)
-            .collect();
-        if let Some((a0, b0)) = tab.selection {
-            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-            if b > a {
-                ranges.push((a, b));
-            }
-        }
-        ranges.sort();
-        let mut merged: Vec<(usize, usize)> = Vec::new();
-        for (s, e) in ranges {
-            if let Some(last) = merged.last_mut() {
-                if s <= last.1 {
-                    last.1 = last.1.max(e);
-                    continue;
-                }
-            }
-            merged.push((s, e));
-        }
-        merged
+        self.tabs
+            .get(tab_idx)
+            .map(EditorTab::all_selected_ranges)
+            .unwrap_or_default()
     }
 
     fn selected_range(&self, tab_idx: usize) -> Option<(usize, usize)> {

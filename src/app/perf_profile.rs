@@ -218,6 +218,28 @@ impl PerfProfile {
         }
     }
 
+    /// Per-frame budget for turning scanned paths into list rows.
+    ///
+    /// This is the "how many files are loaded yet" path — the number the user
+    /// watches during a folder load — so an idle frame gets the tier's full
+    /// slice. While audio is running it is capped hard rather than scaled:
+    /// playback is a latency constraint, not a throughput one, and a fast
+    /// machine spending 4ms here still drops the frame the audio callback
+    /// needs.
+    pub fn list_append_budget(&self, playing: bool) -> Duration {
+        if playing {
+            return Duration::from_micros(match self.tier {
+                PerfTier::Low => 200,
+                PerfTier::Normal | PerfTier::High => 350,
+            });
+        }
+        Duration::from_micros(match self.tier {
+            PerfTier::Low => 1_500,
+            PerfTier::Normal => 3_000,
+            PerfTier::High => 5_000,
+        })
+    }
+
     /// Concurrent heavy restore/decode jobs during a session open.
     pub fn restore_concurrency(&self) -> usize {
         if self.remote_root {
@@ -397,6 +419,31 @@ mod tests {
         assert!(local.meta_pool_workers() >= 1);
         assert!(local.restore_concurrency() >= 1);
         assert!(local.background_io_budget(1) >= 1);
+    }
+
+    /// The append budget is what decides how fast filenames appear during a
+    /// folder load, so it must grow with the machine -- but never at the
+    /// expense of the audio callback.
+    #[test]
+    fn the_append_budget_grows_with_the_tier_but_yields_to_playback() {
+        let low = PerfProfile::from_cores(2, PerfTierPreference::Auto);
+        let normal = PerfProfile::from_cores(4, PerfTierPreference::Auto);
+        let high = PerfProfile::from_cores(16, PerfTierPreference::Auto);
+
+        assert!(low.list_append_budget(false) < normal.list_append_budget(false));
+        assert!(normal.list_append_budget(false) < high.list_append_budget(false));
+
+        for profile in [low, normal, high] {
+            assert!(
+                profile.list_append_budget(true) < profile.list_append_budget(false),
+                "playback must shrink the slice, not keep it"
+            );
+            assert!(
+                profile.list_append_budget(true) <= Duration::from_micros(350),
+                "the playing slice must stay inside the old hard cap"
+            );
+            assert!(profile.list_append_budget(true) > Duration::ZERO);
+        }
     }
 
     #[test]
