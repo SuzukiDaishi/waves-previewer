@@ -368,6 +368,14 @@ enum PendingTabActivationKind {
     InitialOpen,
 }
 
+/// Runtime-only bridge while a List transport remains audible underneath an
+/// Editor tab that is still loading its exact audio.
+#[derive(Clone, Debug)]
+struct PendingEditorPlaybackHandoff {
+    path: PathBuf,
+    desired_playing: bool,
+}
+
 #[derive(Clone, Debug)]
 struct PlaybackSessionState {
     source: PlaybackSourceKind,
@@ -651,6 +659,11 @@ pub struct WavesPreviewer {
     pub list_column_order: Vec<types::ColumnId>,
     /// Unified display order for built-in and registered metadata columns.
     pub list_column_layout: Vec<types::ColumnKey>,
+    /// Active List Columns window position. Saved in the current Session when
+    /// one exists; otherwise mirrored to `list_columns_window_global_pos`.
+    list_columns_window_pos: Option<egui::Pos2>,
+    /// Fallback position persisted in prefs for folder/file-only workflows.
+    list_columns_window_global_pos: Option<egui::Pos2>,
     /// User-selected metadata columns. Their keys are stable strings shared
     /// with the metadata CLI and session format.
     metadata_list_columns: Vec<types::MetadataListColumn>,
@@ -668,6 +681,9 @@ pub struct WavesPreviewer {
     list_col_widths_seen: Vec<(String, f32)>,
     list_table_ui_id: Option<egui::Id>,
     list_table_col_count: usize,
+    /// Changes whenever the unified column order changes so egui_extras does
+    /// not reuse positional widths for a different set of column keys.
+    list_table_layout_revision: u64,
     /// Longest duration seen since the list was last loaded, which decides
     /// whether Length renders `h:mm:ss` for every row. A monotonic latch on
     /// purpose: an exact maximum would need decrement hooks on every removal
@@ -748,6 +764,11 @@ pub struct WavesPreviewer {
     /// A seek requested from a row waveform that the decoded preview buffer
     /// does not reach yet. See `list_seek_ops`.
     list_seek_pending: Option<list_seek_ops::ListSeekPending>,
+    /// Pointer-down List waveform interaction. The audio transport is not
+    /// moved until this gesture is committed on pointer release.
+    list_seek_gesture: Option<list_seek_ops::ListSeekGesture>,
+    /// Conservative throughput/emit timing for the active progressive decode.
+    list_decode_progress: Option<list_seek_ops::ListDecodeProgress>,
     /// `max_secs` the active list-preview job was spawned with. `0.0` means
     /// "decode to the end of the file" -- the existing convention in
     /// `spawn_list_preview_async`, which nothing recorded, so a seek past the
@@ -770,6 +791,9 @@ pub struct WavesPreviewer {
     scroll_to_selected: bool,
     last_list_scroll_at: Option<std::time::Instant>,
     auto_play_list_nav: bool,
+    /// User preference: a manual List stop either parks at the current
+    /// position (false) or rewinds the active item to its start (true).
+    list_stop_returns_to_start: bool,
     // single click = select + audition (default). When false, single click only
     // selects; audition happens via Space / keyboard nav / autoplay.
     list_click_audition: bool,
@@ -996,6 +1020,7 @@ pub struct WavesPreviewer {
     pending_activate_kind: Option<PendingTabActivationKind>,
     pending_activate_ready: bool,
     pending_editor_autoplay_path: Option<PathBuf>,
+    pending_editor_playback_handoff: Option<PendingEditorPlaybackHandoff>,
     pending_preview_autoplay: Option<PendingPreviewAutoplay>,
     // Heavy preview worker for Pitch/Stretch (mono) with path/generation guard
     heavy_preview_rx: Option<std::sync::mpsc::Receiver<HeavyPreviewMessage>>,
@@ -2078,7 +2103,11 @@ impl WavesPreviewer {
         playback_source: &PlaybackSourceKind,
         tab: &EditorTab,
     ) -> bool {
-        matches!(playback_source, PlaybackSourceKind::EditorTab(path) if path == &tab.path)
+        matches!(
+            playback_source,
+            PlaybackSourceKind::EditorTab(path) | PlaybackSourceKind::ListPreview(path)
+                if path == &tab.path
+        )
     }
 
     fn map_audio_to_display_sample_with(

@@ -1099,6 +1099,30 @@ mod kittest_suite {
         harness.run_steps(2);
     }
 
+    fn pointer_drag_with_press_frame(
+        harness: &mut Harness<'static, WavesPreviewer>,
+        start: egui::Pos2,
+        end: egui::Pos2,
+    ) {
+        harness.hover_at(start);
+        harness.event(egui::Event::PointerButton {
+            pos: start,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(end));
+        harness.run_steps(2);
+        harness.event(egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+    }
+
     fn editor_pointer_drag_with_modifiers(
         harness: &mut Harness<'static, WavesPreviewer>,
         start: egui::Pos2,
@@ -1259,6 +1283,20 @@ mod kittest_suite {
             .rect()
     }
 
+    fn list_columns_row_label_center(
+        harness: &Harness<'static, WavesPreviewer>,
+        label: &str,
+    ) -> egui::Pos2 {
+        let drag_label = format!("Drag {label} column");
+        let row = harness.get_by_label(&drag_label).rect();
+        harness
+            .query_all_by_label(label)
+            .find(|node| node.rect().intersects(row))
+            .unwrap_or_else(|| panic!("List Columns row label '{label}' not found"))
+            .rect()
+            .center()
+    }
+
     fn assert_rect_nearly_same(a: egui::Rect, b: egui::Rect, label: &str) {
         let tolerance = 2.0;
         assert!(
@@ -1268,6 +1306,309 @@ mod kittest_suite {
                 && (a.height() - b.height()).abs() <= tolerance,
             "{label} moved/resized too much: before={a:?} after={b:?}"
         );
+    }
+
+    #[test]
+    fn kittest_list_columns_window_moves_and_rows_drag_from_their_labels() {
+        let mut harness = harness_with_wavs(false);
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        harness
+            .state_mut()
+            .test_add_metadata_list_column("ucs.cat_id", "UCS Category");
+        harness.run_steps(3);
+
+        top_menu_button(&harness, "Tools").click();
+        harness.run_steps(1);
+        harness.get_by_label("List Columns...").click();
+        harness.run_steps(5);
+        let reset = harness
+            .query_all_by_label("Reset")
+            .max_by(|a, b| {
+                a.rect()
+                    .center()
+                    .x
+                    .partial_cmp(&b.rect().center().x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("List Columns Reset button");
+        reset.click();
+        harness.run_steps(2);
+
+        let before_pos = harness
+            .state()
+            .test_list_columns_window_pos()
+            .expect("initial List Columns position");
+        let title_start = egui::pos2(before_pos.x + 260.0, before_pos.y + 12.0);
+        let title_delta = egui::vec2(150.0, -55.0);
+        pointer_drag_with_press_frame(&mut harness, title_start, title_start + title_delta);
+        let moved_pos = harness
+            .state()
+            .test_list_columns_window_pos()
+            .expect("moved List Columns position");
+        let actual_delta = moved_pos - before_pos;
+        assert!(
+            (actual_delta.x - title_delta.x).abs() <= 4.0
+                && (actual_delta.y - title_delta.y).abs() <= 4.0,
+            "title drag should move the window by the pointer delta: before={before_pos:?} start={title_start:?} expected={title_delta:?} actual={actual_delta:?}"
+        );
+        assert_eq!(
+            harness.state().test_list_columns_window_global_pos(),
+            Some(moved_pos),
+            "a no-Session title drag should update the global persisted position"
+        );
+        harness
+            .query_all_by_label("Reset")
+            .max_by(|a, b| {
+                a.rect()
+                    .center()
+                    .x
+                    .partial_cmp(&b.rect().center().x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("List Columns Reset after move")
+            .click();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_list_columns_window_pos(),
+            Some(moved_pos),
+            "Reset should affect column settings but not the window position"
+        );
+
+        let file_start = list_columns_row_label_center(&harness, "File");
+        let edited_drop = list_columns_row_label_center(&harness, "Edited");
+        editor_pointer_drag(&mut harness, file_start, edited_drop);
+        assert_eq!(
+            harness.state().list_column_layout[0],
+            ColumnKey::Builtin(ColumnId::File),
+            "the Built-in label itself should be a drag source"
+        );
+
+        assert!(
+            !harness.state().list_columns.cover_art,
+            "Art must remain hidden before the hidden-row drag"
+        );
+        let art_start = list_columns_row_label_center(&harness, "Art");
+        let file_drop = list_columns_row_label_center(&harness, "File");
+        editor_pointer_drag(&mut harness, art_start, file_drop);
+        assert_eq!(
+            harness.state().list_column_layout[0],
+            ColumnKey::Builtin(ColumnId::CoverArt),
+            "a hidden Built-in row should be reorderable"
+        );
+        assert!(!harness.state().list_columns.cover_art);
+
+        let external_start = list_columns_row_label_center(&harness, "External");
+        let art_drop = list_columns_row_label_center(&harness, "Art");
+        editor_pointer_drag(&mut harness, external_start, art_drop);
+        assert_eq!(
+            harness.state().list_column_layout[0],
+            ColumnKey::Builtin(ColumnId::External),
+            "an unavailable External row should still be reorderable"
+        );
+
+        harness.get_by_label("Show Art column").click();
+        harness.run_steps(2);
+        assert!(
+            harness.state().list_columns.cover_art,
+            "clicking a checkbox must still toggle visibility"
+        );
+        assert_eq!(
+            harness.state().list_column_layout[1],
+            ColumnKey::Builtin(ColumnId::CoverArt),
+            "a checkbox click must not start a row drag"
+        );
+
+        let scroll_hover = list_columns_row_label_center(&harness, "Bitrate");
+        harness.hover_at(scroll_hover);
+        for _ in 0..24 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -5.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+        let metadata_start = list_columns_row_label_center(&harness, "UCS Category");
+        let note_drop = list_columns_row_label_center(&harness, "Note");
+        editor_pointer_drag(&mut harness, metadata_start, note_drop);
+        assert_eq!(
+            harness.state().list_column_layout.last(),
+            Some(&ColumnKey::Normalized("ucs.cat_id".to_string())),
+            "Metadata should use the same row-label drag behavior as Built-in columns"
+        );
+
+        harness
+            .state_mut()
+            .test_set_list_columns_window_pos(Some(egui::pos2(-5_000.0, 5_000.0)));
+        harness.run_steps(3);
+        let constrained = harness
+            .state()
+            .test_list_columns_window_pos()
+            .expect("constrained List Columns position");
+        assert!(
+            constrained.x >= 0.0
+                && constrained.y >= 0.0
+                && constrained.x < 1600.0
+                && constrained.y < 900.0,
+            "off-screen positions should be constrained into the viewport: {constrained:?}"
+        );
+    }
+
+    #[test]
+    fn kittest_list_columns_position_roundtrips_through_prefs_and_session() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let dir = make_temp_dir("list_columns_position");
+        let prefs = dir.join("prefs.txt");
+        let session = dir.join("position.nwsess");
+
+        let global_pos = egui::pos2(84.0, 96.0);
+        harness
+            .state_mut()
+            .test_set_list_columns_window_global_pos(Some(global_pos));
+        harness
+            .state_mut()
+            .test_set_list_columns_window_pos(Some(global_pos));
+        harness.state().test_save_prefs_to_path(&prefs);
+        harness
+            .state_mut()
+            .test_set_list_columns_window_global_pos(None);
+        harness.state_mut().test_set_list_columns_window_pos(None);
+        harness.state_mut().test_load_prefs_from_path(&prefs);
+        assert_eq!(
+            harness.state().test_list_columns_window_global_pos(),
+            Some(global_pos)
+        );
+        assert_eq!(
+            harness.state().test_list_columns_window_pos(),
+            Some(global_pos),
+            "a no-Session workflow should restore the global position"
+        );
+
+        let session_pos = egui::pos2(333.5, 144.25);
+        harness
+            .state_mut()
+            .test_set_list_columns_window_pos(Some(session_pos));
+        assert!(harness.state_mut().test_save_session_to(&session));
+        harness
+            .state_mut()
+            .test_set_list_columns_window_global_pos(Some(global_pos));
+        harness
+            .state_mut()
+            .test_set_list_columns_window_pos(Some(egui::pos2(1.0, 2.0)));
+        assert!(harness.state_mut().test_open_session_from(&session));
+        assert_eq!(
+            harness.state().test_list_columns_window_pos(),
+            Some(session_pos),
+            "the Session-specific position should take precedence over prefs"
+        );
+        assert!(harness.state_mut().test_close_session_with_autosave());
+        assert_eq!(
+            harness.state().test_list_columns_window_pos(),
+            Some(global_pos),
+            "closing the Session should restore the global position"
+        );
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_list_columns_window_move_and_builtin_label_drag_evidence() {
+        let mut harness = harness_with_wavs(false);
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+
+        top_menu_button(&harness, "Tools").click();
+        harness.run_steps(1);
+        harness.get_by_label("List Columns...").click();
+        harness.run_steps(5);
+        harness
+            .query_all_by_label("Reset")
+            .max_by(|a, b| {
+                a.rect()
+                    .center()
+                    .x
+                    .partial_cmp(&b.rect().center().x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("List Columns Reset button")
+            .click();
+        harness.run_steps(2);
+
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("list_columns_drag");
+        std::fs::create_dir_all(&out_dir).expect("create List Columns drag evidence dir");
+        harness
+            .render()
+            .expect("render List Columns initial position")
+            .save(out_dir.join("01_before.png"))
+            .expect("save List Columns initial screenshot");
+
+        let before_pos = harness
+            .state()
+            .test_list_columns_window_pos()
+            .expect("initial window position");
+        let title_start = egui::pos2(before_pos.x + 260.0, before_pos.y + 12.0);
+        let title_delta = egui::vec2(170.0, -60.0);
+        pointer_drag_with_press_frame(&mut harness, title_start, title_start + title_delta);
+        let moved_pos = harness
+            .state()
+            .test_list_columns_window_pos()
+            .expect("moved window position");
+        let actual_delta = moved_pos - before_pos;
+        assert!(
+            (actual_delta.x - title_delta.x).abs() <= 4.0
+                && (actual_delta.y - title_delta.y).abs() <= 4.0,
+            "evidence drag should move the window: expected={title_delta:?} actual={actual_delta:?}"
+        );
+        harness
+            .render()
+            .expect("render moved List Columns window")
+            .save(out_dir.join("02_window_moved.png"))
+            .expect("save moved List Columns screenshot");
+
+        let file_start = list_columns_row_label_center(&harness, "File");
+        let edited_drop = list_columns_row_label_center(&harness, "Edited");
+        harness.hover_at(file_start);
+        harness.event(egui::Event::PointerButton {
+            pos: file_start,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.event(egui::Event::PointerMoved(edited_drop));
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().list_column_order[0],
+            ColumnId::Edited,
+            "order must not change before pointer release"
+        );
+        harness
+            .render()
+            .expect("render Built-in row while dragging")
+            .save(out_dir.join("03_builtin_dragging.png"))
+            .expect("save Built-in dragging screenshot");
+
+        harness.event(egui::Event::PointerButton {
+            pos: edited_drop,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().list_column_order[0],
+            ColumnId::File,
+            "releasing the Built-in label on Edited should commit the new order"
+        );
+        harness
+            .render()
+            .expect("render reordered Built-in rows")
+            .save(out_dir.join("04_builtin_reordered.png"))
+            .expect("save reordered Built-in screenshot");
     }
 
     #[cfg(feature = "kittest_render")]
@@ -2988,6 +3329,7 @@ mod kittest_suite {
         harness.get_by_label("Settings...").click();
         harness.run_steps(2);
         assert!(harness.state().test_show_export_settings());
+        let _ = harness.get_by_label("Return List playback to start when stopped");
     }
 
     #[test]
@@ -3028,6 +3370,33 @@ mod kittest_suite {
         harness.state_mut().test_set_auto_play_list_nav(true);
         harness.state_mut().test_load_prefs_from_path(&prefs);
         assert!(!harness.state().test_auto_play_list_nav());
+    }
+
+    #[test]
+    fn list_stop_return_to_start_pref_roundtrip_persists() {
+        let mut harness = harness_empty();
+        let prefs = make_temp_dir("prefs_list_stop_return").join("prefs.txt");
+        assert!(!harness.state().test_list_stop_returns_to_start());
+
+        harness
+            .state_mut()
+            .test_set_list_stop_returns_to_start(true);
+        harness.state().test_save_prefs_to_path(&prefs);
+        harness
+            .state_mut()
+            .test_set_list_stop_returns_to_start(false);
+        harness.state_mut().test_load_prefs_from_path(&prefs);
+        assert!(harness.state().test_list_stop_returns_to_start());
+
+        harness
+            .state_mut()
+            .test_set_list_stop_returns_to_start(false);
+        harness.state().test_save_prefs_to_path(&prefs);
+        harness
+            .state_mut()
+            .test_set_list_stop_returns_to_start(true);
+        harness.state_mut().test_load_prefs_from_path(&prefs);
+        assert!(!harness.state().test_list_stop_returns_to_start());
     }
 
     #[test]
@@ -8315,6 +8684,12 @@ mod kittest_suite {
         assert_eq!(harness.state().test_recording_state_name(), "Recording");
 
         harness.state_mut().test_discard_recording();
+        assert_eq!(
+            harness.state().test_recording_state_name(),
+            "Finalizing",
+            "discard should wait for the capture worker before returning to idle"
+        );
+        harness.state_mut().test_finish_recording_discard();
         assert_eq!(harness.state().test_recording_state_name(), "Idle");
         assert!(!harness.state().test_recording_paused_flag());
         assert!(!harness.state().test_recording_pause_started());
@@ -9254,6 +9629,425 @@ mod kittest_suite {
         );
     }
 
+    #[test]
+    fn list_wave_seek_pointer_hold_is_silent_until_release() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        let row = wait_for_seekable_row(&mut harness, 0.5, Some("wav"));
+        let duration = harness.state().test_row_duration_secs(row).unwrap();
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(4);
+
+        let rect = harness.get_by_label(&format!("List seek row {row}")).rect();
+        let start = egui::pos2(rect.left() + rect.width() * 0.25, rect.center().y);
+        let end = egui::pos2(rect.left() + rect.width() * 0.70, rect.center().y);
+        harness.hover_at(start);
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+            Modifiers::NONE,
+        );
+        harness.run_steps(2);
+        assert!(!harness.state().test_audio_is_playing());
+        assert!(
+            harness.state().test_list_seek_gesture_frac().is_some(),
+            "pointer-down should create a held seek without committing it"
+        );
+        let held_source_time = harness.state().test_playback_source_time_sec();
+
+        harness.event_modifiers(egui::Event::PointerMoved(end), Modifiers::NONE);
+        harness.run_steps(2);
+        assert!(!harness.state().test_audio_is_playing());
+        let held_frac = harness
+            .state()
+            .test_list_seek_gesture_frac()
+            .expect("held seek fraction");
+        assert!((held_frac - 0.70).abs() < 0.08, "held frac={held_frac}");
+        assert_eq!(
+            harness.state().test_playback_source_time_sec(),
+            held_source_time,
+            "dragging must not move the real transport"
+        );
+
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            },
+            Modifiers::NONE,
+        );
+        harness.run_steps(3);
+        assert!(harness.state().test_audio_is_playing());
+        assert_eq!(harness.state().test_list_seek_gesture_frac(), None);
+        let committed = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("committed source time");
+        assert!(
+            (committed - duration * 0.70).abs() < duration * 0.1,
+            "release should commit near 70%: {committed:.3}/{duration:.3}"
+        );
+    }
+
+    #[test]
+    fn list_stop_then_play_reuses_position_until_another_item_is_selected() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        harness
+            .state_mut()
+            .test_set_list_stop_returns_to_start(false);
+        let row = wait_for_seekable_row(&mut harness, 0.5, Some("wav"));
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(3);
+        harness.state_mut().test_list_seek_row_frac(row, 0.4);
+        harness.run_steps(2);
+        assert!(harness.state().test_audio_is_playing());
+
+        harness.state_mut().test_request_workspace_play_toggle();
+        let stopped_at = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("stopped source time");
+        assert!(!harness.state().test_audio_is_playing());
+        harness.state_mut().test_request_workspace_play_toggle();
+        let resumed_at = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("resumed source time");
+        assert!(harness.state().test_audio_is_playing());
+        assert!(
+            (resumed_at - stopped_at).abs() < 1e-3,
+            "same-item resume reset position: stopped={stopped_at} resumed={resumed_at}"
+        );
+
+        let other = if row == 0 { 1 } else { 0 };
+        harness.state_mut().test_select_row_with_autoscroll(other);
+        harness.run_steps(3);
+        let reset_at = harness
+            .state()
+            .test_playback_source_time_sec()
+            .unwrap_or(0.0);
+        assert!(
+            reset_at < 0.05,
+            "new item should reset to its start: {reset_at}"
+        );
+    }
+
+    #[test]
+    fn list_stop_returns_to_start_when_preference_is_enabled() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        harness
+            .state_mut()
+            .test_set_list_stop_returns_to_start(true);
+        let row = wait_for_seekable_row(&mut harness, 0.5, Some("wav"));
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(3);
+        harness.state_mut().test_list_seek_row_frac(row, 0.4);
+        harness.run_steps(2);
+        assert!(harness.state().test_audio_is_playing());
+
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(!harness.state().test_audio_is_playing());
+        let stopped_at = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("rewound source time");
+        assert!(
+            stopped_at < 0.01,
+            "enabled stop preference should rewind to 0:00, got {stopped_at}"
+        );
+
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(harness.state().test_audio_is_playing());
+        let resumed_at = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("restarted source time");
+        assert!(
+            resumed_at < 0.01,
+            "the next Play should begin at 0:00, got {resumed_at}"
+        );
+    }
+
+    #[test]
+    fn slow_progressive_decode_rebuffers_before_reaching_the_buffer_end() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(false);
+        let row = wait_for_seekable_row(&mut harness, 0.5, Some("wav"));
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !harness.state().test_audio_has_samples() {
+            harness.run_steps(1);
+            assert!(Instant::now() < deadline, "List buffer did not load");
+        }
+        let len = harness.state().test_audio_source_len();
+        assert!(len > 100);
+
+        harness
+            .state_mut()
+            .test_force_list_decode_progress(10.0, Some(10.0), 0.1, true);
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(harness.state().test_audio_is_playing());
+        let buffered_ahead = (len / 10).max(32);
+        harness
+            .state_mut()
+            .test_audio_seek_to_sample(len.saturating_sub(buffered_ahead));
+        harness
+            .state_mut()
+            .test_force_list_decode_progress(0.5, Some(0.5), 1.0, false);
+        harness.state_mut().test_maintain_list_playback_buffer();
+        assert!(
+            !harness.state().test_audio_is_playing(),
+            "low-water guard must stop before callback underrun"
+        );
+        assert!(harness.state().test_list_seek_pending_frac().is_some());
+
+        harness
+            .state_mut()
+            .test_force_list_decode_progress(10.0, Some(10.0), 0.1, true);
+        harness.state_mut().test_apply_pending_list_seek();
+        assert!(harness.state().test_audio_is_playing());
+        assert_eq!(harness.state().test_list_seek_pending_frac(), None);
+    }
+
+    #[test]
+    fn opening_editor_from_playing_list_wav_preserves_transport() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        let row = wait_for_seekable_row(&mut harness, 0.5, Some("wav"));
+        let path = path_for_row(harness.state(), row);
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(3);
+        harness.state_mut().test_list_seek_row_frac(row, 0.35);
+        harness.run_steps(2);
+        let before = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("list source time");
+        assert!(harness.state().test_audio_is_playing());
+
+        assert!(harness.state_mut().test_open_tab_for_path(&path));
+        assert!(harness.state().test_audio_is_playing());
+        let immediately_after = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("handoff source time");
+        assert!((immediately_after - before).abs() < 1e-3);
+        assert_eq!(
+            harness.state().test_editor_playback_handoff(),
+            Some((path.clone(), true))
+        );
+
+        harness.run_steps(5);
+        assert!(harness.state().test_is_editor_workspace_active());
+        assert!(harness.state().test_audio_is_playing());
+        assert!(harness.state().test_playback_source_is_editor_path(&path));
+        assert_eq!(harness.state().test_editor_playback_handoff(), None);
+        let after = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("editor source time");
+        assert!(
+            (after - before).abs() < 0.02,
+            "Editor handoff moved position: before={before} after={after}"
+        );
+    }
+
+    #[test]
+    fn opening_editor_from_playing_compressed_list_keeps_audio_during_decode() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_samples/bgms");
+        if !dir.is_dir() {
+            eprintln!("skipping: {} not present", dir.display());
+            return;
+        }
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(dir);
+        let mut harness = harness_with_startup(cfg);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        let row = wait_for_seekable_row(&mut harness, 2.0, Some("mp3"));
+        let path = path_for_row(harness.state(), row);
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !harness.state().test_audio_is_playing() {
+            harness.run_steps(1);
+            assert!(
+                Instant::now() < deadline,
+                "compressed List preview did not start"
+            );
+        }
+        let before = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("compressed List source time");
+
+        assert!(harness.state_mut().test_open_tab_for_path(&path));
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "opening the loading Editor must not stop the List transport"
+        );
+        assert_eq!(
+            harness.state().test_editor_playback_handoff(),
+            Some((path.clone(), true))
+        );
+        let immediate = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("compressed handoff source time");
+        assert!((immediate - before).abs() < 1e-3);
+
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(!harness.state().test_audio_is_playing());
+        assert_eq!(
+            harness.state().test_editor_playback_handoff(),
+            Some((path.clone(), false))
+        );
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(harness.state().test_audio_is_playing());
+        assert_eq!(
+            harness.state().test_editor_playback_handoff(),
+            Some((path.clone(), true))
+        );
+
+        wait_for_tab_fully_loaded(&mut harness);
+        harness.run_steps(3);
+        assert!(harness.state().test_audio_is_playing());
+        assert!(harness.state().test_playback_source_is_editor_path(&path));
+        assert_eq!(harness.state().test_editor_playback_handoff(), None);
+        let after = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("compressed Editor source time");
+        assert!((after - before).abs() < 0.05);
+    }
+
+    #[test]
+    fn opening_editor_from_stopped_list_keeps_position_and_stopped_state() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(false);
+        let row = wait_for_seekable_row(&mut harness, 0.5, Some("wav"));
+        let path = path_for_row(harness.state(), row);
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(3);
+        harness.state_mut().test_list_seek_row_frac(row, 0.55);
+        let seek_deadline = Instant::now() + Duration::from_secs(30);
+        while harness.state().test_list_seek_pending_frac().is_some() {
+            harness.run_steps(1);
+            assert!(
+                Instant::now() < seek_deadline,
+                "stopped List seek did not finish decoding"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        harness.run_steps(2);
+        assert!(!harness.state().test_audio_is_playing());
+        let before = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("stopped List source time");
+
+        assert!(harness.state_mut().test_open_tab_for_path(&path));
+        harness.run_steps(5);
+        assert!(harness.state().test_is_editor_workspace_active());
+        assert!(!harness.state().test_audio_is_playing());
+        let after = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("stopped Editor source time");
+        assert!(
+            (after - before).abs() < 0.02,
+            "stopped Editor handoff moved from {before:.6}s to {after:.6}s"
+        );
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_list_seek_editor_handoff_sequence() {
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug/screenshot_verify/list_seek_editor_handoff");
+        std::fs::create_dir_all(&out_dir).expect("create handoff screenshot dir");
+        let mut harness = harness_with_wavs(false);
+        harness.set_size(egui::vec2(1280.0, 760.0));
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        let row = wait_for_seekable_row(&mut harness, 0.5, Some("wav"));
+        let path = path_for_row(harness.state(), row);
+        harness.state_mut().test_select_row_with_autoscroll(row);
+        harness.run_steps(4);
+        harness.state_mut().test_list_seek_row_frac(row, 0.20);
+        harness.run_steps(2);
+
+        let before = harness.render().expect("render before seek");
+        before
+            .save(out_dir.join("01_before_seek.png"))
+            .expect("save before seek");
+
+        let rect = harness.get_by_label(&format!("List seek row {row}")).rect();
+        let target = egui::pos2(rect.left() + rect.width() * 0.68, rect.center().y);
+        harness.hover_at(target);
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+            Modifiers::NONE,
+        );
+        harness.run_steps(2);
+        assert!(!harness.state().test_audio_is_playing());
+        let held = harness.render().expect("render held seek");
+        held.save(out_dir.join("02_seek_held.png"))
+            .expect("save held seek");
+
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            },
+            Modifiers::NONE,
+        );
+        harness.run_steps(3);
+        assert!(harness.state().test_audio_is_playing());
+        let released = harness.render().expect("render released seek");
+        released
+            .save(out_dir.join("03_seek_released.png"))
+            .expect("save released seek");
+
+        let before_editor_time = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("before editor source time");
+        assert!(harness.state_mut().test_open_tab_for_path(&path));
+        harness.run_steps(5);
+        assert!(harness.state().test_audio_is_playing());
+        let after_editor_time = harness
+            .state()
+            .test_playback_source_time_sec()
+            .expect("after editor source time");
+        assert!((after_editor_time - before_editor_time).abs() < 0.02);
+        let editor = harness.render().expect("render editor handoff");
+        editor
+            .save(out_dir.join("04_editor_handoff.png"))
+            .expect("save editor handoff");
+        eprintln!("[shot] wrote {}", out_dir.display());
+    }
+
     /// Not an assertion test: renders the list with a seek in progress so the
     /// playhead, the progress fill and the undecoded shading can be eyeballed
     /// at the real row height. Run with:
@@ -9309,18 +10103,14 @@ mod kittest_suite {
         harness.state_mut().test_list_scroll_to_end();
         harness.run_steps(4);
 
+        let image = harness.render().expect("render image");
+        let out = out_dir.join("list_end_of_list.png");
+        image.save(&out).expect("save screenshot");
+        eprintln!("[shot] wrote {}", out.display());
+
         assert!(
             harness.state().test_list_end_row_fully_visible(),
             "the picture is supposed to show the end-of-list row"
-        );
-
-        let image = harness.render().expect("render image");
-        image
-            .save(out_dir.join("list_end_of_list.png"))
-            .expect("save screenshot");
-        eprintln!(
-            "[shot] wrote {}",
-            out_dir.join("list_end_of_list.png").display()
         );
     }
 

@@ -144,6 +144,12 @@ impl crate::app::WavesPreviewer {
         let list_bottom = metrics.list_rect.bottom();
         let mut last_fully_visible_row: Option<usize> = None;
         let mut end_row_fully_visible = false;
+        let end_marker = table::format_list_end_marker(
+            self.files.len(),
+            self.items.len(),
+            !self.search_query.trim().is_empty(),
+        );
+        let mut end_row_rect: Option<egui::Rect> = None;
         let allow_auto_scroll = self.list_allow_auto_scroll(ctx, &metrics, key_moved);
         self.update_list_scroll_state(ctx, &metrics, allow_auto_scroll);
         let (table, filler_cols, header_dirty) = self.build_list_table(ui, &metrics);
@@ -1441,38 +1447,15 @@ impl crate::app::WavesPreviewer {
                         // The row that closes the list. Scrolling stops with
                         // this on screen, so reaching the end is something the
                         // user reads rather than infers from a half-drawn row.
-                        let marker = table::format_list_end_marker(
-                            self.files.len(),
-                            self.items.len(),
-                            !self.search_query.trim().is_empty(),
-                        );
-                        let mut first = true;
-                        let mut end_rect: Option<egui::Rect> = None;
                         for _ in 0..filler_cols {
                             row.col(|ui| {
-                                let (rect, _) = ui.allocate_exact_size(
+                                let _ = ui.allocate_exact_size(
                                     egui::vec2(ui.available_width(), row_h * 0.9),
                                     Sense::hover(),
                                 );
-                                if !first {
-                                    return;
-                                }
-                                first = false;
-                                end_rect = Some(rect);
-                                // Painted rather than laid out as a label so
-                                // the text can run past the first column's
-                                // width instead of being truncated by it.
-                                ui.painter().text(
-                                    egui::pos2(rect.left() + 6.0, rect.center().y),
-                                    egui::Align2::LEFT_CENTER,
-                                    &marker,
-                                    egui::FontId::proportional(text_height * 0.9),
-                                    ui.style().visuals.weak_text_color(),
-                                );
+                                let rect = ui.max_rect();
+                                end_row_rect = Some(end_row_rect.map_or(rect, |all| all.union(rect)));
                             });
-                        }
-                        if let Some(rect) = end_rect {
-                            end_row_fully_visible = rect.bottom() <= list_bottom + 0.5;
                         }
                     } else {
                         // filler
@@ -1488,10 +1471,31 @@ impl crate::app::WavesPreviewer {
                 });
             });
 
+        if let Some(rect) = end_row_rect {
+            end_row_fully_visible = rect.bottom() <= list_bottom + 0.5;
+            // Fixed-height columns are clipped so their contents cannot break
+            // the custom row-index scroll math. Paint the closing label from
+            // the parent UI after the table instead, giving it the full row
+            // width rather than the narrow first column's clip rectangle.
+            ui.painter().text(
+                egui::pos2(rect.left() + 6.0, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                &end_marker,
+                egui::FontId::proportional(text_height * 0.9),
+                ui.style().visuals.weak_text_color(),
+            );
+        }
         self.list_end_row_fully_visible = end_row_fully_visible;
         self.list_last_fully_visible_row = last_fully_visible_row;
         if let Some(req) = wave_seek_request {
             self.apply_list_seek_request(req);
+        }
+        // egui can miss `drag_stopped` when the pointer is released outside
+        // the cell/window. Commit the last visible target on a normal outside
+        // release; a focus loss cancels and leaves playback stopped.
+        if self.has_active_list_seek_gesture() && !ctx.input(|input| input.pointer.primary_down()) {
+            let focused = ctx.input(|input| input.raw.focused);
+            self.finish_list_seek_gesture_from_pointer_state(focused);
         }
         self.ui_list_scrollbar(ui, &metrics);
         self.commit_list_col_widths(ctx);

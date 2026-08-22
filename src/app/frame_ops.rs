@@ -201,6 +201,8 @@ impl WavesPreviewer {
         // the seek they just asked for, and this returns immediately when
         // nothing is parked.
         self.apply_pending_list_seek();
+        self.maintain_list_playback_buffer();
+        self.maintain_editor_playback_handoff();
         trace_stage!(
             "drain_list_preview_prefetch_results",
             self.drain_list_preview_prefetch_results()
@@ -526,7 +528,16 @@ impl WavesPreviewer {
                                         render_spec,
                                         false,
                                     );
-                                    self.audio.set_samples_channels(rendered);
+                                    let handoff = self.editor_playback_handoff_matches(&p);
+                                    if handoff {
+                                        self.set_editor_buffer_transport_preserving_time(
+                                            &p,
+                                            rendered,
+                                            self.audio.shared.out_sample_rate.max(1),
+                                        );
+                                    } else {
+                                        self.audio.set_samples_channels(rendered);
+                                    }
                                     self.playback_mark_buffer_source(
                                         PlaybackSourceKind::EditorTab(p.clone()),
                                         self.audio.shared.out_sample_rate.max(1),
@@ -536,6 +547,9 @@ impl WavesPreviewer {
                                             self.mode,
                                             source_time_sec,
                                         );
+                                    }
+                                    if handoff {
+                                        self.finish_editor_playback_handoff(&p, true);
                                     }
                                 }
                             }
@@ -550,12 +564,14 @@ impl WavesPreviewer {
                                 }
                             }
                         }
-                        match self.mode {
-                            RateMode::Speed | RateMode::PitchShift | RateMode::TimeStretch => {
-                                self.playback_mark_buffer_source(
-                                    PlaybackSourceKind::EditorTab(p.clone()),
-                                    self.audio.shared.out_sample_rate.max(1),
-                                );
+                        if !self.editor_playback_handoff_matches(&p) {
+                            match self.mode {
+                                RateMode::Speed | RateMode::PitchShift | RateMode::TimeStretch => {
+                                    self.playback_mark_buffer_source(
+                                        PlaybackSourceKind::EditorTab(p.clone()),
+                                        self.audio.shared.out_sample_rate.max(1),
+                                    );
+                                }
                             }
                         }
                     }
@@ -588,6 +604,10 @@ impl WavesPreviewer {
         let Some(path) = self.pending_editor_autoplay_path.clone() else {
             return;
         };
+        if self.editor_playback_handoff_matches(&path) {
+            self.pending_editor_autoplay_path = None;
+            return;
+        }
         if !self.auto_play_list_nav {
             self.pending_editor_autoplay_path = None;
             return;

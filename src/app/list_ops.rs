@@ -64,11 +64,12 @@ impl super::WavesPreviewer {
         self.selected_multi.insert(row);
         self.select_anchor = Some(row);
         self.open_or_activate_tab(path);
-        self.pending_editor_autoplay_path = if self.auto_play_list_nav {
-            Some(path.to_path_buf())
-        } else {
-            None
-        };
+        self.pending_editor_autoplay_path =
+            if self.auto_play_list_nav && !self.editor_playback_handoff_matches(path) {
+                Some(path.to_path_buf())
+            } else {
+                None
+            };
         true
     }
 

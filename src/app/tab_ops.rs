@@ -3,6 +3,123 @@ use std::path::{Path, PathBuf};
 use super::*;
 
 impl super::WavesPreviewer {
+    pub(super) fn editor_playback_handoff_matches(&self, path: &Path) -> bool {
+        self.pending_editor_playback_handoff
+            .as_ref()
+            .is_some_and(|handoff| handoff.path.as_path() == path)
+    }
+
+    fn begin_editor_playback_handoff(&mut self, path: &Path) -> bool {
+        let list_source_matches = matches!(
+            &self.playback_session.source,
+            super::PlaybackSourceKind::ListPreview(source) if source.as_path() == path
+        );
+        let pending_matches = self
+            .list_seek_pending
+            .as_ref()
+            .is_some_and(|pending| pending.path.as_path() == path);
+        let gesture_matches = self
+            .list_seek_gesture
+            .as_ref()
+            .is_some_and(|gesture| gesture.path.as_path() == path);
+        if !list_source_matches && !pending_matches && !gesture_matches {
+            self.pending_editor_playback_handoff = None;
+            return false;
+        }
+        let desired_playing = self.playback_is_playing_now()
+            || self
+                .list_seek_pending
+                .as_ref()
+                .filter(|pending| pending.path.as_path() == path)
+                .is_some_and(|pending| pending.resume_playing)
+            || self
+                .list_seek_gesture
+                .as_ref()
+                .filter(|gesture| gesture.path.as_path() == path)
+                .is_some_and(|gesture| gesture.resume_playing);
+        self.pending_editor_playback_handoff = Some(super::PendingEditorPlaybackHandoff {
+            path: path.to_path_buf(),
+            desired_playing,
+        });
+        true
+    }
+
+    pub(super) fn finish_editor_playback_handoff(&mut self, path: &Path, source_replaced: bool) {
+        let Some(handoff) = self
+            .pending_editor_playback_handoff
+            .take()
+            .filter(|handoff| handoff.path.as_path() == path)
+        else {
+            return;
+        };
+        self.cancel_list_preview_job();
+        self.list_seek_gesture = None;
+        if handoff.desired_playing {
+            if source_replaced || !self.playback_is_playing_now() {
+                self.audio
+                    .play_declicked(crate::app::list_seek_ops::LIST_TRANSPORT_FADE_IN_MS);
+            }
+        } else {
+            self.audio.stop();
+        }
+    }
+
+    pub(super) fn cancel_editor_playback_handoff_for_path(&mut self, path: &Path) {
+        if self.editor_playback_handoff_matches(path) {
+            self.pending_editor_playback_handoff = None;
+        }
+    }
+
+    pub(super) fn maintain_editor_playback_handoff(&mut self) {
+        let Some(path) = self
+            .pending_editor_playback_handoff
+            .as_ref()
+            .map(|handoff| handoff.path.clone())
+        else {
+            return;
+        };
+        let active_matches = self.is_editor_workspace_active()
+            && self
+                .active_tab
+                .and_then(|idx| self.tabs.get(idx))
+                .is_some_and(|tab| tab.path == path);
+        let activation_matches = self.pending_activate_path.as_ref() == Some(&path);
+        if !active_matches && !activation_matches {
+            self.pending_editor_playback_handoff = None;
+            return;
+        }
+        let naturally_finished = self
+            .pending_editor_playback_handoff
+            .as_ref()
+            .is_some_and(|handoff| handoff.desired_playing)
+            && !self.playback_is_playing_now()
+            && self.list_seek_pending.is_none()
+            && self.audio.current_source_len() > 0
+            && self
+                .audio
+                .shared
+                .play_pos
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= self.audio.current_source_len();
+        if naturally_finished {
+            if let Some(handoff) = &mut self.pending_editor_playback_handoff {
+                handoff.desired_playing = false;
+            }
+        }
+    }
+
+    fn reset_editor_transport_unless_handoff(&mut self, path: &Path, sample_rate: u32) {
+        if self.editor_playback_handoff_matches(path) {
+            return;
+        }
+        self.audio.stop();
+        self.audio.set_samples_channels(Vec::new());
+        self.playback_mark_buffer_source(
+            super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+            sample_rate.max(1),
+        );
+    }
+
     fn seed_editor_notes_for_tab(&self, tab: &mut EditorTab) {
         if let Some(item) = self.item_for_path(&tab.path) {
             tab.editor_notes = item.editor_notes.clone();
@@ -22,8 +139,11 @@ impl super::WavesPreviewer {
                 return;
             }
         }
+        let preserve_list_transport = self.begin_editor_playback_handoff(path);
         if self.is_virtual_path(path) {
-            self.audio.stop();
+            if !preserve_list_transport {
+                self.audio.stop();
+            }
             if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
                 self.workspace_view = crate::app::types::WorkspaceView::Editor;
                 self.active_tab = Some(idx);
@@ -32,6 +152,7 @@ impl super::WavesPreviewer {
                 return;
             }
             if self.tabs.len() >= crate::app::MAX_EDITOR_TABS {
+                self.cancel_editor_playback_handoff_for_path(path);
                 self.debug_log(format!(
                     "tab limit reached ({}); skipping {}",
                     crate::app::MAX_EDITOR_TABS,
@@ -96,12 +217,7 @@ impl super::WavesPreviewer {
                 self.workspace_view = crate::app::types::WorkspaceView::Editor;
                 self.active_tab = Some(self.tabs.len() - 1);
                 self.playing_path = Some(path.to_path_buf());
-                self.audio.stop();
-                self.audio.set_samples_channels(Vec::new());
-                self.playback_mark_buffer_source(
-                    super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-                    cached_sr,
-                );
+                self.reset_editor_transport_unless_handoff(path, cached_sr);
                 self.apply_effective_volume();
                 self.spawn_editor_decode_from_ready_channels(
                     path.to_path_buf(),
@@ -143,12 +259,7 @@ impl super::WavesPreviewer {
                 self.workspace_view = crate::app::types::WorkspaceView::Editor;
                 self.active_tab = Some(self.tabs.len() - 1);
                 self.playing_path = Some(path.to_path_buf());
-                self.audio.stop();
-                self.audio.set_samples_channels(Vec::new());
-                self.playback_mark_buffer_source(
-                    super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-                    out_sr,
-                );
+                self.reset_editor_transport_unless_handoff(path, out_sr);
                 self.apply_effective_volume();
                 self.spawn_editor_decode(path.to_path_buf());
                 return;
@@ -179,10 +290,8 @@ impl super::WavesPreviewer {
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
             self.playing_path = Some(path.to_path_buf());
-            self.audio.stop();
-            self.audio.set_samples_channels(Vec::new());
-            self.playback_mark_buffer_source(
-                super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+            self.reset_editor_transport_unless_handoff(
+                path,
                 self.audio.shared.out_sample_rate.max(1),
             );
             self.apply_effective_volume();
@@ -190,6 +299,7 @@ impl super::WavesPreviewer {
             return;
         }
         if !path.is_file() {
+            self.cancel_editor_playback_handoff_for_path(path);
             self.remove_missing_path(path);
             return;
         }
@@ -203,6 +313,7 @@ impl super::WavesPreviewer {
             return;
         }
         if self.tabs.len() >= crate::app::MAX_EDITOR_TABS {
+            self.cancel_editor_playback_handoff_for_path(path);
             self.debug_log(format!(
                 "tab limit reached ({}); skipping {}",
                 crate::app::MAX_EDITOR_TABS,
@@ -268,12 +379,7 @@ impl super::WavesPreviewer {
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
             self.playing_path = Some(path.to_path_buf());
-            self.audio.stop();
-            self.audio.set_samples_channels(Vec::new());
-            self.playback_mark_buffer_source(
-                super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-                cached_sr,
-            );
+            self.reset_editor_transport_unless_handoff(path, cached_sr);
             self.apply_effective_volume();
             self.spawn_editor_decode_from_ready_channels(
                 path.to_path_buf(),
@@ -315,11 +421,7 @@ impl super::WavesPreviewer {
         self.workspace_view = crate::app::types::WorkspaceView::Editor;
         self.active_tab = Some(self.tabs.len() - 1);
         self.playing_path = Some(path.to_path_buf());
-        self.audio.set_samples_channels(Vec::new());
-        self.playback_mark_buffer_source(
-            super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-            self.audio.shared.out_sample_rate.max(1),
-        );
+        self.reset_editor_transport_unless_handoff(path, self.audio.shared.out_sample_rate.max(1));
         self.apply_effective_volume();
         self.queue_tab_activation_with_kind(
             path.to_path_buf(),

@@ -53,6 +53,7 @@ impl super::WavesPreviewer {
     pub(super) fn cancel_list_preview_job(&mut self) {
         self.list_preview_rx = None;
         self.list_preview_partial_ready = false;
+        self.list_decode_progress = None;
         // The decode this seek was waiting on is gone.
         self.clear_list_seek_pending();
         self.list_preview_job_id = self.list_preview_job_id.wrapping_add(1);
@@ -195,6 +196,7 @@ impl super::WavesPreviewer {
         use std::sync::mpsc;
         self.list_preview_job_id = self.list_preview_job_id.wrapping_add(1);
         let job_id = self.list_preview_job_id;
+        self.begin_list_decode_progress(job_id);
         self.list_preview_job_epoch.store(job_id, Ordering::Relaxed);
         self.list_preview_partial_ready = false;
         // Recorded so a seek past the decoded extent can tell whether a
@@ -417,6 +419,11 @@ impl super::WavesPreviewer {
                         let audio = std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(
                             res.channels,
                         ));
+                        self.record_list_decode_progress(
+                            res.job_id,
+                            audio.len() as f64 / res.play_sr.max(1) as f64,
+                            res.is_final,
+                        );
                         let truncated = !res.is_final;
                         self.insert_list_preview_cache_entry(
                             res.path.clone(),
@@ -428,15 +435,34 @@ impl super::WavesPreviewer {
                             },
                         );
                         self.debug_mark_list_preview_ready(&res.path);
-                        if self.is_list_workspace_active()
+                        let editor_handoff_matches = self
+                            .pending_editor_playback_handoff
+                            .as_ref()
+                            .is_some_and(|handoff| handoff.path == res.path);
+                        if (self.is_list_workspace_active() || editor_handoff_matches)
                             && self.playing_path.as_ref() == Some(&res.path)
                         {
                             let selected_matches = self
                                 .selected_path_buf()
                                 .map(|p| p == res.path)
                                 .unwrap_or(false);
-                            let needs_play = self.list_play_pending
-                                || (self.auto_play_list_nav && selected_matches);
+                            let handoff_wants_play = self
+                                .pending_editor_playback_handoff
+                                .as_ref()
+                                .filter(|handoff| handoff.path == res.path)
+                                .is_some_and(|handoff| handoff.desired_playing);
+                            let transport_is_parked = self
+                                .list_seek_pending
+                                .as_ref()
+                                .is_some_and(|pending| pending.path == res.path)
+                                || self
+                                    .list_seek_gesture
+                                    .as_ref()
+                                    .is_some_and(|gesture| gesture.path == res.path);
+                            let needs_play = !transport_is_parked
+                                && (self.list_play_pending
+                                    || (self.auto_play_list_nav && selected_matches)
+                                    || handoff_wants_play);
                             let defer_live_audio_for_fx = self.playback_mode_needs_fx_buffer()
                                 && selected_matches
                                 && (needs_play
@@ -460,8 +486,19 @@ impl super::WavesPreviewer {
                                 }
                             } else {
                                 if self.list_preview_active_buffer_job != Some(res.job_id) {
-                                    // First chunk for this job: fresh buffer, restart from 0.
-                                    self.audio.set_samples_buffer(audio);
+                                    // A full-decode job may replace the prefix job while a
+                                    // seek is held or an Editor handoff is playing. Preserve
+                                    // the current frame instead of jumping back to zero.
+                                    let same_live_path = matches!(
+                                        &self.playback_session.source,
+                                        super::PlaybackSourceKind::ListPreview(path)
+                                            if path == &res.path
+                                    ) || editor_handoff_matches;
+                                    if same_live_path && self.audio.current_source_len() > 0 {
+                                        self.audio.replace_samples_keep_pos(audio);
+                                    } else {
+                                        self.audio.set_samples_buffer(audio);
+                                    }
                                     self.list_preview_active_buffer_job = Some(res.job_id);
                                 } else {
                                     // Continuation chunk: swap buffer in place, preserve play position.
@@ -473,7 +510,11 @@ impl super::WavesPreviewer {
                                 }
                                 self.audio.set_loop_enabled(false);
                                 if needs_play {
-                                    self.audio.play();
+                                    if !self.playback_is_playing_now() {
+                                        self.audio.play_declicked(
+                                            crate::app::list_seek_ops::LIST_TRANSPORT_FADE_IN_MS,
+                                        );
+                                    }
                                     // Keep pending intent across prefix->full handoff so
                                     // manual list playback does not stop at prefix length.
                                     if res.is_final {

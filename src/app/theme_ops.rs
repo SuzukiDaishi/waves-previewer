@@ -57,6 +57,11 @@ impl WavesPreviewer {
 
         let prev_skip = self.skip_dotfiles;
         self.skip_dotfiles = true;
+        self.list_stop_returns_to_start = false;
+        self.list_columns_window_global_pos = None;
+        if self.project_path.is_none() {
+            self.list_columns_window_pos = None;
+        }
         self.item_bg_mode = ItemBgMode::Standard;
         self.src_quality = SrcQuality::Good;
         self.list_columns = ListColumnConfig::default();
@@ -404,6 +409,7 @@ impl WavesPreviewer {
                     .filter_map(|name| crate::app::types::ColumnKey::parse(name.trim()))
                     .collect();
                 self.list_column_layout = parsed;
+                self.list_table_layout_revision = self.list_table_layout_revision.wrapping_add(1);
                 self.list_column_order = crate::app::types::sanitize_column_order(
                     &self
                         .list_column_layout
@@ -509,6 +515,22 @@ impl WavesPreviewer {
                 self.audio_channel_map_direct = rest.trim().eq_ignore_ascii_case("direct");
             } else if let Some(rest) = line.strip_prefix("auto_play_list_nav=") {
                 self.auto_play_list_nav = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("list_stop_returns_to_start=") {
+                self.list_stop_returns_to_start =
+                    matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("list_columns_window_pos=") {
+                let raw = rest.trim();
+                let parsed = raw.split_once(',').and_then(|(x, y)| {
+                    let x = x.trim().parse::<f32>().ok()?;
+                    let y = y.trim().parse::<f32>().ok()?;
+                    (x.is_finite() && y.is_finite()).then(|| egui::pos2(x, y))
+                });
+                if raw.is_empty() || parsed.is_some() {
+                    self.list_columns_window_global_pos = parsed;
+                    if self.project_path.is_none() {
+                        self.list_columns_window_pos = parsed;
+                    }
+                }
             } else if let Some(rest) = line.strip_prefix("list_click_audition=") {
                 self.list_click_audition = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("list_col_widths=") {
@@ -821,7 +843,17 @@ impl WavesPreviewer {
             "auto"
         };
         let auto_play_list_nav = if self.auto_play_list_nav { "1" } else { "0" };
+        let list_stop_returns_to_start = if self.list_stop_returns_to_start {
+            "1"
+        } else {
+            "0"
+        };
         let list_click_audition = if self.list_click_audition { "1" } else { "0" };
+        let list_columns_window_pos = self
+            .list_columns_window_global_pos
+            .filter(|pos| pos.x.is_finite() && pos.y.is_finite())
+            .map(|pos| format!("{:.1},{:.1}", pos.x, pos.y))
+            .unwrap_or_default();
         let inspect_cfg = {
             let c = &self.inspection_cfg;
             let b = |v: bool| if v { "1" } else { "0" };
@@ -933,7 +965,9 @@ src_quality={}\n\
 audio_output_device={}\n\
 audio_channel_map={}\n\
 auto_play_list_nav={}\n\
+list_stop_returns_to_start={}\n\
 list_click_audition={}\n\
+list_columns_window_pos={}\n\
 list_col_widths={}\n\
 inspect_cfg={}\n\
 inspect_naming={}\n\
@@ -1006,7 +1040,9 @@ zoo_flip_manual={}\n",
             audio_output_device,
             audio_channel_map,
             auto_play_list_nav,
+            list_stop_returns_to_start,
             list_click_audition,
+            list_columns_window_pos,
             list_col_widths,
             inspect_cfg,
             inspect_naming,

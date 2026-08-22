@@ -34,6 +34,26 @@ impl super::WavesPreviewer {
         self.audio.has_audio_source()
     }
 
+    pub fn test_playback_source_is_list_path(&self, path: &Path) -> bool {
+        matches!(
+            &self.playback_session.source,
+            crate::app::PlaybackSourceKind::ListPreview(source) if source.as_path() == path
+        )
+    }
+
+    pub fn test_playback_source_is_editor_path(&self, path: &Path) -> bool {
+        matches!(
+            &self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(source) if source.as_path() == path
+        )
+    }
+
+    pub fn test_editor_playback_handoff(&self) -> Option<(PathBuf, bool)> {
+        self.pending_editor_playback_handoff
+            .as_ref()
+            .map(|handoff| (handoff.path.clone(), handoff.desired_playing))
+    }
+
     pub fn test_toast_messages(&self) -> Vec<String> {
         self.toasts.iter().map(|t| t.message.clone()).collect()
     }
@@ -92,6 +112,10 @@ impl super::WavesPreviewer {
 
     pub fn test_set_auto_play_list_nav(&mut self, enabled: bool) {
         self.auto_play_list_nav = enabled;
+    }
+
+    pub fn test_set_list_stop_returns_to_start(&mut self, enabled: bool) {
+        self.list_stop_returns_to_start = enabled;
     }
 
     pub fn test_set_list_click_audition(&mut self, enabled: bool) {
@@ -297,6 +321,22 @@ impl super::WavesPreviewer {
 
     pub fn test_show_list_columns_window(&self) -> bool {
         self.show_list_columns_window
+    }
+
+    pub fn test_list_columns_window_pos(&self) -> Option<egui::Pos2> {
+        self.list_columns_window_pos
+    }
+
+    pub fn test_list_columns_window_global_pos(&self) -> Option<egui::Pos2> {
+        self.list_columns_window_global_pos
+    }
+
+    pub fn test_set_list_columns_window_pos(&mut self, position: Option<egui::Pos2>) {
+        self.list_columns_window_pos = position;
+    }
+
+    pub fn test_set_list_columns_window_global_pos(&mut self, position: Option<egui::Pos2>) {
+        self.list_columns_window_global_pos = position;
     }
 
     /// Shift the active tab's WORLD F0 draft by `semitones` and kick the
@@ -566,9 +606,7 @@ impl super::WavesPreviewer {
 
     pub fn test_ui_input_focus_is_floating(&self, id: &str) -> bool {
         self.ui_input_focus.active()
-            == Some(super::input_focus::UiSurface::Floating(egui::Id::new(
-                id,
-            )))
+            == Some(super::input_focus::UiSurface::Floating(egui::Id::new(id)))
     }
 
     /// Whether a caret is live somewhere in the UI this frame.
@@ -612,6 +650,10 @@ impl super::WavesPreviewer {
 
     pub fn test_auto_play_list_nav(&self) -> bool {
         self.auto_play_list_nav
+    }
+
+    pub fn test_list_stop_returns_to_start(&self) -> bool {
+        self.list_stop_returns_to_start
     }
 
     pub fn test_list_play_pending(&self) -> bool {
@@ -1267,11 +1309,69 @@ impl super::WavesPreviewer {
     /// Request a seek at `frac` of the whole file on the given row, exactly as
     /// clicking that point of the row's waveform does.
     pub fn test_list_seek_row_frac(&mut self, row: usize, frac: f32) {
+        self.test_list_seek_phase(row, frac, crate::app::list_seek_ops::ListSeekPhase::Begin);
+        self.test_list_seek_phase(row, frac, crate::app::list_seek_ops::ListSeekPhase::Commit);
+    }
+
+    fn test_list_seek_phase(
+        &mut self,
+        row: usize,
+        frac: f32,
+        phase: crate::app::list_seek_ops::ListSeekPhase,
+    ) {
         self.apply_list_seek_request(crate::app::list_seek_ops::ListSeekRequest {
             row,
             frac,
-            scrubbing: false,
+            phase,
         });
+    }
+
+    pub fn test_list_seek_begin(&mut self, row: usize, frac: f32) {
+        self.test_list_seek_phase(row, frac, crate::app::list_seek_ops::ListSeekPhase::Begin);
+    }
+
+    pub fn test_list_seek_update(&mut self, row: usize, frac: f32) {
+        self.test_list_seek_phase(row, frac, crate::app::list_seek_ops::ListSeekPhase::Update);
+    }
+
+    pub fn test_list_seek_commit(&mut self, row: usize, frac: f32) {
+        self.test_list_seek_phase(row, frac, crate::app::list_seek_ops::ListSeekPhase::Commit);
+    }
+
+    pub fn test_list_seek_cancel(&mut self, row: usize, frac: f32) {
+        self.test_list_seek_phase(row, frac, crate::app::list_seek_ops::ListSeekPhase::Cancel);
+    }
+
+    pub fn test_list_seek_gesture_frac(&self) -> Option<f32> {
+        self.list_seek_gesture.as_ref().map(|gesture| gesture.frac)
+    }
+
+    pub fn test_force_list_decode_progress(
+        &mut self,
+        cumulative_speed: f64,
+        recent_speed: Option<f64>,
+        last_emit_gap_secs: f64,
+        complete: bool,
+    ) {
+        self.list_decode_progress = Some(crate::app::list_seek_ops::ListDecodeProgress {
+            job_id: self.list_preview_job_id,
+            started_at: std::time::Instant::now(),
+            last_emit_at: Some(std::time::Instant::now()),
+            decoded_transport_secs: self.audio.current_source_len() as f64
+                / self.playback_session.transport_sr.max(1) as f64,
+            cumulative_speed,
+            recent_speed,
+            last_emit_gap_secs,
+            complete,
+        });
+    }
+
+    pub fn test_maintain_list_playback_buffer(&mut self) {
+        self.maintain_list_playback_buffer();
+    }
+
+    pub fn test_apply_pending_list_seek(&mut self) {
+        self.apply_pending_list_seek();
     }
 
     /// Absolute index of the end-of-list row: one past the last file.

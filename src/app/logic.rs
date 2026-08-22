@@ -77,7 +77,7 @@ impl super::WavesPreviewer {
         );
     }
 
-    fn try_activate_list_stream_transport(&mut self, path: &Path) -> bool {
+    pub(super) fn try_activate_list_stream_transport(&mut self, path: &Path) -> bool {
         if !self.exact_stream_path_eligible_cached(path) {
             return false;
         }
@@ -244,6 +244,10 @@ impl super::WavesPreviewer {
             return false;
         };
         let target = ProcessingTarget::EditorTab(tab_path.clone());
+        let handoff = self.editor_playback_handoff_matches(&tab_path);
+        let handoff_source_time = handoff
+            .then(|| self.playback_current_source_time_sec())
+            .flatten();
         if self.audio.is_streaming_wav_path(&stream_path) {
             let source_sr = self
                 .audio
@@ -252,7 +256,7 @@ impl super::WavesPreviewer {
                 .unwrap_or(self.audio.shared.out_sample_rate.max(1));
             self.invalidate_processing_for_target(&target, "editor exact stream retained");
             self.playback_mark_source(
-                super::PlaybackSourceKind::EditorTab(tab_path),
+                super::PlaybackSourceKind::EditorTab(tab_path.clone()),
                 super::PlaybackTransportKind::ExactStreamWav,
                 source_sr,
             );
@@ -260,6 +264,9 @@ impl super::WavesPreviewer {
                 self.apply_loop_mode_for_tab(tab);
             }
             self.apply_effective_volume();
+            if handoff {
+                self.finish_editor_playback_handoff(&tab_path, false);
+            }
             return true;
         }
         match self.audio.set_streaming_wav_path(&stream_path) {
@@ -271,7 +278,7 @@ impl super::WavesPreviewer {
                     .unwrap_or(self.audio.shared.out_sample_rate.max(1));
                 self.invalidate_processing_for_target(&target, "editor exact stream activated");
                 self.playback_mark_source(
-                    super::PlaybackSourceKind::EditorTab(tab_path),
+                    super::PlaybackSourceKind::EditorTab(tab_path.clone()),
                     super::PlaybackTransportKind::ExactStreamWav,
                     source_sr,
                 );
@@ -279,6 +286,12 @@ impl super::WavesPreviewer {
                     self.apply_loop_mode_for_tab(tab);
                 }
                 self.apply_effective_volume();
+                if let Some(source_time) = handoff_source_time {
+                    self.playback_seek_to_source_time(self.mode, source_time);
+                }
+                if handoff {
+                    self.finish_editor_playback_handoff(&tab_path, true);
+                }
                 true
             }
             Err(err) => {
@@ -413,11 +426,13 @@ impl super::WavesPreviewer {
     ) {
         let previous_buffer_sr = self.playback_session.transport_sr.max(1);
         let new_buffer_sr = new_buffer_sr.max(1);
-        let same_editor_source = matches!(
+        let same_timeline_source = matches!(
             &self.playback_session.source,
-            super::PlaybackSourceKind::EditorTab(src) if src.as_path() == path
-        );
-        if same_editor_source {
+            super::PlaybackSourceKind::EditorTab(src)
+                | super::PlaybackSourceKind::ListPreview(src)
+                if src.as_path() == path
+        ) || self.editor_playback_handoff_matches(path);
+        if same_timeline_source {
             self.audio.set_samples_channels_keep_time_pos(
                 channels,
                 previous_buffer_sr,
@@ -687,25 +702,51 @@ impl super::WavesPreviewer {
         }
     }
 
+    /// Apply only a user-requested stop from the List transport. Internal
+    /// pauses used for seeking, buffering, and source handoff must retain the
+    /// exact position regardless of this preference.
+    fn stop_list_transport_from_user(&mut self) {
+        self.audio.stop();
+        self.list_play_pending = false;
+        if self.list_stop_returns_to_start {
+            self.clear_list_seek_pending();
+            if !matches!(
+                self.playback_session.source,
+                super::PlaybackSourceKind::None
+            ) {
+                self.playback_seek_to_source_time(self.mode, 0.0);
+            }
+        } else {
+            self.set_pending_list_resume_intent(false);
+        }
+    }
+
     pub(super) fn request_workspace_play_toggle(&mut self) {
         if self.audio_bootstrap_rx.is_some() {
             return;
         }
         if self.is_list_workspace_active() {
+            if self.list_seek_gesture.is_some() {
+                return;
+            }
             let now_playing = self
                 .audio
                 .shared
                 .playing
                 .load(std::sync::atomic::Ordering::Relaxed);
-            if now_playing {
-                self.audio.stop();
-                self.list_play_pending = false;
+            let pending_wants_play = self
+                .list_seek_pending
+                .as_ref()
+                .is_some_and(|pending| pending.resume_playing);
+            if now_playing || pending_wants_play {
+                self.stop_list_transport_from_user();
             } else if self.force_load_selected_list_preview_for_play() {
                 if self.playback_mode_needs_fx_buffer() && !self.spawn_playback_fx_render(true) {
                     self.list_play_pending = true;
                     return;
                 }
-                self.audio.play();
+                self.audio
+                    .play_declicked(crate::app::list_seek_ops::LIST_TRANSPORT_FADE_IN_MS);
                 if let Some(path) = self.selected_path_buf() {
                     self.debug_mark_list_play_start(&path);
                 }
@@ -731,6 +772,36 @@ impl super::WavesPreviewer {
                 }
                 self.list_play_pending = true;
             }
+            return;
+        }
+        let editor_handoff = if self.is_editor_workspace_active() {
+            self.active_tab
+                .and_then(|idx| self.tabs.get(idx))
+                .and_then(|tab| {
+                    self.pending_editor_playback_handoff
+                        .as_ref()
+                        .filter(|handoff| handoff.path == tab.path)
+                        .map(|handoff| (handoff.path.clone(), handoff.desired_playing))
+                })
+        } else {
+            None
+        };
+        if let Some((path, desired_playing)) = editor_handoff {
+            let next_desired = !desired_playing;
+            if let Some(handoff) = &mut self.pending_editor_playback_handoff {
+                handoff.desired_playing = next_desired;
+            }
+            self.set_pending_list_resume_intent(next_desired);
+            if next_desired {
+                if self.list_seek_pending.is_none() && self.audio.has_audio_source() {
+                    self.audio
+                        .play_declicked(crate::app::list_seek_ops::LIST_TRANSPORT_FADE_IN_MS);
+                    self.debug_mark_list_play_start(&path);
+                }
+            } else {
+                self.stop_list_transport_from_user();
+            }
+            self.playback_sync_state_snapshot();
             return;
         }
         if self.is_editor_workspace_active() && !self.active_editor_exact_audio_ready() {
@@ -1933,6 +2004,7 @@ impl super::WavesPreviewer {
         if row_idx >= len {
             return;
         }
+        let previous_path = self.selected_path_buf();
         if mods.shift {
             let anchor = self.select_anchor.or(self.selected).unwrap_or(row_idx);
             let (a, b) = if anchor <= row_idx {
@@ -1962,13 +2034,51 @@ impl super::WavesPreviewer {
             self.selected = Some(row_idx);
             self.select_anchor = Some(row_idx);
         }
+        let next_path = self.selected_path_buf();
+        if previous_path != next_path {
+            self.clear_list_seek_pending();
+            self.list_seek_gesture = None;
+            self.pending_editor_playback_handoff = None;
+            self.list_play_pending = false;
+            let previous_was_list_source = previous_path.as_ref().is_some_and(|previous| {
+                matches!(
+                    &self.playback_session.source,
+                    super::PlaybackSourceKind::ListPreview(source) if source == previous
+                )
+            });
+            if previous_was_list_source {
+                self.audio.stop();
+                self.playing_path = None;
+                self.playback_mark_source_without_buffer(
+                    super::PlaybackSourceKind::None,
+                    super::PlaybackTransportKind::Buffer,
+                    self.audio.shared.out_sample_rate.max(1),
+                );
+            }
+        }
     }
     /// Select a row and load audio buffer accordingly.
     /// Used when any cell in the row is clicked so Space can play immediately.
     pub(super) fn select_and_load(&mut self, row_idx: usize, auto_scroll: bool) {
+        self.select_and_load_with_autoplay(row_idx, auto_scroll, true);
+    }
+
+    /// Waveform seeking must be able to select/load a row without allowing an
+    /// Auto Play callback to emit audio before the pointer is released.
+    pub(super) fn select_and_load_without_autoplay(&mut self, row_idx: usize, auto_scroll: bool) {
+        self.select_and_load_with_autoplay(row_idx, auto_scroll, false);
+    }
+
+    fn select_and_load_with_autoplay(
+        &mut self,
+        row_idx: usize,
+        auto_scroll: bool,
+        allow_autoplay: bool,
+    ) {
         if row_idx >= self.files.len() {
             return;
         }
+        let previous_selected_path = self.selected_path_buf();
         // A manual row change ends a running variation audition (the
         // audition's own advances set the guard flag).
         if self.variation_audition.is_some() && !self.variation_audition_advancing {
@@ -1981,6 +2091,12 @@ impl super::WavesPreviewer {
             return;
         };
         let p_owned = item_snapshot.path.clone();
+        let selection_changed = previous_selected_path.as_deref() != Some(p_owned.as_path());
+        if selection_changed {
+            self.clear_list_seek_pending();
+            self.list_seek_gesture = None;
+            self.pending_editor_playback_handoff = None;
+        }
         if item_snapshot.source == crate::app::types::MediaSource::External {
             self.selected = Some(row_idx);
             self.scroll_to_selected = auto_scroll;
@@ -1991,6 +2107,18 @@ impl super::WavesPreviewer {
             self.remove_missing_path(&p_owned);
             return;
         }
+        let same_live_transport = !selection_changed
+            && matches!(
+                &self.playback_session.source,
+                super::PlaybackSourceKind::ListPreview(path) if path == &p_owned
+            )
+            && self.audio.has_audio_source();
+        if same_live_transport {
+            self.playing_path = Some(p_owned);
+            self.audio.set_loop_enabled(false);
+            return;
+        }
+        let autoplay = allow_autoplay && self.auto_play_list_nav;
         self.debug_mark_list_select_start(&p_owned);
         if self.apply_dirty_tab_preview_for_list(&p_owned) {
             return;
@@ -2011,7 +2139,7 @@ impl super::WavesPreviewer {
             self.list_preview_pending_path = None;
             let Some(audio) = item_snapshot.virtual_audio else {
                 if self.try_activate_list_stream_transport(&p_owned) {
-                    if self.auto_play_list_nav {
+                    if autoplay {
                         self.audio.play();
                     }
                     self.debug_mark_list_preview_ready(&p_owned);
@@ -2053,7 +2181,7 @@ impl super::WavesPreviewer {
             self.debug_mark_list_preview_ready(&p_owned);
             return;
         }
-        if self.auto_play_list_nav && self.try_activate_list_stream_transport(&p_owned) {
+        if autoplay && self.try_activate_list_stream_transport(&p_owned) {
             self.audio.play();
             self.debug_mark_list_preview_ready(&p_owned);
             self.debug_mark_list_play_start(&p_owned);
@@ -2070,7 +2198,7 @@ impl super::WavesPreviewer {
         }
         // AutoPlay uses a larger dynamic prefix so playback starts quickly but
         // still has enough headroom before full decode replaces the buffer.
-        let decode_secs = if self.auto_play_list_nav {
+        let decode_secs = if autoplay {
             self.list_play_prefix_secs(&p_owned)
         } else {
             LIST_PREVIEW_PREFIX_SECS
@@ -2106,7 +2234,7 @@ impl super::WavesPreviewer {
             return;
         }
         if self.list_preview_rx.is_some() {
-            if self.list_preview_partial_ready || self.auto_play_list_nav {
+            if self.list_preview_partial_ready || autoplay {
                 // Current async job is in full-decode phase; switch immediately.
                 self.cancel_list_preview_job();
                 self.debug.stale_preview_cancel_count =
@@ -2114,7 +2242,7 @@ impl super::WavesPreviewer {
                 self.list_preview_pending_path = None;
                 self.audio.stop();
                 self.audio.set_samples_mono(Vec::new());
-                let emit_secs = if self.auto_play_list_nav {
+                let emit_secs = if autoplay {
                     crate::app::LIST_PLAY_EMIT_SECS
                 } else {
                     0.0
@@ -2135,7 +2263,7 @@ impl super::WavesPreviewer {
         // Do list decode asynchronously so row navigation never blocks UI.
         self.audio.stop();
         self.audio.set_samples_mono(Vec::new());
-        let emit_secs = if self.auto_play_list_nav {
+        let emit_secs = if autoplay {
             crate::app::LIST_PLAY_EMIT_SECS
         } else {
             0.0
@@ -2156,6 +2284,30 @@ impl super::WavesPreviewer {
         let source = self.item_for_path(&path).map(|item| item.source);
         if matches!(source, Some(crate::app::types::MediaSource::External)) {
             return false;
+        }
+        if matches!(
+            &self.playback_session.source,
+            super::PlaybackSourceKind::ListPreview(current) if current == &path
+        ) && self.audio.has_audio_source()
+        {
+            if let Some(pending) = self
+                .list_seek_pending
+                .as_mut()
+                .filter(|pending| pending.path == path)
+            {
+                pending.resume_playing = true;
+                self.list_play_pending = true;
+                return false;
+            }
+            if !self.prepare_current_list_transport_for_resume(&path) {
+                self.list_play_pending = true;
+                return false;
+            }
+            // Stop only flips the playing flag. Reusing this transport is what
+            // keeps Stop -> Play on the same row at the stopped position.
+            self.playing_path = Some(path.clone());
+            self.list_play_pending = false;
+            return true;
         }
         // Keep Space/AutoPlay behavior consistent with row-click selection:
         // edited tab/cached dirty audio must win over file decode/cache.

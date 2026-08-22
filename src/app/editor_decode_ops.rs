@@ -949,6 +949,7 @@ impl super::WavesPreviewer {
         }
         if let Some((path, err)) = decode_error {
             self.debug_log(format!("editor decode failed: {} ({err})", path.display()));
+            self.cancel_editor_playback_handoff_for_path(&path);
         }
         if decode_cancel_preview {
             self.cancel_heavy_preview();
@@ -989,17 +990,21 @@ impl super::WavesPreviewer {
                 });
                 if let Some((tab_path, buffer_sr, channels)) = tab_audio {
                     if !self.try_activate_editor_stream_transport_for_tab(idx) {
+                        let handoff = self.editor_playback_handoff_matches(&tab_path);
                         self.set_editor_buffer_transport_preserving_time(
                             tab_path.as_path(),
                             channels,
                             buffer_sr,
                         );
                         self.playback_mark_buffer_source(
-                            super::PlaybackSourceKind::EditorTab(tab_path),
+                            super::PlaybackSourceKind::EditorTab(tab_path.clone()),
                             buffer_sr,
                         );
                         if let Some(tab) = self.tabs.get(idx) {
                             self.apply_loop_mode_for_tab(tab);
+                        }
+                        if handoff {
+                            self.finish_editor_playback_handoff(&tab_path, true);
                         }
                     }
                 }

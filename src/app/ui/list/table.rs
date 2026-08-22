@@ -27,13 +27,13 @@ pub(super) fn format_list_end_marker(visible: usize, total: usize, filtered: boo
 
 /// How many rows fit *entirely* within `body_h` pixels of list body.
 ///
-/// `egui_extras::TableBody::rows` lays rows out at a pitch of
+/// `egui_extras::TableBody::rows` lays fixed-height rows out at a pitch of
 /// `row_height_sans_spacing + item_spacing.y`, with no trailing spacing after
-/// the final row -- so N rows occupy `N * pitch - spacing_y`. Dividing the
-/// available height by the row height alone over-counts, and the
-/// `total - visible` scroll clamp then stopped short of the end: the tail rows
-/// were laid out below the clip rect of a table built with `vscroll(false)`,
-/// where no inner scroll could ever bring them into view.
+/// the final row -- so N rows occupy `N * pitch - spacing_y`. The table columns
+/// are clipped in `build_list_table` to preserve that fixed-height contract;
+/// without clipping, an inline widget can silently make a row taller than the
+/// pitch used by the custom scrollbar. Dividing the available height by the
+/// row height alone also over-counts and makes the scroll clamp stop short.
 ///
 /// Flooring is the safe direction. Under-counting only makes the scroll clamp
 /// more generous, so the last row stays reachable; over-counting is what made
@@ -224,7 +224,7 @@ impl WavesPreviewer {
         // the egui_extras resize-handle responses (ids derive from this ui).
         self.list_table_ui_id = Some(ui.id());
         let mut table = TableBuilder::new(ui)
-            .id_salt("list_table")
+            .id_salt(("list_table", self.list_table_layout_revision))
             .striped(true)
             .resizable(true)
             .auto_shrink([false, true])
@@ -243,7 +243,8 @@ impl WavesPreviewer {
                             egui_extras::Column::initial(
                                 self.list_col_w(&column.key.serialized_name(), column.width),
                             )
-                            .resizable(true),
+                            .resizable(true)
+                            .clip(true),
                         );
                         filler_cols += 1;
                     }
@@ -255,16 +256,28 @@ impl WavesPreviewer {
             }
             match sorted_col {
                 C::Edited => {
-                    table = table.column(egui_extras::Column::initial(30.0).resizable(false));
+                    table = table.column(
+                        egui_extras::Column::initial(30.0)
+                            .resizable(false)
+                            .clip(true),
+                    );
                     filler_cols += 1;
                 }
                 C::CoverArt => {
-                    table = table.column(egui_extras::Column::initial(76.0).resizable(false));
+                    table = table.column(
+                        egui_extras::Column::initial(76.0)
+                            .resizable(false)
+                            .clip(true),
+                    );
                     filler_cols += 1;
                 }
                 C::External => {
                     for _ in 0..metrics.external_cols.len() {
-                        table = table.column(egui_extras::Column::initial(140.0).resizable(true));
+                        table = table.column(
+                            egui_extras::Column::initial(140.0)
+                                .resizable(true)
+                                .clip(true),
+                        );
                         filler_cols += 1;
                     }
                 }
@@ -276,7 +289,8 @@ impl WavesPreviewer {
                         egui_extras::Column::initial(
                             self.list_col_w(key, Self::list_col_default(key)),
                         )
-                        .resizable(true),
+                        .resizable(true)
+                        .clip(true),
                     );
                     filler_cols += 1;
                 }
@@ -284,7 +298,7 @@ impl WavesPreviewer {
         }
 
         table = table
-            .column(egui_extras::Column::remainder())
+            .column(egui_extras::Column::remainder().clip(true))
             .min_scrolled_height((metrics.avail_h - metrics.header_h).max(0.0));
         filler_cols += 1;
         self.list_table_col_count = filler_cols;
@@ -314,7 +328,7 @@ impl WavesPreviewer {
         if seen_empty {
             return;
         }
-        let state_id = ui_id.with("list_table");
+        let state_id = ui_id.with(("list_table", self.list_table_layout_revision));
         let mut drag_stopped = false;
         let mut dragging = false;
         for i in 0..self.list_table_col_count {
@@ -603,9 +617,9 @@ mod tests {
         assert!(actual < naive);
     }
 
-    /// The real table lays rows out taller than `row_h` because the Gain and
-    /// Note cells carry widget padding. A larger measured pitch must yield
-    /// fewer rows.
+    /// If a caller supplies a taller pitch, the fit count must shrink. The
+    /// list table clips cells to keep its nominal pitch today; this still pins
+    /// the conservative behavior expected by any other caller.
     #[test]
     fn a_taller_measured_pitch_yields_fewer_rows() {
         let derived = list_fully_visible_rows(563.0, 29.0, 3.0);

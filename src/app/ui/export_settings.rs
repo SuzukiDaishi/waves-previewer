@@ -345,6 +345,18 @@ impl crate::app::WavesPreviewer {
                                     self.save_prefs();
                                 }
                             });
+                            if ui
+                                .checkbox(
+                                    &mut self.list_stop_returns_to_start,
+                                    "Return List playback to start when stopped",
+                                )
+                                .on_hover_text(
+                                    "On: stopping rewinds the current List item to 0:00. Off: the next Play resumes from the stopped position.",
+                                )
+                                .changed()
+                            {
+                                self.save_prefs();
+                            }
                             ui.separator();
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("Transcription settings moved to:");

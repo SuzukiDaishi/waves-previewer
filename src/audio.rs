@@ -1090,6 +1090,27 @@ impl AudioEngine {
         let mut ch_peak = [0.0f32; METER_CH_SLOTS];
         let mut ch_counts = [0usize; METER_CH_SLOTS];
         let mut pos = pos_f.floor() as usize;
+        // A transport seek can start on an arbitrary non-zero sample. Read the
+        // short output ramp once per callback block and apply it per frame so
+        // the first sample after a seek is silent instead of producing a
+        // discontinuity click. `ramp_events` prevents this callback from
+        // overwriting a newer ramp scheduled concurrently by the UI thread.
+        let ramp_event = shared
+            .ramp_events
+            .load(std::sync::atomic::Ordering::Acquire);
+        let mut ramp_gain = shared
+            .ramp_gain
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .clamp(0.0, 1.0);
+        let ramp_target = shared
+            .ramp_target
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .clamp(0.0, 1.0);
+        let ramp_step = shared
+            .ramp_step
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .abs()
+            .max(1e-6);
 
         for frame in data.chunks_mut(out_channels) {
             if pos >= len {
@@ -1130,7 +1151,7 @@ impl AudioEngine {
 
             let mut tap_frame = [0.0f32; 2];
             for (out_ch, out_sample) in frame.iter_mut().enumerate() {
-                let out = (matrix.mix(out_ch, &src_frame) * vol).clamp(-1.0, 1.0);
+                let out = (matrix.mix(out_ch, &src_frame) * vol * ramp_gain).clamp(-1.0, 1.0);
                 *out_sample = T::from_sample(out);
                 if out_ch < 2 {
                     tap_frame[out_ch] = out;
@@ -1150,6 +1171,7 @@ impl AudioEngine {
                     tap_frame[0]
                 },
             );
+            Self::advance_ramp_gain(&mut ramp_gain, ramp_target, ramp_step);
 
             pos_f += rate;
             if valid_loop && pos_f >= loop_end as f64 {
@@ -1164,6 +1186,15 @@ impl AudioEngine {
         shared
             .play_pos_f
             .store(pos_f, std::sync::atomic::Ordering::Relaxed);
+        if shared
+            .ramp_events
+            .load(std::sync::atomic::Ordering::Acquire)
+            == ramp_event
+        {
+            shared
+                .ramp_gain
+                .store(ramp_gain, std::sync::atomic::Ordering::Release);
+        }
         shared.meter_rms.store(
             if meter_count > 0 {
                 (meter_sum_sq / meter_count as f64).sqrt() as f32
@@ -1496,6 +1527,18 @@ impl AudioEngine {
         }
     }
 
+    /// Start playback at the current position with a short output fade-in.
+    /// Normal `play` intentionally remains unchanged; callers use this only
+    /// after discontinuous transport operations such as waveform seeking or
+    /// replacing a progressively decoded source.
+    pub fn play_declicked(&self, duration_ms: f32) {
+        if !self.has_audio_source() {
+            return;
+        }
+        self.start_output_ramp(0.0, 1.0, duration_ms);
+        self.play();
+    }
+
     pub fn stop(&self) {
         self.shared
             .playing
@@ -1687,7 +1730,6 @@ impl AudioEngine {
         (angle.cos(), angle.sin())
     }
 
-    #[allow(dead_code)]
     fn advance_ramp_gain(ramp_gain: &mut f32, ramp_target: f32, ramp_step: f32) {
         if (*ramp_gain - ramp_target).abs() <= 1e-6 {
             *ramp_gain = ramp_target;
@@ -1700,7 +1742,6 @@ impl AudioEngine {
         }
     }
 
-    #[allow(dead_code)]
     fn start_output_ramp(&self, start: f32, target: f32, duration_ms: f32) {
         let start = if start.is_finite() { start } else { 0.0 }.clamp(0.0, 1.0);
         let target = if target.is_finite() { target } else { 1.0 }.clamp(0.0, 1.0);
@@ -1719,7 +1760,7 @@ impl AudioEngine {
             .store(step, std::sync::atomic::Ordering::Relaxed);
         self.shared
             .ramp_events
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     pub fn seek_to_sample(&self, pos: usize) {
@@ -1761,6 +1802,7 @@ impl AudioEngine {
 mod tests {
     use super::*;
     use hound::{SampleFormat, WavSpec, WavWriter};
+    use std::sync::atomic::Ordering;
 
     fn write_test_wav(path: &Path, sr: u32, secs: f32) {
         let spec = WavSpec {
@@ -1962,6 +2004,32 @@ mod tests {
             0,
             "offline-only transport should not schedule output ramps"
         );
+    }
+
+    #[test]
+    fn declicked_play_schedules_a_monotonic_fade_without_moving_position() {
+        let audio = AudioEngine::new_for_test();
+        audio.set_samples_mono(vec![0.5; 48_000]);
+        audio.seek_to_sample(12_345);
+        audio.play_declicked(5.0);
+        assert_eq!(
+            audio.shared.play_pos.load(Ordering::Relaxed),
+            12_345,
+            "de-click must not move the transport"
+        );
+        assert_eq!(audio.shared.ramp_gain.load(Ordering::Relaxed), 0.0);
+        assert_eq!(audio.shared.ramp_target.load(Ordering::Relaxed), 1.0);
+        assert_eq!(audio.shared.ramp_events.load(Ordering::Relaxed), 1);
+
+        let step = audio.shared.ramp_step.load(Ordering::Relaxed);
+        let mut gain = 0.0;
+        let mut previous = gain;
+        for _ in 0..300 {
+            AudioEngine::advance_ramp_gain(&mut gain, 1.0, step);
+            assert!(gain >= previous, "fade must be monotonic");
+            previous = gain;
+        }
+        assert!((gain - 1.0).abs() < 1e-6);
     }
 
     #[test]

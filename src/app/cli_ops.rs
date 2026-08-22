@@ -3096,6 +3096,7 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
             search_regex: false,
             selected_path: None,
             list_columns: project_list_columns_from_config(cols),
+            list_columns_window_pos: None,
             auto_play_list_nav: false,
             export_policy: Some(ProjectExportPolicy {
                 save_mode: "new_file".to_string(),

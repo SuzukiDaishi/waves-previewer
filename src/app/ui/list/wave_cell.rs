@@ -9,7 +9,7 @@ use std::path::Path;
 use egui::{Color32, Sense};
 
 use crate::app::helpers::{amp_to_color, db_to_amp};
-use crate::app::list_seek_ops::{ListSeekRequest, ListWavePlayheadInfo};
+use crate::app::list_seek_ops::{ListSeekPhase, ListSeekRequest, ListWavePlayheadInfo};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ListWaveOverlayInfo {
@@ -336,6 +336,13 @@ impl crate::app::WavesPreviewer {
                 egui::vec2(ui.available_width(), cell.row_h * 0.9),
                 Sense::click_and_drag(),
             );
+            resp2.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Slider,
+                    ui.is_enabled(),
+                    format!("List seek row {}", cell.row_idx),
+                )
+            });
             let error_text = self
                 .meta_for_path(cell.path)
                 .and_then(|m| m.decode_error.as_deref());
@@ -415,9 +422,24 @@ impl crate::app::WavesPreviewer {
             );
 
             let resp2 = self.attach_row_context_menu(resp2, cell.row_idx, ctx);
-            let scrubbing = resp2.dragged_by(egui::PointerButton::Primary);
-            let pressed = resp2.is_pointer_button_down_on() || scrubbing;
-            if seekable && (pressed || resp2.clicked_by(egui::PointerButton::Primary)) {
+            let active_for_row = self.list_seek_gesture.as_ref().is_some_and(|gesture| {
+                gesture.row == cell.row_idx && gesture.path.as_path() == cell.path
+            });
+            let released = resp2.drag_stopped_by(egui::PointerButton::Primary)
+                || resp2.clicked_by(egui::PointerButton::Primary);
+            let pressed = resp2.is_pointer_button_down_on()
+                || resp2.dragged_by(egui::PointerButton::Primary)
+                || resp2.drag_started_by(egui::PointerButton::Primary);
+            let seek_phase = if released {
+                Some(ListSeekPhase::Commit)
+            } else if pressed && active_for_row {
+                Some(ListSeekPhase::Update)
+            } else if pressed {
+                Some(ListSeekPhase::Begin)
+            } else {
+                None
+            };
+            if seekable && seek_phase.is_some() {
                 // Claim the drag so the row does not start a file drag-out.
                 outcome.interacted_with_control = true;
                 outcome.focus_list = true;
@@ -427,7 +449,7 @@ impl crate::app::WavesPreviewer {
                     outcome.seek_request = Some(ListSeekRequest {
                         row: cell.row_idx,
                         frac,
-                        scrubbing,
+                        phase: seek_phase.expect("checked above"),
                     });
                 }
             } else if resp2.clicked_by(egui::PointerButton::Primary) {

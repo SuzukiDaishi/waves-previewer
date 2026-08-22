@@ -1824,6 +1824,10 @@ impl super::WavesPreviewer {
                     })
                     .collect(),
             },
+            list_columns_window_pos: self
+                .list_columns_window_pos
+                .filter(|pos| pos.x.is_finite() && pos.y.is_finite())
+                .map(|pos| [pos.x, pos.y]),
             auto_play_list_nav: self.auto_play_list_nav,
             export_policy: Some(ProjectExportPolicy {
                 save_mode: match self.export_cfg.save_mode {
@@ -2602,6 +2606,12 @@ impl super::WavesPreviewer {
         self.search_query = project.app.search_query.clone();
         self.search_use_regex = project.app.search_regex;
         self.auto_play_list_nav = project.app.auto_play_list_nav;
+        self.list_columns_window_pos = project
+            .app
+            .list_columns_window_pos
+            .filter(|[x, y]| x.is_finite() && y.is_finite())
+            .map(|[x, y]| egui::pos2(x, y))
+            .or(self.list_columns_window_global_pos);
         let selected_path = project
             .app
             .selected_path
@@ -2669,6 +2679,7 @@ impl super::WavesPreviewer {
                 .collect();
             self.list_column_layout = parsed;
         }
+        self.list_table_layout_revision = self.list_table_layout_revision.wrapping_add(1);
         for (key, w) in &project.app.list_columns.widths {
             if w.is_finite() && *w > 4.0 {
                 self.list_col_widths.insert(key.clone(), *w);

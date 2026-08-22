@@ -256,6 +256,10 @@ pub struct ProjectApp {
     #[serde(default)]
     pub selected_path: Option<String>,
     pub list_columns: ProjectListColumns,
+    /// Logical-point top-left position of the movable List Columns window.
+    /// Optional so version-2 Sessions written by older builds remain valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_columns_window_pos: Option<[f32; 2]>,
     #[serde(default)]
     pub auto_play_list_nav: bool,
     #[serde(default)]
@@ -1894,6 +1898,7 @@ impl super::WavesPreviewer {
         self.effect_graph = super::types::EffectGraphState::default();
         self.pending_activate_path = None;
         self.pending_editor_autoplay_path = None;
+        self.pending_editor_playback_handoff = None;
         self.pending_activate_kind = None;
         self.leave_intent = None;
         self.show_leave_prompt = false;
@@ -1909,6 +1914,7 @@ impl super::WavesPreviewer {
         self.overwrite_undo_stack.clear();
         self.project_path = None;
         self.session_path_mode = SessionPathMode::Absolute;
+        self.list_columns_window_pos = self.list_columns_window_global_pos;
     }
 
     /// `exists` is parallel to `raw_paths` and comes from the parse worker
@@ -2319,6 +2325,7 @@ show_note_labels = false
     #[test]
     fn serialize_deserialize_minimal_roundtrip() {
         let p = deserialize_project(MINIMAL_TOML).unwrap();
+        assert_eq!(p.app.list_columns_window_pos, None);
         let s = serialize_project(&p).unwrap();
         let p2 = deserialize_project(&s).unwrap();
         assert_eq!(p.version, p2.version);
@@ -2328,6 +2335,19 @@ show_note_labels = false
         assert_eq!(p.list.files, p2.list.files);
         assert_eq!(p.app.theme, p2.app.theme);
         assert_eq!(p.app.sort_key, p2.app.sort_key);
+    }
+
+    #[test]
+    fn list_columns_window_position_roundtrips_without_session_version_bump() {
+        let mut project = deserialize_project(MINIMAL_TOML).unwrap();
+        let version = project.version;
+        project.app.list_columns_window_pos = Some([321.5, 147.25]);
+
+        let encoded = serialize_project(&project).expect("serialize window position");
+        let restored = deserialize_project(&encoded).expect("deserialize window position");
+
+        assert_eq!(restored.version, version);
+        assert_eq!(restored.app.list_columns_window_pos, Some([321.5, 147.25]));
     }
 
     #[test]

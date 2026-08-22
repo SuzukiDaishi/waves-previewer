@@ -25,6 +25,12 @@ impl crate::app::WavesPreviewer {
             (viewport.width() - 32.0).max(1.0),
             (viewport.height() - 32.0).max(1.0),
         );
+        let default_size = egui::vec2(520.0_f32.min(max_size.x), 680.0_f32.min(max_size.y));
+        let centered_pos = viewport.center() - default_size * 0.5;
+        let requested_pos = self
+            .list_columns_window_pos
+            .filter(|pos| pos.x.is_finite() && pos.y.is_finite())
+            .unwrap_or(centered_pos);
         let mut open = self.show_list_columns_window;
         // The one dialog that was never registered as an input surface, so it
         // neither owned the wheel nor stood the list's keys down.
@@ -33,12 +39,13 @@ impl crate::app::WavesPreviewer {
         let shown = egui::Window::new("List Columns")
             .open(&mut open)
             .collapsible(false)
+            .movable(true)
             .resizable(true)
-            .default_size(egui::vec2(520.0, 680.0))
+            .current_pos(requested_pos)
+            .default_size(default_size)
             .min_size(egui::vec2(390.0, 320.0))
             .max_size(max_size)
             .constrain_to(viewport)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Columns shown in List").strong().size(16.0));
@@ -60,6 +67,8 @@ impl crate::app::WavesPreviewer {
                                 )
                                 .chain(std::iter::once(ColumnKey::Builtin(ColumnId::Note)))
                                 .collect();
+                            self.list_table_layout_revision =
+                                self.list_table_layout_revision.wrapping_add(1);
                             self.sanitize_list_column_layout();
                             self.save_metadata_column_registry();
                             self.save_prefs();
@@ -138,29 +147,6 @@ impl crate::app::WavesPreviewer {
                             let (zone, dropped) = ui.dnd_drop_zone::<ColumnDrag, _>(frame, |ui| {
                                 ui.push_id(("list_column", key.serialized_name()), |ui| {
                                     ui.horizontal(|ui| {
-                                        let handle = ui
-                                            .add(
-                                                egui::Label::new(
-                                                    RichText::new("⠿")
-                                                        .size(18.0)
-                                                        .color(Color32::from_gray(145)),
-                                                )
-                                                .sense(egui::Sense::drag()),
-                                            )
-                                            .on_hover_text("Drag up or down to reorder");
-                                        handle.widget_info(|| {
-                                            egui::WidgetInfo::labeled(
-                                                egui::WidgetType::Button,
-                                                true,
-                                                format!("Drag {label} column"),
-                                            )
-                                        });
-                                        handle.dnd_set_drag_payload(ColumnDrag(key.clone()));
-                                        ui.label(
-                                            RichText::new(format!("{:02}", index + 1))
-                                                .monospace()
-                                                .weak(),
-                                        );
                                         let response = ui.add_enabled(
                                             available,
                                             egui::Checkbox::without_text(&mut visible),
@@ -182,20 +168,75 @@ impl crate::app::WavesPreviewer {
                                                 }
                                             }
                                         }
-                                        ui.add(
-                                            egui::Label::new(if available {
-                                                RichText::new(&label).strong()
-                                            } else {
-                                                RichText::new(&label).weak()
-                                            })
-                                            .truncate(),
-                                        );
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(Align::Center),
+
+                                        let drag_id = ui.make_persistent_id((
+                                            "list_column_drag",
+                                            key.serialized_name(),
+                                        ));
+                                        let is_dragging = ui.ctx().is_being_dragged(drag_id);
+                                        let drag_source = ui.dnd_drag_source(
+                                            drag_id,
+                                            ColumnDrag(key.clone()),
                                             |ui| {
-                                                ui.label(RichText::new(kind).small().weak());
+                                                let drag_frame = if is_dragging {
+                                                    egui::Frame::NONE
+                                                        .fill(ui.visuals().window_fill())
+                                                        .stroke(ui.visuals().selection.stroke)
+                                                        .corner_radius(6.0)
+                                                        .inner_margin(egui::Margin::symmetric(8, 6))
+                                                } else {
+                                                    egui::Frame::NONE
+                                                };
+                                                drag_frame.show(ui, |ui| {
+                                                    ui.set_min_width(ui.available_width());
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            RichText::new("≡")
+                                                                .size(18.0)
+                                                                .color(Color32::from_gray(145)),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "{:02}",
+                                                                index + 1
+                                                            ))
+                                                            .monospace()
+                                                            .weak(),
+                                                        );
+                                                        ui.add(
+                                                            egui::Label::new(if available {
+                                                                RichText::new(&label).strong()
+                                                            } else {
+                                                                RichText::new(&label).weak()
+                                                            })
+                                                            .truncate(),
+                                                        );
+                                                        ui.with_layout(
+                                                            egui::Layout::right_to_left(
+                                                                Align::Center,
+                                                            ),
+                                                            |ui| {
+                                                                ui.label(
+                                                                    RichText::new(kind)
+                                                                        .small()
+                                                                        .weak(),
+                                                                );
+                                                            },
+                                                        );
+                                                    })
+                                                })
                                             },
                                         );
+                                        drag_source.response.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::WidgetType::Button,
+                                                true,
+                                                format!("Drag {label} column"),
+                                            )
+                                        });
+                                        drag_source
+                                            .response
+                                            .on_hover_text("Drag up or down to reorder");
                                     });
                                 });
                             });
@@ -204,6 +245,16 @@ impl crate::app::WavesPreviewer {
                                 {
                                     reorder = Some((from, index));
                                 }
+                            }
+                            if egui::DragAndDrop::has_payload_of_type::<ColumnDrag>(ui.ctx())
+                                && zone.response.contains_pointer()
+                            {
+                                ui.painter().rect_stroke(
+                                    zone.response.rect,
+                                    6.0,
+                                    egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                                    egui::StrokeKind::Inside,
+                                );
                             }
                             zone.response.on_hover_text("Drop to place the column here");
                             ui.add_space(3.0);
@@ -238,6 +289,8 @@ impl crate::app::WavesPreviewer {
                 }
                 if let Some((from, to)) = reorder {
                     if move_vec_item(&mut self.list_column_layout, from, to) {
+                        self.list_table_layout_revision =
+                            self.list_table_layout_revision.wrapping_add(1);
                         self.sanitize_list_column_layout();
                         self.save_prefs();
                     }
@@ -247,6 +300,16 @@ impl crate::app::WavesPreviewer {
         drop(scroll_guard);
         if let Some(shown) = shown.as_ref() {
             self.register_scroll_surface(scroll_target, &shown.response);
+            let position = shown.response.rect.min;
+            self.list_columns_window_pos = Some(position);
+            let global_position_changed = self.project_path.is_none()
+                && self.list_columns_window_global_pos.map_or(true, |saved| {
+                    (saved.x - position.x).abs() > 0.5 || (saved.y - position.y).abs() > 0.5
+                });
+            if global_position_changed && ctx.input(|input| input.pointer.any_released()) {
+                self.list_columns_window_global_pos = Some(position);
+                self.save_prefs();
+            }
         } else {
             open = false;
         }

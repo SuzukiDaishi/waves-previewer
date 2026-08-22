@@ -53,7 +53,11 @@ impl WavesPreviewer {
         if seen.insert(note.clone()) {
             layout.push(note);
         }
+        let layout_changed = layout != self.list_column_layout;
         self.list_column_layout = layout;
+        if layout_changed {
+            self.list_table_layout_revision = self.list_table_layout_revision.wrapping_add(1);
+        }
         self.list_column_order = self
             .list_column_layout
             .iter()
