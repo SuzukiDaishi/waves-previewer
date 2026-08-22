@@ -2,7 +2,7 @@ use egui::{Align, Color32, RichText};
 use egui_extras::{TableBuilder, TableRow};
 
 use crate::app::{
-    helpers::sortable_header, input_focus::UiScrollTarget, types::SortKey, WavesPreviewer,
+    helpers::sortable_header, input_focus::UiSurface, types::SortKey, WavesPreviewer,
 };
 
 use super::{ListInteractionState, ListRenderState, ListViewMetrics};
@@ -72,7 +72,7 @@ impl WavesPreviewer {
         } else {
             Vec::new()
         };
-        let pointer_over_list = self.allows_pointer_scroll(UiScrollTarget::List, ui, list_rect);
+        let pointer_over_list = self.allows_pointer_scroll(UiSurface::List, ui, list_rect);
         if self.debug.cfg.enabled {
             self.debug.last_pointer_over_list = pointer_over_list;
         }

@@ -26,6 +26,10 @@ impl crate::app::WavesPreviewer {
             (viewport.height() - 32.0).max(1.0),
         );
         let mut open = self.show_list_columns_window;
+        // The one dialog that was never registered as an input surface, so it
+        // neither owned the wheel nor stood the list's keys down.
+        let scroll_target = self.begin_floating_scroll_surface("list_columns_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
         let shown = egui::Window::new("List Columns")
             .open(&mut open)
             .collapsible(false)
@@ -240,7 +244,10 @@ impl crate::app::WavesPreviewer {
                 }
             });
 
-        if shown.is_none() {
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        } else {
             open = false;
         }
         self.show_list_columns_window = open;

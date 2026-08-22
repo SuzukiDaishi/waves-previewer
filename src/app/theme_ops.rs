@@ -208,6 +208,13 @@ impl WavesPreviewer {
                 .text_styles
                 .insert(TextStyle::Monospace, FontId::monospace(14.0));
             style.visuals = visuals.clone();
+            // An editor UI, not a document: dragging across labels to select
+            // their text is never what the user meant, and the multi-widget
+            // variant is what makes Ctrl+A sweep up whole panels of labels.
+            // Text that is worth copying opts back in with
+            // `Label::new(..).selectable(true)`.
+            style.interaction.selectable_labels = false;
+            style.interaction.multi_widget_text_select = false;
             #[cfg(debug_assertions)]
             {
                 // The virtualized file-list table reuses on-screen row rects for

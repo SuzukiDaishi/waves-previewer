@@ -13,6 +13,11 @@ impl crate::app::WavesPreviewer {
             .resizable(true)
             .default_width(380.0)
             .show(ctx, |ui| {
+                // Diagnostics exist to be pasted into a bug report, so
+                // this window opts back into the label selection the rest of
+                // the app turns off.
+                ui.style_mut().interaction.selectable_labels = true;
+                ui.style_mut().interaction.multi_widget_text_select = true;
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Screenshot").clicked() {
                         let path = self.default_screenshot_path();

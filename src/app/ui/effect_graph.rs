@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::app::helpers::db_to_color;
-use crate::app::input_focus::UiScrollTarget;
+use crate::app::input_focus::UiSurface;
 use crate::app::types::{
     EffectGraphBitDepth, EffectGraphCombineMode, EffectGraphDebugPreview, EffectGraphNodeCategory,
     EffectGraphNodeData, EffectGraphNodeKind, EffectGraphNodeRunPhase, EffectGraphPlaybackTarget,
@@ -507,7 +507,9 @@ impl crate::app::WavesPreviewer {
     }
 
     fn handle_effect_graph_shortcuts(&mut self, ctx: &egui::Context) {
-        if !self.is_effect_graph_workspace_active() {
+        // `F` is a bare letter and Delete/Escape are what a text field wants
+        // first, so these need the caret check, not just a workspace check.
+        if !self.surface_keys_allowed(UiSurface::EffectGraph) {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)) {
@@ -1026,7 +1028,7 @@ impl crate::app::WavesPreviewer {
         if self.effect_graph.canvas.background_panning && !ctx.input(|i| i.pointer.primary_down()) {
             self.effect_graph.canvas.background_panning = false;
         }
-        if self.ui_scroll_focus.is_active(UiScrollTarget::EffectGraph)
+        if self.ui_input_focus.is_active(UiSurface::EffectGraph)
             && canvas_resp.contains_pointer()
             && ctx.input(|i| i.modifiers.command)
         {
@@ -2307,8 +2309,8 @@ impl crate::app::WavesPreviewer {
                                         &preview_resp,
                                         &mut debug_scroll_x,
                                         waveform_zoom.unwrap_or(1.0),
-                                        self.ui_scroll_focus
-                                            .is_active(UiScrollTarget::EffectGraph),
+                                        self.ui_input_focus
+                                            .is_active(UiSurface::EffectGraph),
                                     );
                                     draw_waveform_preview(
                                         ui.painter(),
@@ -2378,8 +2380,8 @@ impl crate::app::WavesPreviewer {
                                         &preview_resp,
                                         &mut debug_scroll_x,
                                         spectrum_zoom.unwrap_or(1.0),
-                                        self.ui_scroll_focus
-                                            .is_active(UiScrollTarget::EffectGraph),
+                                        self.ui_input_focus
+                                            .is_active(UiSurface::EffectGraph),
                                     );
                                     draw_spectrum_preview(
                                         ui.painter(),
@@ -2854,8 +2856,8 @@ impl crate::app::WavesPreviewer {
                                 egui::Id::new(("fx_eq_plot", idx)),
                                 &mut plot_params,
                                 48_000,
-                                self.ui_scroll_focus
-                                    .is_active(UiScrollTarget::EffectGraph),
+                                self.ui_input_focus
+                                    .is_active(UiSurface::EffectGraph),
                             ) {
                                 low_shelf_freq_hz = plot_params.low_shelf_freq_hz;
                                 low_shelf_gain_db = plot_params.low_shelf_gain_db;

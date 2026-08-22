@@ -1,3 +1,4 @@
+use super::input_focus::UiSurface;
 use super::keymap::{self, Action};
 use super::types::{EditorPrimaryView, EditorTab, LoopMode, ToolKind, UndoScope, ViewMode};
 
@@ -22,25 +23,29 @@ impl super::WavesPreviewer {
         // A pending rebind capture swallows the pressed chord before any
         // dispatch below (including raw consume_key families) can see it.
         self.keymap_capture_tick(ctx);
-        let wants_kb = ctx.egui_wants_keyboard_input();
-        let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
+        // Modified chords that cannot be typed as text: allowed from anywhere
+        // except while a caret is live.
+        let allow_global = self.global_keys_allowed();
+        // Unmodified keys and per-surface commands: only inside their surface,
+        // so an open dialog owns them without blocking the background.
+        let allow_workspace = self.workspace_keys_allowed();
 
-        if self.keymap_consume(ctx, Action::FocusSearch) {
+        if allow_global && self.keymap_consume(ctx, Action::FocusSearch) {
             ctx.memory_mut(|m| m.request_focus(Self::search_box_id()));
             self.search_has_focus = true;
             self.list_has_focus = false;
         }
 
-        if !search_focused {
+        // Space: a transport control, so it works from any workspace surface,
+        // but never while typing and never while a dialog is up.
+        if allow_workspace {
             if self.keymap_consume(ctx, Action::TogglePlay) {
                 self.request_workspace_play_toggle();
             }
         }
 
-        let allow_list_shortcuts = self.is_list_workspace_active() && !search_focused;
-        // Keep list shortcuts responsive even when the list currently owns keyboard focus.
-        let allow_volume_shortcuts =
-            !search_focused && (self.is_list_workspace_active() || !wants_kb);
+        let allow_list_shortcuts = self.surface_keys_allowed(UiSurface::List);
+        let allow_volume_shortcuts = allow_workspace;
         if allow_volume_shortcuts {
             if self.keymap_consume(ctx, Action::VolumeDown) {
                 self.adjust_volume_db(-1.0);
@@ -51,7 +56,7 @@ impl super::WavesPreviewer {
         }
 
         // Tab switching: Ctrl+1 = List, Ctrl+2.. = editor tabs
-        if !search_focused || !wants_kb {
+        if allow_global {
             let mut target: Option<usize> = None;
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num1)) {
                 target = Some(0);
@@ -110,11 +115,11 @@ impl super::WavesPreviewer {
             }
         }
 
-        let save_as = self.keymap_consume(ctx, Action::SaveSessionAs);
-        if self.keymap_consume(ctx, Action::NewWindow) {
+        let save_as = allow_global && self.keymap_consume(ctx, Action::SaveSessionAs);
+        if allow_global && self.keymap_consume(ctx, Action::NewWindow) {
             self.open_new_window();
         }
-        let save = self.keymap_consume(ctx, Action::SaveSession);
+        let save = allow_global && self.keymap_consume(ctx, Action::SaveSession);
         if save_as {
             if let Some(mut path) = self.pick_project_save_dialog() {
                 let needs_ext = path
@@ -152,11 +157,11 @@ impl super::WavesPreviewer {
             }
         }
 
-        if self.keymap_consume(ctx, Action::ExportSelected) {
+        if allow_global && self.keymap_consume(ctx, Action::ExportSelected) {
             self.trigger_save_selected();
         }
 
-        if self.keymap_consume(ctx, Action::CloseTab) {
+        if allow_global && self.keymap_consume(ctx, Action::CloseTab) {
             if self.is_effect_graph_workspace_active() {
                 self.request_close_effect_graph_workspace();
             } else if let Some(active_idx) = self.active_tab {
@@ -183,7 +188,7 @@ impl super::WavesPreviewer {
 
         // Editor-specific shortcuts.
         if let Some(tab_idx) = self.active_tab {
-            if !wants_kb {
+            if self.surface_keys_allowed(UiSurface::Editor) {
                 if self.keymap_consume(ctx, Action::EditorSetLoopStart) {
                     // Set Loop Start
                     let pos_audio = self
@@ -685,8 +690,8 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn handle_undo_redo_hotkeys(&mut self, ctx: &egui::Context) {
-        let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
-        if search_focused && ctx.egui_wants_keyboard_input() {
+        // Ctrl+Z/Y belong to whatever text field has the caret, not to the app.
+        if !self.global_keys_allowed() {
             return;
         }
         let cmd_down = ctx.input(|i| i.modifiers.command);
