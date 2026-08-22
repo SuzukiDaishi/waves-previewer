@@ -2141,6 +2141,28 @@ pub struct PencilDraft {
     pub drag: Option<PencilDragState>,
 }
 
+/// Selection edge grabbed by the waveform's direct Time Stretch gesture.
+/// This is transient editor input state and is never persisted in a Session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionStretchEdge {
+    Start,
+    End,
+}
+
+/// In-progress waveform selection-handle gesture.
+///
+/// The committed selection stays untouched while this exists; `target_len`
+/// drives only the cyan ghost until pointer release starts the async apply.
+#[derive(Clone, Copy, Debug)]
+pub struct SelectionStretchGesture {
+    pub edge: SelectionStretchEdge,
+    pub source_range: (usize, usize),
+    pub target_len: usize,
+    pub press_pointer_x: f32,
+    pub fixed_screen_offset_px: f32,
+    pub moved: bool,
+}
+
 pub struct EditorTab {
     /// Stable identity across index shifts (tab close/reorder); async jobs
     /// target tabs by id so a result never lands on the wrong tab.
@@ -2295,13 +2317,11 @@ pub struct EditorTab {
     pub tool_state: ToolState,       // simple per-tool parameters
     pub loop_mode: LoopMode,         // Off / On (whole) / Marker
     pub dragging_marker: Option<MarkerKind>, // transient while dragging A/B
-    /// Transient: dragging one edge of the primary selection.
-    ///
-    /// Holds the *anchor* — the edge that stays put — rather than which edge
-    /// was grabbed. Dragging past the anchor then flips the range exactly like
-    /// a fresh drag-select does, instead of the grabbed handle swapping
-    /// identity with the fixed one mid-gesture.
-    pub selection_edge_drag_anchor: Option<usize>,
+    /// Transient Waveform-only selection-handle Time Stretch gesture.
+    pub selection_stretch_gesture: Option<SelectionStretchGesture>,
+    /// A cancelled stretch keeps primary-pointer ownership until release so
+    /// the same held press cannot fall through into a fresh range selection.
+    pub selection_stretch_cancel_until_release: bool,
     // Preview audio state (non-destructive): tool-driven preview, cleared on tool/tab/view changes
     pub preview_audio_tool: Option<ToolKind>,
     /// Audition buffer that produced the visible green preview waveform.
@@ -2338,9 +2358,8 @@ pub struct EditorTab {
     pub pitch_env_enabled: bool, // Pitch Shift tool: edit the curve on the waveform canvas
     pub pitch_env_points: Vec<(usize, f32)>, // (sample, semitones), sorted by sample
     pub pitch_env_drag: Option<usize>, // index of the breakpoint being dragged
-    // --- Canvas gesture state for PitchShift / Speed / TimeStretch (transient) ---
+    // --- Canvas gesture state for PitchShift (transient) ---
     pub pitch_drag_active: bool, // dragging the static pitch line up/down
-    pub stretch_drag_target: Option<usize>, // dragged selection-end target while stretching
     // --- Spectral warp (image-like frequency warp on Spec/Log views, transient) ---
     pub spectral_warp_edit: bool, // canvas warp editing enabled (owns the pointer)
     pub spectral_warp_points: Vec<SpectralWarpPoint>, // accumulated warp strokes
@@ -2591,7 +2610,8 @@ impl EditorTab {
             tool_state: crate::app::types::ToolState::default_values(),
             loop_mode: crate::app::types::LoopMode::Off,
             dragging_marker: None,
-            selection_edge_drag_anchor: None,
+            selection_stretch_gesture: None,
+            selection_stretch_cancel_until_release: false,
             preview_audio_tool: None,
             preview_audio_buffer: None,
             active_tool_last: None,
@@ -2621,7 +2641,6 @@ impl EditorTab {
             pitch_env_points: Vec::new(),
             pitch_env_drag: None,
             pitch_drag_active: false,
-            stretch_drag_target: None,
             spectral_warp_edit: false,
             spectral_warp_points: Vec::new(),
             spectral_warp_drag: None,
@@ -3046,6 +3065,16 @@ pub struct SessionSaveState {
     pub started_at: std::time::Instant,
 }
 
+/// Viewport anchor captured by a waveform selection-handle Time Stretch.
+/// The output edge corresponding to `dragged_edge` is placed back at
+/// `fixed_screen_offset_px` after the worker result is adopted.
+#[derive(Clone, Copy, Debug)]
+pub struct EditorApplyViewportRestore {
+    pub dragged_edge: SelectionStretchEdge,
+    pub fixed_screen_offset_px: f32,
+    pub samples_per_px: f32,
+}
+
 pub struct EditorApplyState {
     pub msg: String,
     pub rx: std::sync::mpsc::Receiver<EditorApplyResult>,
@@ -3057,6 +3086,7 @@ pub struct EditorApplyState {
     pub source_range: Option<(usize, usize)>,
     pub source_len: usize,
     pub source_sample_rate: u32,
+    pub viewport_restore: Option<EditorApplyViewportRestore>,
 }
 
 pub struct EditorApplyResult {

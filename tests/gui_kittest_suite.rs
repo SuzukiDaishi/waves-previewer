@@ -10297,62 +10297,139 @@ mod kittest_suite {
         }
     }
 
-    /// The request this implements: after selecting, nudge an edge to fine-tune
-    /// the range instead of redrawing the whole selection.
+    /// The handles are tool-independent and start a destructive,
+    /// pitch-preserving Time Stretch only on pointer release.
     #[test]
-    fn selection_edge_drag_extends_and_shrinks() {
+    fn selection_handle_drag_applies_time_stretch_from_gain_tool_on_release() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
 
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
         assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
         harness.run_steps(2);
-        let (start_before, end_before) = editor_selection(&harness);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let selection_before = editor_selection(&harness);
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+        let inspector_rate_before = harness.state().tabs[tab_idx].tool_state.stretch_rate;
+        let undo_before = harness.state().tabs[tab_idx].undo_stack.len();
+        let from = editor_pos_at_selection_boundary(&harness, selection_before.1);
+        let to = egui::pos2(from.x + 90.0, from.y);
 
-        // Grab the end handle and pull it right.
-        let from = editor_pos_at_selection_boundary(&harness, end_before);
-        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 90.0, from.y));
-        let (start_after, end_after) = editor_selection(&harness);
-        assert_eq!(start_after, start_before, "the far edge must stay put");
-        assert!(
-            end_after > end_before,
-            "end should extend: {end_before} -> {end_after}"
-        );
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(to));
+        harness.run_steps(2);
 
-        // ...and push it back left to shorten.
-        let from = editor_pos_at_selection_boundary(&harness, end_after);
-        editor_pointer_drag(&mut harness, from, egui::pos2(from.x - 60.0, from.y));
-        let (start_final, end_final) = editor_selection(&harness);
+        let held = harness.state().tabs[tab_idx]
+            .selection_stretch_gesture
+            .expect("selection stretch gesture while held");
+        assert_eq!(format!("{:?}", held.edge), "End");
+        assert!(held.target_len > selection_before.1 - selection_before.0);
         assert_eq!(
-            start_final, start_before,
-            "the far edge must still stay put"
+            editor_selection(&harness),
+            selection_before,
+            "dragging may update only the ghost, not the committed selection"
         );
-        assert!(
-            end_final < end_after,
-            "end should shrink: {end_after} -> {end_final}"
+        assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
+        assert!(!harness.state().test_editor_apply_active());
+
+        harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        wait_for_editor_apply(&mut harness);
+        harness.run_steps(2);
+
+        let selection_after = editor_selection(&harness);
+        assert_eq!(selection_after.0, selection_before.0);
+        assert!(selection_after.1 > selection_before.1);
+        assert!(harness.state().tabs[tab_idx].samples_len > len_before);
+        assert_eq!(harness.state().test_active_tool(), Some(ToolKind::Gain));
+        assert_eq!(
+            harness.state().tabs[tab_idx].tool_state.stretch_rate,
+            inspector_rate_before,
+            "the direct gesture must not change the Time Stretch inspector rate"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].undo_stack.len(),
+            undo_before + 1,
+            "one handle release must create exactly one Undo step"
         );
     }
 
-    /// Dragging the start must leave the anchor on the end, so a following
-    /// Shift+click or Shift+Arrow keeps moving the edge the user just moved.
+    /// A start-handle apply ripples the whole buffer without losing prefix or
+    /// suffix audio, while the output range's fixed end stays at the same x.
     #[test]
-    fn selection_edge_drag_keeps_the_anchor_on_the_opposite_edge() {
+    fn selection_start_handle_preserves_audio_and_fixed_edge_viewport() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
 
-        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.60));
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::Normalize));
+        assert!(harness.state_mut().test_set_tab_samples_per_px(40.0));
+        assert!(harness.state_mut().test_set_tab_view_offset(40_000));
+        assert!(harness.state_mut().test_set_selection_frac(0.32, 0.48));
         harness.run_steps(2);
-        let (start, end) = editor_selection(&harness);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let (start_before, end_before) = editor_selection(&harness);
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+        let prefix_before = harness.state().tabs[tab_idx].ch_samples[0][..128].to_vec();
+        let suffix_before =
+            harness.state().tabs[tab_idx].ch_samples[0][len_before - 128..].to_vec();
+        let fixed_x_before = harness
+            .state()
+            .test_editor_display_sample_boundary_x_offset(end_before)
+            .expect("fixed end x before");
 
-        let from = editor_pos_at_selection_boundary(&harness, start);
-        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 40.0, from.y));
+        let from = editor_pos_at_selection_boundary(&harness, start_before);
+        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 50.0, from.y));
+        wait_for_editor_apply(&mut harness);
+        harness.run_steps(3);
 
+        let (start_after, end_after) = editor_selection(&harness);
+        let len_after = harness.state().tabs[tab_idx].samples_len;
+        assert_eq!(start_after, start_before);
+        assert!(end_after < end_before, "start drag right should shorten");
+        assert!(len_after < len_before);
         assert_eq!(
-            harness.state().test_tab_selection_anchor(),
-            Some(end),
-            "anchor should sit on the edge that stayed put"
+            &harness.state().tabs[tab_idx].ch_samples[0][..128],
+            prefix_before.as_slice(),
+            "audio before the replacement must be preserved"
         );
+        assert_eq!(
+            &harness.state().tabs[tab_idx].ch_samples[0][len_after - 128..],
+            suffix_before.as_slice(),
+            "audio after the replacement must ripple and remain preserved"
+        );
+        let fixed_x_after = harness
+            .state()
+            .test_editor_display_sample_boundary_x_offset(end_after)
+            .expect("fixed end x after");
+        assert_eq!(
+            harness.state().test_active_tool(),
+            Some(ToolKind::Normalize),
+            "the selected inspector tool must not change"
+        );
+        assert!(
+            (fixed_x_after - fixed_x_before).abs() <= 1.5,
+            "fixed end moved on screen: {fixed_x_before} -> {fixed_x_after}"
+        );
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        harness.run_steps(3);
+        assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
     }
 
     /// A grab with no movement reads to egui as a click, and the click handler
@@ -10400,84 +10477,376 @@ mod kittest_suite {
         );
     }
 
-    /// The selection is tool-independent, so its handles are too.
+    /// Waveform overlay does not enable handles in analysis views.
     #[test]
-    fn selection_edge_drag_works_outside_the_trim_tool() {
+    fn selection_handles_do_not_apply_in_non_waveform_views() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
 
-        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
-        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
-        harness.run_steps(2);
-        let (_, end_before) = editor_selection(&harness);
-
-        let from = editor_pos_at_selection_boundary(&harness, end_before);
-        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 80.0, from.y));
-
-        assert!(
-            editor_selection(&harness).1 > end_before,
-            "edge drag should work with the Gain tool active"
-        );
+        assert!(harness.state_mut().test_set_waveform_overlay(true));
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        for mode in [
+            neowaves::ViewMode::Spectrogram,
+            neowaves::ViewMode::Log,
+            neowaves::ViewMode::Mel,
+            neowaves::ViewMode::Tempogram,
+            neowaves::ViewMode::Chromagram,
+            neowaves::ViewMode::World,
+        ] {
+            assert!(harness.state_mut().test_set_view_mode(mode));
+            assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+            harness.run_steps(2);
+            let (_, end_before) = editor_selection(&harness);
+            let len_before = harness.state().tabs[tab_idx].samples_len;
+            let from = editor_pos_at_selection_boundary(&harness, end_before);
+            editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 70.0, from.y));
+            assert!(
+                harness.state().tabs[tab_idx]
+                    .selection_stretch_gesture
+                    .is_none(),
+                "{mode:?} must not arm a waveform handle"
+            );
+            assert!(!harness.state().test_editor_apply_active());
+            assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
+        }
     }
 
     /// Speed/TimeStretch already own the selection's right edge as a stretch
     /// gesture. The selection drag must not race it — but the left edge, which
     /// that tool does not use, stays adjustable.
     #[test]
-    fn the_stretch_tool_keeps_its_own_right_edge_gesture() {
+    fn selection_handle_escape_cancels_without_applying() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
 
-        assert!(harness
-            .state_mut()
-            .test_set_active_tool(ToolKind::TimeStretch));
         assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
         harness.run_steps(2);
-        let (start_before, end_before) = editor_selection(&harness);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let selection_before = editor_selection(&harness);
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+        let from = editor_pos_at_selection_boundary(&harness, selection_before.1);
+        let to = egui::pos2(from.x + 70.0, from.y);
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(to));
+        harness.run_steps(2);
+        assert!(harness.state().tabs[tab_idx]
+            .selection_stretch_gesture
+            .is_some());
 
-        let from = editor_pos_at_selection_boundary(&harness, end_before);
-        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 70.0, from.y));
-        assert_eq!(
-            editor_selection(&harness).1,
-            end_before,
-            "the stretch tool owns the right edge; the selection must not move"
-        );
-
-        let from = editor_pos_at_selection_boundary(&harness, start_before);
-        editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 40.0, from.y));
-        assert!(
-            editor_selection(&harness).0 > start_before,
-            "the left edge is still adjustable in the stretch tool"
-        );
+        harness.key_press(Key::Escape);
+        harness.run_steps(1);
+        assert!(harness.state().tabs[tab_idx]
+            .selection_stretch_gesture
+            .is_none());
+        harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+        assert!(!harness.state().test_editor_apply_active());
+        assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
+        assert_eq!(editor_selection(&harness), selection_before);
     }
 
-    /// Screenshot of the selection with its grab handles.
-    ///   cargo test --features kittest_render -- --ignored selection_handles_screenshot --nocapture
+    #[test]
+    fn selection_handle_rejects_a_busy_apply_without_queueing() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+        let (_, end) = editor_selection(&harness);
+        let from = editor_pos_at_selection_boundary(&harness, end);
+        let to = egui::pos2(from.x + 70.0, from.y);
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(to));
+        harness.run_steps(1);
+        assert!(harness.state_mut().test_set_mock_editor_apply_busy());
+        harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+        assert!(harness
+            .state()
+            .test_toast_messages()
+            .iter()
+            .any(|message| message.contains("Another apply")));
+        harness.state_mut().test_clear_mock_editor_apply_busy();
+        harness.run_steps(2);
+        assert!(!harness.state().test_editor_apply_active());
+        assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
+    }
+
+    #[test]
+    fn selection_handle_rejects_loading_audio_without_queueing() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+        let (_, end) = editor_selection(&harness);
+        let from = editor_pos_at_selection_boundary(&harness, end);
+        let to = egui::pos2(from.x + 70.0, from.y);
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(to));
+        harness.run_steps(1);
+        assert!(harness.state_mut().test_set_tab_loading(true));
+        harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+        assert!(harness
+            .state()
+            .test_toast_messages()
+            .iter()
+            .any(|message| message.contains("finishes loading")));
+        assert!(harness.state_mut().test_set_tab_loading(false));
+        harness.run_steps(2);
+        assert!(!harness.state().test_editor_apply_active());
+        assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
+    }
+
+    #[test]
+    fn selection_handle_rejects_decode_failure_without_queueing() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+        let (_, end) = editor_selection(&harness);
+        let from = editor_pos_at_selection_boundary(&harness, end);
+        let to = egui::pos2(from.x + 70.0, from.y);
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(to));
+        harness.run_steps(1);
+        assert!(harness
+            .state_mut()
+            .test_set_active_decode_error(Some("fixture decode failure")));
+        harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+        assert!(harness
+            .state()
+            .test_toast_messages()
+            .iter()
+            .any(|message| message.contains("decoding failed")));
+        assert!(harness.state_mut().test_set_active_decode_error(None));
+        harness.run_steps(2);
+        assert!(!harness.state().test_editor_apply_active());
+        assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
+    }
+
+    #[test]
+    fn selection_handle_release_outside_canvas_commits_the_clamped_target() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.40));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let selection_before = editor_selection(&harness);
+        let source_len = selection_before.1 - selection_before.0;
+        let from = editor_pos_at_selection_boundary(&harness, selection_before.1);
+        let outside = egui::pos2(from.x + 2_000.0, from.y);
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(outside));
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx]
+                .selection_stretch_gesture
+                .expect("held outside")
+                .target_len,
+            source_len * 4,
+            "outside drag should clamp at the 0.25x limit"
+        );
+        harness.event(egui::Event::PointerButton {
+            pos: outside,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        wait_for_editor_apply(&mut harness);
+        harness.run_steps(2);
+        let selection_after = editor_selection(&harness);
+        assert!(selection_after.1 - selection_after.0 > source_len * 3);
+    }
+
+    #[test]
+    fn selection_handle_view_switch_cancels_without_applying() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let selection_before = editor_selection(&harness);
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+        let from = editor_pos_at_selection_boundary(&harness, selection_before.1);
+        let to = egui::pos2(from.x + 70.0, from.y);
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(to));
+        harness.run_steps(1);
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Spectrogram));
+        harness.run_steps(2);
+        assert!(harness.state().tabs[tab_idx]
+            .selection_stretch_gesture
+            .is_none());
+        harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+        assert!(!harness.state().test_editor_apply_active());
+        assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
+        assert_eq!(editor_selection(&harness), selection_before);
+    }
+
+    /// Visual evidence set for Waveform-only handles, held ghost, and apply.
+    ///   cargo test --features kittest_render -- --ignored selection_time_stretch_handle_screenshots --nocapture
     #[cfg(feature = "kittest_render")]
     #[test]
     #[ignore]
-    fn selection_handles_screenshot() {
+    fn selection_time_stretch_handle_screenshots() {
         let out_dir = std::path::PathBuf::from(
             std::env::var("NEOWAVES_SHOT_DIR").unwrap_or_else(|_| "/tmp".to_string()),
         );
         std::fs::create_dir_all(&out_dir).ok();
 
-        let mut harness = harness_with_editor_fixture();
+        let mut harness = harness_with_dynamic_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
-        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
-        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.60));
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_selection_frac(0.25, 0.55));
         harness.run_steps(3);
 
         let image = harness.render().expect("render image");
         image
-            .save(out_dir.join("editor_selection_handles.png"))
+            .save(out_dir.join("01_waveform_initial.png"))
             .expect("save screenshot");
-        eprintln!(
-            "[shot] wrote {}",
-            out_dir.join("editor_selection_handles.png").display()
-        );
+
+        assert!(harness.state_mut().test_set_waveform_overlay(true));
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Spectrogram));
+        harness.run_steps(8);
+        harness
+            .render()
+            .expect("render non-waveform")
+            .save(out_dir.join("02_non_waveform.png"))
+            .expect("save non-waveform screenshot");
+
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Waveform));
+        harness.run_steps(3);
+        let (_, selection_end) = editor_selection(&harness);
+        let from = editor_pos_at_selection_boundary(&harness, selection_end);
+        let to = egui::pos2(from.x + 110.0, from.y);
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(to));
+        harness.run_steps(3);
+        harness
+            .render()
+            .expect("render held ghost")
+            .save(out_dir.join("03_dragging_ghost.png"))
+            .expect("save held-ghost screenshot");
+
+        harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        wait_for_editor_apply(&mut harness);
+        harness.run_steps(3);
+        harness
+            .render()
+            .expect("render applied waveform")
+            .save(out_dir.join("04_applied.png"))
+            .expect("save applied screenshot");
+
+        for name in [
+            "01_waveform_initial.png",
+            "02_non_waveform.png",
+            "03_dragging_ghost.png",
+            "04_applied.png",
+        ] {
+            eprintln!("[shot] wrote {}", out_dir.join(name).display());
+        }
     }
 }

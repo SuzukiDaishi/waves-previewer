@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use crate::app::types::{
-    EditorApplyResult, EditorUndoState, PencilActiveStroke, PencilDraft, PencilStrokeEdit,
-    PreviewOverlay, ToolKind, VirtualTrimPhase, VirtualTrimResult, VirtualTrimState,
+    EditorApplyResult, EditorApplyViewportRestore, EditorUndoState, PencilActiveStroke,
+    PencilDraft, PencilStrokeEdit, PreviewOverlay, ToolKind, VirtualTrimPhase, VirtualTrimResult,
+    VirtualTrimState,
 };
 
 const VIRTUAL_TRIM_COPY_CHUNK_FRAMES: usize = 262_144;
@@ -185,7 +186,8 @@ impl crate::app::WavesPreviewer {
         tab.preview_offset_samples = None;
         tab.pending_loop_unwrap = None;
         tab.dragging_marker = None;
-        tab.selection_edge_drag_anchor = None;
+        tab.selection_stretch_gesture = None;
+        tab.selection_stretch_cancel_until_release = false;
         // Scan markers describe the pre-edit buffer.
         tab.declick_scan = None;
         Self::editor_clear_selection_anchor(tab);
@@ -1843,6 +1845,7 @@ impl crate::app::WavesPreviewer {
             source_range: None,
             source_len: 0,
             source_sample_rate: 1,
+            viewport_restore: None,
         });
     }
 
@@ -3445,7 +3448,29 @@ impl crate::app::WavesPreviewer {
         param: f32,
         range: Option<(usize, usize)>,
     ) {
-        self.spawn_editor_apply_for_tab_range_with_pitch_curve(tab_idx, tool, param, range, None);
+        self.spawn_editor_apply_for_tab_range_with_pitch_curve(
+            tab_idx, tool, param, range, None, None,
+        );
+    }
+
+    /// Apply a pitch-preserving Time Stretch started by a Waveform selection
+    /// handle. The viewport anchor is runtime-only and leaves inspector state
+    /// and Session data untouched.
+    pub(super) fn spawn_editor_selection_stretch_apply(
+        &mut self,
+        tab_idx: usize,
+        rate: f32,
+        range: (usize, usize),
+        viewport_restore: EditorApplyViewportRestore,
+    ) {
+        self.spawn_editor_apply_for_tab_range_with_pitch_curve(
+            tab_idx,
+            ToolKind::TimeStretch,
+            rate,
+            Some(range),
+            None,
+            Some(viewport_restore),
+        );
     }
 
     pub(super) fn spawn_editor_apply_pitch_curve_for_tab_range(
@@ -3461,6 +3486,7 @@ impl crate::app::WavesPreviewer {
             fallback_semitones,
             range,
             Some(points),
+            None,
         );
     }
 
@@ -3471,6 +3497,7 @@ impl crate::app::WavesPreviewer {
         param: f32,
         range: Option<(usize, usize)>,
         pitch_curve: Option<Vec<(usize, f32)>>,
+        viewport_restore: Option<EditorApplyViewportRestore>,
     ) {
         use std::sync::mpsc;
         // Single apply slot: the UI disables further applies on the busy tab;
@@ -3482,11 +3509,24 @@ impl crate::app::WavesPreviewer {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
+        if viewport_restore.is_some() && (tab.loading || tab.samples_len == 0) {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Info,
+                "Time Stretch is unavailable until the audio finishes loading",
+            );
+            return;
+        }
         if matches!(
             tool,
             ToolKind::PitchShift | ToolKind::TimeStretch | ToolKind::Speed
         ) && self.is_decode_failed_path(&tab.path)
         {
+            if viewport_restore.is_some() {
+                self.push_toast(
+                    crate::app::types::ToastSeverity::Error,
+                    "Time Stretch is unavailable because audio decoding failed",
+                );
+            }
             return;
         }
         let range = range.filter(|(s, e)| *e > *s && *e <= tab.samples_len);
@@ -3624,6 +3664,7 @@ impl crate::app::WavesPreviewer {
             source_range: range,
             source_len,
             source_sample_rate: buffer_sr,
+            viewport_restore,
         });
     }
 
@@ -3688,6 +3729,7 @@ impl crate::app::WavesPreviewer {
             Option<(usize, usize)>,
             usize,
             u32,
+            Option<EditorApplyViewportRestore>,
         )> = None;
         let mut apply_dead = false;
         if let Some(state) = &mut self.editor_apply_state {
@@ -3703,6 +3745,7 @@ impl crate::app::WavesPreviewer {
                         state.source_range,
                         state.source_len,
                         state.source_sample_rate,
+                        state.viewport_restore,
                     ));
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -3720,7 +3763,16 @@ impl crate::app::WavesPreviewer {
             ctx.request_repaint();
             return;
         }
-        if let Some((mut res, undo, tab_id, tool, source_range, source_len, source_sr)) = apply_done
+        if let Some((
+            mut res,
+            undo,
+            tab_id,
+            tool,
+            source_range,
+            source_len,
+            source_sr,
+            viewport_restore,
+        )) = apply_done
         {
             // Resolve identity -> index at completion time; the tab may have
             // moved (another tab closed) or be gone entirely.
@@ -3761,7 +3813,7 @@ impl crate::app::WavesPreviewer {
                     }
                     Self::invalidate_editor_viewport_cache(tab);
                     let new_len = tab.samples_len.max(1);
-                    if old_len > 0 && new_len > 0 {
+                    if viewport_restore.is_none() && old_len > 0 && new_len > 0 {
                         let ratio = (new_len as f32) / (old_len as f32);
                         if old_spp > 0.0 {
                             tab.samples_per_px =
@@ -3771,6 +3823,10 @@ impl crate::app::WavesPreviewer {
                         tab.view_offset_exact = tab.view_offset as f64;
                         tab.loop_xfade_samples =
                             ((tab.loop_xfade_samples as f32) * ratio).round() as usize;
+                    } else if let Some(restore) = viewport_restore {
+                        tab.samples_per_px = restore
+                            .samples_per_px
+                            .max(crate::app::EDITOR_MIN_SAMPLES_PER_PX);
                     }
                     Self::editor_clamp_vertical_view(tab);
                     tab.dirty = true;
@@ -3778,6 +3834,20 @@ impl crate::app::WavesPreviewer {
                         tab.selection = Some(sel);
                     }
                     Self::editor_clamp_ranges(tab);
+                    if let (Some(restore), Some((selection_start, selection_end))) =
+                        (viewport_restore, res.selection_after)
+                    {
+                        let fixed_output_sample = match restore.dragged_edge {
+                            crate::app::types::SelectionStretchEdge::Start => selection_end,
+                            crate::app::types::SelectionStretchEdge::End => selection_start,
+                        };
+                        let exact_view = fixed_output_sample as f64
+                            - restore.fixed_screen_offset_px as f64
+                                * tab.samples_per_px.max(0.0001) as f64;
+                        let max_view = tab.samples_len.saturating_sub(1) as f64;
+                        tab.view_offset_exact = exact_view.clamp(0.0, max_view);
+                        tab.view_offset = tab.view_offset_exact.round() as usize;
+                    }
                     if let Some(v) = res.lufs_override {
                         self.lufs_override.insert(tab.path.clone(), v);
                     }

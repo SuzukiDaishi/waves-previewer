@@ -177,6 +177,35 @@ fn nearest_handle(candidates: &[(f32, usize)], x: f32, radius: f32) -> Option<us
     best.map(|(_, payload)| payload)
 }
 
+const SELECTION_STRETCH_MIN_RATE: f32 = 0.25;
+const SELECTION_STRETCH_MAX_RATE: f32 = 4.0;
+
+fn selection_stretch_target_len(
+    source_len: usize,
+    edge: SelectionStretchEdge,
+    pointer_delta_px: f32,
+    samples_per_px: f32,
+) -> usize {
+    let source_len = source_len.max(1);
+    let sample_delta = pointer_delta_px as f64 * samples_per_px.max(0.0001) as f64;
+    let raw_len = match edge {
+        SelectionStretchEdge::Start => source_len as f64 - sample_delta,
+        SelectionStretchEdge::End => source_len as f64 + sample_delta,
+    };
+    let min_len = ((source_len as f64) / SELECTION_STRETCH_MAX_RATE as f64)
+        .ceil()
+        .max(1.0) as usize;
+    let max_len = source_len.saturating_mul(4).max(min_len);
+    raw_len.round().clamp(min_len as f64, max_len as f64) as usize
+}
+
+fn selection_stretch_rate(source_len: usize, target_len: usize) -> f32 {
+    ((source_len.max(1) as f64) / (target_len.max(1) as f64)).clamp(
+        SELECTION_STRETCH_MIN_RATE as f64,
+        SELECTION_STRETCH_MAX_RATE as f64,
+    ) as f32
+}
+
 /// Find the nearest zero crossing (in either direction, max 48001 samples) using mixdown.
 /// Used for Alt+drag snapping without holding a `&self` borrow.
 fn zc_snap_nearest(ch_samples: &[Vec<f32>], eps: f32, cur: usize) -> usize {
@@ -2831,6 +2860,11 @@ impl crate::app::WavesPreviewer {
                     });
             });
             if selected_view != prev_view {
+                if tab.selection_stretch_gesture.take().is_some()
+                    && ui.input(|input| input.pointer.primary_down())
+                {
+                    tab.selection_stretch_cancel_until_release = true;
+                }
                 let prev_preview_supported =
                     Self::view_supports_wave_preview(prev_view, tab.show_waveform_overlay);
                 tab.set_leaf_view_mode(selected_view);
@@ -3513,6 +3547,11 @@ impl crate::app::WavesPreviewer {
                     Option<(usize, usize)>,
                 )> = None;
                 let mut pending_stretch_apply: Option<(f32, Option<(usize, usize)>)> = None;
+                let mut pending_selection_stretch_apply: Option<(
+                    f32,
+                    (usize, usize),
+                    EditorApplyViewportRestore,
+                )> = None;
                 let mut pending_speed_apply: Option<(f32, Option<(usize, usize)>)> = None;
                 let mut pending_loudness_apply: Option<f32> = None;
                 let mut pending_plugin_scan = false;
@@ -4856,10 +4895,10 @@ impl crate::app::WavesPreviewer {
                 }
             }
             // ---- Tool canvas gestures (Waveform view) ----
-            // Gain curve editing owns the pointer like the WORLD pencil;
-            // PitchShift's pitch line and Speed/TimeStretch's selection-edge
-            // handle only claim the pointer while grabbing their handles, so
-            // seek/selection keep working elsewhere on the canvas.
+            // The primary selection's edge handles are always available in
+            // Waveform mode. A press on either one is armed before the active
+            // tool sees the pointer; explicit Loop/Fade/Marker and envelope
+            // handles retain priority when they overlap it.
             let wave_view_gestures = view_mode == ViewMode::Waveform && display_samples_len > 0;
             let gain_env_editing = wave_view_gestures
                 && matches!(tab.active_tool, ToolKind::Gain)
@@ -4884,15 +4923,150 @@ impl crate::app::WavesPreviewer {
             const PITCH_SEMI_RANGE: f32 = 12.0;
             let frac_to_y = |frac: f32| rect.top() + (1.0 - frac.clamp(0.0, 1.0)) * canvas_h;
             let y_to_frac = |y: f32| (1.0 - (y - rect.top()) / canvas_h).clamp(0.0, 1.0);
+
+            let cancel_selection_stretch = !wave_view_gestures
+                || ui.input(|input| {
+                    input.key_pressed(egui::Key::Escape) || !input.raw.focused
+                });
+            if cancel_selection_stretch {
+                if tab.selection_stretch_gesture.take().is_some()
+                    && ui.input(|input| input.pointer.primary_down())
+                {
+                    tab.selection_stretch_cancel_until_release = true;
+                }
+            }
+            if tab.selection_stretch_gesture.is_some_and(|gesture| {
+                Self::editor_selected_range(tab) != Some(gesture.source_range)
+            }) {
+                tab.selection_stretch_gesture = None;
+            }
+            let cancelled_selection_stretch_claims_pointer =
+                tab.selection_stretch_cancel_until_release;
+            if cancelled_selection_stretch_claims_pointer
+                && ui.input(|input| {
+                    input.pointer.primary_released() || !input.pointer.primary_down()
+                })
+            {
+                tab.selection_stretch_cancel_until_release = false;
+            }
+            if wave_view_gestures
+                && pointer_over_waveform
+                && tab.selection_stretch_gesture.is_none()
+                && !cancelled_selection_stretch_claims_pointer
+                && ui.input(|input| input.pointer.primary_pressed())
+            {
+                if let (Some((sel_s, sel_e)), Some(pos)) = (
+                    Self::editor_selected_range(tab),
+                    ui.input(|input| input.pointer.press_origin())
+                        .or_else(|| ui.input(|input| input.pointer.hover_pos())),
+                ) {
+                    let near_x = |sample: usize, radius: f32| {
+                        geom.contains_boundary(sample)
+                            && (pos.x - geom.sample_boundary_x_unclamped(sample)).abs() <= radius
+                    };
+                    let mut specialized_handle_hit = false;
+                    match tab.active_tool {
+                        ToolKind::LoopEdit => {
+                            if let Some((a, b)) = tab.loop_region {
+                                specialized_handle_hit =
+                                    near_x(a.min(b), 7.0) || near_x(a.max(b), 7.0);
+                            }
+                        }
+                        ToolKind::Fade => {
+                            let sr = tab.buffer_sample_rate.max(1) as f32;
+                            let fade_in =
+                                ((tab.tool_state.fade_in_ms.max(0.0) / 1000.0) * sr).round()
+                                    as usize;
+                            let fade_out =
+                                ((tab.tool_state.fade_out_ms.max(0.0) / 1000.0) * sr).round()
+                                    as usize;
+                            specialized_handle_hit = (fade_in > 0
+                                && near_x(fade_in.min(display_samples_len), 10.0))
+                                || (fade_out > 0
+                                    && near_x(
+                                        display_samples_len.saturating_sub(fade_out),
+                                        10.0,
+                                    ));
+                        }
+                        ToolKind::Markers => {
+                            specialized_handle_hit =
+                                tab.markers.iter().any(|marker| near_x(marker.sample, 7.0));
+                        }
+                        ToolKind::Gain if tab.gain_env_enabled => {
+                            specialized_handle_hit = tab.gain_env_points.iter().any(|point| {
+                                let x = geom.sample_center_x(point.0.min(display_samples_len));
+                                let y = frac_to_y(0.5 + point.1 / (GAIN_ENV_DB_RANGE * 2.0));
+                                egui::pos2(x, y).distance(pos) <= 8.0
+                            });
+                        }
+                        ToolKind::PitchShift if tab.pitch_env_enabled => {
+                            specialized_handle_hit = tab.pitch_env_points.iter().any(|point| {
+                                let x = geom.sample_center_x(point.0.min(display_samples_len));
+                                let y = frac_to_y(0.5 + point.1 / (PITCH_SEMI_RANGE * 2.0));
+                                egui::pos2(x, y).distance(pos) <= 8.0
+                            });
+                        }
+                        ToolKind::PitchShift => {
+                            let semitones = tab.tool_state.pitch_semitones.clamp(
+                                -PITCH_SEMI_RANGE,
+                                PITCH_SEMI_RANGE,
+                            );
+                            let line_y = frac_to_y(
+                                0.5 + semitones / (PITCH_SEMI_RANGE * 2.0),
+                            );
+                            specialized_handle_hit = (pos.y - line_y).abs() <= 8.0;
+                        }
+                        _ => {}
+                    }
+
+                    if !specialized_handle_hit && sel_e > sel_s {
+                        let mut candidates = Vec::with_capacity(2);
+                        if geom.contains_boundary(sel_s) {
+                            candidates.push((geom.sample_boundary_x_unclamped(sel_s), 0usize));
+                        }
+                        if geom.contains_boundary(sel_e) {
+                            candidates.push((geom.sample_boundary_x_unclamped(sel_e), 1usize));
+                        }
+                        if let Some(which) = nearest_handle(
+                            &candidates,
+                            pos.x,
+                            SELECTION_EDGE_GRAB_RADIUS,
+                        ) {
+                            let edge = if which == 0 {
+                                SelectionStretchEdge::Start
+                            } else {
+                                SelectionStretchEdge::End
+                            };
+                            let fixed_sample = match edge {
+                                SelectionStretchEdge::Start => sel_e,
+                                SelectionStretchEdge::End => sel_s,
+                            };
+                            tab.selection_stretch_gesture = Some(SelectionStretchGesture {
+                                edge,
+                                source_range: (sel_s, sel_e),
+                                target_len: sel_e - sel_s,
+                                press_pointer_x: pos.x,
+                                fixed_screen_offset_px: geom
+                                    .sample_boundary_x_unclamped(fixed_sample)
+                                    - wave_left,
+                                moved: false,
+                            });
+                        }
+                    }
+                }
+            }
             // A flag any gesture sets while it owns the primary button; the
             // seek / range-select handlers below bail out when set.
-            let mut tool_gesture_active = spectral_warp_editing || spectral_brush_editing;
+            let mut tool_gesture_active = spectral_warp_editing
+                || spectral_brush_editing
+                || tab.selection_stretch_gesture.is_some()
+                || cancelled_selection_stretch_claims_pointer;
             // Requests deferred to after UI borrows (same pattern as inspector).
             let mut gesture_refresh_preview = false;
             let mut gesture_restore_preview = false;
             let mut gesture_spawn_tool_preview: Option<(ToolKind, f32, Option<(usize, usize)>)> =
                 None;
-            if gain_env_editing {
+            if gain_env_editing && tab.selection_stretch_gesture.is_none() {
                 if resp.hovered() {
                     hover_cursor = Some(egui::CursorIcon::Crosshair);
                 }
@@ -5000,7 +5174,7 @@ impl crate::app::WavesPreviewer {
                     }
                 }
             }
-            if pitch_env_editing {
+            if pitch_env_editing && tab.selection_stretch_gesture.is_none() {
                 if resp.hovered() {
                     hover_cursor = Some(egui::CursorIcon::Crosshair);
                 }
@@ -5119,7 +5293,7 @@ impl crate::app::WavesPreviewer {
             let pencil_editing = wave_view_gestures
                 && matches!(tab.active_tool, ToolKind::Pencil)
                 && tab.pencil_draft.is_some();
-            if pencil_editing {
+            if pencil_editing && tab.selection_stretch_gesture.is_none() {
                 tool_gesture_active = true;
                 suppress_seek = true;
                 let visible = tab.channel_view.visible_indices(tab.ch_samples.len());
@@ -5361,7 +5535,7 @@ impl crate::app::WavesPreviewer {
             let pitch_line_tool = wave_view_gestures
                 && matches!(tab.active_tool, ToolKind::PitchShift)
                 && !tab.pitch_env_enabled;
-            if pitch_line_tool {
+            if pitch_line_tool && tab.selection_stretch_gesture.is_none() {
                 let semi_to_frac = |semi: f32| 0.5 + semi / (PITCH_SEMI_RANGE * 2.0);
                 let frac_to_semi = |frac: f32| (frac - 0.5) * PITCH_SEMI_RANGE * 2.0;
                 let mut semi = tab.tool_state.pitch_semitones;
@@ -5370,7 +5544,7 @@ impl crate::app::WavesPreviewer {
                 }
                 let line_y = frac_to_y(semi_to_frac(semi));
                 let near_line = |pos: egui::Pos2| (pos.y - line_y).abs() <= 8.0;
-                if pointer_over_waveform && tab.stretch_drag_target.is_none() {
+                if pointer_over_waveform && tab.selection_stretch_gesture.is_none() {
                     if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                         if near_line(pos) || tab.pitch_drag_active {
                             hover_cursor = Some(egui::CursorIcon::ResizeVertical);
@@ -5415,84 +5589,6 @@ impl crate::app::WavesPreviewer {
                     }
                 }
             }
-            // Speed / TimeStretch: drag the selection's right edge to stretch
-            // or shrink the selected part; preview renders on release.
-            let stretch_tool = wave_view_gestures
-                && !gain_env_editing
-                && matches!(tab.active_tool, ToolKind::TimeStretch | ToolKind::Speed);
-            if stretch_tool {
-                if let Some((sel_s, sel_e)) = Self::editor_selected_range(tab) {
-                    let sel_len = (sel_e - sel_s).max(1);
-                    let edge_x = geom.sample_boundary_x(sel_e.min(display_samples_len));
-                    let near_edge = |pos: egui::Pos2| (pos.x - edge_x).abs() <= 8.0;
-                    if pointer_over_waveform && !tab.pitch_drag_active {
-                        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-                            if near_edge(pos) || tab.stretch_drag_target.is_some() {
-                                hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
-                            }
-                        }
-                    }
-                    // Unclamped x -> sample so the target can extend past the
-                    // current end of the timeline while slowing down.
-                    let x_to_sample_unclamped = |x: f32| -> usize {
-                        let rel = ((x - wave_left).max(0.0) as f64) * (geom.spp as f64);
-                        (geom.view_offset_exact + rel).round().max(0.0) as usize
-                    };
-                    let clamp_target = |raw: usize| -> usize {
-                        let min_len = (sel_len as f64 / 4.0).ceil().max(1.0) as usize;
-                        let max_len = sel_len.saturating_mul(4);
-                        raw.clamp(sel_s + min_len, sel_s + max_len)
-                    };
-                    if resp.drag_started_by(egui::PointerButton::Primary)
-                        && !tab.pitch_drag_active
-                    {
-                        if let Some(pos) = ui
-                            .input(|i| i.pointer.press_origin())
-                            .or_else(|| resp.interact_pointer_pos())
-                        {
-                            if near_edge(pos) {
-                                tab.stretch_drag_target = Some(sel_e);
-                            }
-                        }
-                    }
-                    if tab.stretch_drag_target.is_some() {
-                        tool_gesture_active = true;
-                        suppress_seek = true;
-                        if resp.dragged_by(egui::PointerButton::Primary) {
-                            if let Some(pos) = resp.interact_pointer_pos() {
-                                tab.stretch_drag_target =
-                                    Some(clamp_target(x_to_sample_unclamped(pos.x)));
-                            }
-                        }
-                        if resp.drag_stopped_by(egui::PointerButton::Primary) {
-                            let target = tab.stretch_drag_target.take().unwrap_or(sel_e);
-                            let new_len = target.saturating_sub(sel_s).max(1);
-                            let rate =
-                                ((sel_len as f64) / (new_len as f64)).clamp(0.25, 4.0) as f32;
-                            let tool = tab.active_tool;
-                            if matches!(tool, ToolKind::Speed) {
-                                tab.tool_state = ToolState {
-                                    speed_rate: rate,
-                                    ..tab.tool_state
-                                };
-                            } else {
-                                tab.tool_state = ToolState {
-                                    stretch_rate: rate,
-                                    ..tab.tool_state
-                                };
-                            }
-                            stop_playback = true;
-                            if (rate - 1.0).abs() <= 0.0001 {
-                                gesture_restore_preview = true;
-                            } else {
-                                tab.preview_audio_tool = Some(tool);
-                                gesture_spawn_tool_preview =
-                                    Some((tool, rate, Some((sel_s, sel_e))));
-                            }
-                        }
-                    }
-                }
-            }
             // Safety: never let a gesture grab outlive the pointer button
             // (e.g. release outside the window where drag_stopped is missed).
             if !ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary))
@@ -5500,7 +5596,6 @@ impl crate::app::WavesPreviewer {
             {
                 tab.pitch_drag_active = false;
                 tab.pitch_env_drag = None;
-                tab.stretch_drag_target = None;
                 tab.spectral_warp_drag = None;
             }
             // Resolve deferred gesture requests into the shared pending slots.
@@ -5974,94 +6069,51 @@ impl crate::app::WavesPreviewer {
                     }
                 }
             }
-            // Grab either edge of the primary selection to lengthen or shorten
-            // it. Tool-independent, like the selection itself, and placed
-            // before the drag-select block below so a grab on an existing edge
-            // wins over starting a fresh range on the same press.
-            if (pointer_over_waveform || tab.selection_edge_drag_anchor.is_some())
-                && !world_f0_editing
-                && !tool_gesture_active
-                && display_samples_len > 0
-                && tab.dragging_marker.is_none()
-            {
-                let sel = tab.selection.map(|(a0, b0)| {
-                    if a0 <= b0 {
-                        (a0, b0)
-                    } else {
-                        (b0, a0)
+            // Update the Waveform-only selection Time Stretch gesture. Pointer
+            // position is read globally so releasing outside the canvas still
+            // commits the last valid clamped target. The real selection stays
+            // unchanged until the worker result is adopted.
+            if let Some(mut gesture) = tab.selection_stretch_gesture {
+                tool_gesture_active = true;
+                suppress_seek = true;
+                let pointer_down = ui.input(|input| input.pointer.primary_down());
+                let pointer_released = ui.input(|input| input.pointer.primary_released());
+                if pointer_down || pointer_released {
+                    if let Some(pos) = ui.input(|input| input.pointer.hover_pos()) {
+                        let delta_px = pos.x - gesture.press_pointer_x;
+                        if delta_px.abs() >= 0.5 {
+                            gesture.moved = true;
+                        }
+                        gesture.target_len = selection_stretch_target_len(
+                            gesture.source_range.1 - gesture.source_range.0,
+                            gesture.edge,
+                            delta_px,
+                            geom.spp,
+                        );
+                        tab.selection_stretch_gesture = Some(gesture);
                     }
-                });
-                match sel.filter(|&(a, b)| b > a) {
-                    Some((sel_s, sel_e)) => {
-                        // Candidates are (handle x, the anchor that stays put).
-                        // Speed/TimeStretch already own the selection's right
-                        // edge as a stretch gesture, so there we offer the left
-                        // edge only rather than arming two gestures on one press.
-                        let stretch_owns_end =
-                            matches!(tab.active_tool, ToolKind::Speed | ToolKind::TimeStretch);
-                        let mut candidates: Vec<(f32, usize)> = Vec::new();
-                        if geom.contains_boundary(sel_s) {
-                            candidates.push((geom.sample_boundary_x_unclamped(sel_s), sel_e));
-                        }
-                        if !stretch_owns_end && geom.contains_boundary(sel_e) {
-                            candidates.push((geom.sample_boundary_x_unclamped(sel_e), sel_s));
-                        }
-
-                        // Grab on the raw button press, not `drag_started_by`:
-                        // a handle has to respond without the drag threshold's
-                        // worth of movement.
-                        if tab.selection_edge_drag_anchor.is_none()
-                            && ui.input(|i| i.pointer.primary_pressed())
-                        {
-                            if let Some(pos) = ui
-                                .input(|i| i.pointer.press_origin())
-                                .or_else(|| ui.input(|i| i.pointer.hover_pos()))
-                            {
-                                if let Some(anchor) =
-                                    nearest_handle(&candidates, pos.x, SELECTION_EDGE_GRAB_RADIUS)
-                                {
-                                    tab.selection_edge_drag_anchor = Some(anchor);
-                                }
-                            }
-                        }
-
-                        if let Some(anchor) = tab.selection_edge_drag_anchor {
-                            if ui.input(|i| i.pointer.primary_down()) {
-                                // Only once the pointer has actually moved.
-                                // Handles are drawn on the sample *boundary*
-                                // but x -> sample is centre-based, so feeding
-                                // the press position straight back would shift
-                                // the edge by a sample on a bare click.
-                                let moved = ui
-                                    .input(|i| i.pointer.press_origin())
-                                    .zip(ui.input(|i| i.pointer.hover_pos()))
-                                    .is_none_or(|(origin, pos)| (pos.x - origin.x).abs() >= 0.5);
-                                if let Some(pos) =
-                                    ui.input(|i| i.pointer.hover_pos()).filter(|_| moved)
-                                {
-                                    let raw = to_range_selection_display_sample(pos.x);
-                                    let samp = if alt_now {
-                                        zc_snap_nearest(
-                                            &tab.ch_samples,
-                                            self.zero_cross_epsilon,
-                                            raw,
-                                        )
-                                    } else {
-                                        raw
-                                    };
-                                    Self::editor_set_selection_from_anchor(tab, anchor, samp);
-                                }
-                            } else {
-                                tab.selection_edge_drag_anchor = None;
-                            }
-                            // Held past the release frame as well: a grab with
-                            // no movement is reported as a click, and the
-                            // click handler would clear the whole selection.
-                            tool_gesture_active = true;
-                            suppress_seek = true;
+                }
+                if pointer_released {
+                    if let Some(completed) = tab.selection_stretch_gesture.take() {
+                        let source_len = completed.source_range.1 - completed.source_range.0;
+                        if completed.moved && completed.target_len != source_len {
+                            let rate =
+                                selection_stretch_rate(source_len, completed.target_len);
+                            pending_selection_stretch_apply = Some((
+                                rate,
+                                completed.source_range,
+                                EditorApplyViewportRestore {
+                                    dragged_edge: completed.edge,
+                                    fixed_screen_offset_px: completed.fixed_screen_offset_px,
+                                    samples_per_px: geom.spp,
+                                },
+                            ));
+                            need_restore_preview = true;
                         }
                     }
-                    None => tab.selection_edge_drag_anchor = None,
+                } else if !pointer_down {
+                    // No release event means focus/input capture was lost.
+                    tab.selection_stretch_gesture = None;
                 }
             }
 
@@ -7047,22 +7099,38 @@ impl crate::app::WavesPreviewer {
                                     egui::StrokeKind::Inside,
                                 );
                             }
-                            // Grab handles, so the edges read as draggable.
-                            // Opaque rather than the fill's alpha: this is a
-                            // target, not a tint. Skipped where the edge is
-                            // scrolled out of view, and on the right edge for
-                            // the two tools that own it as a stretch gesture.
-                            let handle_col = Color32::from_rgb(70, 140, 255);
-                            if geom.contains_boundary(a) {
-                                draw_handle(ax, handle_col);
-                            }
-                            if geom.contains_boundary(b)
-                                && !matches!(
-                                    tab.active_tool,
-                                    ToolKind::Speed | ToolKind::TimeStretch
-                                )
-                            {
-                                draw_handle(bx, handle_col);
+                            // Time Stretch grips exist only in the primary
+                            // Waveform view. The blue selection fill above
+                            // remains visible in every other analysis view.
+                            if view_mode == ViewMode::Waveform {
+                                let handle_col = Color32::from_rgb(90, 220, 255);
+                                let draw_stretch_handle = |x: f32| {
+                                    painter.line_segment(
+                                        [
+                                            egui::pos2(x, rect.top()),
+                                            egui::pos2(x, rect.bottom()),
+                                        ],
+                                        egui::Stroke::new(2.0, handle_col),
+                                    );
+                                    draw_handle(x, handle_col);
+                                    let cy = rect.center().y;
+                                    for dir in [-1.0f32, 1.0f32] {
+                                        painter.add(egui::Shape::line(
+                                            vec![
+                                                egui::pos2(x + dir * 4.0, cy - 5.0),
+                                                egui::pos2(x + dir * 8.0, cy),
+                                                egui::pos2(x + dir * 4.0, cy + 5.0),
+                                            ],
+                                            egui::Stroke::new(1.5, handle_col),
+                                        ));
+                                    }
+                                };
+                                if geom.contains_boundary(a) {
+                                    draw_stretch_handle(ax);
+                                }
+                                if geom.contains_boundary(b) {
+                                    draw_stretch_handle(bx);
+                                }
                             }
                         }
                     }
@@ -7452,28 +7520,23 @@ impl crate::app::WavesPreviewer {
                 }
 
                 // Cursor feedback for editor handles
-                if pointer_over_waveform {
+                if pointer_over_waveform && view_mode == ViewMode::Waveform {
                     let handle_radius = 7.0;
                     if tab.dragging_marker.is_some()
-                        || tab.selection_edge_drag_anchor.is_some()
+                        || tab.selection_stretch_gesture.is_some()
                     {
                         hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
                     } else if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                         let x = pos.x;
                         let near = |hx: f32| (x - hx).abs() <= handle_radius;
-                        // The selection is tool-independent, so its edges are
-                        // checked before (and outside) the per-tool match.
+                        // Both selection edges are always Time Stretch grips
+                        // in Waveform mode, independent of the active tool.
                         if let Some((a0, b0)) = tab.selection {
                             let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
                             if b > a {
-                                let stretch_owns_end = matches!(
-                                    tab.active_tool,
-                                    ToolKind::Speed | ToolKind::TimeStretch
-                                );
                                 if (geom.contains_boundary(a)
                                     && near(geom.sample_boundary_x_unclamped(a)))
-                                    || (!stretch_owns_end
-                                        && geom.contains_boundary(b)
+                                    || (geom.contains_boundary(b)
                                         && near(geom.sample_boundary_x_unclamped(b)))
                                 {
                                     hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
@@ -7715,73 +7778,65 @@ impl crate::app::WavesPreviewer {
                         );
                     }
                 }
-                // Speed / TimeStretch: selection-edge stretch handle + ghost
-                if matches!(tab.active_tool, ToolKind::TimeStretch | ToolKind::Speed) {
-                    if let Some((sel_s, sel_e)) = Self::editor_selected_range(tab) {
-                        let stretch_color = Color32::from_rgb(90, 220, 255);
-                        let edge_x = geom.sample_boundary_x(sel_e.min(display_samples_len));
-                        if edge_x >= wave_left && edge_x <= wave_left + wave_w {
-                            painter.line_segment(
-                                [
-                                    egui::pos2(edge_x, rect.top()),
-                                    egui::pos2(edge_x, rect.bottom()),
-                                ],
-                                egui::Stroke::new(2.0, stretch_color),
-                            );
-                            // Grip chevrons on the handle
-                            let cy = rect.center().y;
-                            for dir in [-1.0f32, 1.0f32] {
-                                painter.add(egui::Shape::line(
-                                    vec![
-                                        egui::pos2(edge_x + dir * 4.0, cy - 5.0),
-                                        egui::pos2(edge_x + dir * 8.0, cy),
-                                        egui::pos2(edge_x + dir * 4.0, cy + 5.0),
-                                    ],
-                                    egui::Stroke::new(1.5, stretch_color),
-                                ));
-                            }
-                        }
-                        if let Some(target) = tab.stretch_drag_target {
-                            let sel_len = (sel_e - sel_s).max(1);
-                            let new_len = target.saturating_sub(sel_s).max(1);
-                            let rate =
-                                ((sel_len as f64) / (new_len as f64)).clamp(0.25, 4.0) as f32;
-                            let sx = geom
-                                .sample_boundary_x(sel_s.min(display_samples_len))
-                                .clamp(wave_left, wave_left + wave_w);
-                            let raw_tx = wave_left
-                                + (((target as f64) - geom.view_offset_exact)
-                                    / (geom.spp.max(0.0001) as f64))
-                                    as f32;
-                            let tx = raw_tx.clamp(wave_left, wave_left + wave_w);
-                            painter.rect_filled(
-                                egui::Rect::from_min_max(
-                                    egui::pos2(sx.min(tx), rect.top()),
-                                    egui::pos2(sx.max(tx), rect.bottom()),
-                                ),
-                                0.0,
-                                Color32::from_rgba_unmultiplied(90, 220, 255, 24),
-                            );
-                            painter.line_segment(
-                                [egui::pos2(tx, rect.top()), egui::pos2(tx, rect.bottom())],
-                                egui::Stroke::new(2.0, stretch_color),
-                            );
-                            let dir_label = if rate > 1.0001 {
-                                " (faster/shorter)"
-                            } else if rate < 0.9999 {
-                                " (slower/longer)"
-                            } else {
-                                ""
-                            };
-                            painter.text(
-                                egui::pos2(tx + 6.0, rect.top() + 16.0),
-                                egui::Align2::LEFT_TOP,
-                                format!("x{rate:.2}{dir_label}"),
-                                overlay_font.clone(),
-                                stretch_color,
-                            );
-                        }
-                    }
+                // Both selection handles share one pitch-preserving Time
+                // Stretch ghost, independent of whichever inspector tool is
+                // selected. DSP starts only after the pointer is released.
+                if let Some(gesture) = tab.selection_stretch_gesture {
+                    let stretch_color = Color32::from_rgb(90, 220, 255);
+                    let fixed_sample = match gesture.edge {
+                        SelectionStretchEdge::Start => gesture.source_range.1,
+                        SelectionStretchEdge::End => gesture.source_range.0,
+                    };
+                    let fixed_x = geom.sample_boundary_x_unclamped(fixed_sample);
+                    let span_px = gesture.target_len as f32 / geom.spp.max(0.0001);
+                    let target_x = match gesture.edge {
+                        SelectionStretchEdge::Start => fixed_x - span_px,
+                        SelectionStretchEdge::End => fixed_x + span_px,
+                    };
+                    let clipped_fixed_x = fixed_x.clamp(wave_left, wave_left + wave_w);
+                    let clipped_target_x = target_x.clamp(wave_left, wave_left + wave_w);
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(clipped_fixed_x.min(clipped_target_x), rect.top()),
+                            egui::pos2(clipped_fixed_x.max(clipped_target_x), rect.bottom()),
+                        ),
+                        0.0,
+                        Color32::from_rgba_unmultiplied(90, 220, 255, 34),
+                    );
+                    painter.line_segment(
+                        [
+                            egui::pos2(clipped_target_x, rect.top()),
+                            egui::pos2(clipped_target_x, rect.bottom()),
+                        ],
+                        egui::Stroke::new(2.5, stretch_color),
+                    );
+                    let source_len = gesture.source_range.1 - gesture.source_range.0;
+                    let rate = selection_stretch_rate(source_len, gesture.target_len);
+                    let dir_label = if rate > 1.0001 {
+                        " (faster/shorter)"
+                    } else if rate < 0.9999 {
+                        " (slower/longer)"
+                    } else {
+                        ""
+                    };
+                    let (label_pos, align) = if clipped_target_x > wave_left + wave_w - 170.0 {
+                        (
+                            egui::pos2(clipped_target_x - 6.0, rect.top() + 16.0),
+                            egui::Align2::RIGHT_TOP,
+                        )
+                    } else {
+                        (
+                            egui::pos2(clipped_target_x + 6.0, rect.top() + 16.0),
+                            egui::Align2::LEFT_TOP,
+                        )
+                    };
+                    painter.text(
+                        label_pos,
+                        align,
+                        format!("x{rate:.2}{dir_label}"),
+                        overlay_font.clone(),
+                        stretch_color,
+                    );
                 }
             }
 
@@ -8531,7 +8586,6 @@ impl crate::app::WavesPreviewer {
                                 tab.gain_env_drag = None;
                                 tab.pitch_env_drag = None;
                                 tab.pitch_drag_active = false;
-                                tab.stretch_drag_target = None;
                                 stop_playback = true;
                                 tab.active_tool = tool;
                                 if tool == ToolKind::Fade
@@ -13373,6 +13427,14 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                         range,
                     );
                 }
+                if let Some((rate, range, viewport_restore)) = pending_selection_stretch_apply {
+                    self.spawn_editor_selection_stretch_apply(
+                        tab_idx,
+                        rate,
+                        range,
+                        viewport_restore,
+                    );
+                }
                 if let Some((rate, range)) = pending_speed_apply {
                     self.spawn_editor_apply_for_tab_range(tab_idx, ToolKind::Speed, rate, range);
                 }
@@ -13971,7 +14033,11 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
 
 #[cfg(test)]
 mod tests {
-    use super::{nearest_handle, EditorDisplayGeometry, SELECTION_EDGE_GRAB_RADIUS};
+    use super::{
+        nearest_handle, selection_stretch_rate, selection_stretch_target_len,
+        EditorDisplayGeometry, SELECTION_EDGE_GRAB_RADIUS,
+    };
+    use crate::app::types::SelectionStretchEdge;
 
     fn geom(view_offset: usize, spp: f32) -> EditorDisplayGeometry {
         EditorDisplayGeometry {
@@ -14040,5 +14106,36 @@ mod tests {
     fn the_grab_radius_stays_under_the_playhead_snap() {
         assert!(SELECTION_EDGE_GRAB_RADIUS < 8.0);
         assert!(SELECTION_EDGE_GRAB_RADIUS > 0.0);
+    }
+
+    #[test]
+    fn selection_stretch_drag_is_symmetric_for_both_edges() {
+        let source_len = 400usize;
+        let end_longer =
+            selection_stretch_target_len(source_len, SelectionStretchEdge::End, 75.0, 2.0);
+        let start_longer =
+            selection_stretch_target_len(source_len, SelectionStretchEdge::Start, -75.0, 2.0);
+        assert_eq!(end_longer, 550);
+        assert_eq!(start_longer, end_longer);
+
+        let end_shorter =
+            selection_stretch_target_len(source_len, SelectionStretchEdge::End, -75.0, 2.0);
+        let start_shorter =
+            selection_stretch_target_len(source_len, SelectionStretchEdge::Start, 75.0, 2.0);
+        assert_eq!(end_shorter, 250);
+        assert_eq!(start_shorter, end_shorter);
+    }
+
+    #[test]
+    fn selection_stretch_target_and_rate_clamp_to_quarter_and_four_x() {
+        let source_len = 400usize;
+        let shortest =
+            selection_stretch_target_len(source_len, SelectionStretchEdge::End, -10_000.0, 10.0);
+        let longest =
+            selection_stretch_target_len(source_len, SelectionStretchEdge::End, 10_000.0, 10.0);
+        assert_eq!(shortest, 100);
+        assert_eq!(longest, 1_600);
+        assert_eq!(selection_stretch_rate(source_len, shortest), 4.0);
+        assert_eq!(selection_stretch_rate(source_len, longest), 0.25);
     }
 }

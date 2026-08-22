@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::app::types::{
-    AutoTrimState, EditorDecodeResult, EditorDecodeStage, EditorDecodeState, EffectGraphDocument,
-    EffectGraphEdge, EffectGraphNode, EffectGraphNodeData, FileMeta, LoopDetectState, LoopMode,
-    LoopXfadeShape, MusicAnalysisResult, MusicStemSet, PreviewOverlayDetailKind, ProcessingResult,
-    ProcessingState, ProcessingTarget, RateMode, SampleValueKind, SortDir, SortKey, ToolKind,
-    ToolState, ViewMode,
+    AutoTrimState, EditorApplyResult, EditorApplyState, EditorDecodeResult, EditorDecodeStage,
+    EditorDecodeState, EffectGraphDocument, EffectGraphEdge, EffectGraphNode, EffectGraphNodeData,
+    FileMeta, LoopDetectState, LoopMode, LoopXfadeShape, MusicAnalysisResult, MusicStemSet,
+    PreviewOverlayDetailKind, ProcessingResult, ProcessingState, ProcessingTarget, RateMode,
+    SampleValueKind, SortDir, SortKey, ToolKind, ToolState, ViewMode,
 };
 
 #[cfg(feature = "kittest")]
@@ -369,6 +369,39 @@ impl super::WavesPreviewer {
     /// True while an editor apply job (including WORLD resynthesis) runs.
     pub fn test_editor_apply_busy(&self) -> bool {
         self.editor_apply_state.is_some()
+    }
+
+    pub fn test_set_mock_editor_apply_busy(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let tab_id = tab.tab_id;
+        let source_len = tab.samples_len;
+        let source_sample_rate = tab.buffer_sample_rate.max(1);
+        let (tx, rx) = std::sync::mpsc::channel::<EditorApplyResult>();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            drop(tx);
+        });
+        self.editor_apply_state = Some(EditorApplyState {
+            msg: "Mock apply...".to_string(),
+            rx,
+            tab_id,
+            undo: None,
+            tool: ToolKind::Normalize,
+            source_range: None,
+            source_len,
+            source_sample_rate,
+            viewport_restore: None,
+        });
+        true
+    }
+
+    pub fn test_clear_mock_editor_apply_busy(&mut self) {
+        self.editor_apply_state = None;
     }
 
     /// Mirror of the modal busy overlay's block condition.
@@ -2554,6 +2587,34 @@ impl super::WavesPreviewer {
             return false;
         };
         self.tabs.get(tab_idx).map(|t| t.loading).unwrap_or(false)
+    }
+
+    pub fn test_set_tab_loading(&mut self, loading: bool) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        if loading && tab.samples_len_visual == 0 {
+            tab.samples_len_visual = tab.samples_len;
+        }
+        tab.loading = loading;
+        true
+    }
+
+    pub fn test_set_active_decode_error(&mut self, error: Option<&str>) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(path) = self.tabs.get(tab_idx).map(|tab| tab.path.clone()) else {
+            return false;
+        };
+        let Some(mut meta) = self.meta_for_path(&path).cloned() else {
+            return false;
+        };
+        meta.decode_error = error.map(str::to_string);
+        self.set_meta_for_path(&path, meta)
     }
 
     pub fn test_editor_decode_progress(&self) -> Option<f32> {

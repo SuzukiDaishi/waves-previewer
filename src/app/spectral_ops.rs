@@ -901,6 +901,7 @@ impl crate::app::WavesPreviewer {
             source_range: None,
             source_len: 0,
             source_sample_rate: 1,
+            viewport_restore: None,
         });
     }
 
@@ -1035,6 +1036,7 @@ impl crate::app::WavesPreviewer {
             source_range: None,
             source_len: 0,
             source_sample_rate: 1,
+            viewport_restore: None,
         });
     }
 
@@ -1250,6 +1252,7 @@ impl crate::app::WavesPreviewer {
             source_range: None,
             source_len: 0,
             source_sample_rate: 1,
+            viewport_restore: None,
         });
     }
 
@@ -1344,6 +1347,7 @@ impl crate::app::WavesPreviewer {
             source_range: None,
             source_len: 0,
             source_sample_rate: 1,
+            viewport_restore: None,
         });
     }
 
