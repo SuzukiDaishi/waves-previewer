@@ -793,13 +793,32 @@ impl crate::app::WavesPreviewer {
 
     /// Fit the view to the primary selection with a small margin (Z shortcut).
     pub(in crate::app) fn editor_zoom_to_selection(&mut self, tab_idx: usize) {
+        let range = self.tabs.get(tab_idx).and_then(|tab| tab.selection);
+        self.editor_zoom_to_range(tab_idx, range);
+    }
+
+    /// Fit the loop region to the view, the way `Z` fits the selection.
+    ///
+    /// Adjusting a loop means looking closely at both of its ends, and there
+    /// was no way to get there except zooming by hand until they were both on
+    /// screen.
+    pub(in crate::app) fn editor_zoom_to_loop_region(&mut self, tab_idx: usize) {
+        let range = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| Self::normalized_loop_range(tab.loop_region));
+        self.editor_zoom_to_range(tab_idx, range);
+    }
+
+    /// Fit `range` to the view with a small margin on each side.
+    fn editor_zoom_to_range(&mut self, tab_idx: usize, range: Option<(usize, usize)>) {
         let Some(tab) = self.tabs.get_mut(tab_idx) else {
             return;
         };
-        let Some((sel_start, sel_end)) = tab.selection else {
+        let Some((start, end)) = range else {
             return;
         };
-        if sel_end <= sel_start {
+        if end <= start {
             return;
         }
         let wave_w = tab.last_wave_w;
@@ -814,13 +833,53 @@ impl crate::app::WavesPreviewer {
         if display_samples_len == 0 {
             return;
         }
-        let sel_len = sel_end - sel_start;
-        let pad = ((sel_len as f64) * 0.05).ceil().max(1.0) as usize;
-        let spp = Self::editor_fit_samples_per_px(sel_len + pad * 2, wave_w);
+        let range_len = end - start;
+        // 5% either side: enough that the edges are not flush against the
+        // canvas border, which is what makes them awkward to grab.
+        let pad = ((range_len as f64) * 0.05).ceil().max(1.0) as usize;
+        let spp = Self::editor_fit_samples_per_px(range_len + pad * 2, wave_w);
         tab.samples_per_px = spp;
         let visible = ((wave_w * spp).ceil()).max(1.0) as usize;
         let max_left = display_samples_len.saturating_sub(visible);
-        Self::editor_set_view_offset_exact(tab, sel_start as f64 - pad as f64, max_left);
+        Self::editor_set_view_offset_exact(tab, start as f64 - pad as f64, max_left);
+        Self::invalidate_editor_viewport_cache(tab);
+    }
+
+    /// Zoom in around one sample, keeping it in the middle of the view.
+    ///
+    /// Used by the double-click on a loop handle: the point you are working on
+    /// stays where you are looking instead of sliding off as the view narrows.
+    pub(in crate::app) fn editor_zoom_centered_on_sample(
+        &mut self,
+        tab_idx: usize,
+        sample: usize,
+        factor: f32,
+    ) {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        let wave_w = tab.last_wave_w;
+        if wave_w <= 0.0 {
+            return;
+        }
+        let display_samples_len = if tab.loading && tab.samples_len_visual > 0 {
+            tab.samples_len_visual
+        } else {
+            tab.samples_len
+        };
+        if display_samples_len == 0 {
+            return;
+        }
+        let fit = Self::editor_fit_samples_per_px(display_samples_len, wave_w);
+        let spp = (tab.samples_per_px * factor).clamp(
+            crate::app::EDITOR_MIN_SAMPLES_PER_PX,
+            fit.max(crate::app::EDITOR_MIN_SAMPLES_PER_PX),
+        );
+        tab.samples_per_px = spp;
+        let visible = ((wave_w * spp).ceil()).max(1.0) as usize;
+        let max_left = display_samples_len.saturating_sub(visible);
+        let exact = Self::editor_exact_view_for_anchor(sample, 0.5, wave_w, spp);
+        Self::editor_set_view_offset_exact(tab, exact, max_left);
         Self::invalidate_editor_viewport_cache(tab);
     }
 
@@ -3013,6 +3072,10 @@ impl crate::app::WavesPreviewer {
         }
         let editor_panel_rect = ui.max_rect();
         let mut apply_pending_loop = false;
+        // Double-clicking a loop handle zooms in around that point. Deferred
+        // because the zoom helpers take `&mut self` and the pointer block runs
+        // with the tab already borrowed.
+        let mut zoom_around_loop_point: Option<usize> = None;
         let mut do_commit_loop = false;
         let mut do_preview_unwrap: Option<u32> = None;
         let mut do_commit_markers = false;
@@ -6142,9 +6205,39 @@ impl crate::app::WavesPreviewer {
             {
                 let pointer_down = ui.input(|i| i.pointer.primary_down());
                 let pointer_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
+                // Kept across the reset below: the double click that zooms is
+                // only recognisable once the button comes back up, by which
+                // point the drag state has to be gone.
+                let armed_marker = tab.dragging_marker;
+                let armed_and_moved = tab.loop_drag_moved;
                 if pointer_released || !pointer_down {
                     tab.dragging_marker = None;
                     tab.loop_drag_moved = false;
+                }
+                // A second click on a handle, in place, zooms in around it --
+                // the gesture for "let me look at this edge properly". It can
+                // never collide with the drag, which by definition has moved.
+                if pointer_released && !armed_and_moved {
+                    if let Some(marker) = armed_marker {
+                        let release_pos = ui
+                            .input(|i| i.pointer.interact_pos())
+                            .or_else(|| ui.input(|i| i.pointer.hover_pos()));
+                        let repeat = release_pos.is_some_and(|pos| {
+                            crate::app::helpers::note_repeated_click(
+                                &mut self.editor_loop_handle_last_click,
+                                pos,
+                            )
+                        });
+                        if repeat {
+                            if let Some((a, b)) = Self::normalized_loop_range(tab.loop_region) {
+                                zoom_around_loop_point = Some(match marker {
+                                    MarkerKind::A => a,
+                                    MarkerKind::B => b,
+                                });
+                            }
+                            suppress_seek = true;
+                        }
+                    }
                 }
                 if pointer_down {
                     // Arm on the press, and only on the press.
@@ -14646,6 +14739,11 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
             if let Some(tab_ro) = self.tabs.get(tab_idx) {
                 self.apply_loop_mode_for_tab(tab_ro);
             }
+        }
+        if let Some(sample) = zoom_around_loop_point {
+            // The same 0.9 step the wheel and `+` use, so one double click is
+            // one recognisable notch rather than a jump to some fixed depth.
+            self.editor_zoom_centered_on_sample(tab_idx, sample, 0.9);
         }
         self.ui_editor_zoo_overlay(ctx, Some(tab_idx), editor_panel_rect);
     }

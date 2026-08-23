@@ -70,6 +70,32 @@ const WAVE_LOUD: Color32 = Color32::from_rgb(255, 124, 96);
 /// the brightest part of the ramp rather than the crossing between stops.
 const WAVE_MID_T: f32 = 0.62;
 
+/// Record a click, and say whether it was the second of a pair in the same spot.
+///
+/// egui's own double-click reporting does not survive contact with either of
+/// the surfaces that need it here. `Response::double_clicked` never fires on a
+/// canvas that also senses drags, because the second press is taken for the
+/// start of one; and `PointerState::button_double_clicked` uses a 300 ms window
+/// that is tighter than these surfaces are repainted. The editor's note rows
+/// and the amplitude navigator each grew their own version of this check for
+/// the same reason -- this is that check, written once.
+///
+/// A repeat clears the state, so a third click starts a new pair rather than
+/// counting as a second double.
+pub fn note_repeated_click(
+    state: &mut Option<(std::time::Instant, egui::Pos2)>,
+    pos: egui::Pos2,
+) -> bool {
+    const WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
+    const SLOP_PX: f32 = 6.0;
+    let now = std::time::Instant::now();
+    let repeat = state.is_some_and(|(at, prev)| {
+        now.saturating_duration_since(at) <= WINDOW && prev.distance(pos) <= SLOP_PX
+    });
+    *state = if repeat { None } else { Some((now, pos)) };
+    repeat
+}
+
 pub fn amp_to_color(a: f32) -> Color32 {
     let t = a.clamp(0.0, 1.0).powf(0.6); // emphasize loud parts
     if t <= WAVE_MID_T {

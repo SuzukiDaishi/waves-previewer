@@ -57,6 +57,7 @@ pub enum Action {
     EditorSeekStart,
     EditorSeekEnd,
     EditorZoomToSelection,
+    EditorZoomToLoopRegion,
     EditorZoomIn,
     EditorZoomOut,
     EditorViewPageBack,
@@ -459,6 +460,14 @@ pub const KEYMAP: &[KeyBinding] = &[
         chord: Some((Mods::None, Key::Z)),
         keys_label: "",
         desc: "Zoom the view to the selection",
+        dispatch: Dispatch::Table,
+    },
+    KeyBinding {
+        action: Action::EditorZoomToLoopRegion,
+        context: KeyContext::Editor,
+        chord: Some((Mods::Shift, Key::Z)),
+        keys_label: "",
+        desc: "Zoom the view to the loop region",
         dispatch: Dispatch::Table,
     },
     KeyBinding {

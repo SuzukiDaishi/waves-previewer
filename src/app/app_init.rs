@@ -59,6 +59,7 @@ impl WavesPreviewer {
             meter_ch_last_time: None,
             topbar_volume_rect: None,
             topbar_volume_last_click: None,
+            editor_loop_handle_last_click: None,
             topbar_output_meter_rect: None,
             topbar_search_rect: None,
             editor_inspector_rect: None,

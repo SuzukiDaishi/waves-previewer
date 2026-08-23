@@ -440,7 +440,12 @@ impl super::WavesPreviewer {
                     if self.keymap_consume(ctx, Action::EditorSeekEnd) {
                         self.seek_to_fraction_in_active_tab(9, 9);
                     }
-                    if self.keymap_consume(ctx, Action::EditorZoomToSelection) {
+                    // Shift+Z before Z: egui matches modifiers logically, so
+                    // the bare-`Z` pattern also accepts an event with Shift
+                    // held and would swallow this one.
+                    if self.keymap_consume(ctx, Action::EditorZoomToLoopRegion) {
+                        self.editor_zoom_to_loop_region(tab_idx);
+                    } else if self.keymap_consume(ctx, Action::EditorZoomToSelection) {
                         self.editor_zoom_to_selection(tab_idx);
                     }
                     // `=` shares the physical key with `+` on many layouts, so

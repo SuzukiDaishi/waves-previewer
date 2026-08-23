@@ -786,27 +786,18 @@ impl WavesPreviewer {
         // Double click puts the monitor back at unity. The whole control is one
         // allocated rect, so the label, the track and the readout all take it.
         //
-        // `Response::double_clicked()` is not enough by itself -- the editor's
-        // note rows and the amplitude navigator both pair it with their own
-        // "was there a click just before this one, near enough" test, and this
-        // needs the same. Kept to the same 400 ms and few pixels they use.
+        // `Response::double_clicked()` is not enough by itself here; see
+        // `helpers::note_repeated_click`.
         //
         // Either way it has to be decided before the positional branch and lock
         // it out for the frame: a double click reports `clicked()` too, and the
         // position under the pointer would otherwise be written straight back
         // over the reset.
         let click_pos = ctx.input(|i| i.pointer.interact_pos());
-        let now = std::time::Instant::now();
         let repeated_click = response.clicked()
             && click_pos.is_some_and(|pos| {
-                self.topbar_volume_last_click.is_some_and(|(at, prev)| {
-                    now.saturating_duration_since(at) <= std::time::Duration::from_millis(400)
-                        && prev.distance(pos) <= 6.0
-                })
+                crate::app::helpers::note_repeated_click(&mut self.topbar_volume_last_click, pos)
             });
-        if response.clicked() {
-            self.topbar_volume_last_click = click_pos.map(|pos| (now, pos));
-        }
         let reset_to_unity = response.double_clicked() || repeated_click;
         if reset_to_unity {
             if (self.volume_db - 0.0).abs() >= f32::EPSILON {

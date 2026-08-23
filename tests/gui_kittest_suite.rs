@@ -11563,4 +11563,83 @@ mod kittest_suite {
             "a paste that adds nothing must say why, got {toast:?}"
         );
     }
+
+    #[test]
+    fn shift_z_fits_the_loop_region_to_the_view() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_loop_region_frac(0.40, 0.50));
+        harness.run_steps(2);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let (loop_start, loop_end) = harness.state().test_loop_region().expect("loop region");
+        let spp_before = harness.state().tabs[tab_idx].samples_per_px;
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::Z);
+        harness.run_steps(3);
+
+        let tab = &harness.state().tabs[tab_idx];
+        assert!(
+            tab.samples_per_px < spp_before,
+            "fitting a tenth of the file should zoom in: {} -> {}",
+            spp_before,
+            tab.samples_per_px
+        );
+        let visible = (tab.last_wave_w * tab.samples_per_px).ceil() as usize;
+        let view_end = tab.view_offset + visible;
+        assert!(
+            tab.view_offset <= loop_start && view_end >= loop_end,
+            "both loop edges should be on screen: view {}..{view_end} vs loop {loop_start}..{loop_end}",
+            tab.view_offset
+        );
+    }
+
+    #[test]
+    fn shift_z_does_nothing_without_a_loop() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert!(harness.state().test_loop_region().is_none());
+        let spp_before = harness.state().tabs[tab_idx].samples_per_px;
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::Z);
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_per_px,
+            spp_before,
+            "no loop, no zoom -- and Z must not have taken the press instead"
+        );
+    }
+
+    #[test]
+    fn double_clicking_a_loop_handle_zooms_in_around_it() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.70));
+        harness.run_steps(2);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before = harness.state().test_loop_region().expect("loop region");
+        let spp_before = harness.state().tabs[tab_idx].samples_per_px;
+
+        let handle = editor_pos_at_loop_edge(&harness, before.0);
+        double_click_at(&mut harness, handle);
+
+        assert!(
+            harness.state().tabs[tab_idx].samples_per_px < spp_before,
+            "a double click on the handle should zoom in"
+        );
+        assert_eq!(
+            harness.state().test_loop_region(),
+            Some(before),
+            "and must not move the loop while doing it"
+        );
+    }
 }
