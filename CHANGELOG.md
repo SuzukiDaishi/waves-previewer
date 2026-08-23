@@ -4,6 +4,57 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### 波形・ループ・ショートカットの UX 改善
+
+**波形が読めるようになった**
+
+- **中心線が中心線に見えるようになった**: 振幅 0 の線は前から描かれていたが、±6 / ±12 dBFS のグリッドと**まったく同じ色・同じ太さ**だった。波形がどこを中心に振れているかを示す唯一の線が、目盛りにすぎない 2 本と見分けがつかなかった。中心線を明るくし、グリッドを一段落とした（振幅ナビ・タイムナビが既に使っている 0 線と同系統の色）。左のガターに `0` ラベルも出る。ガターは波形領域の外なので、波形やマーカーに重なることはない。ステレオ・マルチチャンネルではレーンごとに出る。縦ズーム / パン時にレーンの中央と振幅 0 は一致しないので、Y は `waveform_center_y` から取っている。
+- **波形の色が、振幅が上がるほど暗くなっていた**: 従来は cyan → red の 1 本の補間で、(1) 中点が `rgb(167,135,162)` の**灰紫**に沈み、そこが普通の素材のいる場所だった、(2) 静かな側の輝度 170 に対して大きい側が 125 と、**明るさが振幅と逆向き**だった。つまりいちばん見たいピークがいちばん暗かった。t=0.62 に琥珀色の中継点を置き、全域で彩度 40 以上・輝度 155 以上を保つようにした。普通の素材がランプのいちばん明るいところに乗り、大きいところは従来どおり赤に寄るのでレベルも一目で分かる。編集プレビューのミントグリーンは変えていないので、プレビュー中かどうかの区別は保たれる。`amp_to_color` はリストの Wave 列とも共有なので、サムネイルも同時に読みやすくなる。
+- **聞こえていないチャンネルは沈むようになった**: mute / solo は M/S ボタンとエンジンには効いていたがキャンバスには届いておらず、消しているチャンネルが鳴っているものとまったく同じ明るさで描かれていた。そのレーンだけ背景側へ沈める（選択範囲・マーカー・再生ヘッドはその上に残るので、どのレーンでも同じように読める）。可聴判定はエンジンと同じ規則（どこかに solo があれば solo 以外は無音）。
+
+**ループ端を掴む操作が、掴む前に動かなくなった**
+
+- **ループ端のクリックが、ループを動かしてしまっていた**: 「再生位置をループ端に合わせよう」とクリックすると、その瞬間にループ点のほうが動いた。ポインタの移動は不要で、押した瞬間に決まっていた。しかも武装と移動で座標の換算が違う（ハンドルはサンプル境界、x→サンプルは中心基準）ので、クリックした場所にすら来なかった。同じクリックが Undo ステップまで積んでいた（フレーム末尾で無条件に push されるため）。押した時点で武装し、**0.5px 動いてから**初めてループ点を動かすようにした。動かなかった押下はクリックのままなので、本来やりたかったシークになる。
+- **画面外のループ端がキャンバスの縁で掴めてしまう問題**: ヒットテストが clamped な x を使っていたため、左に流れたループは両端ともキャンバスの縁にいることになり、ループから遠く離れた場所の押下に反応していた。選択範囲の端と同じく unclamped な x と `contains_boundary` を使う。ホバーカーソルも同じ判定を見るので、押しても掴めないハンドルをカーソルが約束することはない。
+- **短いループの終了端が掴めなかった**: 端の選択が `if / else if` で、掴み半径 2 つぶんより短いループでは常に開始側が勝っていた。`nearest_handle`（そのテストがこのコードを反面教師として名指ししていた）に置き換えた。掴み半径の `7.0` はヒットテスト・ホバーカーソル・ストレッチグリップの 3 箇所に散っていたので 1 つの定数にした。
+- **ループ端がマーカーに吸着するようになった**: しきい値は画面上のピクセル（8px）なので、ズーム率が変わっても操作感は同じ。掴み半径よりわずかに広いだけなので、掴んだ瞬間にハンドルが手元から逃げることはない。吸着したループ点は**マーカーとまったく同じ sample index** を取る（描画された x から丸め直さない）。書き出しや再生が読むのはこの値。マーカーとゼロクロスが競合したらマーカーが勝つ。ゼロクロスはタブの Zero Cross Snap が ON のときだけ効く — `R` キーと docs はこの設定をずっと宣伝していたが、キャンバス上でそれを読んでいる場所は 1 つも無かった。
+- **ループのハンドルが、掴める場所に描かれるようになった**: S / E のつまみはキャンバス最上部に描かれていたが、そこは前回タイムストレッチのグリップが取った帯だった。「ここを掴めばループが動く」という唯一の目印が、掴むと別のことが起きる場所に立っていた。ストレッチ帯のすぐ下から始まる▼に描き直し、ラベルもその下に移した。
+- 半サンプルの話: 極端なズームではループ端とマーカーは半サンプルぶんずれて描かれる。範囲の端はサンプルとサンプルの**間**にあり、マーカーはサンプルの**上**にあるため。内部の sample index は一致している。
+
+**ナビゲーションと表示**
+
+- **←/→ がループ端でも止まるようになった**: 左右キーはグリッド刻みのシークで、跨いだマーカーがあればそこで止まる仕組みだった。ループの開始 / 終了はその対象に入っていなかったが、再生位置をぴったり置きたい場所としては最も多い 2 つ（継ぎ目の確認、ループ位置の確認）。1 サンプル刻みになるまでズームするしか方法が無かった。マーカーと同格のランドマークにした。マーカーがループ点と同じ位置にあっても停止は 1 回だけで、次の押下は先へ進む。
+- **Shift+ホイールの横スクロールが、表示幅に対して一定になった**: 固定 60px だったので、長尺を横断するのに必要なノッチ数がズーム率に関係なく同じで、ウィンドウが広いほど 1 ノッチで進む割合が小さかった。表示幅の 15%／ノッチにした。ホイールの回転量も捨てていた（`.signum()`）ため、egui が 1 ノッチを数フレームに平滑化するぶんだけフレームレート任せに何段も進んでいた。実際の delta に比例させたので、1 ノッチは 1 ノッチになる。長尺用に Settings の **Horizontal scroll speed**（1x / 2x / 4x）を追加。
+  - 計画では Ctrl+Shift+ホイールを高速版に充てる案だったが、このコードでは使えない。egui のズーム修飾キーが COMMAND で、一致するとスクロール量がズーム側に回され、エディタに届く前にゼロにされる — Ctrl+ホイール と区別できない。
+- **`Shift+Z` でループ領域へズーム**: ループを詰める作業は両端を近くで見る作業なのに、両端が画面に入るまで手でズームするしか方法が無かった。`Z`（選択範囲へズーム）と同じ挙動で、両者は 1 つの実装を共有している。**ループハンドルのダブルクリック**でも、その端を中心に 1 段ズームインする（見ている場所が中央に留まる）。
+  - 計画では右クリックメニュー案だったが、キャンバスの右ボタンは既にシーク / Shift+右ドラッグの範囲選択に使われており、コンテキストメニューはそれと競合する。
+- **`Tab` / `Shift+Tab` でエディタタブを巡回**: 末尾で先頭に回る。Editor が前面でタブが 2 つ以上あるときだけで、リストや単一タブでは従来どおり egui のフォーカス移動。テキスト欄・メタデータ欄・モーダル・キー再割り当て中は発火しない。
+  - egui は Tab をフレーム冒頭でフォーカス移動に使うので、タブを切り替えた時点で既にどこかのウィジェットにフォーカスが移っている。放置すると**次の** Tab を奪われ、テキスト欄に入っていたら以降の無修飾キーも全部そちらへ行く。切り替え後にフォーカスを手放している。
+
+**音量とラウドネス**
+
+- **Volume は 0 dB で始まり、ダブルクリックで 0 dB に戻る**: 毎回 12 dB 下から始まり、戻す手段はスライダを引いて数値を読むか `D` を 12 回叩くかしか無かった。ラベル・トラック・数値表示のどこをダブルクリックしても戻る。丸めた表示では正確な値が分からないので、ホバーテキストに正確な dB と操作方法を出している。
+- **スライダの上半分が効くようになった**: `set_volume` が線形値を 1.0 で頭打ちにしていたため、-80〜+6 dB を名乗るスライダの 0 dB より上は全部同じだった。既定が 0 dB になると真っ先に触る領域なので、上限をスライダ自身の +6 dB に合わせた。出力サンプルは従来どおり [-1, 1] にクランプされるので、上げれば歪む — モニタゲインとして期待される挙動。
+- **LUFS がモニタ音量に振り回されなくなった**: トップバーの M / S / TP は最終出力（マスター音量・シークのアンチクリックランプ・出力クランプを全部通した後）から測っていた。音量を絞ると素材が実際より小さく見え、リストのオフライン LUFS(I) 列とも納品目標とも比較できなかった。ラウドネス表示の意味の大半がそこにある。タップを「素材そのもの」に移した — チャンネルルーティングと mute/solo は実際に鳴っているものを変えるので含み、再生音量の都合は含まない。ファイル単位の pending gain はエンジンに渡る前にバッファへ焼かれているので従来どおり乗る（リストの LUFS 列も同じく足しているので一致する）。dBFS の出力メーターは出力を見るものなので変更していない。
+
+**取り込みと発見しやすさ**
+
+- **エクスプローラ / Finder からコピーした音源を貼り付けられるようになった**: OS のファイルリストを読める環境でしか動かず、しかも失敗しても何も言わなかった。ファイルリストが無いときはクリップボードのテキストを見るようにした（`text/uri-list` の `file://` URI、改行区切りのパス、単一パス）。どのファイルマネージャも少なくともどれかをテキスト側に置くので、これで環境を問わず動く。`file://` のパーセントデコードは**バイト単位**で行う — 文字単位でやると非 ASCII のファイル名が壊れる。この用途では日本語のファイル名がそれに当たる。Windows のドライブレター (`file:///C:/...`) と UNC ホスト (`file://server/share/...`) も解釈する。パスの形をしていない行は捨てるので、文章を貼り付けても何も起きない。
+  - **結果を報告するようになった**: 追加した件数と、重複 / 非対応 / 見つからなかった件数をトーストで出す。ドラッグ&ドロップなら何を落としたか見えているが、クリップボードは何かがリストに現れるまで不可視で、黙って弾かれると「貼り付けが壊れている」としか見えない。重複と非対応の判定規則自体は D&D と同じまま。
+- **ループのショートカットが Help だけで理解できるようになった**: `L` は「Apply loop from selection/markers, else cycle loop mode」という 1 つの Action に 3 つの挙動が入っていて、ループモードの切り替えはその 3 番目としてしか呼べなかった。モード切り替えを `Shift+L` として独立させ、`L` は「ループ領域があれば Marker loop / 無ければ選択範囲からループ / どちらも無ければモード切り替え」と、従来の挙動そのままに整理した。既に `L` を再割り当てしていた人の設定は失われない（prefs 上の旧 Action 名を受け付ける）。
+  - Help はコンテキストごとの 1 枚の表で、Editor の 40 行あまりが一続きに並び、ループのキーはその真ん中に埋もれていた — どのキーか知っている人しか見つけられない。全行にカテゴリ（Playback / Navigation / Selection / Loop / Editing / View / Tabs & Windows / Files）を持たせて分類した。1 行では言い切れない行には 2 行目を足している（`K` がループ終了を追い越すとどうなるか、ループ領域が無いときモード切り替えがどうなるか、`L` が何にフォールバックするか、←/→ の刻みが何で止まるか）。**Keyboard Shortcuts** と **Customize Shortcuts** の両方が同じ分類・同じ説明を使う。
+- **`Ctrl+A` でファイル全体を選択**: エディタには全選択が無く、全体を選ぶにはドラッグするしかなかった。長いファイルで両端が画面に入るズーム率だと、そのドラッグは端に正確に届かない。破壊的な操作ではないので、`T` / `V` / `Delete` / `Ctrl+M` と違って読み取り専用ソースでも使える（メタデータインスペクタでは、そこにある表や入力欄のものなので発火しない）。リスト側の `Ctrl+A` はそのまま。
+  - ズームアウトしていると全体選択と「両端の少し手前まで」の選択は見た目が同じなので、結果を明示する — トーストと、選択が全体を覆っている間ずっとインスペクタの範囲表示に出る `(entire file)`。
+
+### エディタ: 範囲を伸ばすのと、音を伸ばすのを分けた
+
+- **選択範囲の縦線をドラッグしても、もう音は書き換わらない**: 選択範囲の両端はキャンバス全高のタイムストレッチ用グリップになっていて、線のどこを掴んでも破壊的なリサンプルが走っていた。範囲をほんの少し詰めたいだけの操作が、そのたびに音声そのものを作り直していたことになる。縦線の本体は**範囲を伸縮するだけ**の操作に戻した。掴んだ側だけが動き、反対の端は固定、`Alt` でゼロクロススナップ、反対の端を追い越せば範囲が反転する（ワーカーも Undo ステップも増えない）。
+- **音を伸ばすのは、上端のグリップだけになった**: タイムストレッチはキャンバス最上部の小さなつまみからのみ始まる。的の大きさを役割に合わせたということで、取り返しのつく操作（範囲の伸縮）に線の全高を、取り返しのつかない操作（音声の書き換え）に 18px のつまみを割り当てている。掴める範囲は描かれているつまみと同じ寸法で、見た目より広く反応することはない。
+  - つまみは 10x18px に少し大きくし、中に左右の矢印を描いた。これまで波形の**中央**に描かれていた `<>` の山記号は削除した。あれは全高が掴める時代の目印で、いまは掴めない場所に立っているだけの記号になる。
+  - ホバーしたカーソルで見分けられる: 上端のグリップは手のひら（ドラッグ中は握った手）、縦線の残りは従来どおり ↔。選択範囲の端はどの表示モードでも伸縮できるので、カーソルの表示もスペクトログラム等で出るようになった。
+- **Loop Edit でループ端と選択端が重なっていても、両方使える**: 「選択範囲からループを作る」を通した直後は 2 つの端がぴったり同じ x に立つ。これまではループマーカーが高さを問わず勝っていて、その場所ではストレッチが一切できなかった。いまは高さで分担する — 上端のグリップはストレッチ、その下の縦線はループマーカーの移動。
+- **掴んだ操作は離すまで持ち主が変わらない**: ループマーカーのドラッグはボタンの「押下中」で武装するため、範囲の伸縮中にポインタがたまたまループ端の 7px 以内を通ると、そこから先はループが動きはじめて範囲のほうが固まる、という取り違えが起きえた。押した時点の持ち主が離すまで持ち続ける。
+
 ### 動画ファイルが開けるようになった
 - **mp4 / mov の音声がそのまま扱える**: 音声が動画コンテナに入ったまま届いた素材は、これまで別のツールで音声を抜き出さないとリストにすら載らなかった。`.mp4` / `.mov` / `.m4v` / `.3gp` / `.3g2` が音声ファイルとまったく同じように読み込まれ、リストに並び、選べば音声トラックが鳴る。波形もラウドネス測定もトランスクリプトも、これまでどおり動く。音声トラックの取り出しは m4a と同じ経路 (fdk-aac、AAC でなければ symphonia) を通るので、新しい再生経路は増えていない。
   - この対応の前提として、**映像トラックのある mp4 は音声すら読めなかった**バグを直している。symphonia の `default_track()` は「ファイルの先頭のトラック」を返し、その ISO-BMFF リーダーは映像トラックも空のコーデック情報つきでトラックとして並べる。一般的な mp4 は映像トラックが先頭なので、デコーダには「コーデック不明」のトラックが渡され、そこで失敗していた。音声コーデックを名乗る最初のトラックを選ぶようになった。これは `.mp4` を `.m4a` にリネームしただけのファイルにも効く。
@@ -21,7 +72,7 @@ All notable changes in this repository (hand-written).
 - **"Add Trim As Virtual" is described in plain terms**: its hover text said "Add the trim range as a virtual item", which a user reported not understanding. It now says what it does — export the selected range as a separate item in the list, leaving the current file untouched, written to disk only when saved — along with the naming and the one-item-per-range behaviour.
 
 ### Editor: one range on the waveform
-- **Selection edges can be dragged**: adjusting a range meant redrawing it from scratch — Shift+click only ever moved the edge away from the drag's anchor, so after a left-to-right drag the start could not be pulled back at all. Both edges now carry a grab handle and can be dragged to lengthen or shorten the range, in every tool, with the opposite edge staying put. `Alt` snaps to a zero crossing and the playhead snaps as it does when drawing a selection, so a nudged edge lands where a fresh drag would. Dragging an edge past the other flips the range, exactly like drawing one. Speed and Time Stretch already use the selection's right edge for their own stretch gesture, so there only the left edge is draggable — and only the left handle is drawn, so what is shown matches what can be grabbed.
+- **Selection edges can be dragged**: adjusting a range meant redrawing it from scratch — Shift+click only ever moved the edge away from the drag's anchor, so after a left-to-right drag the start could not be pulled back at all. Both edges now carry a grab handle and can be dragged to lengthen or shorten the range, in every tool, with the opposite edge staying put. `Alt` snaps to a zero crossing and the playhead snaps as it does when drawing a selection, so a nudged edge lands where a fresh drag would. Dragging an edge past the other flips the range, exactly like drawing one. (Both edges are draggable in every tool; the Time Stretch grip that later took over the top of the same line is described under "エディタ: 範囲を伸ばすのと、音を伸ばすのを分けた" above.)
 - **The orange Trim band is gone**: the waveform drew a second, orange range for the Trim tool on top of the blue selection. Nothing in the UI had set that range for some time — only Auto Trim wrote it, and Auto Trim writes the *same* span to the selection, so one range was being drawn twice and read as "a range you had to establish separately". Hovering its edges even produced a resize cursor, for a drag that was never implemented. The selection is now the only range the waveform draws, and the header no longer labels a range it isn't drawing.
 
 ### Editor: selection shortcuts

@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use egui_kittest::Harness;
+use egui_kittest::{
+    kittest::{NodeT, Queryable},
+    Harness,
+};
 use neowaves::kittest::harness_with_startup;
 use neowaves::{StartupConfig, WavesPreviewer};
 
@@ -227,4 +230,92 @@ fn closing_only_tab_clears_active_and_returns_to_list() {
         "closing the only tab should leave the editor workspace"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `Tab` / `Shift+Tab` cycle the editor tabs, wrapping at both ends.
+///
+/// The keys were previously unbound, so they fell through to egui's own focus
+/// traversal. That traversal still runs -- it reads Tab before any of the app's
+/// handlers -- so the interesting part is that the tab switch happens *and*
+/// nothing is left holding focus afterwards.
+#[test]
+fn tab_and_shift_tab_cycle_the_editor_tabs() {
+    let (mut harness, dir, paths) = harness_with_three_tabs();
+    let names: Vec<String> = paths
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+
+    let active = |h: &Harness<'static, WavesPreviewer>| -> String {
+        h.state()
+            .test_active_tab_path()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .expect("an active tab")
+    };
+    assert_eq!(
+        active(&harness),
+        names[2],
+        "the last opened tab is in front"
+    );
+
+    harness.key_press(egui::Key::Tab);
+    harness.run_steps(3);
+    assert_eq!(active(&harness), names[0], "Tab wraps past the last tab");
+
+    harness.key_press(egui::Key::Tab);
+    harness.run_steps(3);
+    assert_eq!(active(&harness), names[1]);
+
+    harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+    harness.run_steps(3);
+    assert_eq!(active(&harness), names[0], "Shift+Tab goes back");
+
+    harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+    harness.run_steps(3);
+    assert_eq!(active(&harness), names[2], "and wraps past the first tab");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A caret in a text field owns Tab, the way it owns every other unmodified key.
+#[test]
+fn tab_does_not_switch_tabs_while_a_text_field_has_the_caret() {
+    let (mut harness, dir, paths) = harness_with_three_tabs();
+    let before = harness.state().test_active_tab_path();
+
+    harness
+        .state_mut()
+        .test_set_export_name_template("tab_focus_token");
+    harness.state_mut().test_set_show_export_settings(true);
+    harness.run_steps(3);
+    harness
+        .query_all_by_value("tab_focus_token")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::TextInput)
+        .expect("the Settings name-template field")
+        .click();
+    harness.run_steps(2);
+    assert!(
+        harness.state().test_input_scope_text_editing(),
+        "the test needs a caret in a field for this to mean anything"
+    );
+
+    harness.key_press(egui::Key::Tab);
+    harness.run_steps(3);
+    assert_eq!(
+        harness.state().test_active_tab_path(),
+        before,
+        "Tab belongs to the field, not to the tab strip"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = paths;
+}
+
+fn harness_with_three_tabs() -> (Harness<'static, WavesPreviewer>, PathBuf, [PathBuf; 3]) {
+    let dir = make_temp_dir("tab_cycle");
+    let paths = write_three(&dir);
+    let mut harness = harness_with_folder(dir.clone());
+    open_three_tabs(&mut harness, &paths);
+    harness.run_steps(2);
+    (harness, dir, paths)
 }

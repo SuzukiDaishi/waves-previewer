@@ -220,7 +220,7 @@ impl crate::app::WavesPreviewer {
                                 self.copy_selected_to_clipboard();
                             }
                             if ui.button("Paste").clicked() {
-                                self.paste_clipboard_to_list();
+                                self.paste_clipboard_to_list(None);
                             }
                         });
                     });

@@ -33,6 +33,7 @@
   - Ultra Scale Audio Plan (2026-03-15): docs/ULTRA_SCALE_AUDIO_PLAN_20260315.md
   - UI/Audio Performance Improvement Candidates (2026-06-06): docs/UI_PERFORMANCE_IMPROVEMENT_CANDIDATES_20260606.md
   - UI Freeze Countermeasures (2026-08-19): docs/UI_FREEZE_COUNTERMEASURES_20260819.md
+  - Waveform / Loop / Shortcut UX (2026-08-23): docs/WAVEFORM_LOOP_UX_20260823.md
   - CHANGELOG: CHANGELOG.md
   - Linux Debug Guide: docs/LINUX_DEBUG.md
   - Native Drag / Windows Shell Path (2026-08-18): docs/NATIVE_DRAG_SHELL_PATH_20260818.md

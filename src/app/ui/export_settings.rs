@@ -1,6 +1,7 @@
 use crate::app::types::{
-    ConflictPolicy, EditorHorizontalZoomAnchorMode, EditorPauseResumeMode, ItemBgMode, SaveMode,
-    SpectrogramScale, SrcQuality, ThemeMode, ViewMode, WindowFunction,
+    ConflictPolicy, EditorHorizontalScrollSpeed, EditorHorizontalZoomAnchorMode,
+    EditorPauseResumeMode, ItemBgMode, SaveMode, SpectrogramScale, SrcQuality, ThemeMode, ViewMode,
+    WindowFunction,
 };
 use egui::RichText;
 
@@ -474,6 +475,23 @@ impl crate::app::WavesPreviewer {
                                 self.invert_shift_wheel_pan = invert_shift_pan;
                                 self.save_prefs();
                             }
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Horizontal scroll speed:")
+                                    .on_hover_text(
+                                        "How far one Shift+wheel notch pans. The step is a \
+                                         fraction of the visible width, so this reads the same \
+                                         at every zoom; 4x is a little over half the viewport \
+                                         per notch, for moving around long takes.",
+                                    );
+                                let mut next_speed = self.editor_horizontal_scroll_speed;
+                                for speed in EditorHorizontalScrollSpeed::ALL {
+                                    ui.selectable_value(&mut next_speed, speed, speed.label());
+                                }
+                                if next_speed != self.editor_horizontal_scroll_speed {
+                                    self.editor_horizontal_scroll_speed = next_speed;
+                                    self.save_prefs();
+                                }
+                            });
                             let mut wheel_scrolls = self.editor_wheel_scrolls;
                             if ui
                                 .checkbox(

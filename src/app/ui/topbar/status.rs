@@ -731,7 +731,9 @@ impl WavesPreviewer {
         )
         .on_hover_text(
             "Realtime loudness of what's playing: M = momentary LUFS (400 ms), \
-                 S = short-term LUFS (3 s), TP = true peak (dBTP, 4x oversampled)",
+                 S = short-term LUFS (3 s), TP = true peak (dBTP, 4x oversampled).\n\
+                 Measured on the material, so the monitor volume does not move these \
+                 numbers; per-channel mute/solo and channel routing do.",
         );
         if m.is_some() || s.is_some() || tp.is_some() {
             ui.ctx()
@@ -781,7 +783,28 @@ impl WavesPreviewer {
             egui::pos2(track_right.max(track_left + 24.0), rect.center().y + 4.0),
         );
         let mut changed = false;
-        if (response.dragged() || response.clicked())
+        // Double click puts the monitor back at unity. The whole control is one
+        // allocated rect, so the label, the track and the readout all take it.
+        //
+        // `Response::double_clicked()` is not enough by itself here; see
+        // `helpers::note_repeated_click`.
+        //
+        // Either way it has to be decided before the positional branch and lock
+        // it out for the frame: a double click reports `clicked()` too, and the
+        // position under the pointer would otherwise be written straight back
+        // over the reset.
+        let click_pos = ctx.input(|i| i.pointer.interact_pos());
+        let repeated_click = response.clicked()
+            && click_pos.is_some_and(|pos| {
+                crate::app::helpers::note_repeated_click(&mut self.topbar_volume_last_click, pos)
+            });
+        let reset_to_unity = response.double_clicked() || repeated_click;
+        if reset_to_unity {
+            if (self.volume_db - 0.0).abs() >= f32::EPSILON {
+                self.volume_db = 0.0;
+                changed = true;
+            }
+        } else if (response.dragged() || response.clicked())
             && ctx.input(|i| i.pointer.interact_pos()).is_some()
         {
             if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
@@ -879,6 +902,14 @@ impl WavesPreviewer {
             mono_font,
             text_col,
         );
+        // The readout is rounded to fit the strip, so the tooltip is where the
+        // exact value lives -- and where the double click is advertised, since
+        // nothing about the control suggests it.
+        response.on_hover_text(format!(
+            "Monitor volume: {:.1} dB\nDrag to set, double-click for 0.0 dB. \
+             Affects what you hear, not the file, the meters' LUFS, or exports.",
+            self.volume_db
+        ));
     }
 
     fn ui_topbar_output_meter(&mut self, ui: &mut egui::Ui, compact: bool) {

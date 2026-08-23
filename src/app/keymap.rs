@@ -16,6 +16,51 @@ pub enum KeyContext {
     Editor,
 }
 
+/// What a shortcut is *for*, within its context.
+///
+/// The help was one flat table per context, which made the Editor's forty-odd
+/// rows a wall to read and buried the loop keys somewhere in the middle of it.
+/// Grouping by task is what lets someone find "the loop ones" without already
+/// knowing which key they are.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyCategory {
+    Files,
+    Playback,
+    Navigation,
+    Selection,
+    Loop,
+    Editing,
+    View,
+    Tabs,
+}
+
+impl KeyCategory {
+    pub fn title(self) -> &'static str {
+        match self {
+            KeyCategory::Files => "Files",
+            KeyCategory::Playback => "Playback",
+            KeyCategory::Navigation => "Navigation",
+            KeyCategory::Selection => "Selection",
+            KeyCategory::Loop => "Loop",
+            KeyCategory::Editing => "Editing",
+            KeyCategory::View => "View",
+            KeyCategory::Tabs => "Tabs & Windows",
+        }
+    }
+
+    /// Display order within a context.
+    pub const ALL: [KeyCategory; 8] = [
+        KeyCategory::Playback,
+        KeyCategory::Navigation,
+        KeyCategory::Selection,
+        KeyCategory::Loop,
+        KeyCategory::Editing,
+        KeyCategory::View,
+        KeyCategory::Tabs,
+        KeyCategory::Files,
+    ];
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Action {
     // Global
@@ -24,6 +69,7 @@ pub enum Action {
     VolumeDown,
     VolumeUp,
     SwitchTab,
+    CycleEditorTab,
     SaveSession,
     SaveSessionAs,
     NewWindow,
@@ -41,11 +87,13 @@ pub enum Action {
     // Editor
     EditorSetLoopStart,
     EditorSetLoopEnd,
-    EditorApplyLoop,
+    EditorToggleMarkerLoop,
+    EditorCycleLoopMode,
     EditorCycleViewMode,
     EditorToggleBpm,
     EditorAddMarker,
     EditorToggleZeroCross,
+    EditorSelectAll,
     EditorDeleteSelection,
     EditorTrimSelection,
     EditorMuteSelection,
@@ -56,6 +104,7 @@ pub enum Action {
     EditorSeekStart,
     EditorSeekEnd,
     EditorZoomToSelection,
+    EditorZoomToLoopRegion,
     EditorZoomIn,
     EditorZoomOut,
     EditorViewPageBack,
@@ -117,6 +166,15 @@ impl Action {
     /// Inverse of [`Action::name`]; every action appears in KEYMAP exactly
     /// once, so the table doubles as the registry.
     pub fn from_name(s: &str) -> Option<Action> {
+        // This action was `EditorApplyLoop` until the mode cycle it had been
+        // tangled with was split out of it. Prefs written before that name it
+        // the old way, and without the alias a user's rebinding of it would be
+        // dropped on the next load without a word.
+        let s = if s == "EditorApplyLoop" {
+            "EditorToggleMarkerLoop"
+        } else {
+            s
+        };
         KEYMAP
             .iter()
             .map(|b| b.action)
@@ -154,6 +212,12 @@ pub enum Dispatch {
 pub struct KeyBinding {
     pub action: Action,
     pub context: KeyContext,
+    /// What this shortcut is for, used to group the help.
+    pub category: KeyCategory,
+    /// A sentence or two on what the key actually does, for rows whose one-line
+    /// `desc` cannot say enough -- most often what happens when the thing it
+    /// acts on is not there. Empty where the one-liner is the whole story.
+    pub detail: &'static str,
     /// Concrete chord for table-dispatched rows. `None` for manual rows whose
     /// keys are described by `keys_label` (ranges, multi-chord families).
     pub chord: Option<(Mods, Key)>,
@@ -177,6 +241,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::FocusSearch,
         context: KeyContext::Global,
+        category: KeyCategory::Navigation,
+        detail: "",
         chord: Some((Mods::Command, Key::F)),
         keys_label: "",
         desc: "Focus the search box",
@@ -185,6 +251,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::TogglePlay,
         context: KeyContext::Global,
+        category: KeyCategory::Playback,
+        detail: "",
         chord: Some((Mods::None, Key::Space)),
         keys_label: "",
         desc: "Play / stop",
@@ -193,6 +261,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::VolumeDown,
         context: KeyContext::Global,
+        category: KeyCategory::Playback,
+        detail: "",
         chord: Some((Mods::None, Key::A)),
         keys_label: "",
         desc: "Master volume -1 dB",
@@ -201,6 +271,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::VolumeUp,
         context: KeyContext::Global,
+        category: KeyCategory::Playback,
+        detail: "",
         chord: Some((Mods::None, Key::D)),
         keys_label: "",
         desc: "Master volume +1 dB",
@@ -209,14 +281,28 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::SwitchTab,
         context: KeyContext::Global,
+        category: KeyCategory::Tabs,
+        detail: "",
         chord: None,
         keys_label: "Ctrl+1..9",
         desc: "Switch workspace: 1 = List, 2..9 = editor tabs",
         dispatch: Dispatch::Manual,
     },
     KeyBinding {
+        action: Action::CycleEditorTab,
+        context: KeyContext::Global,
+        category: KeyCategory::Tabs,
+        detail: "Only while an editor tab is in front and more than one is open; elsewhere Tab still moves focus between controls.",
+        chord: None,
+        keys_label: "Tab / Shift+Tab",
+        desc: "Next / previous editor tab (wraps; editor workspace only)",
+        dispatch: Dispatch::Manual,
+    },
+    KeyBinding {
         action: Action::SaveSession,
         context: KeyContext::Global,
+        category: KeyCategory::Files,
+        detail: "",
         chord: Some((Mods::Command, Key::S)),
         keys_label: "",
         desc: "Save session",
@@ -225,6 +311,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::SaveSessionAs,
         context: KeyContext::Global,
+        category: KeyCategory::Files,
+        detail: "",
         chord: Some((Mods::CommandShift, Key::S)),
         keys_label: "",
         desc: "Save session as...",
@@ -233,6 +321,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::NewWindow,
         context: KeyContext::Global,
+        category: KeyCategory::Tabs,
+        detail: "",
         chord: Some((Mods::CommandShift, Key::N)),
         keys_label: "",
         desc: "Open a new window",
@@ -241,6 +331,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::ExportSelected,
         context: KeyContext::Global,
+        category: KeyCategory::Files,
+        detail: "",
         chord: Some((Mods::Command, Key::E)),
         keys_label: "",
         desc: "Export selected files",
@@ -249,6 +341,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::CloseTab,
         context: KeyContext::Global,
+        category: KeyCategory::Tabs,
+        detail: "",
         chord: Some((Mods::Command, Key::W)),
         keys_label: "",
         desc: "Close the active editor tab (asks when dirty)",
@@ -257,6 +351,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::Undo,
         context: KeyContext::Global,
+        category: KeyCategory::Editing,
+        detail: "",
         chord: None,
         keys_label: "Ctrl+Z",
         desc: "Undo (list or editor, scope follows focus)",
@@ -265,6 +361,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::Redo,
         context: KeyContext::Global,
+        category: KeyCategory::Editing,
+        detail: "",
         chord: None,
         keys_label: "Ctrl+Shift+Z / Ctrl+Y",
         desc: "Redo",
@@ -274,6 +372,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::ListToggleAutoplay,
         context: KeyContext::List,
+        category: KeyCategory::Playback,
+        detail: "",
         chord: Some((Mods::None, Key::P)),
         keys_label: "",
         desc: "Toggle auto-play on navigation",
@@ -282,6 +382,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::ListToggleRegex,
         context: KeyContext::List,
+        category: KeyCategory::Navigation,
+        detail: "",
         chord: Some((Mods::None, Key::R)),
         keys_label: "",
         desc: "Toggle regex search",
@@ -290,6 +392,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::ListOpenSelected,
         context: KeyContext::List,
+        category: KeyCategory::Navigation,
+        detail: "",
         chord: None,
         keys_label: "Enter",
         desc: "Open the selected rows in the editor",
@@ -298,6 +402,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::ListNavigate,
         context: KeyContext::List,
+        category: KeyCategory::Navigation,
+        detail: "",
         chord: None,
         keys_label: "Up/Down, PgUp/PgDn, Home/End",
         desc: "Move the selection (Shift extends the range)",
@@ -306,6 +412,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::ListRenameInline,
         context: KeyContext::List,
+        category: KeyCategory::Editing,
+        detail: "",
         chord: Some((Mods::None, Key::F2)),
         keys_label: "",
         desc: "Rename the selected file in place",
@@ -314,6 +422,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::ListCopyPaste,
         context: KeyContext::List,
+        category: KeyCategory::Files,
+        detail: "Paste takes files copied in the OS file browser, as a file list or as pasted paths, and reports what it added and what it skipped.",
         chord: None,
         keys_label: "Ctrl+C / Ctrl+V",
         desc: "Copy selected files / paste files into the list",
@@ -323,6 +433,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorSetLoopStart,
         context: KeyContext::Editor,
+        category: KeyCategory::Loop,
+        detail: "Moves the loop start to the playhead. The end stays where it is; if that would put the start past it, the two swap.",
         chord: Some((Mods::None, Key::K)),
         keys_label: "",
         desc: "Set loop start at the playhead",
@@ -331,22 +443,38 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorSetLoopEnd,
         context: KeyContext::Editor,
+        category: KeyCategory::Loop,
+        detail: "Moves the loop end to the playhead. The start stays where it is.",
         chord: Some((Mods::None, Key::P)),
         keys_label: "",
         desc: "Set loop end at the playhead",
         dispatch: Dispatch::Table,
     },
     KeyBinding {
-        action: Action::EditorApplyLoop,
+        action: Action::EditorToggleMarkerLoop,
         context: KeyContext::Editor,
+        category: KeyCategory::Loop,
+        detail: "With a loop region set, turns marker looping on from it. With no loop region but a selection, makes the loop out of the selection. With neither, falls back to cycling the loop mode.",
         chord: Some((Mods::None, Key::L)),
         keys_label: "",
         desc: "Apply loop from selection/markers, else cycle loop mode",
         dispatch: Dispatch::Table,
     },
     KeyBinding {
+        action: Action::EditorCycleLoopMode,
+        context: KeyContext::Editor,
+        category: KeyCategory::Loop,
+        detail: "Off, then the whole file, then the marker loop, then off again. Marker loop needs a loop region; with none set it lands back on off.",
+        chord: Some((Mods::Shift, Key::L)),
+        keys_label: "",
+        desc: "Cycle the loop mode",
+        dispatch: Dispatch::Table,
+    },
+    KeyBinding {
         action: Action::EditorCycleViewMode,
         context: KeyContext::Editor,
+        category: KeyCategory::View,
+        detail: "",
         chord: Some((Mods::None, Key::S)),
         keys_label: "",
         desc: "Cycle view mode (Waveform / Spectrogram / Log / Mel / ...)",
@@ -355,6 +483,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorToggleBpm,
         context: KeyContext::Editor,
+        category: KeyCategory::View,
+        detail: "",
         chord: Some((Mods::None, Key::B)),
         keys_label: "",
         desc: "Toggle the BPM grid",
@@ -363,6 +493,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorAddMarker,
         context: KeyContext::Editor,
+        category: KeyCategory::Navigation,
+        detail: "",
         chord: Some((Mods::None, Key::M)),
         keys_label: "",
         desc: "Add a marker at the playhead",
@@ -371,9 +503,21 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorToggleZeroCross,
         context: KeyContext::Editor,
+        category: KeyCategory::Selection,
+        detail: "Snaps a dragged loop edge to the nearest zero crossing. A marker within reach still wins over it.",
         chord: Some((Mods::None, Key::R)),
         keys_label: "",
         desc: "Toggle zero-cross snap",
+        dispatch: Dispatch::Table,
+    },
+    KeyBinding {
+        action: Action::EditorSelectAll,
+        context: KeyContext::Editor,
+        category: KeyCategory::Selection,
+        detail: "The inspector range readout keeps saying entire file for as long as the selection covers everything.",
+        chord: Some((Mods::Command, Key::A)),
+        keys_label: "",
+        desc: "Select the whole file",
         dispatch: Dispatch::Table,
     },
     KeyBinding {
@@ -382,6 +526,8 @@ pub const KEYMAP: &[KeyBinding] = &[
         // Delete rather than `C`: this is the Trim inspector's Cut, and Delete
         // is what a sound designer reaches for. The list and the effect graph
         // also use Delete, but each is scoped to its own workspace.
+        category: KeyCategory::Editing,
+        detail: "",
         chord: Some((Mods::None, Key::Delete)),
         keys_label: "",
         desc: "Delete the selection and join (undoable)",
@@ -390,6 +536,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorTrimSelection,
         context: KeyContext::Editor,
+        category: KeyCategory::Editing,
+        detail: "",
         chord: Some((Mods::None, Key::T)),
         keys_label: "",
         desc: "Trim to the selection (undoable)",
@@ -399,6 +547,8 @@ pub const KEYMAP: &[KeyBinding] = &[
         action: Action::EditorMuteSelection,
         context: KeyContext::Editor,
         // Bare `M` is already "add a marker", so mute takes the Ctrl chord.
+        category: KeyCategory::Editing,
+        detail: "",
         chord: Some((Mods::Command, Key::M)),
         keys_label: "",
         desc: "Mute the selection (undoable)",
@@ -407,6 +557,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorVirtualTrim,
         context: KeyContext::Editor,
+        category: KeyCategory::Files,
+        detail: "",
         chord: Some((Mods::None, Key::V)),
         keys_label: "",
         desc: "Create a virtual trim item from the selection",
@@ -415,6 +567,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorDigitSeek,
         context: KeyContext::Editor,
+        category: KeyCategory::Navigation,
+        detail: "",
         chord: None,
         keys_label: "1..9, 0",
         desc: "Seek across the file (1 = start, ..., 0 = end)",
@@ -423,6 +577,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorAudioClipboard,
         context: KeyContext::Editor,
+        category: KeyCategory::Editing,
+        detail: "",
         chord: None,
         keys_label: "Ctrl+C / X / V (+Shift/Alt)",
         desc: "Copy / cut / paste-insert audio; Shift+V mixes, Alt+V crossfades",
@@ -431,6 +587,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorSeekStart,
         context: KeyContext::Editor,
+        category: KeyCategory::Navigation,
+        detail: "",
         chord: Some((Mods::None, Key::Home)),
         keys_label: "",
         desc: "Seek to the start of the file",
@@ -439,6 +597,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorSeekEnd,
         context: KeyContext::Editor,
+        category: KeyCategory::Navigation,
+        detail: "",
         chord: Some((Mods::None, Key::End)),
         keys_label: "",
         desc: "Seek to the end of the file",
@@ -447,14 +607,28 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorZoomToSelection,
         context: KeyContext::Editor,
+        category: KeyCategory::View,
+        detail: "",
         chord: Some((Mods::None, Key::Z)),
         keys_label: "",
         desc: "Zoom the view to the selection",
         dispatch: Dispatch::Table,
     },
     KeyBinding {
+        action: Action::EditorZoomToLoopRegion,
+        context: KeyContext::Editor,
+        category: KeyCategory::View,
+        detail: "Fits the loop region to the view with a small margin. Double-clicking a loop handle instead zooms in one step around that end.",
+        chord: Some((Mods::Shift, Key::Z)),
+        keys_label: "",
+        desc: "Zoom the view to the loop region",
+        dispatch: Dispatch::Table,
+    },
+    KeyBinding {
         action: Action::EditorZoomIn,
         context: KeyContext::Editor,
+        category: KeyCategory::View,
+        detail: "",
         chord: Some((Mods::None, Key::Plus)),
         keys_label: "",
         desc: "Zoom in around the playhead (= works too)",
@@ -463,6 +637,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorZoomOut,
         context: KeyContext::Editor,
+        category: KeyCategory::View,
+        detail: "",
         chord: Some((Mods::None, Key::Minus)),
         keys_label: "",
         desc: "Zoom out around the playhead",
@@ -471,6 +647,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorViewPageBack,
         context: KeyContext::Editor,
+        category: KeyCategory::View,
+        detail: "",
         chord: Some((Mods::None, Key::OpenBracket)),
         keys_label: "",
         desc: "Scroll the view back one page",
@@ -479,6 +657,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorViewPageForward,
         context: KeyContext::Editor,
+        category: KeyCategory::View,
+        detail: "",
         chord: Some((Mods::None, Key::CloseBracket)),
         keys_label: "",
         desc: "Scroll the view forward one page",
@@ -487,6 +667,8 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorCancelPreview,
         context: KeyContext::Editor,
+        category: KeyCategory::Editing,
+        detail: "",
         chord: Some((Mods::None, Key::Escape)),
         keys_label: "",
         desc: "Discard the pending tool preview",
@@ -495,9 +677,11 @@ pub const KEYMAP: &[KeyBinding] = &[
     KeyBinding {
         action: Action::EditorArrowKeys,
         context: KeyContext::Editor,
+        category: KeyCategory::Navigation,
+        detail: "The step follows the time or BPM grid. Markers and loop points stop it, so a step that would cross one lands on it exactly.",
         chord: None,
         keys_label: "Left/Right (+Shift/Alt/Ctrl)",
-        desc: "Seek; Shift extends selection, Alt steps zero-cross, Ctrl steps one sample",
+        desc: "Seek, stopping on markers and loop points; Shift extends selection, Alt steps zero-cross, Ctrl steps one sample",
         dispatch: Dispatch::Manual,
     },
 ];
@@ -660,6 +844,50 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_old_name_for_the_split_loop_action_still_resolves() {
+        // A user who rebound this before the mode cycle was split out of it has
+        // `keymap=EditorApplyLoop=...` in their prefs. Dropping the alias would
+        // discard that binding on the next load without saying anything.
+        assert_eq!(
+            Action::from_name("EditorApplyLoop"),
+            Some(Action::EditorToggleMarkerLoop)
+        );
+        assert_eq!(
+            Action::from_name("EditorToggleMarkerLoop"),
+            Some(Action::EditorToggleMarkerLoop)
+        );
+        assert_eq!(Action::from_name("NoSuchAction"), None);
+    }
+
+    #[test]
+    fn every_category_that_claims_a_row_is_in_the_display_order() {
+        // A row whose category is missing from `ALL` is simply not drawn, and
+        // nothing else would notice.
+        for binding in KEYMAP {
+            assert!(
+                KeyCategory::ALL.contains(&binding.category),
+                "{:?} is in {:?}, which the help never renders",
+                binding.action,
+                binding.category
+            );
+        }
+    }
+
+    #[test]
+    fn the_loop_keys_explain_what_happens_when_there_is_no_loop() {
+        // The whole point of the Loop group: its keys behave differently
+        // depending on what is already set, and the one-line desc has no room
+        // to say so.
+        for binding in KEYMAP.iter().filter(|b| b.category == KeyCategory::Loop) {
+            assert!(
+                !binding.detail.is_empty(),
+                "{:?} needs a detail line",
+                binding.action
+            );
         }
     }
 }

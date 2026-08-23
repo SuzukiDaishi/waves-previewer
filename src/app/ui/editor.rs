@@ -160,6 +160,72 @@ impl EditorDisplayGeometry {
 /// handle can never teleport the edge onto the playhead on the first frame.
 const SELECTION_EDGE_GRAB_RADIUS: f32 = 7.0;
 
+/// Grab radius for a loop edge on the waveform.
+///
+/// The same 7 px the selection's edges use, and for the same reason: the loop
+/// line stands in the middle of the canvas where a plain click is the seek
+/// gesture. It was three separate literals before — the hit test, the hover
+/// cursor, and the stretch grip's "decline, a loop edge is here" test — which
+/// is three chances for the grabbable area and the drawn one to drift apart.
+const LOOP_EDGE_GRAB_RADIUS: f32 = 7.0;
+
+/// How close a dragged loop edge has to come to a marker to land exactly on it.
+///
+/// Decided in pixels, not samples, so the magnet feels identical at every zoom.
+/// Kept just above the grab radius, matching the playhead magnet the range drag
+/// already uses: a snap that reached further than the grab would pull an edge
+/// out from under the press on the frame it was picked up.
+const LOOP_SNAP_RADIUS: f32 = 8.0;
+
+/// The loop edge's grab tab: a downward triangle at the top of the loop line.
+///
+/// It sits immediately below the Time Stretch grip rather than at the very top
+/// of the canvas, where it used to be drawn. The grip took that band over, so
+/// the one glyph that says "grab here to move the loop" was standing exactly
+/// where grabbing does something else entirely. It now starts where the loop
+/// drag starts.
+const LOOP_HANDLE_W: f32 = 11.0;
+const LOOP_HANDLE_H: f32 = 9.0;
+
+// The selection's Time Stretch grip: a tab at the very top of the canvas, and
+// the only place the destructive stretch can be started from.
+//
+// Below this band the same edge line is a plain range resize, so what is drawn
+// and what is grabbable must stay the same number — a grip that reaches
+// further than it looks turns a range nudge into a resample.
+const SELECTION_STRETCH_HANDLE_W: f32 = 10.0;
+const SELECTION_STRETCH_HANDLE_H: f32 = 18.0;
+
+/// Is `y` inside the stretch grip's band for a canvas whose top is `canvas_top`?
+fn in_selection_stretch_band(canvas_top: f32, y: f32) -> bool {
+    y >= canvas_top && y <= canvas_top + SELECTION_STRETCH_HANDLE_H
+}
+
+/// The grip's height, for pointer-driven UI tests that must aim inside it.
+#[cfg(feature = "kittest")]
+pub(crate) fn selection_stretch_handle_height() -> f32 {
+    SELECTION_STRETCH_HANDLE_H
+}
+
+// The amplitude-0 line and the dB scale around it.
+//
+// These were one colour and one width, which made the line that says where the
+// waveform is centred indistinguishable from the two that are only a scale.
+// The centre line belongs to the same family as the zero lines the amplitude
+// (`rgb(86, 98, 116)`) and time (`rgb(84, 94, 110)`) navigators already draw;
+// the grid sits below it so the two roles read apart. Both stay well under the
+// waveform's own brightness — this is a reference, not a feature.
+const WAVE_CENTER_LINE_COL: Color32 = Color32::from_rgb(96, 104, 120);
+const WAVE_CENTER_LINE_W: f32 = 1.4;
+const WAVE_CENTER_LABEL_COL: Color32 = Color32::from_rgb(150, 158, 172);
+const WAVE_DB_GRID_COL: Color32 = Color32::from_rgb(38, 38, 44);
+
+/// Laid over a lane whose channel is muted (or lost to someone else's solo).
+/// The canvas background at ~59% alpha, so the lane fades toward the backdrop
+/// instead of changing hue. Written premultiplied because that is the `const`
+/// constructor: rgb(16, 16, 18) x 150/255.
+const WAVE_INAUDIBLE_SCRIM: Color32 = Color32::from_rgba_premultiplied(9, 9, 11, 150);
+
 /// Nearest handle to `x` within `radius`, returning that handle's payload.
 ///
 /// Ties resolve toward the later entry, so on a selection narrower than two
@@ -485,8 +551,64 @@ impl crate::app::WavesPreviewer {
         changed
     }
 
+    /// Timeline pixels to pan per pixel of wheel travel, for Shift+wheel.
+    ///
+    /// Sized so one ordinary notch — about `WHEEL_NOTCH_PX` of smooth delta —
+    /// moves `HORIZONTAL_PAN_NOTCH_FRACTION` of the visible width at 1x. That
+    /// keeps the gesture feeling the same whatever the zoom, and lets the
+    /// speed multiplier mean something concrete: 4x is a little over half the
+    /// viewport per notch.
+    pub(crate) fn editor_horizontal_pan_gain(
+        wave_w: f32,
+        speed: EditorHorizontalScrollSpeed,
+    ) -> f32 {
+        const WHEEL_NOTCH_PX: f32 = 50.0;
+        const HORIZONTAL_PAN_NOTCH_FRACTION: f32 = 0.15;
+        wave_w.max(1.0) * HORIZONTAL_PAN_NOTCH_FRACTION / WHEEL_NOTCH_PX * speed.multiplier()
+    }
+
     pub(crate) fn normalized_loop_range(range: Option<(usize, usize)>) -> Option<(usize, usize)> {
         range.map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
+    }
+
+    /// Where a loop edge dragged to `x` should land.
+    ///
+    /// Markers win over zero crossings, which is the order that matters when
+    /// both are in reach: a marker is a place the user put deliberately, a zero
+    /// crossing is one the signal happens to offer. Zero crossings only apply
+    /// when the tab's own Zero Cross Snap is on — the `R` key has advertised
+    /// that setting since before anything on the canvas read it.
+    ///
+    /// A snapped edge takes the marker's own sample index. Rounding back
+    /// through the pixel it was drawn at would leave the loop a sample or two
+    /// off the marker it is meant to sit exactly on. (The two still draw half a
+    /// sample apart at extreme zoom, because a range edge lies *between*
+    /// samples while a marker lies *on* one. The indices are equal, which is
+    /// what loop export and playback read.)
+    fn loop_edge_snap_sample(
+        tab: &EditorTab,
+        geom: &EditorDisplayGeometry,
+        zero_cross_epsilon: f32,
+        x: f32,
+    ) -> usize {
+        let mut nearest: Option<(f32, usize)> = None;
+        for marker in &tab.markers {
+            if !geom.contains_sample_center(marker.sample) {
+                continue;
+            }
+            let dx = (geom.sample_center_x_unclamped(marker.sample) - x).abs();
+            if dx <= LOOP_SNAP_RADIUS && nearest.is_none_or(|(best, _)| dx < best) {
+                nearest = Some((dx, marker.sample));
+            }
+        }
+        if let Some((_, sample)) = nearest {
+            return sample;
+        }
+        let raw = geom.x_to_display_sample(x);
+        if tab.snap_zero_cross {
+            return zc_snap_nearest(&tab.ch_samples, zero_cross_epsilon, raw);
+        }
+        raw
     }
 
     pub(crate) fn resolve_editor_loop_visual_ranges(
@@ -671,13 +793,32 @@ impl crate::app::WavesPreviewer {
 
     /// Fit the view to the primary selection with a small margin (Z shortcut).
     pub(in crate::app) fn editor_zoom_to_selection(&mut self, tab_idx: usize) {
+        let range = self.tabs.get(tab_idx).and_then(|tab| tab.selection);
+        self.editor_zoom_to_range(tab_idx, range);
+    }
+
+    /// Fit the loop region to the view, the way `Z` fits the selection.
+    ///
+    /// Adjusting a loop means looking closely at both of its ends, and there
+    /// was no way to get there except zooming by hand until they were both on
+    /// screen.
+    pub(in crate::app) fn editor_zoom_to_loop_region(&mut self, tab_idx: usize) {
+        let range = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| Self::normalized_loop_range(tab.loop_region));
+        self.editor_zoom_to_range(tab_idx, range);
+    }
+
+    /// Fit `range` to the view with a small margin on each side.
+    fn editor_zoom_to_range(&mut self, tab_idx: usize, range: Option<(usize, usize)>) {
         let Some(tab) = self.tabs.get_mut(tab_idx) else {
             return;
         };
-        let Some((sel_start, sel_end)) = tab.selection else {
+        let Some((start, end)) = range else {
             return;
         };
-        if sel_end <= sel_start {
+        if end <= start {
             return;
         }
         let wave_w = tab.last_wave_w;
@@ -692,13 +833,53 @@ impl crate::app::WavesPreviewer {
         if display_samples_len == 0 {
             return;
         }
-        let sel_len = sel_end - sel_start;
-        let pad = ((sel_len as f64) * 0.05).ceil().max(1.0) as usize;
-        let spp = Self::editor_fit_samples_per_px(sel_len + pad * 2, wave_w);
+        let range_len = end - start;
+        // 5% either side: enough that the edges are not flush against the
+        // canvas border, which is what makes them awkward to grab.
+        let pad = ((range_len as f64) * 0.05).ceil().max(1.0) as usize;
+        let spp = Self::editor_fit_samples_per_px(range_len + pad * 2, wave_w);
         tab.samples_per_px = spp;
         let visible = ((wave_w * spp).ceil()).max(1.0) as usize;
         let max_left = display_samples_len.saturating_sub(visible);
-        Self::editor_set_view_offset_exact(tab, sel_start as f64 - pad as f64, max_left);
+        Self::editor_set_view_offset_exact(tab, start as f64 - pad as f64, max_left);
+        Self::invalidate_editor_viewport_cache(tab);
+    }
+
+    /// Zoom in around one sample, keeping it in the middle of the view.
+    ///
+    /// Used by the double-click on a loop handle: the point you are working on
+    /// stays where you are looking instead of sliding off as the view narrows.
+    pub(in crate::app) fn editor_zoom_centered_on_sample(
+        &mut self,
+        tab_idx: usize,
+        sample: usize,
+        factor: f32,
+    ) {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        let wave_w = tab.last_wave_w;
+        if wave_w <= 0.0 {
+            return;
+        }
+        let display_samples_len = if tab.loading && tab.samples_len_visual > 0 {
+            tab.samples_len_visual
+        } else {
+            tab.samples_len
+        };
+        if display_samples_len == 0 {
+            return;
+        }
+        let fit = Self::editor_fit_samples_per_px(display_samples_len, wave_w);
+        let spp = (tab.samples_per_px * factor).clamp(
+            crate::app::EDITOR_MIN_SAMPLES_PER_PX,
+            fit.max(crate::app::EDITOR_MIN_SAMPLES_PER_PX),
+        );
+        tab.samples_per_px = spp;
+        let visible = ((wave_w * spp).ceil()).max(1.0) as usize;
+        let max_left = display_samples_len.saturating_sub(visible);
+        let exact = Self::editor_exact_view_for_anchor(sample, 0.5, wave_w, spp);
+        Self::editor_set_view_offset_exact(tab, exact, max_left);
         Self::invalidate_editor_viewport_cache(tab);
     }
 
@@ -875,7 +1056,11 @@ impl crate::app::WavesPreviewer {
             - (anchor_ratio as f64 * wave_w.max(1.0) as f64 * spp.max(0.0001) as f64)
     }
 
-    fn editor_set_selection_from_anchor(tab: &mut EditorTab, anchor: usize, target: usize) {
+    pub(in crate::app) fn editor_set_selection_from_anchor(
+        tab: &mut EditorTab,
+        anchor: usize,
+        target: usize,
+    ) {
         let (start, end) = if target >= anchor {
             (anchor, target)
         } else {
@@ -1075,6 +1260,19 @@ impl crate::app::WavesPreviewer {
         vertical_view_center: f32,
     ) -> f32 {
         Self::waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, 0.0)
+    }
+
+    /// Is this channel actually being monitored right now?
+    ///
+    /// Mirrors the engine's own rule (`audible_mask` in `src/audio.rs`): a solo
+    /// anywhere silences everything that is not soloed, and only when nothing
+    /// is soloed does mute decide.
+    pub(crate) fn editor_channel_is_audible(tab: &EditorTab, channel: usize) -> bool {
+        if tab.ch_solo.iter().any(|&s| s) {
+            tab.ch_solo.get(channel).copied().unwrap_or(false)
+        } else {
+            !tab.ch_muted.get(channel).copied().unwrap_or(false)
+        }
     }
 
     fn amplitude_nav_y_from_amp(rail_rect: egui::Rect, amp: f32) -> f32 {
@@ -2878,6 +3076,10 @@ impl crate::app::WavesPreviewer {
         }
         let editor_panel_rect = ui.max_rect();
         let mut apply_pending_loop = false;
+        // Double-clicking a loop handle zooms in around that point. Deferred
+        // because the zoom helpers take `&mut self` and the pointer block runs
+        // with the tab already borrowed.
+        let mut zoom_around_loop_point: Option<usize> = None;
         let mut do_commit_loop = false;
         let mut do_preview_unwrap: Option<u32> = None;
         let mut do_commit_markers = false;
@@ -3052,6 +3254,7 @@ impl crate::app::WavesPreviewer {
                 {
                     tab.selection_stretch_cancel_until_release = true;
                 }
+                tab.selection_edge_drag_anchor = None;
                 let prev_preview_supported =
                     Self::view_supports_wave_preview(prev_view, tab.show_waveform_overlay);
                 tab.set_leaf_view_mode(selected_view);
@@ -3415,7 +3618,7 @@ impl crate::app::WavesPreviewer {
                         }
                     };
                     let mut new_display = raw_target.min(max_display);
-                    new_display = Self::stop_with_marker_if_needed(
+                    new_display = Self::stop_at_landmark_if_needed(
                         &self.tabs[tab_idx],
                         cur_display,
                         new_display,
@@ -3789,6 +3992,7 @@ impl crate::app::WavesPreviewer {
                         None
                     };
                     tab.last_amplitude_nav_rect = amplitude_nav_rect;
+                    tab.last_wave_canvas_rect = Some(rect);
                     tab.last_amplitude_viewport_rect = amplitude_nav_rect.map(|nav_rect| {
                         Self::amplitude_nav_viewport_rect(
                             nav_rect,
@@ -4963,7 +5167,20 @@ impl crate::app::WavesPreviewer {
                     scroll_for_pan = -scroll_for_pan;
                 }
                 if modifiers.shift && scroll_for_pan.abs() > 0.0 && display_samples_len > 0 {
-                    let delta_px = -scroll_for_pan.signum() * 60.0; // a page step
+                    // Proportional, and measured against the viewport rather
+                    // than a fixed 60 px.
+                    //
+                    // A fixed step meant crossing a long file took as many
+                    // notches at any zoom, which is what made scrubbing through
+                    // a long take feel like it went nowhere. Taking `.signum()`
+                    // also threw away how far the wheel actually turned, and
+                    // because egui smooths one physical notch across several
+                    // frames, that turned one notch into as many steps as the
+                    // frame rate happened to allow. Scaling the real delta
+                    // fixes both: a notch moves the same fraction of what is on
+                    // screen every time.
+                    let delta_px =
+                        -scroll_for_pan * Self::editor_horizontal_pan_gain(wave_w, self.editor_horizontal_scroll_speed);
                     let vis = (wave_w * tab.samples_per_px).ceil() as usize;
                     let max_left = display_samples_len.saturating_sub(vis);
                     let next_exact = tab.view_offset_exact + (delta_px * tab.samples_per_px) as f64;
@@ -5151,12 +5368,20 @@ impl crate::app::WavesPreviewer {
                         geom.contains_boundary(sample)
                             && (pos.x - geom.sample_boundary_x_unclamped(sample)).abs() <= radius
                     };
+                    let press_in_stretch_band =
+                        in_selection_stretch_band(rect.top(), pos.y);
                     let mut specialized_handle_hit = false;
                     match tab.active_tool {
-                        ToolKind::LoopEdit => {
+                        // A loop edge almost always sits exactly on the
+                        // selection edge (Set loop from selection), so the two
+                        // grips overlap. Split them by height rather than
+                        // letting one swallow the other: the tab at the top
+                        // stretches, the line below it moves the loop marker.
+                        ToolKind::LoopEdit if !press_in_stretch_band => {
                             if let Some((a, b)) = tab.loop_region {
                                 specialized_handle_hit =
-                                    near_x(a.min(b), 7.0) || near_x(a.max(b), 7.0);
+                                    near_x(a.min(b), LOOP_EDGE_GRAB_RADIUS)
+                                        || near_x(a.max(b), LOOP_EDGE_GRAB_RADIUS);
                             }
                         }
                         ToolKind::Fade => {
@@ -5206,7 +5431,7 @@ impl crate::app::WavesPreviewer {
                         _ => {}
                     }
 
-                    if !specialized_handle_hit && sel_e > sel_s {
+                    if !specialized_handle_hit && press_in_stretch_band && sel_e > sel_s {
                         let mut candidates = Vec::with_capacity(2);
                         if geom.contains_boundary(sel_s) {
                             candidates.push((geom.sample_boundary_x_unclamped(sel_s), 0usize));
@@ -5982,64 +6207,139 @@ impl crate::app::WavesPreviewer {
                 && matches!(tab.active_tool, ToolKind::LoopEdit)
                 && display_samples_len > 0
             {
-                let pointer_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+                let pointer_down = ui.input(|i| i.pointer.primary_down());
                 let pointer_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
+                // Kept across the reset below: the double click that zooms is
+                // only recognisable once the button comes back up, by which
+                // point the drag state has to be gone.
+                let armed_marker = tab.dragging_marker;
+                let armed_and_moved = tab.loop_drag_moved;
                 if pointer_released || !pointer_down {
                     tab.dragging_marker = None;
+                    tab.loop_drag_moved = false;
+                }
+                // A second click on a handle, in place, zooms in around it --
+                // the gesture for "let me look at this edge properly". It can
+                // never collide with the drag, which by definition has moved.
+                if pointer_released && !armed_and_moved {
+                    if let Some(marker) = armed_marker {
+                        let release_pos = ui
+                            .input(|i| i.pointer.interact_pos())
+                            .or_else(|| ui.input(|i| i.pointer.hover_pos()));
+                        let repeat = release_pos.is_some_and(|pos| {
+                            crate::app::helpers::note_repeated_click(
+                                &mut self.editor_loop_handle_last_click,
+                                pos,
+                            )
+                        });
+                        if repeat {
+                            if let Some((a, b)) = Self::normalized_loop_range(tab.loop_region) {
+                                zoom_around_loop_point = Some(match marker {
+                                    MarkerKind::A => a,
+                                    MarkerKind::B => b,
+                                });
+                            }
+                            suppress_seek = true;
+                        }
+                    }
                 }
                 if pointer_down {
-                    let to_sample = |x: f32| geom.x_to_display_sample(x);
-                    let to_x = |samp: usize| geom.sample_boundary_x(samp);
-                    let hit_radius = 7.0;
-                    if tab.dragging_marker.is_none() {
-                        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-                            let x = pos.x;
-                            match tab.active_tool {
-                                ToolKind::LoopEdit => {
-                                    if let Some((a0, b0)) = tab.loop_region {
-                                        let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                        let ax = to_x(a);
-                                        let bx = to_x(b);
-                                        if (x - ax).abs() <= hit_radius {
-                                            if pending_edit_undo.is_none() {
-                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
-                                            }
-                                            tab.dragging_marker = Some(MarkerKind::A);
-                                        } else if (x - bx).abs() <= hit_radius {
-                                            if pending_edit_undo.is_none() {
-                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
-                                            }
-                                            tab.dragging_marker = Some(MarkerKind::B);
-                                        }
+                    // Arm on the press, and only on the press.
+                    //
+                    // This used to arm from `button_down` — true on every frame
+                    // the button is held — and then fall through and move the
+                    // loop point in the same frame, so a plain click on a loop
+                    // edge dragged it to the clicked pixel before the pointer
+                    // had moved at all. Clicking a loop edge to put the playhead
+                    // on it is the everyday gesture; moving the edge is the
+                    // rarer one. Now the click seeks and only a drag moves.
+                    if tab.dragging_marker.is_none()
+                        && ui.input(|i| i.pointer.primary_pressed())
+                        && tab.selection_edge_drag_anchor.is_none()
+                        && tab.selection_stretch_gesture.is_none()
+                        && !tab.selection_stretch_cancel_until_release
+                    {
+                        if let Some(pos) = ui
+                            .input(|i| i.pointer.press_origin())
+                            .or_else(|| ui.input(|i| i.pointer.hover_pos()))
+                        {
+                            // The Time Stretch grip owns the top of this same
+                            // line, so a press inside its band is never a loop
+                            // drag — even when the stretch itself declined it.
+                            let grip_owns_press = view_mode == ViewMode::Waveform
+                                && in_selection_stretch_band(rect.top(), pos.y);
+                            if !grip_owns_press {
+                                if let Some((a, b)) = Self::normalized_loop_range(tab.loop_region) {
+                                    // Unclamped, and only for edges actually on
+                                    // screen: `sample_boundary_x` pins an edge
+                                    // scrolled off to the left onto the canvas
+                                    // border, where it answered presses nowhere
+                                    // near the loop.
+                                    let mut candidates: Vec<(f32, usize)> = Vec::new();
+                                    if geom.contains_boundary(a) {
+                                        candidates.push((geom.sample_boundary_x_unclamped(a), 0));
                                     }
+                                    if geom.contains_boundary(b) {
+                                        candidates.push((geom.sample_boundary_x_unclamped(b), 1));
+                                    }
+                                    // Nearest, not first. The `if / else if`
+                                    // this replaces handed the start every
+                                    // press on a loop shorter than two grab
+                                    // radii, so the end could not be grabbed.
+                                    tab.dragging_marker = nearest_handle(
+                                        &candidates,
+                                        pos.x,
+                                        LOOP_EDGE_GRAB_RADIUS,
+                                    )
+                                    .map(|which| {
+                                        if which == 0 {
+                                            MarkerKind::A
+                                        } else {
+                                            MarkerKind::B
+                                        }
+                                    });
                                 }
-                                _ => {}
                             }
                         }
                     }
                     if let Some(marker) = tab.dragging_marker {
-                        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-                            let samp = to_sample(pos.x);
-                            match tab.active_tool {
-                                ToolKind::LoopEdit => {
-                                    if let Some((a0, b0)) = tab.loop_region {
-                                        let (mut a, mut b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                        if pending_edit_undo.is_none() {
-                                            pending_edit_undo = Some(Self::capture_undo_state(tab));
-                                        }
-                                        match marker {
-                                            MarkerKind::A => a = samp.min(b),
-                                            MarkerKind::B => b = samp.max(a),
-                                        }
-                                        tab.loop_region = Some((a, b));
-                                        Self::update_loop_markers_dirty(tab);
-                                        apply_pending_loop = true;
-                                    }
-                                }
-                                _ => {}
-                            }
+                        // Handles are drawn on the sample *boundary* but
+                        // x -> sample is centre-based, so feeding the press
+                        // position straight back would shift the edge by a
+                        // sample on a bare click. Latched, because a drag that
+                        // wandered back through its own start would otherwise
+                        // hand the release back to the seek handler.
+                        if !tab.loop_drag_moved {
+                            tab.loop_drag_moved = ui
+                                .input(|i| i.pointer.press_origin())
+                                .zip(ui.input(|i| i.pointer.hover_pos()))
+                                .is_some_and(|(origin, pos)| (pos.x - origin.x).abs() >= 0.5);
                         }
-                        suppress_seek = true;
+                        if tab.loop_drag_moved {
+                            if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                                if let Some((mut a, mut b)) =
+                                    Self::normalized_loop_range(tab.loop_region)
+                                {
+                                    if pending_edit_undo.is_none() {
+                                        pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                    }
+                                    let samp = Self::loop_edge_snap_sample(
+                                        tab,
+                                        &geom,
+                                        self.zero_cross_epsilon,
+                                        pos.x,
+                                    );
+                                    match marker {
+                                        MarkerKind::A => a = samp.min(b),
+                                        MarkerKind::B => b = samp.max(a),
+                                    }
+                                    tab.loop_region = Some((a, b));
+                                    Self::update_loop_markers_dirty(tab);
+                                    apply_pending_loop = true;
+                                }
+                            }
+                            suppress_seek = true;
+                        }
                     }
                 }
             }
@@ -6304,6 +6604,105 @@ impl crate::app::WavesPreviewer {
                 }
             }
 
+            // Grab the selection's edge line — anywhere below the Time Stretch
+            // grip at the top — to lengthen or shorten the range. This moves
+            // nothing but the range: no resample, no undo step, no worker.
+            // Tool-independent, like the selection itself, and placed before
+            // the drag-select block below so a grab on an existing edge wins
+            // over starting a fresh range on the same press.
+            if (pointer_over_waveform || tab.selection_edge_drag_anchor.is_some())
+                && !world_f0_editing
+                && !tool_gesture_active
+                && display_samples_len > 0
+            {
+                let sel = tab.selection.map(|(a0, b0)| {
+                    if a0 <= b0 {
+                        (a0, b0)
+                    } else {
+                        (b0, a0)
+                    }
+                });
+                match sel.filter(|&(a, b)| b > a) {
+                    Some((sel_s, sel_e)) => {
+                        // Candidates are (handle x, the anchor that stays put).
+                        let mut candidates: Vec<(f32, usize)> = Vec::new();
+                        if geom.contains_boundary(sel_s) {
+                            candidates.push((geom.sample_boundary_x_unclamped(sel_s), sel_e));
+                        }
+                        if geom.contains_boundary(sel_e) {
+                            candidates.push((geom.sample_boundary_x_unclamped(sel_e), sel_s));
+                        }
+
+                        // Grab on the raw button press, not `drag_started_by`:
+                        // a handle has to respond without the drag threshold's
+                        // worth of movement. The Time Stretch grip owns the top
+                        // of the same line, so a press inside its band is never
+                        // a resize — not even when the stretch itself declined
+                        // it. `dragging_marker` is tested here rather than on
+                        // the block, so the clear-on-release branch below stays
+                        // reachable whatever else armed in the meantime.
+                        if tab.selection_edge_drag_anchor.is_none()
+                            && tab.dragging_marker.is_none()
+                            && ui.input(|i| i.pointer.primary_pressed())
+                        {
+                            if let Some(pos) = ui
+                                .input(|i| i.pointer.press_origin())
+                                .or_else(|| ui.input(|i| i.pointer.hover_pos()))
+                            {
+                                let grip_owns_press = view_mode == ViewMode::Waveform
+                                    && in_selection_stretch_band(rect.top(), pos.y);
+                                if !grip_owns_press {
+                                    if let Some(anchor) = nearest_handle(
+                                        &candidates,
+                                        pos.x,
+                                        SELECTION_EDGE_GRAB_RADIUS,
+                                    ) {
+                                        tab.selection_edge_drag_anchor = Some(anchor);
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(anchor) = tab.selection_edge_drag_anchor {
+                            if ui.input(|i| i.pointer.primary_down()) {
+                                // Only once the pointer has actually moved.
+                                // Handles are drawn on the sample *boundary*
+                                // but x -> sample is centre-based, so feeding
+                                // the press position straight back would shift
+                                // the edge by a sample on a bare click.
+                                let moved = ui
+                                    .input(|i| i.pointer.press_origin())
+                                    .zip(ui.input(|i| i.pointer.hover_pos()))
+                                    .is_none_or(|(origin, pos)| (pos.x - origin.x).abs() >= 0.5);
+                                if let Some(pos) =
+                                    ui.input(|i| i.pointer.hover_pos()).filter(|_| moved)
+                                {
+                                    let raw = to_range_selection_display_sample(pos.x);
+                                    let samp = if alt_now {
+                                        zc_snap_nearest(
+                                            &tab.ch_samples,
+                                            self.zero_cross_epsilon,
+                                            raw,
+                                        )
+                                    } else {
+                                        raw
+                                    };
+                                    Self::editor_set_selection_from_anchor(tab, anchor, samp);
+                                }
+                            } else {
+                                tab.selection_edge_drag_anchor = None;
+                            }
+                            // Held past the release frame as well: a grab with
+                            // no movement is reported as a click, and the
+                            // click handler would clear the whole selection.
+                            tool_gesture_active = true;
+                            suppress_seek = true;
+                        }
+                    }
+                    None => tab.selection_edge_drag_anchor = None,
+                }
+            }
+
             // Drag to select a range (independent of tool), unless we are dragging markers.
             // Alt+Drag: both endpoints snap to nearest zero crossing.
             // Ctrl+Drag: push current selection to extra_selections and start a new one.
@@ -6465,12 +6864,34 @@ impl crate::app::WavesPreviewer {
                 let lane_rect = egui::Rect::from_min_size(egui::pos2(wave_left, lane_top), egui::vec2(wave_w, lane_h));
                 let waveform_columns =
                     ov::compute_waveform_device_columns(lane_rect, pixels_per_point);
-                // dB lines: -6, -12 dBFS and center line (0 amp)
+                // The amplitude-0 line, and the -6/-12 dBFS grid around it.
+                //
+                // These used to be the same colour and the same width, so the
+                // one line that says where the waveform is centred was
+                // indistinguishable from the two that are only a scale. The
+                // centre line is now the brighter of the two, in the same
+                // family as the zero lines the amplitude and time navigators
+                // already draw, and the grid steps back to let it read.
                 let dbs = [-6.0f32, -12.0f32];
-                // center
                 let center_y =
                     Self::waveform_center_y(lane_rect, tab.vertical_zoom, tab.vertical_view_center);
-                painter.line_segment([egui::pos2(lane_rect.left(), center_y), egui::pos2(lane_rect.right(), center_y)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
+                painter.line_segment(
+                    [
+                        egui::pos2(lane_rect.left(), center_y),
+                        egui::pos2(lane_rect.right(), center_y),
+                    ],
+                    egui::Stroke::new(WAVE_CENTER_LINE_W, WAVE_CENTER_LINE_COL),
+                );
+                // The gutter is left of the waveform area, so this never lands
+                // on the trace or on a marker.
+                let gutter_font = TextStyle::Monospace.resolve(ui.style());
+                painter.text(
+                    egui::pos2(rect.left() + 2.0, center_y),
+                    egui::Align2::LEFT_CENTER,
+                    "0",
+                    gutter_font.clone(),
+                    WAVE_CENTER_LABEL_COL,
+                );
                 for &db in &dbs {
                     let a = db_to_amp(db).clamp(0.0, 1.0);
                     let y0 = Self::waveform_y_from_amp(
@@ -6485,11 +6906,10 @@ impl crate::app::WavesPreviewer {
                         tab.vertical_view_center,
                         -a,
                     );
-                    painter.line_segment([egui::pos2(lane_rect.left(), y0), egui::pos2(lane_rect.right(), y0)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
-                    painter.line_segment([egui::pos2(lane_rect.left(), y1), egui::pos2(lane_rect.right(), y1)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
+                    painter.line_segment([egui::pos2(lane_rect.left(), y0), egui::pos2(lane_rect.right(), y0)], egui::Stroke::new(1.0, WAVE_DB_GRID_COL));
+                    painter.line_segment([egui::pos2(lane_rect.left(), y1), egui::pos2(lane_rect.right(), y1)], egui::Stroke::new(1.0, WAVE_DB_GRID_COL));
                     // labels on the left gutter
-                    let fid = TextStyle::Monospace.resolve(ui.style());
-                    painter.text(egui::pos2(rect.left() + 2.0, y0), egui::Align2::LEFT_CENTER, format!("{db:.0} dB"), fid, Color32::GRAY);
+                    painter.text(egui::pos2(rect.left() + 2.0, y0), egui::Align2::LEFT_CENTER, format!("{db:.0} dB"), gutter_font.clone(), Color32::GRAY);
                 }
 
                 if visible_len > 0 {
@@ -7173,6 +7593,18 @@ impl crate::app::WavesPreviewer {
                 }
             }
             }
+
+                // A lane nobody can hear recedes. Mute and solo reached the M/S
+                // buttons and the engine but never the canvas, so a silenced
+                // channel drew exactly as brightly as the one actually playing.
+                // The scrim covers this lane's trace and its grid and nothing
+                // above it, so the selection, markers and playhead stay equally
+                // readable across every lane.
+                if let Some(ch) = channel_index {
+                    if !Self::editor_channel_is_audible(&*tab, ch) {
+                        painter.rect_filled(lane_rect, 0.0, WAVE_INAUDIBLE_SCRIM);
+                    }
+                }
                 }
             }
 
@@ -7190,6 +7622,22 @@ impl crate::app::WavesPreviewer {
                         egui::pos2(x + handle_w * 0.5, rect.top() + handle_h),
                     );
                     painter.rect_filled(r, 2.0, col);
+                };
+                // Where the loop's own handles and labels live: under the
+                // Time Stretch grip's band, so the two never overlap and each
+                // glyph stands where its gesture actually starts.
+                let loop_handle_top = rect.top() + SELECTION_STRETCH_HANDLE_H;
+                let loop_label_top = loop_handle_top + LOOP_HANDLE_H + 1.0;
+                let draw_loop_handle = |x: f32, col: Color32| {
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            egui::pos2(x - LOOP_HANDLE_W * 0.5, loop_handle_top),
+                            egui::pos2(x + LOOP_HANDLE_W * 0.5, loop_handle_top),
+                            egui::pos2(x, loop_handle_top + LOOP_HANDLE_H),
+                        ],
+                        col,
+                        egui::Stroke::NONE,
+                    ));
                 };
                 let sr = sr_ctx.max(1.0);
 
@@ -7286,11 +7734,17 @@ impl crate::app::WavesPreviewer {
                                     egui::StrokeKind::Inside,
                                 );
                             }
-                            // Time Stretch grips exist only in the primary
-                            // Waveform view. The blue selection fill above
-                            // remains visible in every other analysis view.
+                            // The edge line runs the full height and is a
+                            // plain range resize anywhere along it. Only the
+                            // tab at the very top stretches audio, and it is
+                            // drawn only in the primary Waveform view — the
+                            // blue fill above remains in every other view.
                             if view_mode == ViewMode::Waveform {
                                 let handle_col = Color32::from_rgb(90, 220, 255);
+                                // Dark enough to read against the grip's fill;
+                                // the arrows are the only thing that says this
+                                // tab does something the line below does not.
+                                let arrow_col = Color32::from_rgb(12, 18, 24);
                                 let draw_stretch_handle = |x: f32| {
                                     painter.line_segment(
                                         [
@@ -7299,16 +7753,29 @@ impl crate::app::WavesPreviewer {
                                         ],
                                         egui::Stroke::new(2.0, handle_col),
                                     );
-                                    draw_handle(x, handle_col);
-                                    let cy = rect.center().y;
+                                    painter.rect_filled(
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(
+                                                x - SELECTION_STRETCH_HANDLE_W * 0.5,
+                                                rect.top(),
+                                            ),
+                                            egui::pos2(
+                                                x + SELECTION_STRETCH_HANDLE_W * 0.5,
+                                                rect.top() + SELECTION_STRETCH_HANDLE_H,
+                                            ),
+                                        ),
+                                        2.0,
+                                        handle_col,
+                                    );
+                                    let cy = rect.top() + SELECTION_STRETCH_HANDLE_H * 0.5;
                                     for dir in [-1.0f32, 1.0f32] {
                                         painter.add(egui::Shape::line(
                                             vec![
-                                                egui::pos2(x + dir * 4.0, cy - 5.0),
-                                                egui::pos2(x + dir * 8.0, cy),
-                                                egui::pos2(x + dir * 4.0, cy + 5.0),
+                                                egui::pos2(x + dir * 1.0, cy - 2.5),
+                                                egui::pos2(x + dir * 3.5, cy),
+                                                egui::pos2(x + dir * 1.0, cy + 2.5),
                                             ],
-                                            egui::Stroke::new(1.5, handle_col),
+                                            egui::Stroke::new(1.2, arrow_col),
                                         ));
                                     }
                                 };
@@ -7467,9 +7934,9 @@ impl crate::app::WavesPreviewer {
                             [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
                             egui::Stroke::new(2.0, line),
                         );
-                        draw_handle(ax, line);
+                        draw_loop_handle(ax, line);
                         painter.text(
-                            egui::pos2(ax + 6.0, rect.top() + 2.0),
+                            egui::pos2(ax + 8.0, loop_label_top),
                             egui::Align2::LEFT_TOP,
                             "S",
                             fid,
@@ -7492,17 +7959,17 @@ impl crate::app::WavesPreviewer {
                             [egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())],
                             egui::Stroke::new(2.0, line),
                         );
-                        draw_handle(ax, line);
-                        draw_handle(bx, line);
+                        draw_loop_handle(ax, line);
+                        draw_loop_handle(bx, line);
                         painter.text(
-                            egui::pos2(ax + 6.0, rect.top() + 2.0),
+                            egui::pos2(ax + 8.0, loop_label_top),
                             egui::Align2::LEFT_TOP,
                             "S",
                             fid.clone(),
                             Color32::from_rgb(170, 200, 255),
                         );
                         painter.text(
-                            egui::pos2(bx + 6.0, rect.top() + 2.0),
+                            egui::pos2(bx + 8.0, loop_label_top),
                             egui::Align2::LEFT_TOP,
                             "E",
                             fid.clone(),
@@ -7511,7 +7978,7 @@ impl crate::app::WavesPreviewer {
                         let dur = (b.saturating_sub(a)) as f32 / sr;
                         let label = crate::app::helpers::format_time_s(dur);
                         painter.text(
-                            egui::pos2(ax + 6.0, rect.top() + 18.0),
+                            egui::pos2(ax + 8.0, loop_label_top + 14.0),
                             egui::Align2::LEFT_TOP,
                             format!("Loop {label}"),
                             fid,
@@ -7706,42 +8173,48 @@ impl crate::app::WavesPreviewer {
                     }
                 }
 
-                // Cursor feedback for editor handles
-                if pointer_over_waveform && view_mode == ViewMode::Waveform {
+                // Cursor feedback for editor handles. The per-tool handles
+                // below are Waveform-only, but the selection's edges are
+                // draggable in every view, so their branch reads `view_mode`
+                // itself rather than sitting behind the gate.
+                if pointer_over_waveform {
                     let handle_radius = 7.0;
-                    if tab.dragging_marker.is_some()
-                        || tab.selection_stretch_gesture.is_some()
+                    let waveform_view = view_mode == ViewMode::Waveform;
+                    if tab.selection_stretch_gesture.is_some() {
+                        // A closed hand for the one gesture that rewrites audio.
+                        hover_cursor = Some(egui::CursorIcon::Grabbing);
+                    } else if tab.dragging_marker.is_some()
+                        || tab.selection_edge_drag_anchor.is_some()
                     {
                         hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
                     } else if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                         let x = pos.x;
                         let near = |hx: f32| (x - hx).abs() <= handle_radius;
-                        // Both selection edges are always Time Stretch grips
-                        // in Waveform mode, independent of the active tool.
-                        if let Some((a0, b0)) = tab.selection {
-                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                            if b > a {
-                                if (geom.contains_boundary(a)
-                                    && near(geom.sample_boundary_x_unclamped(a)))
-                                    || (geom.contains_boundary(b)
-                                        && near(geom.sample_boundary_x_unclamped(b)))
-                                {
-                                    hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
-                                }
-                            }
-                        }
+                        // Per-tool handles first, so the selection's own grip
+                        // below can override them. A loop edge normally sits
+                        // exactly on the selection edge, and the grip at the
+                        // top belongs to the stretch even there.
                         match tab.active_tool {
-                            ToolKind::LoopEdit => {
-                                if let Some((a0, b0)) = tab.loop_region {
-                                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                    let ax = to_x(a);
-                                    let bx = to_x(b);
-                                    if near(ax) || near(bx) {
+                            ToolKind::LoopEdit if waveform_view => {
+                                // The same reach, and the same "is it actually
+                                // on screen" test, as the drag itself — so the
+                                // cursor never offers a handle the press will
+                                // not find. `to_x` clamps, and a resize arrow
+                                // over the canvas border for a loop scrolled
+                                // out of view is exactly the phantom the drag
+                                // no longer answers.
+                                if let Some((a, b)) = Self::normalized_loop_range(tab.loop_region) {
+                                    let edge_near = |sample: usize| {
+                                        geom.contains_boundary(sample)
+                                            && (x - geom.sample_boundary_x_unclamped(sample)).abs()
+                                                <= LOOP_EDGE_GRAB_RADIUS
+                                    };
+                                    if edge_near(a) || edge_near(b) {
                                         hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
                                     }
                                 }
                             }
-                            ToolKind::Fade => {
+                            ToolKind::Fade if waveform_view => {
                                 if let Some(xh) = fade_in_handle {
                                     if near(xh) {
                                         hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
@@ -7754,6 +8227,29 @@ impl crate::app::WavesPreviewer {
                                 }
                             }
                             _ => {}
+                        }
+                        // The selection's edges are tool-independent. The grip
+                        // at the top stretches audio (an open hand); the line
+                        // below it only moves the range (a resize arrow).
+                        if let Some((a0, b0)) = tab.selection {
+                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                            if b > a {
+                                let edge_near = |sample: usize| {
+                                    geom.contains_boundary(sample)
+                                        && near(geom.sample_boundary_x_unclamped(sample))
+                                };
+                                if edge_near(a) || edge_near(b) {
+                                    // The grip exists only in the Waveform
+                                    // view; elsewhere the whole line resizes.
+                                    let on_grip = waveform_view
+                                        && in_selection_stretch_band(rect.top(), pos.y);
+                                    hover_cursor = Some(if on_grip {
+                                        egui::CursorIcon::Grab
+                                    } else {
+                                        egui::CursorIcon::ResizeHorizontal
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -8446,8 +8942,14 @@ impl crate::app::WavesPreviewer {
                         let start_sec = (a as f32 / sr).max(0.0);
                         let end_sec = (b as f32 / sr).max(0.0);
                         let len_sec = (len as f32 / sr).max(0.0);
+                        // Say so when the range covers everything. Zoomed out,
+                        // a whole-file selection and a nearly-whole-file one
+                        // look identical, and Ctrl+A gives no other sign that
+                        // it reached both ends.
+                        let whole_file = a == 0 && b >= tab.samples_len && tab.samples_len > 0;
+                        let scope = if whole_file { " (entire file)" } else { "" };
                         let range_text = format!(
-                            "{kind}: {a}..{b} ({len} smp) / {}..{} ({})",
+                            "{kind}{scope}: {a}..{b} ({len} smp) / {}..{} ({})",
                             crate::app::helpers::format_time_s(start_sec),
                             crate::app::helpers::format_time_s(end_sec),
                             crate::app::helpers::format_time_s(len_sec)
@@ -14248,6 +14750,11 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                 self.apply_loop_mode_for_tab(tab_ro);
             }
         }
+        if let Some(sample) = zoom_around_loop_point {
+            // The same 0.9 step the wheel and `+` use, so one double click is
+            // one recognisable notch rather than a jump to some fixed depth.
+            self.editor_zoom_centered_on_sample(tab_idx, sample, 0.9);
+        }
         self.ui_editor_zoo_overlay(ctx, Some(tab_idx), editor_panel_rect);
     }
 }
@@ -14255,10 +14762,11 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
 #[cfg(test)]
 mod tests {
     use super::{
-        nearest_handle, selection_stretch_rate, selection_stretch_target_len,
-        EditorDisplayGeometry, SELECTION_EDGE_GRAB_RADIUS,
+        in_selection_stretch_band, nearest_handle, selection_stretch_rate,
+        selection_stretch_target_len, EditorDisplayGeometry, SELECTION_EDGE_GRAB_RADIUS,
+        SELECTION_STRETCH_HANDLE_H, SELECTION_STRETCH_HANDLE_W,
     };
-    use crate::app::types::SelectionStretchEdge;
+    use crate::app::types::{EditorHorizontalScrollSpeed, SelectionStretchEdge};
 
     fn geom(view_offset: usize, spp: f32) -> EditorDisplayGeometry {
         EditorDisplayGeometry {
@@ -14358,5 +14866,85 @@ mod tests {
         assert_eq!(longest, 1_600);
         assert_eq!(selection_stretch_rate(source_len, shortest), 4.0);
         assert_eq!(selection_stretch_rate(source_len, longest), 0.25);
+    }
+
+    /// The whole contract of the split: what is drawn as the grip is what
+    /// stretches, and one pixel below it is a different, harmless gesture.
+    #[test]
+    fn the_stretch_band_is_exactly_the_drawn_grip() {
+        let top = 100.0;
+        assert!(in_selection_stretch_band(top, top));
+        assert!(in_selection_stretch_band(
+            top,
+            top + SELECTION_STRETCH_HANDLE_H
+        ));
+        assert!(!in_selection_stretch_band(
+            top,
+            top + SELECTION_STRETCH_HANDLE_H + 0.1
+        ));
+        assert!(!in_selection_stretch_band(top, top - 0.1));
+    }
+
+    /// The grab radius must cover the tab the user is aiming at, or part of
+    /// what is painted as the grip would quietly resize instead.
+    #[test]
+    fn everything_drawn_in_the_grip_is_grabbable() {
+        assert!(SELECTION_EDGE_GRAB_RADIUS >= SELECTION_STRETCH_HANDLE_W * 0.5);
+    }
+
+    /// The destructive gesture stays the small target. 180.0 is the canvas's
+    /// minimum height, so the grip can never grow into most of the edge line.
+    #[test]
+    fn the_grip_leaves_the_edge_line_to_the_resize() {
+        assert!(SELECTION_STRETCH_HANDLE_H < 180.0 * 0.25);
+    }
+
+    #[test]
+    fn one_wheel_notch_pans_the_same_share_of_the_viewport_at_any_width() {
+        // The step this replaced was a flat 60 px, so a wide window crossed
+        // proportionally less of the file per notch than a narrow one, and a
+        // long take took the same many notches however far it was zoomed out.
+        let notch = 50.0f32;
+        for width in [320.0f32, 900.0, 2400.0] {
+            let moved = notch
+                * crate::app::WavesPreviewer::editor_horizontal_pan_gain(
+                    width,
+                    EditorHorizontalScrollSpeed::X1,
+                );
+            assert!(
+                (moved / width - 0.15).abs() < 1.0e-4,
+                "a notch should move 15% of a {width}px viewport, moved {moved}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_speed_setting_multiplies_that_share() {
+        let width = 900.0f32;
+        let base = crate::app::WavesPreviewer::editor_horizontal_pan_gain(
+            width,
+            EditorHorizontalScrollSpeed::X1,
+        );
+        for (speed, factor) in [
+            (EditorHorizontalScrollSpeed::X2, 2.0f32),
+            (EditorHorizontalScrollSpeed::X4, 4.0),
+        ] {
+            let scaled = crate::app::WavesPreviewer::editor_horizontal_pan_gain(width, speed);
+            assert!(
+                (scaled / base - factor).abs() < 1.0e-4,
+                "{speed:?} should be {factor}x"
+            );
+        }
+    }
+
+    #[test]
+    fn a_degenerate_canvas_width_still_yields_a_finite_step() {
+        for width in [0.0f32, -5.0] {
+            let gain = crate::app::WavesPreviewer::editor_horizontal_pan_gain(
+                width,
+                EditorHorizontalScrollSpeed::X1,
+            );
+            assert!(gain.is_finite() && gain > 0.0, "width {width} gave {gain}");
+        }
     }
 }

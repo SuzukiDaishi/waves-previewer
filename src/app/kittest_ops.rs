@@ -1918,6 +1918,20 @@ impl super::WavesPreviewer {
         true
     }
 
+    pub fn test_editor_wave_canvas_rect(&self) -> Option<egui::Rect> {
+        let tab_idx = self.active_tab?;
+        self.tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.last_wave_canvas_rect)
+    }
+
+    /// Height of the selection's Time Stretch grip, measured down from the
+    /// waveform canvas top. Pointer tests need it to tell the grip from the
+    /// plain range-resize part of the same edge line.
+    pub fn test_editor_selection_stretch_handle_height() -> f32 {
+        crate::app::ui::editor::selection_stretch_handle_height()
+    }
+
     pub fn test_tab_amplitude_nav_rect(&self) -> Option<egui::Rect> {
         let tab_idx = self.active_tab?;
         self.tabs
@@ -2370,6 +2384,29 @@ impl super::WavesPreviewer {
             return 0;
         };
         self.tabs.get(tab_idx).map(|t| t.markers.len()).unwrap_or(0)
+    }
+
+    /// Marker sample indices, so a snap test can assert the loop point landed
+    /// on the marker exactly rather than near it.
+    pub fn test_marker_samples(&self) -> Vec<usize> {
+        let Some(tab_idx) = self.active_tab else {
+            return Vec::new();
+        };
+        self.tabs
+            .get(tab_idx)
+            .map(|t| t.markers.iter().map(|m| m.sample).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn test_set_zero_cross_snap(&mut self, on: bool) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.snap_zero_cross = on;
+        true
     }
 
     pub fn test_loop_region(&self) -> Option<(usize, usize)> {

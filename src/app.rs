@@ -495,6 +495,12 @@ pub struct WavesPreviewer {
     meter_ch_hold_db: Vec<f32>,
     meter_ch_last_time: Option<std::time::Instant>,
     topbar_volume_rect: Option<egui::Rect>,
+    /// When and where the volume control was last clicked, for the
+    /// double-click-to-unity reset. See `helpers::note_repeated_click` for why
+    /// egui's own double-click reporting is not enough here.
+    topbar_volume_last_click: Option<(std::time::Instant, egui::Pos2)>,
+    /// The same, for the double click on a loop handle that zooms in on it.
+    editor_loop_handle_last_click: Option<(std::time::Instant, egui::Pos2)>,
     topbar_output_meter_rect: Option<egui::Rect>,
     topbar_search_rect: Option<egui::Rect>,
     editor_inspector_rect: Option<egui::Rect>,
@@ -839,6 +845,8 @@ pub struct WavesPreviewer {
     // When on, a plain wheel scrolls the view horizontally and Ctrl+wheel zooms.
     editor_wheel_scrolls: bool,
     horizontal_zoom_anchor_mode: EditorHorizontalZoomAnchorMode,
+    // How far one Shift+wheel notch pans, as a multiple of the base step.
+    editor_horizontal_scroll_speed: EditorHorizontalScrollSpeed,
     editor_pause_resume_mode: EditorPauseResumeMode,
     // processing mode
     mode: RateMode,
@@ -2970,10 +2978,13 @@ impl WavesPreviewer {
             tab.loop_region_committed = state.loop_region_committed;
             tab.selection_anchor_sample = None;
             tab.dragging_marker = None;
+            tab.loop_drag_moved = false;
             tab.selection_stretch_gesture = None;
             tab.selection_stretch_cancel_until_release = false;
+            tab.selection_edge_drag_anchor = None;
             tab.preview_offset_samples = None;
             tab.last_amplitude_nav_rect = None;
+            tab.last_wave_canvas_rect = None;
             tab.last_amplitude_viewport_rect = None;
             tab.last_amplitude_nav_click_at = 0.0;
             tab.last_amplitude_nav_click_pos = None;

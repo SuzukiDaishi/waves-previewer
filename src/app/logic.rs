@@ -1663,8 +1663,10 @@ impl super::WavesPreviewer {
         tab.tool_state = crate::app::types::ToolState::default_values();
         tab.loop_mode = crate::app::types::LoopMode::Off;
         tab.dragging_marker = None;
+        tab.loop_drag_moved = false;
         tab.selection_stretch_gesture = None;
         tab.selection_stretch_cancel_until_release = false;
+        tab.selection_edge_drag_anchor = None;
         tab.preview_audio_tool = None;
         tab.preview_audio_buffer = None;
         tab.active_tool_last = None;

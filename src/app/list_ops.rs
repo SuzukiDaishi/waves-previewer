@@ -4,6 +4,44 @@ use std::path::{Path, PathBuf};
 use crate::audio_io;
 use walkdir::WalkDir;
 
+/// What a merge did with the paths it was handed.
+///
+/// `missing` covers paths that are neither a file nor a directory — a stale
+/// clipboard from a since-ejected volume, most often.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct FileMergeCounts {
+    pub added: usize,
+    pub duplicates: usize,
+    pub unsupported: usize,
+    pub missing: usize,
+}
+
+impl FileMergeCounts {
+    /// How the result reads in a toast, or `None` when there is nothing worth
+    /// interrupting the user for.
+    pub fn summary(&self) -> Option<String> {
+        let mut skipped: Vec<String> = Vec::new();
+        if self.duplicates > 0 {
+            skipped.push(format!("{} already in the list", self.duplicates));
+        }
+        if self.unsupported > 0 {
+            skipped.push(format!("{} not audio", self.unsupported));
+        }
+        if self.missing > 0 {
+            skipped.push(format!("{} not found", self.missing));
+        }
+        match (self.added, skipped.is_empty()) {
+            (0, true) => None,
+            (0, false) => Some(format!("Nothing to add: {}", skipped.join(", "))),
+            (n, true) => Some(format!("Added {n} file(s)")),
+            (n, false) => Some(format!(
+                "Added {n} file(s) ({} skipped)",
+                skipped.join(", ")
+            )),
+        }
+    }
+}
+
 impl super::WavesPreviewer {
     fn is_open_target_audio_path(&self, path: &Path) -> bool {
         if !path.is_file() || self.should_skip_path(path) {
@@ -132,15 +170,27 @@ impl super::WavesPreviewer {
 
     // Merge helper: add explicit files (supported audio only)
     pub(super) fn add_files_merge(&mut self, paths: &[PathBuf]) -> usize {
-        let mut added = 0usize;
+        self.add_files_merge_counted(paths).added
+    }
+
+    /// Same merge, but says what happened to the paths that did not make it.
+    ///
+    /// The plain `add_files_merge` returns only the number added, which leaves
+    /// its callers unable to tell "nothing happened because they were already
+    /// in the list" from "nothing happened because none of them were audio".
+    /// Paste needs that distinction: with drag and drop the user can see what
+    /// they dropped, but a clipboard is invisible until something appears.
+    pub(super) fn add_files_merge_counted(&mut self, paths: &[PathBuf]) -> FileMergeCounts {
+        let mut counts = FileMergeCounts::default();
         for p in paths {
             if p.is_file() {
                 if self.should_skip_path(p) {
                     continue;
                 }
-                if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                    if audio_io::is_supported_extension(ext) {
+                match p.extension().and_then(|s| s.to_str()) {
+                    Some(ext) if audio_io::is_supported_extension(ext) => {
                         if self.path_index.contains_key(p) {
+                            counts.duplicates += 1;
                             continue;
                         }
                         let item = self.make_media_item(p.clone());
@@ -148,14 +198,20 @@ impl super::WavesPreviewer {
                         self.path_index.insert(p.clone(), id);
                         self.item_index.insert(id, self.items.len());
                         self.items.push(item);
-                        added += 1;
+                        counts.added += 1;
                     }
+                    _ => counts.unsupported += 1,
                 }
             } else if p.is_dir() {
-                added += self.add_folder_merge(p.as_path());
+                // The folder walk reports only what it added; a paste of a
+                // folder is rare enough not to warrant threading counts through
+                // it as well.
+                counts.added += self.add_folder_merge(p.as_path());
+            } else {
+                counts.missing += 1;
             }
         }
-        added
+        counts
     }
 
     pub(super) fn after_add_refresh(&mut self) {

@@ -129,7 +129,7 @@ impl WavesPreviewer {
         }
         if let (Some(engine), Some(buf)) = (&self.zoo_voice_audio, &self.zoo_voice_cache) {
             // global Volume に従って再生音量を同期する
-            engine.set_volume(db_to_amp(self.volume_db).clamp(0.0, 1.0));
+            engine.set_volume(db_to_amp(self.volume_db));
             engine.stop();
             engine.set_samples_buffer(buf.clone());
             engine.play();

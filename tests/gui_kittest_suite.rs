@@ -10275,7 +10275,11 @@ mod kittest_suite {
         assert_eq!(orange, 0, "found {orange} orange trim-band pixels");
     }
 
-    /// Position the pointer on a selection edge's grab handle.
+    /// Position the pointer on a selection edge at the canvas's *nominal* y —
+    /// which `editor_canvas_pos_at_x_offset` puts only a few pixels below the
+    /// canvas top, inside the Time Stretch grip's band. Use
+    /// `editor_pos_at_selection_edge_body` for the plain resize part of the
+    /// same line and `editor_pos_at_selection_stretch_handle` for the grip.
     fn editor_pos_at_selection_boundary(
         harness: &Harness<'static, WavesPreviewer>,
         display_sample: usize,
@@ -10285,6 +10289,44 @@ mod kittest_suite {
             .test_editor_display_sample_boundary_x_offset(display_sample)
             .expect("boundary x");
         editor_canvas_pos_at_x_offset(harness, x)
+    }
+
+    /// Position the pointer on a selection edge's line well below the Time
+    /// Stretch grip, where dragging only moves the range. Measured from the
+    /// real canvas rect, because the y that `editor_canvas_pos_at_x_offset`
+    /// produces sits inside the grip.
+    fn editor_pos_at_selection_edge_body(
+        harness: &Harness<'static, WavesPreviewer>,
+        display_sample: usize,
+    ) -> egui::Pos2 {
+        let x = harness
+            .state()
+            .test_editor_display_sample_boundary_x_offset(display_sample)
+            .expect("boundary x");
+        let canvas = harness
+            .state()
+            .test_editor_wave_canvas_rect()
+            .expect("wave canvas rect");
+        egui::pos2(editor_wave_left(harness) + x, canvas.center().y)
+    }
+
+    /// Position the pointer on a selection edge's Time Stretch grip — the tab
+    /// at the very top of the canvas, and the only part of the edge that
+    /// rewrites audio. The Y is what tells the two gestures apart.
+    fn editor_pos_at_selection_stretch_handle(
+        harness: &Harness<'static, WavesPreviewer>,
+        display_sample: usize,
+    ) -> egui::Pos2 {
+        let x = harness
+            .state()
+            .test_editor_display_sample_boundary_x_offset(display_sample)
+            .expect("boundary x");
+        let canvas = harness
+            .state()
+            .test_editor_wave_canvas_rect()
+            .expect("wave canvas rect");
+        let handle_h = WavesPreviewer::test_editor_selection_stretch_handle_height();
+        egui::pos2(editor_wave_left(harness) + x, canvas.top() + handle_h * 0.5)
     }
 
     fn editor_selection(harness: &Harness<'static, WavesPreviewer>) -> (usize, usize) {
@@ -10313,7 +10355,7 @@ mod kittest_suite {
         let len_before = harness.state().tabs[tab_idx].samples_len;
         let inspector_rate_before = harness.state().tabs[tab_idx].tool_state.stretch_rate;
         let undo_before = harness.state().tabs[tab_idx].undo_stack.len();
-        let from = editor_pos_at_selection_boundary(&harness, selection_before.1);
+        let from = editor_pos_at_selection_stretch_handle(&harness, selection_before.1);
         let to = egui::pos2(from.x + 90.0, from.y);
 
         harness.hover_at(from);
@@ -10393,7 +10435,7 @@ mod kittest_suite {
             .test_editor_display_sample_boundary_x_offset(end_before)
             .expect("fixed end x before");
 
-        let from = editor_pos_at_selection_boundary(&harness, start_before);
+        let from = editor_pos_at_selection_stretch_handle(&harness, start_before);
         editor_pointer_drag(&mut harness, from, egui::pos2(from.x + 50.0, from.y));
         wait_for_editor_apply(&mut harness);
         harness.run_steps(3);
@@ -10445,7 +10487,7 @@ mod kittest_suite {
         harness.run_steps(2);
         let before = editor_selection(&harness);
 
-        let at = editor_pos_at_selection_boundary(&harness, before.1);
+        let at = editor_pos_at_selection_edge_body(&harness, before.1);
         editor_pointer_drag(&mut harness, at, at);
 
         assert_eq!(
@@ -10453,6 +10495,296 @@ mod kittest_suite {
             before,
             "a click on a handle must not clear the selection"
         );
+    }
+
+    /// Same for the grip at the top: a press that never moves must leave both
+    /// the selection and the audio exactly as they were.
+    #[test]
+    fn selection_stretch_grip_grab_without_movement_changes_nothing() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.60));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before = editor_selection(&harness);
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+        let undo_before = harness.state().tabs[tab_idx].undo_stack.len();
+
+        let at = editor_pos_at_selection_stretch_handle(&harness, before.1);
+        editor_pointer_drag(&mut harness, at, at);
+
+        assert_eq!(
+            editor_selection(&harness),
+            before,
+            "a click on the grip must not clear the selection"
+        );
+        assert!(!harness.state().test_editor_apply_active());
+        assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
+        assert_eq!(
+            harness.state().tabs[tab_idx].undo_stack.len(),
+            undo_before,
+            "a grip click with no movement is not an edit"
+        );
+    }
+
+    /// The edge line below the grip only moves the range. No resample, no
+    /// worker, no undo step — the audio is untouched.
+    #[test]
+    fn selection_edge_body_drag_resizes_without_stretching() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before = editor_selection(&harness);
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+        let undo_before = harness.state().tabs[tab_idx].undo_stack.len();
+
+        let from = editor_pos_at_selection_edge_body(&harness, before.1);
+        let to = egui::pos2(from.x + 90.0, from.y);
+        editor_pointer_drag(&mut harness, from, to);
+
+        let after = editor_selection(&harness);
+        assert_eq!(after.0, before.0, "the opposite edge stays put");
+        assert!(
+            after.1 > before.1,
+            "dragging the end edge outward lengthens the range: {before:?} -> {after:?}"
+        );
+        assert!(
+            harness.state().tabs[tab_idx]
+                .selection_stretch_gesture
+                .is_none(),
+            "the body of the edge line must not arm a stretch"
+        );
+        assert!(!harness.state().test_editor_apply_active());
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_len,
+            len_before,
+            "a range resize must not change the buffer length"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].undo_stack.len(),
+            undo_before,
+            "a range resize is not a destructive edit"
+        );
+    }
+
+    /// Dragging an edge past the other one flips the range, exactly like
+    /// drawing a fresh selection does.
+    #[test]
+    fn selection_edge_body_drag_past_the_other_edge_flips_the_range() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.40, 0.50));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before = editor_selection(&harness);
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+
+        let from = editor_pos_at_selection_edge_body(&harness, before.1);
+        let to = egui::pos2(from.x - 160.0, from.y);
+        editor_pointer_drag(&mut harness, from, to);
+
+        let after = editor_selection(&harness);
+        assert!(
+            after.1 <= before.0,
+            "the dragged edge crossed the anchor: {before:?} -> {after:?}"
+        );
+        assert_eq!(
+            after.1, before.0,
+            "the edge that stayed put becomes the new end"
+        );
+        assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
+    }
+
+    /// A loop edge normally sits exactly on the selection edge, so the two
+    /// grips overlap. They are split by height: the tab at the top stretches.
+    #[test]
+    fn selection_stretch_grip_wins_over_the_loop_marker_in_loop_edit() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let selection_before = editor_selection(&harness);
+        let loop_before = harness.state().test_loop_region().expect("loop region");
+        assert_eq!(
+            loop_before, selection_before,
+            "the two ranges must coincide"
+        );
+
+        let from = editor_pos_at_selection_stretch_handle(&harness, selection_before.1);
+        let to = egui::pos2(from.x + 90.0, from.y);
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(to));
+        harness.run_steps(2);
+
+        let held = harness.state().tabs[tab_idx]
+            .selection_stretch_gesture
+            .expect("the grip arms the stretch even in Loop Edit");
+        assert!(held.target_len > selection_before.1 - selection_before.0);
+        assert!(
+            harness.state().tabs[tab_idx].dragging_marker.is_none(),
+            "the loop marker must not also arm under the same pointer"
+        );
+        assert_eq!(
+            harness.state().test_loop_region(),
+            Some(loop_before),
+            "the loop range stays where it was while the grip is held"
+        );
+
+        harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        wait_for_editor_apply(&mut harness);
+        harness.run_steps(2);
+    }
+
+    /// Both gestures arm from `pointer_down` rather than the press, so a resize
+    /// that is already under way must keep the pointer even when it sweeps past
+    /// a loop marker — otherwise the range freezes mid-drag and the loop moves
+    /// instead.
+    #[test]
+    fn a_loop_marker_does_not_hijack_an_edge_resize_in_progress() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_set_selection_frac(0.40, 0.70));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.10, 0.20));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let selection_before = editor_selection(&harness);
+        let loop_before = harness.state().test_loop_region().expect("loop region");
+
+        // Start on the selection's start edge and sweep left, across the loop
+        // markers, in steps — the hijack only shows up on an intermediate frame.
+        let from = editor_pos_at_selection_edge_body(&harness, selection_before.0);
+        let loop_end_x = editor_pos_at_selection_edge_body(&harness, loop_before.1).x;
+        let past_loop = egui::pos2(loop_end_x - 20.0, from.y);
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        let steps = 8;
+        for step in 1..=steps {
+            let t = step as f32 / steps as f32;
+            harness.event(egui::Event::PointerMoved(egui::pos2(
+                from.x + (past_loop.x - from.x) * t,
+                from.y,
+            )));
+            harness.run_steps(1);
+        }
+        harness.event(egui::Event::PointerButton {
+            pos: past_loop,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness.state().test_loop_region(),
+            Some(loop_before),
+            "the loop range must not move while an edge resize owns the pointer"
+        );
+        let after = editor_selection(&harness);
+        assert_eq!(after.1, selection_before.1, "the opposite edge stays put");
+        assert!(
+            after.0 < loop_before.1,
+            "the dragged edge followed the pointer past the loop end: \
+             {selection_before:?} -> {after:?}, loop {loop_before:?}"
+        );
+        assert!(harness.state().tabs[tab_idx].dragging_marker.is_none());
+    }
+
+    /// ...and the line below the grip still belongs to the loop marker, which
+    /// is what the Loop Edit tool is for.
+    #[test]
+    fn loop_marker_drag_still_owns_the_edge_body_in_loop_edit() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.50));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.50));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let selection_before = editor_selection(&harness);
+        let loop_before = harness.state().test_loop_region().expect("loop region");
+        let len_before = harness.state().tabs[tab_idx].samples_len;
+
+        let from = editor_pos_at_selection_edge_body(&harness, selection_before.1);
+        let to = egui::pos2(from.x + 90.0, from.y);
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(to));
+        harness.run_steps(2);
+
+        assert!(
+            harness.state().tabs[tab_idx].dragging_marker.is_some(),
+            "the body of the line is the loop marker's in Loop Edit"
+        );
+        assert!(
+            harness.state().tabs[tab_idx]
+                .selection_stretch_gesture
+                .is_none(),
+            "no stretch below the grip"
+        );
+        let loop_held = harness.state().test_loop_region().expect("loop region");
+        assert!(
+            loop_held.1 > loop_before.1,
+            "the loop end followed the pointer: {loop_before:?} -> {loop_held:?}"
+        );
+        assert_eq!(
+            editor_selection(&harness),
+            selection_before,
+            "the loop marker drag leaves the selection alone"
+        );
+
+        harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+        assert!(!harness.state().test_editor_apply_active());
+        assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
     }
 
     /// Clicking well inside the selection is still a seek that clears it —
@@ -10477,7 +10809,9 @@ mod kittest_suite {
         );
     }
 
-    /// Waveform overlay does not enable handles in analysis views.
+    /// The Time Stretch grip is Waveform-only: a waveform overlay does not put
+    /// one on an analysis view. Dragging the edge there is the plain range
+    /// resize, which touches no audio.
     #[test]
     fn selection_handles_do_not_apply_in_non_waveform_views() {
         let mut harness = harness_with_editor_fixture();
@@ -10512,9 +10846,9 @@ mod kittest_suite {
         }
     }
 
-    /// Speed/TimeStretch already own the selection's right edge as a stretch
-    /// gesture. The selection drag must not race it — but the left edge, which
-    /// that tool does not use, stays adjustable.
+    /// Escape while the grip is held drops the gesture, and the rest of that
+    /// held press stays swallowed so it cannot fall through into a fresh
+    /// range selection.
     #[test]
     fn selection_handle_escape_cancels_without_applying() {
         let mut harness = harness_with_editor_fixture();
@@ -10526,7 +10860,7 @@ mod kittest_suite {
         let tab_idx = harness.state().active_tab.expect("active tab");
         let selection_before = editor_selection(&harness);
         let len_before = harness.state().tabs[tab_idx].samples_len;
-        let from = editor_pos_at_selection_boundary(&harness, selection_before.1);
+        let from = editor_pos_at_selection_stretch_handle(&harness, selection_before.1);
         let to = egui::pos2(from.x + 70.0, from.y);
         harness.hover_at(from);
         harness.event(egui::Event::PointerButton {
@@ -10569,7 +10903,7 @@ mod kittest_suite {
         let tab_idx = harness.state().active_tab.expect("active tab");
         let len_before = harness.state().tabs[tab_idx].samples_len;
         let (_, end) = editor_selection(&harness);
-        let from = editor_pos_at_selection_boundary(&harness, end);
+        let from = editor_pos_at_selection_stretch_handle(&harness, end);
         let to = egui::pos2(from.x + 70.0, from.y);
         harness.hover_at(from);
         harness.event(egui::Event::PointerButton {
@@ -10610,7 +10944,7 @@ mod kittest_suite {
         let tab_idx = harness.state().active_tab.expect("active tab");
         let len_before = harness.state().tabs[tab_idx].samples_len;
         let (_, end) = editor_selection(&harness);
-        let from = editor_pos_at_selection_boundary(&harness, end);
+        let from = editor_pos_at_selection_stretch_handle(&harness, end);
         let to = egui::pos2(from.x + 70.0, from.y);
         harness.hover_at(from);
         harness.event(egui::Event::PointerButton {
@@ -10651,7 +10985,7 @@ mod kittest_suite {
         let tab_idx = harness.state().active_tab.expect("active tab");
         let len_before = harness.state().tabs[tab_idx].samples_len;
         let (_, end) = editor_selection(&harness);
-        let from = editor_pos_at_selection_boundary(&harness, end);
+        let from = editor_pos_at_selection_stretch_handle(&harness, end);
         let to = egui::pos2(from.x + 70.0, from.y);
         harness.hover_at(from);
         harness.event(egui::Event::PointerButton {
@@ -10694,7 +11028,7 @@ mod kittest_suite {
         let tab_idx = harness.state().active_tab.expect("active tab");
         let selection_before = editor_selection(&harness);
         let source_len = selection_before.1 - selection_before.0;
-        let from = editor_pos_at_selection_boundary(&harness, selection_before.1);
+        let from = editor_pos_at_selection_stretch_handle(&harness, selection_before.1);
         let outside = egui::pos2(from.x + 2_000.0, from.y);
         harness.hover_at(from);
         harness.event(egui::Event::PointerButton {
@@ -10737,7 +11071,7 @@ mod kittest_suite {
         let tab_idx = harness.state().active_tab.expect("active tab");
         let selection_before = editor_selection(&harness);
         let len_before = harness.state().tabs[tab_idx].samples_len;
-        let from = editor_pos_at_selection_boundary(&harness, selection_before.1);
+        let from = editor_pos_at_selection_stretch_handle(&harness, selection_before.1);
         let to = egui::pos2(from.x + 70.0, from.y);
         harness.hover_at(from);
         harness.event(egui::Event::PointerButton {
@@ -10807,7 +11141,7 @@ mod kittest_suite {
             .test_set_view_mode(neowaves::ViewMode::Waveform));
         harness.run_steps(3);
         let (_, selection_end) = editor_selection(&harness);
-        let from = editor_pos_at_selection_boundary(&harness, selection_end);
+        let from = editor_pos_at_selection_stretch_handle(&harness, selection_end);
         let to = egui::pos2(from.x + 110.0, from.y);
         harness.hover_at(from);
         harness.event(egui::Event::PointerButton {
@@ -10848,5 +11182,575 @@ mod kittest_suite {
         ] {
             eprintln!("[shot] wrote {}", out_dir.join(name).display());
         }
+    }
+
+    /// Position the pointer on a loop edge's line, below the Time Stretch grip
+    /// and below the loop's own handle — the part of the line that answers a
+    /// loop drag.
+    fn editor_pos_at_loop_edge(
+        harness: &Harness<'static, WavesPreviewer>,
+        display_sample: usize,
+    ) -> egui::Pos2 {
+        let x = harness
+            .state()
+            .test_editor_display_sample_boundary_x_offset(display_sample)
+            .expect("boundary x");
+        let canvas = harness
+            .state()
+            .test_editor_wave_canvas_rect()
+            .expect("wave canvas rect");
+        egui::pos2(editor_wave_left(harness) + x, canvas.center().y)
+    }
+
+    #[test]
+    fn loop_edge_click_seeks_and_leaves_the_loop_alone() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.70));
+        harness.run_steps(2);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before = harness.state().test_loop_region().expect("loop region");
+        let undo_before = harness.state().tabs[tab_idx].undo_stack.len();
+
+        // Press and release on the loop's start edge without moving. This used
+        // to drag the edge onto the clicked pixel on the press frame.
+        let pos = editor_pos_at_loop_edge(&harness, before.0);
+        editor_primary_click_at_pos(&mut harness, pos);
+
+        assert_eq!(
+            harness.state().test_loop_region(),
+            Some(before),
+            "a click on a loop edge must not move it"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].undo_stack.len(),
+            undo_before,
+            "a click that changes nothing must not push an undo step"
+        );
+        let playhead = harness
+            .state()
+            .test_playhead_display_now()
+            .expect("playhead after clicking a loop edge");
+        assert!(
+            playhead.abs_diff(before.0) < harness.state().tabs[tab_idx].samples_len / 20,
+            "the click should have seeked to the loop edge: {playhead} vs {}",
+            before.0
+        );
+    }
+
+    #[test]
+    fn loop_edge_drag_moves_the_loop() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_set_zero_cross_snap(false));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.70));
+        harness.run_steps(2);
+
+        let before = harness.state().test_loop_region().expect("loop region");
+        let from = editor_pos_at_loop_edge(&harness, before.1);
+        let to = egui::pos2(from.x - 80.0, from.y);
+        editor_pointer_drag(&mut harness, from, to);
+
+        let after = harness.state().test_loop_region().expect("loop region");
+        assert_eq!(after.0, before.0, "the opposite edge stays put");
+        assert!(
+            after.1 < before.1,
+            "dragging the end edge inward shortens the loop: {before:?} -> {after:?}"
+        );
+    }
+
+    #[test]
+    fn loop_edge_drag_lands_exactly_on_a_marker() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_add_marker_frac(0.50));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.20, 0.80));
+        harness.run_steps(2);
+
+        let marker = harness.state().test_marker_samples()[0];
+        let before = harness.state().test_loop_region().expect("loop region");
+
+        // Aim a few pixels short of the marker, inside the magnet's reach.
+        let from = editor_pos_at_loop_edge(&harness, before.0);
+        let marker_x = harness
+            .state()
+            .test_editor_display_sample_boundary_x_offset(marker)
+            .expect("marker x");
+        let to = egui::pos2(editor_wave_left(&harness) + marker_x - 4.0, from.y);
+        editor_pointer_drag(&mut harness, from, to);
+
+        let after = harness.state().test_loop_region().expect("loop region");
+        assert_eq!(
+            after.0, marker,
+            "a loop edge dropped within the magnet takes the marker's own \
+             sample index, not the one the pixel rounds to"
+        );
+    }
+
+    #[test]
+    fn a_loop_scrolled_out_of_view_has_no_handle_at_the_canvas_edge() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_set_zero_cross_snap(false));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.02, 0.06));
+        harness.run_steps(2);
+        let before = harness.state().test_loop_region().expect("loop region");
+
+        // Zoom in on the far end, so both loop edges are off the left of the
+        // canvas. `sample_boundary_x` reports them as sitting exactly on the
+        // canvas border, which used to make the border grabbable.
+        for _ in 0..14 {
+            editor_zoom_in_at_frac(&mut harness, 0.90);
+        }
+        harness.run_steps(2);
+
+        let canvas = harness
+            .state()
+            .test_editor_wave_canvas_rect()
+            .expect("wave canvas rect");
+        let from = egui::pos2(editor_wave_left(&harness) + 1.0, canvas.center().y);
+        let to = egui::pos2(from.x + 70.0, from.y);
+        editor_pointer_drag(&mut harness, from, to);
+
+        assert_eq!(
+            harness.state().test_loop_region(),
+            Some(before),
+            "the canvas border is not a loop handle"
+        );
+    }
+
+    #[test]
+    fn the_end_of_a_narrow_loop_can_still_be_grabbed() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_set_zero_cross_snap(false));
+        // Short enough that both edges are inside one grab radius of each
+        // other, which is where the old `if / else if` always chose the start.
+        assert!(harness.state_mut().test_set_loop_region_frac(0.50, 0.502));
+        harness.run_steps(2);
+
+        let before = harness.state().test_loop_region().expect("loop region");
+        let from = editor_pos_at_loop_edge(&harness, before.1);
+        let to = egui::pos2(from.x + 120.0, from.y);
+        editor_pointer_drag(&mut harness, from, to);
+
+        let after = harness.state().test_loop_region().expect("loop region");
+        assert_eq!(
+            after.0, before.0,
+            "the start must not have been the one that moved"
+        );
+        assert!(
+            after.1 > before.1,
+            "the end edge should have taken the press: {before:?} -> {after:?}"
+        );
+    }
+
+    #[test]
+    fn arrow_keys_stop_on_a_loop_point() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.60));
+        harness.run_steps(2);
+        let (loop_start, _) = harness.state().test_loop_region().expect("loop region");
+
+        harness.key_press(Key::Home);
+        harness.run_steps(2);
+
+        // Step right with the grid. Somewhere on the way the step has to cross
+        // the loop start, and when it does the playhead must land exactly on
+        // it rather than skip past to the next grid multiple.
+        let mut landed = false;
+        for _ in 0..40 {
+            harness.key_press(Key::ArrowRight);
+            harness.run_steps(2);
+            let playhead = harness
+                .state()
+                .test_playhead_display_now()
+                .expect("playhead while stepping");
+            if playhead == loop_start {
+                landed = true;
+                break;
+            }
+            if playhead > loop_start {
+                break;
+            }
+        }
+        assert!(
+            landed,
+            "stepping right past the loop start should have stopped on it ({loop_start})"
+        );
+
+        // And the next press has to move on, not sit on the same landmark.
+        harness.key_press(Key::ArrowRight);
+        harness.run_steps(2);
+        assert!(
+            harness.state().test_playhead_display_now().unwrap() > loop_start,
+            "the playhead must continue past a landmark it already stopped on"
+        );
+    }
+
+    fn double_click_at(harness: &mut Harness<'static, WavesPreviewer>, pos: egui::Pos2) {
+        for _ in 0..2 {
+            harness.hover_at(pos);
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run_steps(1);
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+        harness.run_steps(2);
+    }
+
+    #[test]
+    fn the_monitor_volume_starts_at_unity() {
+        let harness = harness_with_editor_fixture();
+        assert_eq!(
+            harness.state().test_volume_db(),
+            0.0,
+            "a fresh app should monitor at unity, not 12 dB down"
+        );
+    }
+
+    #[test]
+    fn double_clicking_the_volume_control_returns_it_to_unity() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        harness.run_steps(2);
+        harness.state_mut().test_set_volume_db(-31.0);
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_volume_db(), -31.0);
+
+        let rect = harness
+            .state()
+            .test_topbar_volume_rect()
+            .expect("volume control rect");
+        // Deliberately off the knob: the whole control resets, and the first
+        // click of the pair would otherwise set the volume from the pointer
+        // position and hide a reset that never happened.
+        double_click_at(&mut harness, egui::pos2(rect.left() + 6.0, rect.center().y));
+
+        assert_eq!(
+            harness.state().test_volume_db(),
+            0.0,
+            "double click should put the monitor back at unity"
+        );
+        assert!(
+            (harness.state().test_audio_output_volume_linear() - 1.0).abs() < 1.0e-4,
+            "the reset has to reach the engine, not just the readout"
+        );
+    }
+
+    #[test]
+    fn the_volume_slider_can_actually_reach_its_own_top_end() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        harness.run_steps(2);
+
+        harness.state_mut().test_set_volume_db(0.0);
+        harness.run_steps(2);
+        let unity = harness.state().test_audio_output_volume_linear();
+        assert!(
+            (unity - 1.0).abs() < 1.0e-3,
+            "0 dB should be unity, got {unity}"
+        );
+
+        // The slider advertises +6 dB; the engine used to clamp the linear gain
+        // at 1.0, so its whole upper half did nothing.
+        harness.state_mut().test_set_volume_db(6.0);
+        harness.run_steps(2);
+        let boosted = harness.state().test_audio_output_volume_linear();
+        assert!(
+            boosted > unity * 1.9,
+            "+6 dB should roughly double the monitor gain, got {boosted}"
+        );
+    }
+
+    #[test]
+    fn pasting_file_paths_as_text_imports_them_into_the_list() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        harness.run_steps(2);
+        let before = harness.state().test_visible_list_paths().len();
+
+        // Files that exist but are not in the open folder, plus two paths that
+        // should be turned away: one non-audio, one that is not there at all.
+        let extra = make_temp_dir("paste_import");
+        let sr = 48_000;
+        let chans = synth_stereo(sr, 0.25);
+        let mut lines = Vec::new();
+        for name in ["pasted_one.wav", "pasted_two.wav"] {
+            let path = extra.join(name);
+            neowaves::wave::export_channels_audio(&chans, sr, &path)
+                .unwrap_or_else(|e| panic!("export {name} failed: {e}"));
+            lines.push(format!("file://{}", path.display()));
+        }
+        let notes = extra.join("notes.txt");
+        std::fs::write(&notes, b"not audio").expect("write notes.txt");
+        lines.push(format!("file://{}", notes.display()));
+        lines.push(format!("file://{}", extra.join("gone.wav").display()));
+
+        // The list paste only fires while the list owns the keys and has
+        // something selected, which is the state a user pasting into it is in.
+        harness.state_mut().test_list_select_all();
+        harness.run_steps(2);
+        harness.event(egui::Event::Paste(lines.join("\n")));
+        harness.run_steps(6);
+
+        assert_eq!(
+            harness.state().test_visible_list_paths().len(),
+            before + 2,
+            "both pasted wavs should have been imported"
+        );
+        let toast = harness.state().test_toast_messages().join(" | ");
+        assert!(
+            toast.contains("Added 2"),
+            "the paste should report what it did, got {toast:?}"
+        );
+        assert!(
+            toast.contains("not audio") && toast.contains("not found"),
+            "and what it turned away, got {toast:?}"
+        );
+    }
+
+    #[test]
+    fn pasting_the_same_paths_again_says_they_are_already_there() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        harness.run_steps(2);
+
+        let path = harness
+            .state()
+            .test_visible_list_paths()
+            .first()
+            .map(|p| p.display().to_string())
+            .expect("a row in the list");
+        harness.state_mut().test_list_select_all();
+        harness.run_steps(2);
+        let before = harness.state().test_visible_list_paths().len();
+        harness.event(egui::Event::Paste(path));
+        harness.run_steps(6);
+
+        assert_eq!(harness.state().test_visible_list_paths().len(), before);
+        let toast = harness.state().test_toast_messages().join(" | ");
+        assert!(
+            toast.contains("already in the list"),
+            "a paste that adds nothing must say why, got {toast:?}"
+        );
+    }
+
+    #[test]
+    fn shift_z_fits_the_loop_region_to_the_view() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_loop_region_frac(0.40, 0.50));
+        harness.run_steps(2);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let (loop_start, loop_end) = harness.state().test_loop_region().expect("loop region");
+        let spp_before = harness.state().tabs[tab_idx].samples_per_px;
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::Z);
+        harness.run_steps(3);
+
+        let tab = &harness.state().tabs[tab_idx];
+        assert!(
+            tab.samples_per_px < spp_before,
+            "fitting a tenth of the file should zoom in: {} -> {}",
+            spp_before,
+            tab.samples_per_px
+        );
+        let visible = (tab.last_wave_w * tab.samples_per_px).ceil() as usize;
+        let view_end = tab.view_offset + visible;
+        assert!(
+            tab.view_offset <= loop_start && view_end >= loop_end,
+            "both loop edges should be on screen: view {}..{view_end} vs loop {loop_start}..{loop_end}",
+            tab.view_offset
+        );
+    }
+
+    #[test]
+    fn shift_z_does_nothing_without_a_loop() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert!(harness.state().test_loop_region().is_none());
+        let spp_before = harness.state().tabs[tab_idx].samples_per_px;
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::Z);
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_per_px,
+            spp_before,
+            "no loop, no zoom -- and Z must not have taken the press instead"
+        );
+    }
+
+    #[test]
+    fn double_clicking_a_loop_handle_zooms_in_around_it() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.70));
+        harness.run_steps(2);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before = harness.state().test_loop_region().expect("loop region");
+        let spp_before = harness.state().tabs[tab_idx].samples_per_px;
+
+        let handle = editor_pos_at_loop_edge(&harness, before.0);
+        double_click_at(&mut harness, handle);
+
+        assert!(
+            harness.state().tabs[tab_idx].samples_per_px < spp_before,
+            "a double click on the handle should zoom in"
+        );
+        assert_eq!(
+            harness.state().test_loop_region(),
+            Some(before),
+            "and must not move the loop while doing it"
+        );
+    }
+
+    #[test]
+    fn ctrl_a_selects_the_whole_file_and_says_so() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.40, 0.45));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let samples_len = harness.state().tabs[tab_idx].samples_len;
+        assert!(samples_len > 0);
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().test_tab_selection(),
+            Some((0, samples_len)),
+            "Ctrl+A should reach both ends of the file"
+        );
+        let toast = harness.state().test_toast_messages().join(" | ");
+        assert!(
+            toast.contains("entire file"),
+            "zoomed out this looks like any other range, so it has to be stated: {toast:?}"
+        );
+    }
+
+    #[test]
+    fn ctrl_a_belongs_to_the_list_when_the_list_is_in_front() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.40, 0.45));
+        harness.run_steps(2);
+        let before = harness.state().test_tab_selection();
+
+        // Back to the list, with the editor tab still open behind it.
+        harness.state_mut().test_switch_to_list_workspace();
+        harness.run_steps(3);
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().test_tab_selection(),
+            before,
+            "the editor's Ctrl+A must not fire from behind the list"
+        );
+    }
+
+    #[test]
+    fn shift_l_cycles_the_loop_mode_without_l_taking_it() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        // No loop region and no selection, so the mode cycle is the only thing
+        // either key can do -- which is what makes this test about the split.
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness
+            .state_mut()
+            .test_set_loop_mode(neowaves::LoopMode::Off));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert_eq!(
+            harness.state().tabs[tab_idx].loop_mode,
+            neowaves::LoopMode::Off
+        );
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::L);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].loop_mode,
+            neowaves::LoopMode::OnWhole,
+            "Shift+L must reach the cycle rather than being swallowed by bare L"
+        );
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::L);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].loop_mode,
+            neowaves::LoopMode::Marker
+        );
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::L);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].loop_mode,
+            neowaves::LoopMode::Off,
+            "and wraps"
+        );
+    }
+
+    #[test]
+    fn l_still_falls_back_to_the_cycle_with_nothing_to_loop() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness
+            .state_mut()
+            .test_set_loop_mode(neowaves::LoopMode::Off));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+
+        harness.key_press(Key::L);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].loop_mode,
+            neowaves::LoopMode::OnWhole,
+            "splitting the cycle out must not change what bare L does"
+        );
     }
 }

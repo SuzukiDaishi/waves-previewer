@@ -92,25 +92,38 @@ impl super::WavesPreviewer {
                     }
                     self.request_list_focus(ctx);
                 } else {
-                    let tab_idx = idx - 1;
-                    // Already on this tab: re-activating would re-target
-                    // playback/decoding for no reason.
-                    let already_active = self.workspace_view == super::types::WorkspaceView::Editor
-                        && self.active_tab == Some(tab_idx);
-                    if tab_idx < self.tabs.len() && !already_active {
-                        if let Some(prev) = self.active_tab {
-                            if prev != tab_idx {
-                                self.clear_preview_if_any(prev);
-                            }
-                        }
-                        if let Some(tab) = self.tabs.get(tab_idx) {
-                            let tab_path = tab.path.clone();
-                            self.workspace_view = super::types::WorkspaceView::Editor;
-                            self.active_tab = Some(tab_idx);
-                            self.debug_mark_tab_switch_start(&tab_path);
-                            self.queue_tab_activation(tab_path);
-                        }
-                    }
+                    self.activate_editor_tab(idx - 1);
+                }
+            }
+        }
+
+        // Tab / Shift+Tab step through the editor tabs.
+        //
+        // Only while an editor tab is actually in front, and only with more
+        // than one open: in the list, and with a single tab, Tab is still
+        // egui's focus traversal, which is what it is for there.
+        // `workspace_keys_allowed` keeps it out of a text field, a metadata
+        // field, a modal and the shortcut-capture box -- all of which own their
+        // own Tab.
+        if allow_workspace && self.is_editor_workspace_active() && self.tabs.len() > 1 {
+            // Shift first, and this order is load-bearing: egui matches
+            // modifiers *logically*, so a pattern of `NONE` also accepts an
+            // event with Shift held. Asking for the bare Tab first would
+            // swallow Shift+Tab and step forwards for it.
+            let back = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+            let forward =
+                !back && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+            if forward || back {
+                if let Some(next) = self.editor_tab_index_offset_by(if forward { 1 } else { -1 }) {
+                    self.activate_editor_tab(next);
+                }
+                // egui reads Tab for focus traversal at the very start of the
+                // pass, before any of this runs, so by now it has already moved
+                // focus to some widget in the outgoing tab. Left there it would
+                // swallow the *next* Tab press -- and if it landed on a text
+                // field, every unmodified key after it. Hand the focus back.
+                if let Some(id) = ctx.memory(|m| m.focused()) {
+                    ctx.memory_mut(|m| m.surrender_focus(id));
                 }
             }
         }
@@ -245,25 +258,20 @@ impl super::WavesPreviewer {
                         self.push_editor_undo_state(tab_idx, state, true);
                     }
                 }
-                if self.keymap_consume(ctx, Action::EditorApplyLoop) {
+                // Shift+L before L: egui matches modifiers logically, so the
+                // bare-`L` pattern also accepts an event with Shift held and
+                // would swallow the cycle.
+                if self.keymap_consume(ctx, Action::EditorCycleLoopMode) {
+                    self.editor_cycle_loop_mode(tab_idx);
+                } else if self.keymap_consume(ctx, Action::EditorToggleMarkerLoop) {
                     if !self.apply_current_loop_region(tab_idx) {
                         if self.has_selected_range(tab_idx) {
                             self.apply_loop_from_selection(tab_idx);
                         } else {
-                            if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                                tab.loop_mode = if tab.loop_region.is_some() {
-                                    LoopMode::Marker
-                                } else {
-                                    match tab.loop_mode {
-                                        LoopMode::Off => LoopMode::OnWhole,
-                                        LoopMode::OnWhole => LoopMode::Marker,
-                                        LoopMode::Marker => LoopMode::Off,
-                                    }
-                                };
-                            }
-                            if let Some(tab_ro) = self.tabs.get(tab_idx) {
-                                self.apply_loop_mode_for_tab(tab_ro);
-                            }
+                            // Nothing to make a loop out of: fall back to the
+                            // mode cycle, which is what this key did before the
+                            // two were separated.
+                            self.editor_cycle_loop_mode(tab_idx);
                         }
                     }
                 }
@@ -334,6 +342,43 @@ impl super::WavesPreviewer {
                     let audio_visible = self.tabs.get(tab_idx).is_some_and(|t| {
                         t.primary_view != EditorPrimaryView::Metadata && !t.read_only
                     });
+                    // Select all is not a destructive edit, so unlike the
+                    // block below it applies to a read-only source too. It does
+                    // need the waveform to be the thing on screen: in the
+                    // Metadata inspector, Ctrl+A belongs to whatever table or
+                    // field is in front.
+                    let waveform_visible = self
+                        .tabs
+                        .get(tab_idx)
+                        .is_some_and(|t| t.primary_view != EditorPrimaryView::Metadata);
+                    if waveform_visible && self.keymap_consume(ctx, Action::EditorSelectAll) {
+                        let selected = self.tabs.get_mut(tab_idx).and_then(|tab| {
+                            (tab.samples_len > 0).then(|| {
+                                tab.extra_selections.clear();
+                                Self::editor_set_selection_from_anchor(tab, 0, tab.samples_len);
+                                tab.samples_len
+                            })
+                        });
+                        if let Some(len) = selected {
+                            // Zoomed out, a whole-file selection looks the same
+                            // as one that stops just short of either end, so say
+                            // outright what happened.
+                            let out_sr = self.audio.shared.out_sample_rate.max(1);
+                            let sr = self
+                                .tabs
+                                .get(tab_idx)
+                                .map(|tab| Self::editor_display_sample_rate_for_tab(tab, out_sr))
+                                .unwrap_or(out_sr)
+                                .max(1) as f32;
+                            self.push_toast(
+                                super::types::ToastSeverity::Info,
+                                format!(
+                                    "Selected the entire file ({})",
+                                    super::helpers::format_time_s(len as f32 / sr)
+                                ),
+                            );
+                        }
+                    }
                     if audio_visible {
                         if self.keymap_consume(ctx, Action::EditorTrimSelection)
                             && !self.editor_apply_busy_toast_for_tab(tab_idx)
@@ -427,7 +472,12 @@ impl super::WavesPreviewer {
                     if self.keymap_consume(ctx, Action::EditorSeekEnd) {
                         self.seek_to_fraction_in_active_tab(9, 9);
                     }
-                    if self.keymap_consume(ctx, Action::EditorZoomToSelection) {
+                    // Shift+Z before Z: egui matches modifiers logically, so
+                    // the bare-`Z` pattern also accepts an event with Shift
+                    // held and would swallow this one.
+                    if self.keymap_consume(ctx, Action::EditorZoomToLoopRegion) {
+                        self.editor_zoom_to_loop_region(tab_idx);
+                    } else if self.keymap_consume(ctx, Action::EditorZoomToSelection) {
                         self.editor_zoom_to_selection(tab_idx);
                     }
                     // `=` shares the physical key with `+` on many layouts, so
@@ -663,7 +713,43 @@ impl super::WavesPreviewer {
         }
     }
 
-    pub(super) fn stop_with_marker_if_needed(
+    /// Clip an arrow-key seek to the first landmark it would have stepped over.
+    ///
+    /// The arrow keys move by a grid step, not from landmark to landmark, so
+    /// this is what makes them land *on* things: if the step would jump the
+    /// playhead across a landmark, it stops there instead.
+    ///
+    /// Loop start and end count as landmarks alongside markers. They are the
+    /// two positions people most often need the playhead exactly on -- to
+    /// audition a seam, or to check where a loop was placed -- and before this
+    /// the only way to reach one exactly was to zoom in far enough that a grid
+    /// step was a single sample.
+    ///
+    /// Returns one position, so a marker sitting on a loop point stops the
+    /// playhead once rather than twice.
+    /// Step the loop mode: off -> whole file -> marker loop -> off.
+    ///
+    /// A loop region forces marker loop, since that is the only mode that uses
+    /// one and landing anywhere else with a region set reads as the key having
+    /// done nothing.
+    pub(super) fn editor_cycle_loop_mode(&mut self, tab_idx: usize) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.loop_mode = if tab.loop_region.is_some() {
+                LoopMode::Marker
+            } else {
+                match tab.loop_mode {
+                    LoopMode::Off => LoopMode::OnWhole,
+                    LoopMode::OnWhole => LoopMode::Marker,
+                    LoopMode::Marker => LoopMode::Off,
+                }
+            };
+        }
+        if let Some(tab_ro) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab_ro);
+        }
+    }
+
+    pub(super) fn stop_at_landmark_if_needed(
         tab: &super::types::EditorTab,
         current_display: usize,
         target_display: usize,
@@ -672,23 +758,25 @@ impl super::WavesPreviewer {
         if dir == 0 || target_display == current_display {
             return target_display;
         }
+        // Markers are kept sorted, but folding the loop points in breaks that,
+        // so take the nearest in the direction of travel rather than the first
+        // one the iterator offers.
+        let landmarks = tab.markers.iter().map(|m| m.sample).chain(
+            crate::app::WavesPreviewer::normalized_loop_range(tab.loop_region)
+                .into_iter()
+                .flat_map(|(a, b)| [a, b]),
+        );
         if dir > 0 {
-            if let Some(marker) = tab
-                .markers
-                .iter()
-                .find(|m| m.sample > current_display && m.sample <= target_display)
-            {
-                return marker.sample;
-            }
-        } else if let Some(marker) = tab
-            .markers
-            .iter()
-            .rev()
-            .find(|m| m.sample < current_display && m.sample >= target_display)
-        {
-            return marker.sample;
+            landmarks
+                .filter(|&s| s > current_display && s <= target_display)
+                .min()
+                .unwrap_or(target_display)
+        } else {
+            landmarks
+                .filter(|&s| s < current_display && s >= target_display)
+                .max()
+                .unwrap_or(target_display)
         }
-        target_display
     }
 
     pub(super) fn handle_undo_redo_hotkeys(&mut self, ctx: &egui::Context) {
@@ -821,5 +909,93 @@ impl super::WavesPreviewer {
         // Edit menu must not gray Undo out while that path would fire.
         let overwrite_export = !redo && !self.overwrite_undo_stack.is_empty();
         graph || editor || list || overwrite_export
+    }
+}
+
+#[cfg(test)]
+mod landmark_tests {
+    use crate::app::types::EditorTab;
+    use crate::app::WavesPreviewer;
+    use crate::markers::MarkerEntry;
+
+    fn tab(markers: &[usize], loop_region: Option<(usize, usize)>) -> EditorTab {
+        let mut tab = EditorTab::new_base(std::path::PathBuf::from("/t.wav"), "t.wav".to_string());
+        tab.markers = markers
+            .iter()
+            .map(|&sample| MarkerEntry {
+                sample,
+                label: String::new(),
+            })
+            .collect();
+        tab.loop_region = loop_region;
+        tab
+    }
+
+    fn stop(tab: &EditorTab, from: usize, to: usize, dir: i32) -> usize {
+        WavesPreviewer::stop_at_landmark_if_needed(tab, from, to, dir)
+    }
+
+    #[test]
+    fn a_step_that_clears_everything_lands_where_it_meant_to() {
+        let t = tab(&[500], Some((600, 700)));
+        assert_eq!(stop(&t, 100, 200, 1), 200);
+        assert_eq!(stop(&t, 900, 800, -1), 800);
+        // dir 0 and a step of nothing are both pass-throughs.
+        assert_eq!(stop(&t, 100, 900, 0), 900);
+        assert_eq!(stop(&t, 100, 100, 1), 100);
+    }
+
+    #[test]
+    fn markers_still_stop_the_step() {
+        let t = tab(&[150, 400], None);
+        assert_eq!(stop(&t, 100, 300, 1), 150);
+        assert_eq!(stop(&t, 500, 300, -1), 400);
+    }
+
+    #[test]
+    fn loop_points_stop_the_step_too() {
+        let t = tab(&[], Some((300, 700)));
+        assert_eq!(stop(&t, 100, 500, 1), 300, "loop start going right");
+        assert_eq!(stop(&t, 500, 900, 1), 700, "loop end going right");
+        assert_eq!(stop(&t, 900, 500, -1), 700, "loop end going left");
+        assert_eq!(stop(&t, 500, 100, -1), 300, "loop start going left");
+    }
+
+    #[test]
+    fn the_nearest_landmark_wins_whichever_kind_it_is() {
+        // The markers are sorted but the loop points are not folded into that
+        // order, so taking the first candidate the iterator offers would step
+        // straight past the loop start to the marker beyond it.
+        let t = tab(&[250, 900], Some((400, 800)));
+        assert_eq!(stop(&t, 100, 950, 1), 250, "marker before the loop start");
+        assert_eq!(stop(&t, 300, 950, 1), 400, "loop start before the marker");
+        assert_eq!(stop(&t, 950, 100, -1), 900, "marker after the loop end");
+        assert_eq!(stop(&t, 850, 100, -1), 800, "loop end before the marker");
+    }
+
+    #[test]
+    fn a_marker_on_a_loop_point_stops_the_playhead_once() {
+        let t = tab(&[400], Some((400, 800)));
+        // Both name sample 400, and one position comes back, so the next press
+        // continues past it instead of stopping on the same sample again.
+        assert_eq!(stop(&t, 100, 600, 1), 400);
+        assert_eq!(stop(&t, 400, 600, 1), 600);
+    }
+
+    #[test]
+    fn a_landmark_exactly_on_the_target_is_where_the_step_ends_anyway() {
+        let t = tab(&[], Some((300, 700)));
+        assert_eq!(stop(&t, 100, 300, 1), 300);
+        assert_eq!(stop(&t, 900, 700, -1), 700);
+        // A landmark the step starts on must not hold it there.
+        assert_eq!(stop(&t, 300, 500, 1), 500);
+        assert_eq!(stop(&t, 700, 500, -1), 500);
+    }
+
+    #[test]
+    fn a_reversed_loop_region_is_normalized_before_it_is_used() {
+        let t = tab(&[], Some((700, 300)));
+        assert_eq!(stop(&t, 100, 500, 1), 300);
+        assert_eq!(stop(&t, 900, 500, -1), 700);
     }
 }
