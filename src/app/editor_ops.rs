@@ -211,7 +211,7 @@ impl crate::app::WavesPreviewer {
             (
                 tab.path.clone(),
                 tab.buffer_sample_rate.max(1),
-                tab.ch_samples.clone(),
+                tab.ch_samples_arc.clone(),
             )
         }) else {
             return;
@@ -222,7 +222,7 @@ impl crate::app::WavesPreviewer {
         self.clear_heavy_preview_state();
         self.clear_heavy_overlay_state();
         self.playback_session.last_play_start_display_sample = None;
-        self.audio.set_samples_channels(channels);
+        self.audio.set_samples_shared_channels(channels);
         if stop_playback {
             self.audio.stop();
         }
@@ -244,54 +244,21 @@ impl crate::app::WavesPreviewer {
     /// markers and loop-range annotations are left untouched — only the
     /// audio buffer and edit history are reset.
     pub(super) fn clear_edit_in_tab(&mut self, tab_idx: usize) {
-        let Some(tab) = self.tabs.get(tab_idx) else {
+        let Some(path) = self.tabs.get(tab_idx).map(|tab| tab.path.clone()) else {
             return;
         };
-        let path = tab.path.clone();
-        let target_sr = self
-            .sample_rate_override
-            .get(&path)
-            .copied()
-            .filter(|v| *v > 0);
-        let bit_depth = self.bit_depth_override.get(&path).copied();
-        let out_sr = self.audio.shared.out_sample_rate;
-        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
-        let decode_path = self
-            .resolved_audio_file_path(&path)
-            .unwrap_or_else(|| path.clone());
-        let Ok((chans, in_sr)) = crate::audio_io::decode_audio_multi(&decode_path) else {
-            self.debug_log(format!("clear edit: decode failed for {}", path.display()));
-            return;
-        };
-        let channels = Self::process_editor_decode_channels(
-            chans,
-            in_sr.max(1),
-            out_sr,
-            target_sr,
-            bit_depth,
-            resample_quality,
-        );
-
-        let undo_state = {
-            let Some(tab) = self.tabs.get_mut(tab_idx) else {
-                return;
-            };
-            let undo_state = Self::capture_undo_state_labeled(tab, "Clear Edit");
-            tab.ch_samples = channels;
-            tab.buffer_sample_rate = out_sr.max(1);
-            Self::editor_clamp_ranges(tab);
-            undo_state
-        };
-        self.edited_cache.remove(&path);
-        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
-        // Clear Edit is a hard reset: unlike other destructive edits, it does
-        // not leave behind an undo point back to the pre-clear (edited) state.
+        // Disk decode, resampling, bit-depth processing and waveform pyramid
+        // construction can all be clip-sized. Reuse the progressive editor
+        // worker and keep the current waveform visible until its result lands.
+        self.audio.stop();
+        self.clear_heavy_preview_state();
+        self.clear_heavy_overlay_state();
+        self.spawn_editor_decode(path.clone());
+        self.editor_clear_edit_pending = Some(path);
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.dirty = false;
-            tab.undo_stack.clear();
-            tab.undo_bytes = 0;
-            tab.redo_stack.clear();
-            tab.redo_bytes = 0;
+            tab.loading = true;
+            tab.loading_waveform_minmax.clear();
+            tab.samples_len_visual = tab.samples_len;
         }
     }
 
@@ -3919,10 +3886,10 @@ impl crate::app::WavesPreviewer {
                         (
                             tab.path.clone(),
                             tab.buffer_sample_rate.max(1),
-                            tab.ch_samples.clone(),
+                            tab.ch_samples_arc.clone(),
                         )
                     }) {
-                        self.audio.set_samples_channels(channels);
+                        self.audio.set_samples_shared_channels(channels);
                         self.playback_mark_buffer_source(
                             crate::app::PlaybackSourceKind::EditorTab(path),
                             buffer_sr,
@@ -4350,6 +4317,11 @@ mod clear_edit_tests {
         );
 
         app.clear_edit_in_tab(tab_idx);
+        assert!(
+            app.tabs[tab_idx].loading,
+            "clear edit should hand clip-sized work to the decode worker"
+        );
+        wait_for_decode(&mut app, tab_idx);
 
         let tab = &app.tabs[tab_idx];
         assert!(!tab.dirty, "clear edit should mark the tab clean");

@@ -37,7 +37,7 @@ pub(super) struct EditorViewportHint {
 }
 
 #[derive(Clone)]
-enum EditorViewportRequest {
+pub(super) enum EditorViewportRequest {
     Waveform {
         tab_path: PathBuf,
         generation: u64,
@@ -114,7 +114,7 @@ enum EditorViewportRequest {
 }
 
 #[derive(Clone)]
-enum WaveLaneRequest {
+pub(super) enum WaveLaneRequest {
     Overview {
         overview: Vec<(f32, f32)>,
         display_samples_len: usize,
@@ -123,12 +123,17 @@ enum WaveLaneRequest {
         bins: usize,
     },
     Samples {
-        samples: Vec<f32>,
+        channels: Arc<Vec<Vec<f32>>>,
+        channel_index: usize,
+        start: usize,
+        end: usize,
         bins: usize,
         render_raw: bool,
     },
     MixdownSamples {
-        channels: Vec<Vec<f32>>,
+        channels: Arc<Vec<Vec<f32>>>,
+        start: usize,
+        end: usize,
         bins: usize,
         render_raw: bool,
     },
@@ -210,6 +215,29 @@ impl super::WavesPreviewer {
             let (tx, rx) = std::sync::mpsc::channel::<EditorViewportJobMsg>();
             self.editor_viewport_tx = Some(tx);
             self.editor_viewport_rx = Some(rx);
+        }
+        if self.editor_viewport_request_tx.is_none() {
+            let Some(result_tx) = self.editor_viewport_tx.as_ref().cloned() else {
+                return;
+            };
+            // One renderer plus one queued request is enough. During a scrub
+            // or zoom gesture, stale generations should not grow an unbounded
+            // collection of expensive image-render threads.
+            let (request_tx, request_rx) =
+                std::sync::mpsc::sync_channel::<EditorViewportRequest>(1);
+            std::thread::spawn(move || {
+                super::threading::lower_current_thread_priority();
+                while let Ok(mut request) = request_rx.recv() {
+                    // If multiple requests arrived between renders, only the
+                    // newest viewport can still be useful.
+                    while let Ok(newer) = request_rx.try_recv() {
+                        request = newer;
+                    }
+                    Self::render_editor_viewport_request(request, &result_tx);
+                    crate::ui_wake::wake_ui();
+                }
+            });
+            self.editor_viewport_request_tx = Some(request_tx);
         }
     }
 
@@ -363,10 +391,11 @@ impl super::WavesPreviewer {
                 generation,
                 EditorViewportRenderQuality::Coarse,
             ) {
-                if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                    tab.viewport_render_inflight_coarse_generation = Some(generation);
+                if self.queue_editor_viewport_render(request) {
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        tab.viewport_render_inflight_coarse_generation = Some(generation);
+                    }
                 }
-                self.queue_editor_viewport_render(request);
             }
         }
         if queue_fine {
@@ -377,15 +406,15 @@ impl super::WavesPreviewer {
                 generation,
                 EditorViewportRenderQuality::Fine,
             ) {
-                if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                    tab.viewport_render_inflight_fine_generation = Some(generation);
+                if self.queue_editor_viewport_render(request) {
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        tab.viewport_render_inflight_fine_generation = Some(generation);
+                    }
                 }
-                self.queue_editor_viewport_render(request);
             }
         }
     }
 
-    #[allow(dead_code)]
     pub(super) fn best_editor_viewport_cache<'a>(
         tab: &'a EditorTab,
         key: &EditorViewportRenderKey,
@@ -424,20 +453,6 @@ impl super::WavesPreviewer {
             })
     }
 
-    pub(super) fn exact_editor_viewport_cache<'a>(
-        tab: &'a EditorTab,
-        key: &EditorViewportRenderKey,
-    ) -> Option<&'a EditorViewportRenderCache> {
-        tab.viewport_render_fine
-            .as_ref()
-            .filter(|cache| cache.key == *key)
-            .or_else(|| {
-                tab.viewport_render_coarse
-                    .as_ref()
-                    .filter(|cache| cache.key == *key)
-            })
-    }
-
     fn editor_feature_key_for_view(
         path: &PathBuf,
         view_mode: ViewMode,
@@ -463,7 +478,12 @@ impl super::WavesPreviewer {
         let kind = match hint.view_mode {
             ViewMode::Waveform => EditorViewportPayloadKind::Waveform,
             ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
-                if self.spectro_cache.contains_key(&tab.path) {
+                // Do not snapshot a partially-filled spectrogram into a viewport
+                // worker. That Arc would force every following tile to clone the
+                // complete allocation on the UI thread via Arc::make_mut.
+                if self.spectro_cache.contains_key(&tab.path)
+                    && !self.spectro_inflight.contains(&tab.path)
+                {
                     EditorViewportPayloadKind::Spectral
                 } else {
                     return None;
@@ -540,17 +560,10 @@ impl super::WavesPreviewer {
                         });
                     }
                 } else if hint.use_mixdown {
-                    let channel_slices = tab
-                        .ch_samples
-                        .iter()
-                        .map(|channel| {
-                            let start = hint.start.min(channel.len());
-                            let end = hint.end.min(channel.len()).max(start);
-                            channel[start..end].to_vec()
-                        })
-                        .collect::<Vec<_>>();
                     lanes.push(WaveLaneRequest::MixdownSamples {
-                        channels: channel_slices,
+                        channels: tab.ch_samples_arc.clone(),
+                        start: hint.start,
+                        end: hint.end,
                         bins,
                         render_raw: raw_mode && visible_len <= hint.wave_width_px.saturating_mul(4),
                     });
@@ -579,7 +592,10 @@ impl super::WavesPreviewer {
                             }
                         }
                         lanes.push(WaveLaneRequest::Samples {
-                            samples: channel[start..end].to_vec(),
+                            channels: tab.ch_samples_arc.clone(),
+                            channel_index: channel_idx,
+                            start,
+                            end,
                             bins,
                             render_raw: raw_mode
                                 && visible_len <= hint.wave_width_px.saturating_mul(4),
@@ -628,7 +644,7 @@ impl super::WavesPreviewer {
             ViewMode::Tempogram => {
                 let analysis_key = Self::editor_feature_key_for_view(&tab.path, hint.view_mode)?;
                 let data = match self.editor_feature_cache.get(&analysis_key)?.as_ref() {
-                    EditorFeatureAnalysisData::Tempogram(data) => Arc::new(data.clone()),
+                    EditorFeatureAnalysisData::Tempogram(data) => data.clone(),
                     _ => return None,
                 };
                 Some(EditorViewportRequest::Tempogram {
@@ -651,7 +667,7 @@ impl super::WavesPreviewer {
             ViewMode::Chromagram => {
                 let analysis_key = Self::editor_feature_key_for_view(&tab.path, hint.view_mode)?;
                 let data = match self.editor_feature_cache.get(&analysis_key)?.as_ref() {
-                    EditorFeatureAnalysisData::Chromagram(data) => Arc::new(data.clone()),
+                    EditorFeatureAnalysisData::Chromagram(data) => data.clone(),
                     _ => return None,
                 };
                 Some(EditorViewportRequest::Chromagram {
@@ -699,38 +715,63 @@ impl super::WavesPreviewer {
         }
     }
 
-    fn queue_editor_viewport_render(&mut self, request: EditorViewportRequest) {
+    fn queue_editor_viewport_render(&mut self, request: EditorViewportRequest) -> bool {
         self.ensure_editor_viewport_channel();
-        let Some(tx) = self.editor_viewport_tx.as_ref().cloned() else {
-            return;
+        let Some(tx) = self.editor_viewport_request_tx.as_ref() else {
+            return false;
         };
-        std::thread::spawn(move || {
-            super::threading::lower_current_thread_priority();
-            match request {
-                EditorViewportRequest::Waveform {
+        match tx.try_send(request) {
+            Ok(()) => true,
+            Err(std::sync::mpsc::TrySendError::Full(_)) => false,
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                self.editor_viewport_request_tx = None;
+                false
+            }
+        }
+    }
+
+    fn render_editor_viewport_request(
+        request: EditorViewportRequest,
+        tx: &std::sync::mpsc::Sender<EditorViewportJobMsg>,
+    ) {
+        match request {
+            EditorViewportRequest::Waveform {
+                tab_path,
+                generation,
+                quality,
+                key,
+                lanes,
+            } => {
+                let payload =
+                    EditorViewportRenderPayload::Waveform(Self::render_waveform_payload(lanes));
+                let _ = tx.send(EditorViewportJobMsg::Ready {
                     tab_path,
                     generation,
                     quality,
                     key,
-                    lanes,
-                } => {
-                    let payload =
-                        EditorViewportRenderPayload::Waveform(Self::render_waveform_payload(lanes));
-                    let _ = tx.send(EditorViewportJobMsg::Ready {
-                        tab_path,
-                        generation,
-                        quality,
-                        key,
-                        payload,
-                    });
-                }
-                EditorViewportRequest::Spectral {
-                    tab_path,
-                    generation,
-                    quality,
-                    key,
-                    specs,
-                    lane_spec_indices,
+                    payload,
+                });
+            }
+            EditorViewportRequest::Spectral {
+                tab_path,
+                generation,
+                quality,
+                key,
+                specs,
+                lane_spec_indices,
+                wave_width_px,
+                lane_height_px,
+                lane_count,
+                start,
+                end,
+                vertical_zoom,
+                vertical_view_center,
+                cfg,
+                view_mode,
+            } => {
+                let image = Arc::new(Self::render_spectral_viewport_image(
+                    &specs,
+                    &lane_spec_indices,
                     wave_width_px,
                     lane_height_px,
                     lane_count,
@@ -738,37 +779,36 @@ impl super::WavesPreviewer {
                     end,
                     vertical_zoom,
                     vertical_view_center,
-                    cfg,
+                    &cfg,
                     view_mode,
-                } => {
-                    let image = Arc::new(Self::render_spectral_viewport_image(
-                        &specs,
-                        &lane_spec_indices,
-                        wave_width_px,
-                        lane_height_px,
-                        lane_count,
-                        start,
-                        end,
-                        vertical_zoom,
-                        vertical_view_center,
-                        &cfg,
-                        view_mode,
-                        quality,
-                    ));
-                    let _ = tx.send(EditorViewportJobMsg::Ready {
-                        tab_path,
-                        generation,
-                        quality,
-                        key,
-                        payload: EditorViewportRenderPayload::Image(image),
-                    });
-                }
-                EditorViewportRequest::Tempogram {
+                    quality,
+                ));
+                let _ = tx.send(EditorViewportJobMsg::Ready {
                     tab_path,
                     generation,
                     quality,
                     key,
-                    data,
+                    payload: EditorViewportRenderPayload::Image(image),
+                });
+            }
+            EditorViewportRequest::Tempogram {
+                tab_path,
+                generation,
+                quality,
+                key,
+                data,
+                wave_width_px,
+                lane_height_px,
+                lane_count,
+                start,
+                end,
+                vertical_zoom,
+                vertical_view_center,
+                cfg,
+                view_mode,
+            } => {
+                let image = Arc::new(Self::render_tempogram_viewport_image(
+                    &data,
                     wave_width_px,
                     lane_height_px,
                     lane_count,
@@ -776,36 +816,36 @@ impl super::WavesPreviewer {
                     end,
                     vertical_zoom,
                     vertical_view_center,
-                    cfg,
+                    &cfg,
                     view_mode,
-                } => {
-                    let image = Arc::new(Self::render_tempogram_viewport_image(
-                        &data,
-                        wave_width_px,
-                        lane_height_px,
-                        lane_count,
-                        start,
-                        end,
-                        vertical_zoom,
-                        vertical_view_center,
-                        &cfg,
-                        view_mode,
-                        quality,
-                    ));
-                    let _ = tx.send(EditorViewportJobMsg::Ready {
-                        tab_path,
-                        generation,
-                        quality,
-                        key,
-                        payload: EditorViewportRenderPayload::Image(image),
-                    });
-                }
-                EditorViewportRequest::Chromagram {
+                    quality,
+                ));
+                let _ = tx.send(EditorViewportJobMsg::Ready {
                     tab_path,
                     generation,
                     quality,
                     key,
-                    data,
+                    payload: EditorViewportRenderPayload::Image(image),
+                });
+            }
+            EditorViewportRequest::Chromagram {
+                tab_path,
+                generation,
+                quality,
+                key,
+                data,
+                wave_width_px,
+                lane_height_px,
+                lane_count,
+                start,
+                end,
+                vertical_zoom,
+                vertical_view_center,
+                cfg,
+                view_mode,
+            } => {
+                let image = Arc::new(Self::render_chromagram_viewport_image(
+                    &data,
                     wave_width_px,
                     lane_height_px,
                     lane_count,
@@ -813,36 +853,37 @@ impl super::WavesPreviewer {
                     end,
                     vertical_zoom,
                     vertical_view_center,
-                    cfg,
+                    &cfg,
                     view_mode,
-                } => {
-                    let image = Arc::new(Self::render_chromagram_viewport_image(
-                        &data,
-                        wave_width_px,
-                        lane_height_px,
-                        lane_count,
-                        start,
-                        end,
-                        vertical_zoom,
-                        vertical_view_center,
-                        &cfg,
-                        view_mode,
-                        quality,
-                    ));
-                    let _ = tx.send(EditorViewportJobMsg::Ready {
-                        tab_path,
-                        generation,
-                        quality,
-                        key,
-                        payload: EditorViewportRenderPayload::Image(image),
-                    });
-                }
-                EditorViewportRequest::World {
+                    quality,
+                ));
+                let _ = tx.send(EditorViewportJobMsg::Ready {
                     tab_path,
                     generation,
                     quality,
                     key,
-                    data,
+                    payload: EditorViewportRenderPayload::Image(image),
+                });
+            }
+            EditorViewportRequest::World {
+                tab_path,
+                generation,
+                quality,
+                key,
+                data,
+                f0_focus,
+                wave_width_px,
+                lane_height_px,
+                lane_count,
+                start,
+                end,
+                vertical_zoom,
+                vertical_view_center,
+                cfg,
+                view_mode,
+            } => {
+                let image = Arc::new(Self::render_world_viewport_image(
+                    &data,
                     f0_focus,
                     wave_width_px,
                     lane_height_px,
@@ -851,33 +892,19 @@ impl super::WavesPreviewer {
                     end,
                     vertical_zoom,
                     vertical_view_center,
-                    cfg,
+                    &cfg,
                     view_mode,
-                } => {
-                    let image = Arc::new(Self::render_world_viewport_image(
-                        &data,
-                        f0_focus,
-                        wave_width_px,
-                        lane_height_px,
-                        lane_count,
-                        start,
-                        end,
-                        vertical_zoom,
-                        vertical_view_center,
-                        &cfg,
-                        view_mode,
-                        quality,
-                    ));
-                    let _ = tx.send(EditorViewportJobMsg::Ready {
-                        tab_path,
-                        generation,
-                        quality,
-                        key,
-                        payload: EditorViewportRenderPayload::Image(image),
-                    });
-                }
+                    quality,
+                ));
+                let _ = tx.send(EditorViewportJobMsg::Ready {
+                    tab_path,
+                    generation,
+                    quality,
+                    key,
+                    payload: EditorViewportRenderPayload::Image(image),
+                });
             }
-        });
+        }
     }
 
     fn render_waveform_payload(lanes: Vec<WaveLaneRequest>) -> EditorViewportWavePayload {
@@ -925,39 +952,49 @@ impl super::WavesPreviewer {
                     out.push(EditorViewportWaveLane::Peaks(peaks));
                 }
                 WaveLaneRequest::Samples {
-                    samples,
+                    channels,
+                    channel_index,
+                    start,
+                    end,
                     bins,
                     render_raw,
                 } => {
+                    let samples = channels
+                        .get(channel_index)
+                        .map(|channel| {
+                            let start = start.min(channel.len());
+                            let end = end.min(channel.len()).max(start);
+                            &channel[start..end]
+                        })
+                        .unwrap_or(&[]);
                     if render_raw {
-                        out.push(EditorViewportWaveLane::Samples(samples));
+                        out.push(EditorViewportWaveLane::Samples(samples.to_vec()));
                     } else {
                         let mut peaks = Vec::new();
-                        wf_cache::build_visible_minmax(&samples, bins.max(1), &mut peaks);
+                        wf_cache::build_visible_minmax(samples, bins.max(1), &mut peaks);
                         out.push(EditorViewportWaveLane::Peaks(peaks));
                     }
                 }
                 WaveLaneRequest::MixdownSamples {
                     channels,
+                    start,
+                    end,
                     bins,
                     render_raw,
                 } => {
+                    let len = channels.first().map(|c| c.len()).unwrap_or(0);
+                    let start = start.min(len);
+                    let end = end.min(len).max(start);
                     if render_raw {
                         let mut mono = Vec::new();
-                        wf_cache::build_mixdown_visible(
-                            &channels,
-                            0,
-                            channels.first().map(|c| c.len()).unwrap_or(0),
-                            &mut mono,
-                        );
+                        wf_cache::build_mixdown_visible(&channels, start, end, &mut mono);
                         out.push(EditorViewportWaveLane::Samples(mono));
                     } else {
                         let mut peaks = Vec::new();
-                        let len = channels.first().map(|c| c.len()).unwrap_or(0);
                         wf_cache::build_mixdown_minmax_visible(
                             &channels,
-                            0,
-                            len,
+                            start,
+                            end,
                             bins.max(1),
                             &mut peaks,
                         );
@@ -1511,9 +1548,12 @@ impl super::WavesPreviewer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::super::types::{SpectrogramConfig, SpectrogramData, SpectrogramDbRef, ViewMode};
     use super::super::WavesPreviewer;
-    use crate::app::types::EditorViewportRenderQuality;
+    use super::WaveLaneRequest;
+    use crate::app::types::{EditorViewportRenderQuality, EditorViewportWaveLane};
 
     fn quiet_spec() -> SpectrogramData {
         // A uniformly quiet spectrogram (-60 dBFS everywhere).
@@ -1566,6 +1606,27 @@ mod tests {
             bright > dim + 50.0,
             "ref=max should brighten a -60 dBFS spectrogram (abs={dim:.1}, max={bright:.1})"
         );
+    }
+
+    #[test]
+    fn shared_waveform_request_keeps_the_requested_sample_alignment() {
+        let channels = Arc::new(vec![vec![-0.9, -0.8, 0.1, 0.2, 0.3, 0.4, 0.8]]);
+        let payload = WavesPreviewer::render_waveform_payload(vec![WaveLaneRequest::Samples {
+            channels: channels.clone(),
+            channel_index: 0,
+            start: 2,
+            end: 6,
+            bins: 4,
+            render_raw: true,
+        }]);
+
+        assert_eq!(Arc::strong_count(&channels), 1);
+        match payload.lanes.as_slice() {
+            [EditorViewportWaveLane::Samples(samples)] => {
+                assert_eq!(samples, &[0.1, 0.2, 0.3, 0.4]);
+            }
+            lanes => panic!("unexpected waveform payload: {lanes:?}"),
+        }
     }
 
     #[test]

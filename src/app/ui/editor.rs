@@ -1976,6 +1976,7 @@ impl crate::app::WavesPreviewer {
         preview_sample_rate: u32,
         playing: bool,
         video_secs: f64,
+        spectrum_interval_secs: f64,
     ) {
         use crate::app::render::mini_meter;
 
@@ -2045,15 +2046,19 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let end = meter_playhead.clamp(1, buf_len);
+        // Frame timing for meter ballistics. The FFT cadence is tiered; when
+        // it is not due we also avoid building its much longer mono history.
+        let now = ui.input(|i| i.time);
+        let spectrum_time_due = tab.mini_meter.spectrum_db.is_empty()
+            || now - tab.mini_meter.spectrum_last_time >= spectrum_interval_secs;
         let spec_n = mini_meter::spectrum_history_len(sr).min(buf_len);
         let scope_n = ((srf * 0.04) as usize).clamp(256, 8_192).min(buf_len);
         let level_n = ((srf * 0.05) as usize).clamp(256, 8_192).min(buf_len);
         let vector_n = ((srf * 0.03) as usize).clamp(256, 4_096).min(buf_len);
-        let need = spec_n.max(scope_n).max(level_n).min(end);
+        let spectrum_need = if spectrum_time_due { spec_n } else { 0 };
+        let need = spectrum_need.max(scope_n).max(level_n).min(end);
         let start = end - need;
 
-        // Frame timing for meter ballistics.
-        let now = ui.input(|i| i.time);
         let dt = ((now - tab.mini_meter.last_time).max(0.0) as f32).min(0.25);
         tab.mini_meter.last_time = now;
 
@@ -2179,8 +2184,18 @@ impl crate::app::WavesPreviewer {
             painter.rect_filled(spectrum_rect, 4.0, panel_bg);
             let db_floor = mini_meter::SPECTRUM_DB_FLOOR;
             let cols = (spectrum_rect.width().max(8.0) as usize).min(1_024);
-            mini_meter::spectrum_columns(mono, sr, cols, spectrum_target);
-            mini_meter::smooth_spectrum_db(&mut tab.mini_meter.spectrum_db, spectrum_target, dt);
+            let spectrum_due = tab.mini_meter.spectrum_db.len() != cols || spectrum_time_due;
+            if spectrum_due {
+                let spectrum_dt =
+                    ((now - tab.mini_meter.spectrum_last_time).max(0.0) as f32).min(0.25);
+                mini_meter::spectrum_columns(mono, sr, cols, spectrum_target);
+                mini_meter::smooth_spectrum_db(
+                    &mut tab.mini_meter.spectrum_db,
+                    spectrum_target,
+                    spectrum_dt,
+                );
+                tab.mini_meter.spectrum_last_time = now;
+            }
             // Faint dB grid lines.
             for db in [-24.0f32, -48.0, -72.0] {
                 let t = (db - db_floor) / -db_floor;
@@ -3070,6 +3085,8 @@ impl crate::app::WavesPreviewer {
     ) {
         let editor_scroll_active = self.ui_input_focus.is_active(UiSurface::Editor);
         let editor_scroll_source = self.scroll_source_for(UiSurface::Editor);
+        let mini_meter_spectrum_interval_secs =
+            self.perf.mini_meter_spectrum_interval().as_secs_f64();
         if self.tabs[tab_idx].primary_view == EditorPrimaryView::Metadata {
             self.ui_metadata_inspector(ui, ctx, tab_idx);
             return;
@@ -3200,8 +3217,24 @@ impl crate::app::WavesPreviewer {
                     )
                     .sense(egui::Sense::hover()),
                 )
+                .on_hover_text(if tab.audio_track_absent {
+                    "This is a video file with no audio track. It remains playable and seekable on a silent timeline, but NeoWaves has no video encoder — so it cannot be edited or written back out."
+                } else {
+                    "This is a video file. Its audio track plays, measures and previews like any other source, but NeoWaves has no video encoder — so it cannot be edited or written back out."
+                });
+            }
+            if tab.audio_track_absent {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new("NO AUDIO")
+                            .small()
+                            .monospace()
+                            .color(Color32::from_rgb(220, 180, 110)),
+                    )
+                    .sense(egui::Sense::hover()),
+                )
                 .on_hover_text(
-                    "This is a video file. Its audio track plays, measures and previews like any other source, but NeoWaves has no video encoder — so it cannot be edited or written back out.",
+                    "This video has no audio track. Playback and seeking use a silent timeline so the picture remains fully previewable.",
                 );
             }
         });
@@ -4275,11 +4308,11 @@ impl crate::app::WavesPreviewer {
             if view_mode != ViewMode::Waveform {
                 match view_mode {
                     ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
-                        if let Some(specs) = spec_cache.as_ref() {
+                        if spec_cache.is_some() {
                             touch_spectro_cache = true;
                             let current_viewport_cache = current_feature_viewport_key
                                 .as_ref()
-                                .and_then(|key| Self::exact_editor_viewport_cache(tab, key));
+                                .and_then(|key| Self::best_editor_viewport_cache(tab, key));
                             if let Some(crate::app::types::EditorViewportRenderCache {
                                 payload:
                                     crate::app::types::EditorViewportCachePayload::Image {
@@ -4302,58 +4335,21 @@ impl crate::app::WavesPreviewer {
                                     Color32::WHITE,
                                 );
                             } else {
-                                let lane_spec_indices = if use_mixdown {
-                                    vec![0usize; lane_count.max(1)]
-                                } else if visible_channels.is_empty() {
-                                    (0..lane_count.max(1)).collect::<Vec<_>>()
-                                } else {
-                                    visible_channels
-                                        .iter()
-                                        .copied()
-                                        .take(lane_count.max(1))
-                                        .collect::<Vec<_>>()
-                                };
-                                let fallback_image = Self::render_spectral_viewport_image(
-                                    specs,
-                                    &lane_spec_indices,
-                                    wave_width_px,
-                                    lane_height_px,
-                                    lane_count.max(1),
-                                    start,
-                                    end,
-                                    tab.vertical_zoom,
-                                    tab.vertical_view_center,
-                                    &self.spectro_cfg,
-                                    view_mode,
-                                    crate::app::types::EditorViewportRenderQuality::Coarse,
+                                // Rendering and texture creation stay on the viewport worker.
+                                // Keeping the last compatible texture avoids a blank flash while
+                                // zooming, without doing a full spectral render on the UI thread.
+                                let fid = TextStyle::Monospace.resolve(ui.style());
+                                painter.text(
+                                    egui::pos2(wave_left + 6.0, rect.top() + 6.0),
+                                    egui::Align2::LEFT_TOP,
+                                    if spec_loading {
+                                        "Building spectrogram..."
+                                    } else {
+                                        "Rendering spectrogram..."
+                                    },
+                                    fid,
+                                    Color32::GRAY,
                                 );
-                                let fallback_texture = ui.ctx().load_texture(
-                                    format!("editor_viewport_sync_fallback_{tab_idx}_{view_mode:?}"),
-                                    fallback_image,
-                                    egui::TextureOptions::LINEAR,
-                                );
-                                painter.image(
-                                    fallback_texture.id(),
-                                    egui::Rect::from_min_size(
-                                        egui::pos2(wave_left, rect.top()),
-                                        egui::vec2(wave_w, lane_h * lane_count as f32),
-                                    ),
-                                    egui::Rect::from_min_max(
-                                        egui::pos2(0.0, 0.0),
-                                        egui::pos2(1.0, 1.0),
-                                    ),
-                                    Color32::WHITE,
-                                );
-                                if spec_loading {
-                                    let fid = TextStyle::Monospace.resolve(ui.style());
-                                    painter.text(
-                                        egui::pos2(wave_left + 6.0, rect.top() + 6.0),
-                                        egui::Align2::LEFT_TOP,
-                                        "Building spectrogram...",
-                                        fid,
-                                        Color32::GRAY,
-                                    );
-                                }
                             }
                         } else {
                             let fid = TextStyle::Monospace.resolve(ui.style());
@@ -4515,7 +4511,7 @@ impl crate::app::WavesPreviewer {
                         );
                         let current_viewport_cache = current_feature_viewport_key
                             .as_ref()
-                            .and_then(|key| Self::exact_editor_viewport_cache(tab, key));
+                            .and_then(|key| Self::best_editor_viewport_cache(tab, key));
                         if let Some(crate::app::types::EditorViewportRenderCache {
                             payload:
                                 crate::app::types::EditorViewportCachePayload::Image {
@@ -4534,38 +4530,12 @@ impl crate::app::WavesPreviewer {
                                 ),
                                 Color32::WHITE,
                             );
-                        } else if let Some(data) = tempogram_data.as_ref() {
-                            let fallback_image = Self::render_tempogram_viewport_image(
-                                data,
-                                wave_width_px,
-                                Self::editor_viewport_dimension_px(h, pixels_per_point),
-                                1,
-                                start,
-                                end,
-                                tab.vertical_zoom,
-                                tab.vertical_view_center,
-                                &self.spectro_cfg,
-                                view_mode,
-                                crate::app::types::EditorViewportRenderQuality::Coarse,
-                            );
-                            let fallback_texture = ui.ctx().load_texture(
-                                format!("editor_viewport_sync_fallback_{tab_idx}_{view_mode:?}"),
-                                fallback_image,
-                                egui::TextureOptions::LINEAR,
-                            );
-                            painter.image(
-                                fallback_texture.id(),
-                                lane_rect,
-                                egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                ),
-                                Color32::WHITE,
-                            );
                         } else {
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let msg = if feature_loading {
                                 "Building tempogram..."
+                            } else if tempogram_data.is_some() {
+                                "Rendering tempogram..."
                             } else {
                                 "Tempogram not ready"
                             };
@@ -4651,7 +4621,7 @@ impl crate::app::WavesPreviewer {
                         );
                         let current_viewport_cache = current_feature_viewport_key
                             .as_ref()
-                            .and_then(|key| Self::exact_editor_viewport_cache(tab, key));
+                            .and_then(|key| Self::best_editor_viewport_cache(tab, key));
                         if let Some(crate::app::types::EditorViewportRenderCache {
                             payload:
                                 crate::app::types::EditorViewportCachePayload::Image {
@@ -4670,38 +4640,12 @@ impl crate::app::WavesPreviewer {
                                 ),
                                 Color32::WHITE,
                             );
-                        } else if let Some(data) = chromagram_data.as_ref() {
-                            let fallback_image = Self::render_chromagram_viewport_image(
-                                data,
-                                wave_width_px,
-                                Self::editor_viewport_dimension_px(h, pixels_per_point),
-                                1,
-                                start,
-                                end,
-                                tab.vertical_zoom,
-                                tab.vertical_view_center,
-                                &self.spectro_cfg,
-                                view_mode,
-                                crate::app::types::EditorViewportRenderQuality::Coarse,
-                            );
-                            let fallback_texture = ui.ctx().load_texture(
-                                format!("editor_viewport_sync_fallback_{tab_idx}_{view_mode:?}"),
-                                fallback_image,
-                                egui::TextureOptions::LINEAR,
-                            );
-                            painter.image(
-                                fallback_texture.id(),
-                                lane_rect,
-                                egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                ),
-                                Color32::WHITE,
-                            );
                         } else {
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let msg = if feature_loading {
                                 "Building chromagram..."
+                            } else if chromagram_data.is_some() {
+                                "Rendering chromagram..."
                             } else {
                                 "Chromagram not ready"
                             };
@@ -4766,7 +4710,7 @@ impl crate::app::WavesPreviewer {
                         );
                         let current_viewport_cache = current_feature_viewport_key
                             .as_ref()
-                            .and_then(|key| Self::exact_editor_viewport_cache(tab, key));
+                            .and_then(|key| Self::best_editor_viewport_cache(tab, key));
                         if let Some(crate::app::types::EditorViewportRenderCache {
                             payload:
                                 crate::app::types::EditorViewportCachePayload::Image {
@@ -4778,35 +4722,6 @@ impl crate::app::WavesPreviewer {
                         {
                             painter.image(
                                 texture.id(),
-                                lane_rect,
-                                egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                ),
-                                Color32::WHITE,
-                            );
-                        } else if let Some(data) = world_data {
-                            let fallback_image = Self::render_world_viewport_image(
-                                data,
-                                tab.world_f0_focus,
-                                wave_width_px,
-                                Self::editor_viewport_dimension_px(h, pixels_per_point),
-                                1,
-                                start,
-                                end,
-                                tab.vertical_zoom,
-                                tab.vertical_view_center,
-                                &self.spectro_cfg,
-                                view_mode,
-                                crate::app::types::EditorViewportRenderQuality::Coarse,
-                            );
-                            let fallback_texture = ui.ctx().load_texture(
-                                format!("editor_viewport_sync_fallback_{tab_idx}_{view_mode:?}"),
-                                fallback_image,
-                                egui::TextureOptions::LINEAR,
-                            );
-                            painter.image(
-                                fallback_texture.id(),
                                 lane_rect,
                                 egui::Rect::from_min_max(
                                     egui::pos2(0.0, 0.0),
@@ -4829,6 +4744,8 @@ impl crate::app::WavesPreviewer {
                                 format!(
                                     "Analyzing WORLD features (F0 / spectral envelope)... {pct:.0}%"
                                 )
+                            } else if world_data.is_some() {
+                                "Rendering WORLD features...".to_string()
                             } else {
                                 "WORLD features not ready".to_string()
                             };
@@ -8763,6 +8680,7 @@ impl crate::app::WavesPreviewer {
                         out_sr,
                         playing,
                         video_secs,
+                        mini_meter_spectrum_interval_secs,
                     );
                     video_request = Some((video_secs, playing));
                 }
@@ -8885,9 +8803,11 @@ impl crate::app::WavesPreviewer {
                                 .color(Color32::from_rgb(220, 180, 110)),
                         );
                         ui.label(
-                            RichText::new(
-                                "A video's audio can be played, measured and previewed, but not edited or written back out.",
-                            )
+                            RichText::new(if tab.audio_track_absent {
+                                "No audio track. The video remains playable and seekable on a silent timeline, but cannot be edited or written back out."
+                            } else {
+                                "A video's audio can be played, measured and previewed, but not edited or written back out."
+                            })
                             .small()
                             .color(Color32::from_rgb(150, 158, 172)),
                         );

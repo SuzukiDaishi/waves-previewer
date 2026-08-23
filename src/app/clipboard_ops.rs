@@ -221,7 +221,7 @@ impl super::WavesPreviewer {
             if has_override {
                 if let Some(current) = audio.take() {
                     let (channels, new_sr) = super::WavesPreviewer::apply_gain_and_resample(
-                        current.channels.clone(),
+                        (*current.channels).clone(),
                         sample_rate,
                         gain_db,
                         target_sr,

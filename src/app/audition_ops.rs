@@ -291,7 +291,7 @@ impl crate::app::WavesPreviewer {
             for (logical_path, asset) in &sources {
                 let decoded_asset = match &asset.backing {
                     crate::audio_asset::AudioBacking::ResidentBuffer(audio) => {
-                        Ok((audio.channels.clone(), asset.sample_rate.max(1)))
+                        Ok(((*audio.channels).clone(), asset.sample_rate.max(1)))
                     }
                     backing => backing
                         .file_path()

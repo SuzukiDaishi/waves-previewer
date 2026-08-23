@@ -243,17 +243,27 @@ impl WavesPreviewer {
         };
         let have_frame_for_target = panel
             .frame_at(target_secs)
-            .map(|(pts, _)| target_secs - pts < frame_secs)
+            .map(|(pts, _)| target_secs >= pts && target_secs - pts < frame_secs)
             .unwrap_or(false);
         let box_changed = panel.box_px != box_px;
-        let moved = (target_secs - panel.requested_secs).abs() >= frame_secs * 0.5;
-        // While playing, keep asking as the ring drains so the run stays ahead
-        // of the playhead instead of running out mid-phrase.
-        let ring_running_low = playing && panel.ring.len() <= decode_ahead / 2;
-        if !box_changed && !moved && have_frame_for_target && !ring_running_low {
+        // Count only pictures still ahead of the playhead. Old frames remain
+        // in the ring briefly for cheap backward nudges, so the total ring
+        // length never represented how much read-ahead was left.
+        let frames_ahead = panel
+            .ring
+            .iter()
+            .filter(|(pts, _)| *pts > target_secs)
+            .count();
+        let ring_running_low = playing && frames_ahead <= decode_ahead / 2;
+        if !box_changed && have_frame_for_target && !ring_running_low {
             return;
         }
-        if panel.inflight && !box_changed && !moved {
+        // Never supersede a decode already in flight. Previously each UI frame
+        // bumped the generation while playback advanced, so a decode taking
+        // longer than one repaint was guaranteed to arrive "stale" and be
+        // discarded. The next draw requests the newest playhead as soon as
+        // this result lands.
+        if panel.inflight {
             return;
         }
 
@@ -264,12 +274,34 @@ impl WavesPreviewer {
             panel.shown_pts = None;
             panel.box_px = box_px;
         }
+        let outside_ring =
+            panel
+                .ring
+                .front()
+                .zip(panel.ring.back())
+                .is_some_and(|((front, _), (back, _))| {
+                    target_secs + frame_secs < *front || target_secs > *back + frame_secs
+                });
+        if outside_ring {
+            // A discontinuous seek must be allowed to append older frames.
+            panel.ring.clear();
+            panel.shown_pts = None;
+        }
+        let request_secs = if playing && have_frame_for_target {
+            panel
+                .ring
+                .back()
+                .map(|(pts, _)| pts + frame_secs)
+                .unwrap_or(target_secs)
+        } else {
+            target_secs
+        };
         panel.generation = panel.generation.wrapping_add(1).max(1);
-        panel.requested_secs = target_secs;
+        panel.requested_secs = request_secs;
         panel.inflight = true;
         let request = VideoFrameRequest {
             generation: panel.generation,
-            target_secs,
+            target_secs: request_secs,
             decode_ahead,
             box_px,
             max_forward_walk,

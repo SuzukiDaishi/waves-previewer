@@ -2959,7 +2959,7 @@ impl super::WavesPreviewer {
                             VirtualSourceRef::VirtualPath(src_path) => {
                                 if let Some(src_item) = self.item_for_path(src_path) {
                                     if let Some(audio) = src_item.virtual_audio.as_ref() {
-                                        channels_opt = Some(audio.channels.clone());
+                                        channels_opt = Some((*audio.channels).clone());
                                         channels_from_raw_source = true;
                                         sample_rate = src_item
                                             .virtual_state

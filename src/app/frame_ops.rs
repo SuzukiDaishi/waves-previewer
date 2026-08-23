@@ -484,6 +484,18 @@ impl WavesPreviewer {
                     let mut used_tab_transport = false;
                     let source_time_sec = self.playback_current_source_time_sec();
                     if let Some(idx) = self.active_tab {
+                        if self
+                            .tabs
+                            .get(idx)
+                            .is_some_and(|tab| tab.path == p && tab.audio_track_absent)
+                        {
+                            used_tab_transport = self.activate_silent_video_transport_for_tab(idx);
+                            if let Some(source_time_sec) = source_time_sec {
+                                self.playback_seek_to_source_time(self.mode, source_time_sec);
+                            }
+                        }
+                    }
+                    if let Some(idx) = self.active_tab.filter(|_| !used_tab_transport) {
                         let measure_stream_activation =
                             matches!(activation_kind, PendingTabActivationKind::InitialOpen)
                                 && self
@@ -510,39 +522,28 @@ impl WavesPreviewer {
                         } else if let Some(tab) = self.tabs.get(idx) {
                             if tab.path == p && !tab.ch_samples.is_empty() {
                                 used_tab_transport = true;
-                                let channels = tab.ch_samples.clone();
+                                let channels = tab.ch_samples_arc.clone();
                                 let in_sr = tab.buffer_sample_rate.max(1);
                                 if self.mode_requires_offline_processing() {
                                     self.audio.stop();
                                     self.audio.set_samples_mono(Vec::new());
                                     self.spawn_heavy_processing_from_channels(
                                         p.clone(),
-                                        channels,
+                                        (*channels).clone(),
                                         ProcessingTarget::EditorTab(p.clone()),
                                     );
                                 } else {
-                                    let mut render_spec = self.offline_render_spec_for_path(&p);
-                                    render_spec.master_gain_db = 0.0;
-                                    render_spec.file_gain_db = 0.0;
-                                    let rendered = Self::render_channels_offline_with_spec(
-                                        channels,
-                                        in_sr,
-                                        render_spec,
-                                        false,
-                                    );
                                     let handoff = self.editor_playback_handoff_matches(&p);
                                     if handoff {
-                                        self.set_editor_buffer_transport_preserving_time(
-                                            &p,
-                                            rendered,
-                                            self.audio.shared.out_sample_rate.max(1),
+                                        self.set_editor_shared_buffer_transport_preserving_time(
+                                            &p, channels, in_sr,
                                         );
                                     } else {
-                                        self.audio.set_samples_channels(rendered);
+                                        self.audio.set_samples_shared_channels(channels);
                                     }
                                     self.playback_mark_buffer_source(
                                         PlaybackSourceKind::EditorTab(p.clone()),
-                                        self.audio.shared.out_sample_rate.max(1),
+                                        in_sr,
                                     );
                                     if let Some(source_time_sec) = source_time_sec {
                                         self.playback_seek_to_source_time(
@@ -560,7 +561,7 @@ impl WavesPreviewer {
                     if !used_tab_transport {
                         if let Some(idx) = self.active_tab {
                             if let Some(tab) = self.tabs.get_mut(idx) {
-                                if tab.path == p && !tab.loading {
+                                if tab.path == p && !tab.loading && !tab.audio_track_absent {
                                     tab.loading = true;
                                     self.spawn_editor_decode(p.clone());
                                 }
@@ -1114,13 +1115,13 @@ impl WavesPreviewer {
             || self.playback_fx_state.is_some()
             || self.list_preview_rx.is_some()
             || self.list_preview_pending_path.is_some()
-            || self.editor_decode_state.is_some()
             || self.heavy_preview_rx.is_some()
             || self.heavy_overlay_rx.is_some()
             || self.music_preview_state.is_some()
             || self.editor_apply_state.is_some()
             || self.plugin_process_state.is_some();
         let progress_repaint = self.scan_in_progress
+            || self.editor_decode_state.is_some()
             || self.music_ai_state.is_some()
             || self.export_state.is_some()
             || self.csv_export_state.is_some()

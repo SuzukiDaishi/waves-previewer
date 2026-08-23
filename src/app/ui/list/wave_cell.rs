@@ -343,10 +343,13 @@ impl crate::app::WavesPreviewer {
                     format!("List seek row {}", cell.row_idx),
                 )
             });
-            let error_text = self
-                .meta_for_path(cell.path)
-                .and_then(|m| m.decode_error.as_deref());
-            let (wave_rect, error_rect) = if error_text.is_some() {
+            let status_text = self.meta_for_path(cell.path).and_then(|meta| {
+                meta.decode_error
+                    .as_deref()
+                    .map(|text| (text, true))
+                    .or_else(|| meta.audio_track_absent.then_some(("NO AUDIO", false)))
+            });
+            let (wave_rect, error_rect) = if status_text.is_some() {
                 let err_max = (rect2.height() * 0.45).max(8.0);
                 let mut err_h = (cell.row_h * 0.36).max(8.0);
                 if err_h > err_max {
@@ -386,7 +389,7 @@ impl crate::app::WavesPreviewer {
             if let Some(overlay) = self.resolve_list_wave_overlay_info(cell.path) {
                 self.paint_list_wave_overlay(ui, wave_rect, &overlay);
             }
-            if let (Some(text), Some(err_rect)) = (error_text, error_rect) {
+            if let (Some((text, is_error)), Some(err_rect)) = (status_text, error_rect) {
                 let text_pos = egui::pos2(err_rect.left() + 4.0, err_rect.center().y);
                 let mut font_size = cell.text_height * 0.85;
                 if font_size < 10.0 {
@@ -401,7 +404,11 @@ impl crate::app::WavesPreviewer {
                     egui::Align2::LEFT_CENTER,
                     text,
                     font,
-                    self.palette().error_text,
+                    if is_error {
+                        self.palette().error_text
+                    } else {
+                        Color32::from_rgb(220, 180, 110)
+                    },
                 );
             }
             // A fraction can only become a time once the duration is known,

@@ -632,6 +632,8 @@ pub struct WavesPreviewer {
     pub spectro_rx: Option<std::sync::mpsc::Receiver<SpectrogramJobMsg>>,
     pub editor_viewport_tx: Option<std::sync::mpsc::Sender<EditorViewportJobMsg>>,
     pub editor_viewport_rx: Option<std::sync::mpsc::Receiver<EditorViewportJobMsg>>,
+    editor_viewport_request_tx:
+        Option<std::sync::mpsc::SyncSender<editor_viewport::EditorViewportRequest>>,
     editor_viewport_generation_counter: u64,
     /// Result channel shared by every video decode worker; see `video_ops`.
     video_frame_tx: Option<std::sync::mpsc::Sender<video_ops::VideoFrameMsg>>,
@@ -935,6 +937,9 @@ pub struct WavesPreviewer {
     virtual_trim_queue: std::collections::VecDeque<(PathBuf, usize, usize)>,
     // background decode for editor (prefix + full)
     editor_decode_state: Option<EditorDecodeState>,
+    // A Clear Edit reset reuses the editor decode worker. This marks the
+    // result so adoption clears edit history instead of behaving like open.
+    editor_clear_edit_pending: Option<PathBuf>,
     editor_decode_job_id: u64,
     // cached edited audio when tabs are closed (kept until save)
     edited_cache: HashMap<PathBuf, CachedEdit>,
@@ -1954,6 +1959,7 @@ impl WavesPreviewer {
             None
         };
         FileMeta {
+            audio_track_absent: false,
             channels: channels.len().max(1) as u16,
             sample_rate,
             bits_per_sample,

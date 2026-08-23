@@ -2153,7 +2153,8 @@ pub struct VideoPanelState {
     /// The pixel box the panel wants at its current size, written by the draw
     /// and read by the request. Zero until the panel has been laid out once.
     pub wanted_box_px: (u32, u32),
-    /// Bumped on every request so frames from a superseded one are dropped.
+    /// Bumped on every request. Only one request may be in flight, so a
+    /// completed generation is always displayable unless the tab was closed.
     pub generation: u64,
     pub inflight: bool,
 }
@@ -2192,11 +2193,12 @@ impl VideoPanelState {
 /// (spectrum analyzer ballistics, per-channel peak hold, correlation).
 #[derive(Clone, Debug, Default)]
 pub struct MiniMeterState {
-    pub spectrum_db: Vec<f32>,  // smoothed per-column analyzer levels (dBFS)
-    pub peak_hold_db: Vec<f32>, // per-channel peak hold (dBFS)
-    pub corr: f32,              // smoothed stereo correlation in [-1, 1]
-    pub last_time: f64,         // ui time of the previous update
-    pub active: bool,           // decay animation still in motion
+    pub spectrum_db: Vec<f32>,   // smoothed per-column analyzer levels (dBFS)
+    pub peak_hold_db: Vec<f32>,  // per-channel peak hold (dBFS)
+    pub corr: f32,               // smoothed stereo correlation in [-1, 1]
+    pub last_time: f64,          // ui time of the previous update
+    pub spectrum_last_time: f64, // ui time of the previous FFT update
+    pub active: bool,            // decay animation still in motion
 }
 
 /// WORLD aperiodicity edit draft: a per-frame multiplier applied to every
@@ -2313,6 +2315,10 @@ pub struct EditorTab {
     /// the tool panel, the destructive shortcuts, the post-frame command
     /// dispatch and the list's per-file gain. See [`crate::media_kind`].
     pub read_only: bool,
+    /// The container is valid but deliberately has no audio track. Such a
+    /// video uses a zero-allocation silent transport instead of being treated
+    /// as a decode failure.
+    pub audio_track_absent: bool,
     /// Large file-backed asset: overview is resident, PCM stays paged/mapped.
     pub paged_asset: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
@@ -2658,6 +2664,7 @@ impl EditorTab {
             loop_enabled: false,
             loading: true,
             read_only,
+            audio_track_absent: false,
             paged_asset: false,
             ch_samples: Vec::new(),
             pencil_draft: None,
@@ -2868,6 +2875,9 @@ pub struct BlankPadScan {
 
 #[derive(Clone, Debug)]
 pub struct FileMeta {
+    /// Valid video container with no audio track. This is terminal metadata,
+    /// not a decode error and not a reason to requeue audio analysis.
+    pub audio_track_absent: bool,
     pub channels: u16,
     pub sample_rate: u32,
     pub bits_per_sample: u16,
@@ -3062,10 +3072,10 @@ pub struct EditorAnalysisKey {
 
 #[derive(Clone, Debug)]
 pub enum EditorFeatureAnalysisData {
-    Tempogram(TempogramData),
-    Chromagram(ChromagramData),
-    // Arc so render requests and jobs can share the (potentially large)
-    // analysis without deep-cloning it on the UI thread.
+    // Arc so render requests and jobs can share potentially large analysis
+    // matrices without deep-cloning them on the UI thread.
+    Tempogram(Arc<TempogramData>),
+    Chromagram(Arc<ChromagramData>),
     World(Arc<WorldFeatureData>),
 }
 

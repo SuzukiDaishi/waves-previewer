@@ -491,6 +491,46 @@ mod kittest_suite {
         }
     }
 
+    fn video_fixture_path(name: &str) -> PathBuf {
+        wav_dir().join("video").join(name)
+    }
+
+    fn wait_for_video_metadata(harness: &mut Harness<'static, WavesPreviewer>, path: &Path) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_path_audio_track_absent(path).is_some() {
+                return;
+            }
+            assert!(
+                start.elapsed() < TAB_READY_TIMEOUT,
+                "video metadata timeout: {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_video_pts(harness: &mut Harness<'static, WavesPreviewer>, target_secs: f64) -> f64 {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if let Some(pts) = harness.state().test_active_video_shown_pts() {
+                if pts <= target_secs + 0.002 && target_secs - pts <= 0.055 {
+                    return pts;
+                }
+            }
+            assert!(
+                start.elapsed() < TAB_READY_TIMEOUT,
+                "video frame timeout at {target_secs:.3}s: status={:?} shown={:?} ring={:?}",
+                harness.state().test_active_video_status(),
+                harness.state().test_active_video_shown_pts(),
+                harness.state().test_active_video_ring_pts(),
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn wait_for_tab_fully_loaded(harness: &mut Harness<'static, WavesPreviewer>) {
         let start = Instant::now();
         loop {
@@ -11100,6 +11140,202 @@ mod kittest_suite {
         assert!(!harness.state().test_editor_apply_active());
         assert_eq!(harness.state().tabs[tab_idx].samples_len, len_before);
         assert_eq!(editor_selection(&harness), selection_before);
+    }
+
+    #[test]
+    fn video_with_audio_seeks_to_the_frame_on_the_shared_playhead() {
+        let video_dir = wav_dir().join("video");
+        let path = video_fixture_path("video_sync_6s_30fps.mp4");
+        let mut harness = harness_with_folder(video_dir);
+        wait_for_scan(&mut harness);
+        wait_for_video_metadata(&mut harness, &path);
+        assert_eq!(
+            harness.state().test_path_audio_track_absent(&path),
+            Some(false)
+        );
+        assert!(harness.state().test_path_decode_error(&path).is_none());
+        assert!(harness.state_mut().test_open_tab_for_path(&path));
+        wait_for_tab_ready(&mut harness);
+
+        for target_secs in [0.50_f64, 4.40, 1.10, 5.20, 2.25] {
+            let sr = harness
+                .state()
+                .test_active_editor_display_sample_rate()
+                .expect("display sample rate");
+            assert!(harness
+                .state_mut()
+                .test_seek_active_editor_display_sample((target_secs * sr as f64) as usize));
+            let pts = wait_for_video_pts(&mut harness, target_secs);
+            assert!(
+                pts <= target_secs + 0.002 && target_secs - pts <= 0.055,
+                "picture drift after seek: target={target_secs:.3}, pts={pts:.3}"
+            );
+            let marker = harness
+                .state()
+                .test_active_video_yellow_marker_center_frac()
+                .expect("yellow fixture marker");
+            let second = pts.floor().clamp(0.0, 5.0) as f32;
+            let expected_marker = (second * 288.0 + 120.0) / 1920.0;
+            assert!(
+                (marker - expected_marker).abs() < 0.06,
+                "frame image did not move with its PTS: pts={pts:.3}, marker={marker:.3}, expected={expected_marker:.3}"
+            );
+        }
+    }
+
+    #[test]
+    fn video_without_audio_is_playable_seekable_and_not_a_file_error() {
+        let video_dir = wav_dir().join("video");
+        let path = video_fixture_path("video_no_audio_6s_30fps.mp4");
+        let mut harness = harness_with_folder(video_dir);
+        wait_for_scan(&mut harness);
+        wait_for_video_metadata(&mut harness, &path);
+        assert_eq!(
+            harness.state().test_path_audio_track_absent(&path),
+            Some(true)
+        );
+        assert!(harness.state().test_path_decode_error(&path).is_none());
+
+        assert!(harness.state_mut().test_open_tab_for_path(&path));
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+        assert!(harness.state().test_active_tab_audio_track_absent());
+        assert!(harness.state().test_active_editor_exact_audio_ready());
+        assert!(harness.state().test_audio_is_silent_timeline());
+        assert!(harness.state().test_audio_has_samples());
+        assert!(harness.state().test_playback_source_is_editor_path(&path));
+
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "silent video transport must accept Play"
+        );
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(!harness.state().test_audio_is_playing());
+
+        let target_secs = 3.25_f64;
+        let sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("display sample rate");
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample((target_secs * sr as f64) as usize));
+        let pts = wait_for_video_pts(&mut harness, target_secs);
+        assert!(
+            target_secs - pts <= 0.055,
+            "silent video picture drift: target={target_secs:.3}, pts={pts:.3}"
+        );
+        let marker = harness
+            .state()
+            .test_active_video_yellow_marker_center_frac()
+            .expect("yellow fixture marker");
+        assert!(
+            (marker - 0.5125).abs() < 0.06,
+            "3-second fixture image is displaced: marker={marker:.3}"
+        );
+    }
+
+    /// Stable visual evidence for the list label and before/after video seek.
+    ///   cargo test --features kittest_render -- --ignored video_mini_meter_screenshots --nocapture
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    #[ignore]
+    fn video_mini_meter_screenshots() {
+        let out_dir =
+            std::path::PathBuf::from(std::env::var("NEOWAVES_SHOT_DIR").unwrap_or_else(|_| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("debug")
+                    .join("screenshot_verify")
+                    .join("video_mini_meter")
+                    .display()
+                    .to_string()
+            }));
+        std::fs::create_dir_all(&out_dir).expect("create video screenshot directory");
+        let video_dir = wav_dir().join("video");
+        let path = video_fixture_path("video_no_audio_6s_30fps.mp4");
+        let mut harness = harness_with_folder(video_dir);
+        wait_for_scan(&mut harness);
+        wait_for_video_metadata(&mut harness, &path);
+        harness.run_steps(3);
+        harness
+            .render()
+            .expect("render no-audio list")
+            .save(out_dir.join("01_list_no_audio.png"))
+            .expect("save no-audio list");
+
+        assert!(harness.state_mut().test_open_tab_for_path(&path));
+        wait_for_tab_ready(&mut harness);
+        // Let the deferred initial tab activation install the silent timeline
+        // before setting the evidence seek; otherwise that activation is
+        // allowed to restore the opening position (0.0) one frame later.
+        harness.run_steps(3);
+        assert!(harness.state().test_audio_is_silent_timeline());
+        let sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("display sample rate");
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample((0.50 * sr as f64) as usize));
+        wait_for_video_pts(&mut harness, 0.50);
+        harness.run_steps(2);
+        harness
+            .render()
+            .expect("render initial video frame")
+            .save(out_dir.join("02_editor_0_50s.png"))
+            .expect("save initial video frame");
+
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample((3.25 * sr as f64) as usize));
+        wait_for_video_pts(&mut harness, 3.25);
+        harness.run_steps(2);
+        harness
+            .render()
+            .expect("render seeked video frame")
+            .save(out_dir.join("03_editor_3_25s.png"))
+            .expect("save seeked video frame");
+
+        // The requested layout is most crowded when the video has audio:
+        // VIDEO must remain immediately below Time at the left edge while
+        // SCOPE / SPECTRUM / STEREO / PEAK share the rest of the strip.
+        let sync_path = video_fixture_path("video_sync_6s_30fps.mp4");
+        let mut sync_harness = harness_with_folder(wav_dir().join("video"));
+        wait_for_scan(&mut sync_harness);
+        wait_for_video_metadata(&mut sync_harness, &sync_path);
+        assert_eq!(
+            sync_harness
+                .state()
+                .test_path_audio_track_absent(&sync_path),
+            Some(false)
+        );
+        assert!(sync_harness.state_mut().test_open_tab_for_path(&sync_path));
+        wait_for_tab_ready(&mut sync_harness);
+        sync_harness.run_steps(3);
+        let sync_sr = sync_harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("sync display sample rate");
+        assert!(sync_harness
+            .state_mut()
+            .test_seek_active_editor_display_sample((3.25 * sync_sr as f64) as usize));
+        wait_for_video_pts(&mut sync_harness, 3.25);
+        sync_harness.run_steps(2);
+        sync_harness
+            .render()
+            .expect("render video frame with audio meters")
+            .save(out_dir.join("04_editor_with_audio_3_25s.png"))
+            .expect("save video frame with audio meters");
+
+        for name in [
+            "01_list_no_audio.png",
+            "02_editor_0_50s.png",
+            "03_editor_3_25s.png",
+            "04_editor_with_audio_3_25s.png",
+        ] {
+            eprintln!("[shot] wrote {}", out_dir.join(name).display());
+        }
     }
 
     /// Visual evidence set for Waveform-only handles, held ghost, and apply.

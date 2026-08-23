@@ -802,6 +802,7 @@ impl WavesPreviewer {
             }
         }
         self.editor_decode_state = None;
+        self.editor_clear_edit_pending = None;
     }
 
     pub(super) fn cancel_editor_apply(&mut self) {

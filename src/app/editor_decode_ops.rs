@@ -542,7 +542,7 @@ impl super::WavesPreviewer {
         let path_for_thread = path.clone();
         std::thread::spawn(move || {
             let channels = Self::process_editor_decode_channels(
-                audio.channels.clone(),
+                (*audio.channels).clone(),
                 input_sr.max(1),
                 out_sr,
                 target_sr,
@@ -684,7 +684,9 @@ impl super::WavesPreviewer {
             }
         }
 
-        let mut decode_update_tab: Option<usize> = None;
+        let clear_edit_path = self.editor_clear_edit_pending.clone();
+        let mut decode_update_tab: Option<(usize, bool)> = None;
+        let mut clear_edit_completed: Option<(usize, PathBuf)> = None;
         let mut decode_refresh_preview: Option<usize> = None;
         let mut decode_cancel_preview = false;
         let mut decode_error: Option<(PathBuf, String)> = None;
@@ -761,6 +763,7 @@ impl super::WavesPreviewer {
                             tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some();
                         match res.event {
                             EditorDecodeEvent::FinalReady => {
+                                let is_clear_edit = clear_edit_path.as_ref() == Some(&res.path);
                                 tab.paged_asset = false;
                                 tab.preview_audio_tool = None;
                                 tab.preview_overlay = None;
@@ -784,7 +787,9 @@ impl super::WavesPreviewer {
                                 if tab.samples_len != old_audio_len {
                                     spectro_reset_paths.push(tab.path.clone());
                                 }
-                                marker_updates.push((idx, res.path.clone()));
+                                if !is_clear_edit {
+                                    marker_updates.push((idx, res.path.clone()));
+                                }
                                 let new_display_len = if tab.loading && tab.samples_len_visual > 0 {
                                     tab.samples_len_visual
                                 } else {
@@ -799,7 +804,10 @@ impl super::WavesPreviewer {
                                 );
                                 Self::editor_clamp_ranges(tab);
                                 Self::invalidate_editor_viewport_cache(tab);
-                                decode_update_tab = Some(idx);
+                                decode_update_tab = Some((idx, is_clear_edit));
+                                if is_clear_edit {
+                                    clear_edit_completed = Some((idx, res.path.clone()));
+                                }
                                 // A session may restore the active tool and its
                                 // parameters without persisting a lightweight
                                 // overview-only preview. Do not implicitly
@@ -842,6 +850,7 @@ impl super::WavesPreviewer {
                                 Self::invalidate_editor_viewport_cache(tab);
                             }
                             EditorDecodeEvent::PagedReady => {
+                                let is_clear_edit = clear_edit_path.as_ref() == Some(&res.path);
                                 tab.preview_audio_tool = None;
                                 tab.preview_overlay = None;
                                 tab.ch_samples.clear();
@@ -861,6 +870,9 @@ impl super::WavesPreviewer {
                                 tab.paged_asset = true;
                                 Self::invalidate_editor_viewport_cache(tab);
                                 paged_ready_tab = Some(idx);
+                                if is_clear_edit {
+                                    clear_edit_completed = Some((idx, res.path.clone()));
+                                }
                             }
                             EditorDecodeEvent::Failed => {}
                         }
@@ -950,6 +962,13 @@ impl super::WavesPreviewer {
         if let Some((path, err)) = decode_error {
             self.debug_log(format!("editor decode failed: {} ({err})", path.display()));
             self.cancel_editor_playback_handoff_for_path(&path);
+            if self.editor_clear_edit_pending.as_ref() == Some(&path) {
+                self.editor_clear_edit_pending = None;
+                self.push_toast(
+                    crate::app::types::ToastSeverity::Error,
+                    format!("Clear Edit failed: {err}"),
+                );
+            }
         }
         if decode_cancel_preview {
             self.cancel_heavy_preview();
@@ -972,10 +991,12 @@ impl super::WavesPreviewer {
                 }
             }
         }
-        if let Some(idx) = decode_update_tab {
+        if let Some((idx, is_clear_edit)) = decode_update_tab {
             // Unified gain framework: a pending list gain becomes a regular
             // editor edit (undo/dirty) as soon as the tab has real audio.
-            self.editor_bake_pending_gain_into_tab(idx);
+            if !is_clear_edit {
+                self.editor_bake_pending_gain_into_tab(idx);
+            }
             if self.active_tab == Some(idx) {
                 let tab_audio = self.tabs.get(idx).and_then(|tab| {
                     if tab.ch_samples.is_empty() {
@@ -984,14 +1005,14 @@ impl super::WavesPreviewer {
                         Some((
                             tab.path.clone(),
                             tab.buffer_sample_rate.max(1),
-                            tab.ch_samples.clone(),
+                            tab.ch_samples_arc.clone(),
                         ))
                     }
                 });
                 if let Some((tab_path, buffer_sr, channels)) = tab_audio {
                     if !self.try_activate_editor_stream_transport_for_tab(idx) {
                         let handoff = self.editor_playback_handoff_matches(&tab_path);
-                        self.set_editor_buffer_transport_preserving_time(
+                        self.set_editor_shared_buffer_transport_preserving_time(
                             tab_path.as_path(),
                             channels,
                             buffer_sr,
@@ -1009,6 +1030,22 @@ impl super::WavesPreviewer {
                     }
                 }
             }
+        }
+        if let Some((idx, path)) = clear_edit_completed {
+            // Clear Edit is a hard reset: unlike other destructive edits, it
+            // cannot leave an undo point back to the discarded edited audio.
+            if let Some(tab) = self.tabs.get_mut(idx) {
+                tab.dirty = false;
+                tab.undo_stack.clear();
+                tab.undo_bytes = 0;
+                tab.redo_stack.clear();
+                tab.redo_bytes = 0;
+            }
+            self.edited_cache.remove(&path);
+            self.cancel_spectrogram_for_path(&path);
+            self.cancel_feature_analysis_for_path(&path);
+            self.advance_asset_revision_for_path(&path);
+            self.editor_clear_edit_pending = None;
         }
         if let Some(idx) = paged_ready_tab {
             let _ = self.try_activate_editor_stream_transport_for_tab(idx);

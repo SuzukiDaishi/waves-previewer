@@ -289,7 +289,7 @@ impl WavesPreviewer {
             return Ok((audio, sample_rate.max(1)));
         }
         let (channels, new_sr) = Self::apply_gain_and_resample(
-            audio.channels.clone(),
+            (*audio.channels).clone(),
             sample_rate,
             gain_db,
             target_sr,

@@ -151,7 +151,43 @@ impl super::WavesPreviewer {
             return false;
         };
         (self.editor_stream_transport_eligible(tab) && self.audio.is_streaming_wav_path(&tab.path))
+            || (!tab.loading && tab.audio_track_absent && tab.samples_len > 0)
             || (!tab.loading && !tab.ch_samples.is_empty())
+    }
+
+    /// Activate the zero-allocation transport for a video with no audio
+    /// track. It shares the ordinary audio callback clock, so play, seek,
+    /// looping and the picture all use one authoritative position.
+    pub(super) fn activate_silent_video_transport_for_tab(&mut self, tab_idx: usize) -> bool {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        if !tab.audio_track_absent || tab.samples_len == 0 {
+            return false;
+        }
+        let path = tab.path.clone();
+        let frames = tab.samples_len;
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let already_active = self.audio.is_silent_timeline()
+            && self.audio.current_source_len() == frames
+            && matches!(
+                &self.playback_session.source,
+                super::PlaybackSourceKind::EditorTab(active) if active == &path
+            );
+        if already_active {
+            return true;
+        }
+        let source_time = self.playback_current_source_time_sec();
+        self.audio.stop();
+        self.audio.set_silent_timeline_frames(frames);
+        self.playback_mark_buffer_source(super::PlaybackSourceKind::EditorTab(path), out_sr);
+        if let Some(secs) = source_time {
+            self.playback_seek_to_source_time(self.mode, secs);
+        }
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab);
+        }
+        true
     }
 
     pub(super) fn editor_display_samples_len(tab: &EditorTab) -> usize {
@@ -420,10 +456,10 @@ impl super::WavesPreviewer {
         None
     }
 
-    pub(super) fn set_editor_buffer_transport_preserving_time(
+    pub(super) fn set_editor_shared_buffer_transport_preserving_time(
         &self,
         path: &Path,
-        channels: Vec<Vec<f32>>,
+        channels: Arc<Vec<Vec<f32>>>,
         new_buffer_sr: u32,
     ) {
         let previous_buffer_sr = self.playback_session.transport_sr.max(1);
@@ -435,13 +471,13 @@ impl super::WavesPreviewer {
                 if src.as_path() == path
         ) || self.editor_playback_handoff_matches(path);
         if same_timeline_source {
-            self.audio.set_samples_channels_keep_time_pos(
+            self.audio.set_samples_shared_channels_keep_time_pos(
                 channels,
                 previous_buffer_sr,
                 new_buffer_sr,
             );
         } else {
-            self.audio.set_samples_channels(channels);
+            self.audio.set_samples_shared_channels(channels);
         }
     }
 
@@ -492,7 +528,7 @@ impl super::WavesPreviewer {
         let source_for_thread = source.clone();
         std::thread::spawn(move || {
             let mut channels = if let Some(audio) = base_audio {
-                audio.channels.clone()
+                (*audio.channels).clone()
             } else if let Some((path, spec)) = path_spec {
                 match crate::audio_io::decode_audio_multi(&path) {
                     Ok((channels, in_sr)) => {
@@ -775,6 +811,11 @@ impl super::WavesPreviewer {
                 self.list_play_pending = true;
             }
             return;
+        }
+        if self.is_editor_workspace_active() {
+            if let Some(tab_idx) = self.active_tab {
+                let _ = self.activate_silent_video_transport_for_tab(tab_idx);
+            }
         }
         let editor_handoff = if self.is_editor_workspace_active() {
             self.active_tab
@@ -1372,7 +1413,7 @@ impl super::WavesPreviewer {
             .or_else(|| self.meta_for_path(&path).map(|m| m.sample_rate))
             .filter(|v| *v > 0)
             .unwrap_or(self.audio.shared.out_sample_rate.max(1));
-        let mut editor_channels = audio.channels.clone();
+        let mut editor_channels = (*audio.channels).clone();
         self.apply_sample_rate_preview_for_path(&path, &mut editor_channels, virtual_in_sr);
         let samples_len = editor_channels.get(0).map(|c| c.len()).unwrap_or(0);
         let (waveform, waveform_pyramid) =
@@ -2151,7 +2192,7 @@ impl super::WavesPreviewer {
                 }
                 return;
             };
-            let channels = audio.channels.clone();
+            let channels = (*audio.channels).clone();
             if need_heavy {
                 self.audio.stop();
                 self.audio.set_samples_mono(Vec::new());
@@ -2857,7 +2898,7 @@ impl super::WavesPreviewer {
                 let Some(audio) = self.edited_audio_for_path(&p) else {
                     return;
                 };
-                let channels = audio.channels.clone();
+                let channels = (*audio.channels).clone();
                 let buffer_sr = self
                     .effective_sample_rate_for_path(&p)
                     .unwrap_or(self.audio.shared.out_sample_rate.max(1));

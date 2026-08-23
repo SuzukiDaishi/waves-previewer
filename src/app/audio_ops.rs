@@ -118,17 +118,23 @@ impl WavesPreviewer {
         }
 
         let gain = db_to_amp(file_gain_db).clamp(0.0, 16.0);
-        let mut channels = base_audio.channels.clone();
-        if (gain - 1.0).abs() > 1.0e-6 {
+        let rendered = if (gain - 1.0).abs() <= 1.0e-6 {
+            // The overwhelmingly common path is 0 dB. Re-publish the Arc
+            // directly instead of deep-copying every channel merely to
+            // multiply it by 1.0. A three-minute stereo clip is roughly
+            // 100 MiB, so this also avoids keeping a second playback-sized
+            // allocation alive beside `playback_base_audio`.
+            base_audio
+        } else {
+            let mut channels = (*base_audio.channels).clone();
             for channel in &mut channels {
                 for sample in channel {
                     *sample = (*sample * gain).clamp(-1.0, 1.0);
                 }
             }
-        }
-        self.audio.replace_samples_keep_pos(std::sync::Arc::new(
-            crate::audio::AudioBuffer::from_channels(channels),
-        ));
+            std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(channels))
+        };
+        self.audio.replace_samples_keep_pos(rendered);
         self.playback_session.last_applied_master_gain_db = master_gain_db;
         self.playback_session.last_applied_file_gain_db = file_gain_db;
     }

@@ -2710,6 +2710,78 @@ impl super::WavesPreviewer {
         self.active_editor_exact_audio_ready()
     }
 
+    pub fn test_path_audio_track_absent(&self, path: &Path) -> Option<bool> {
+        self.meta_for_path(path).map(|meta| meta.audio_track_absent)
+    }
+
+    pub fn test_path_decode_error(&self, path: &Path) -> Option<String> {
+        self.meta_for_path(path)
+            .and_then(|meta| meta.decode_error.clone())
+    }
+
+    pub fn test_active_tab_audio_track_absent(&self) -> bool {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .is_some_and(|tab| tab.audio_track_absent)
+    }
+
+    pub fn test_audio_is_silent_timeline(&self) -> bool {
+        self.audio.is_silent_timeline()
+    }
+
+    pub fn test_active_video_shown_pts(&self) -> Option<f64> {
+        let idx = self.active_tab?;
+        self.tabs.get(idx)?.video_panel.as_ref()?.shown_pts
+    }
+
+    pub fn test_active_video_ring_pts(&self) -> Vec<f64> {
+        let Some(idx) = self.active_tab else {
+            return Vec::new();
+        };
+        self.tabs
+            .get(idx)
+            .and_then(|tab| tab.video_panel.as_ref())
+            .map(|panel| panel.ring.iter().map(|(pts, _)| *pts).collect())
+            .unwrap_or_default()
+    }
+
+    /// Horizontal centre of the yellow sync marker in the currently shown
+    /// fixture frame, normalized to 0..1. Used to prove the texture contents
+    /// changed along with PTS rather than merely updating a timestamp label.
+    pub fn test_active_video_yellow_marker_center_frac(&self) -> Option<f32> {
+        let idx = self.active_tab?;
+        let panel = self.tabs.get(idx)?.video_panel.as_ref()?;
+        let shown = panel.shown_pts?;
+        let image = panel
+            .ring
+            .iter()
+            .find(|(pts, _)| (*pts - shown).abs() < 1.0e-7)
+            .map(|(_, image)| image)?;
+        let width = image.size[0].max(1);
+        let mut sum_x = 0usize;
+        let mut count = 0usize;
+        for (index, pixel) in image.pixels.iter().enumerate() {
+            if pixel.r() > 180 && pixel.g() > 150 && pixel.b() < 90 {
+                sum_x = sum_x.saturating_add(index % width);
+                count += 1;
+            }
+        }
+        (count > 0).then_some((sum_x as f32 / count as f32) / width as f32)
+    }
+
+    pub fn test_active_video_status(&self) -> Option<String> {
+        let idx = self.active_tab?;
+        let panel = self.tabs.get(idx)?.video_panel.as_ref()?;
+        Some(match &panel.status {
+            crate::app::types::VideoPanelStatus::Probing => "probing".to_string(),
+            crate::app::types::VideoPanelStatus::Ready => "ready".to_string(),
+            crate::app::types::VideoPanelStatus::Unsupported(reason) => {
+                format!("unsupported: {reason}")
+            }
+            crate::app::types::VideoPanelStatus::Failed(reason) => format!("failed: {reason}"),
+        })
+    }
+
     pub fn test_active_tab_samples_len_visual(&self) -> usize {
         let Some(tab_idx) = self.active_tab else {
             return 0;
@@ -2812,6 +2884,7 @@ impl super::WavesPreviewer {
             return false;
         };
         let mut meta = item.meta.as_deref().cloned().unwrap_or(FileMeta {
+            audio_track_absent: false,
             channels: 1,
             sample_rate: 44_100,
             bits_per_sample: 16,

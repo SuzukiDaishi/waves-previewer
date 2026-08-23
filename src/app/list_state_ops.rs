@@ -302,6 +302,16 @@ impl WavesPreviewer {
     pub(super) fn set_meta_for_path(&mut self, path: &Path, meta: FileMeta) -> bool {
         let bpm_hint = meta.bpm.filter(|v| v.is_finite() && *v > 0.0);
         let sr_hint = (meta.sample_rate > 0).then_some(meta.sample_rate);
+        let audio_track_absent = meta.audio_track_absent;
+        let silent_frames = meta
+            .duration_secs
+            .filter(|secs| secs.is_finite() && *secs > 0.0)
+            .map(|secs| {
+                (secs * self.audio.shared.out_sample_rate.max(1) as f32)
+                    .round()
+                    .max(1.0) as usize
+            })
+            .unwrap_or(0);
         // Single choke point for both the header and full metadata stages, so
         // the Length format latch updates in O(1) instead of a per-frame scan.
         if let Some(d) = meta.duration_secs.filter(|v| v.is_finite() && *v > 0.0) {
@@ -325,6 +335,28 @@ impl WavesPreviewer {
         };
         if updated {
             self.list_art_textures.remove(path);
+        }
+        if audio_track_absent {
+            let out_sr = self.audio.shared.out_sample_rate.max(1);
+            for tab in self.tabs.iter_mut().filter(|tab| tab.path == path) {
+                tab.audio_track_absent = true;
+                tab.loading = false;
+                tab.paged_asset = false;
+                tab.buffer_sample_rate = out_sr;
+                tab.samples_len = silent_frames;
+                tab.samples_len_visual = silent_frames;
+                tab.ch_samples.clear();
+                tab.ch_samples_arc = std::sync::Arc::new(Vec::new());
+                tab.loading_waveform_minmax.clear();
+                Self::invalidate_editor_viewport_cache(tab);
+            }
+            if self
+                .editor_decode_state
+                .as_ref()
+                .is_some_and(|state| state.path == path)
+            {
+                self.cancel_editor_decode();
+            }
         }
         updated
     }

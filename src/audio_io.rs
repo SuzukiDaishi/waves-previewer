@@ -304,6 +304,23 @@ fn read_audio_info_isobmff(
     })
 }
 
+/// Whether a valid ISO-BMFF file contains an audio track.
+///
+/// This is intentionally separate from decoding. A video-only MP4 is a valid
+/// media file, and callers need to distinguish that state from a damaged file
+/// or an unsupported audio codec so the UI can say `NO AUDIO` instead of
+/// reporting a file error.
+pub fn probe_isobmff_audio_track(path: &Path) -> Result<bool> {
+    let file = File::open(path).with_context(|| format!("open mp4: {}", path.display()))?;
+    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let reader =
+        Mp4Reader::read_header(file, size).map_err(|e| anyhow::anyhow!("mp4 header: {e:?}"))?;
+    Ok(reader
+        .tracks()
+        .values()
+        .any(|track| matches!(track.track_type(), Ok(TrackType::Audio))))
+}
+
 fn read_audio_info_wav(
     path: &Path,
     created_at: Option<SystemTime>,
@@ -2886,6 +2903,10 @@ mod tests {
         #[test]
         fn a_video_with_no_audio_track_reports_that_rather_than_hanging() {
             let fixture = FixtureFile::build("no_audio", 8, 0.0).expect("fixture");
+            assert_eq!(
+                crate::audio_io::probe_isobmff_audio_track(&fixture.path).expect("probe tracks"),
+                false
+            );
             assert!(
                 crate::audio_io::decode_audio_multi(&fixture.path).is_err(),
                 "a video with no audio track has nothing to decode"

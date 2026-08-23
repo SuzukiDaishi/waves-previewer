@@ -4363,7 +4363,7 @@ impl WavesPreviewer {
         if let Some(item) = self.item_for_path(path) {
             if let Some(audio) = item.virtual_audio.as_ref() {
                 return Some(dense_audio_bus(
-                    audio.channels.clone(),
+                    (*audio.channels).clone(),
                     item.virtual_state
                         .as_ref()
                         .map(|state| state.sample_rate)

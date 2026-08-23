@@ -290,6 +290,17 @@ impl PerfProfile {
         }
     }
 
+    /// Cadence for the editor mini-meter FFT. Scope/levels remain visually
+    /// responsive, but two FFTs per 60 Hz UI frame are wasted work—especially
+    /// while decode and analysis workers are competing for the same cores.
+    pub fn mini_meter_spectrum_interval(&self) -> Duration {
+        Duration::from_millis(match self.tier {
+            PerfTier::Low => 67,
+            PerfTier::Normal => 42,
+            PerfTier::High => 33,
+        })
+    }
+
     /// How many decoded video frames the editor's preview keeps ahead of the
     /// playhead.
     ///
@@ -375,6 +386,11 @@ mod tests {
         assert!(
             low.frame_budget()
                 < PerfProfile::from_cores(16, PerfTierPreference::Auto).frame_budget()
+        );
+        assert!(
+            low.mini_meter_spectrum_interval()
+                > PerfProfile::from_cores(16, PerfTierPreference::Auto)
+                    .mini_meter_spectrum_interval()
         );
     }
 

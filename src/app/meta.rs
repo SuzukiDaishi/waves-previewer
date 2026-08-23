@@ -319,6 +319,9 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
         })
     }
 
+    if let Some(meta) = no_audio_video_meta(path, false) {
+        return Ok(meta);
+    }
     match audio_io::read_audio_info(path) {
         Ok(info) => {
             let (marker_fracs, loop_frac) = read_wave_annotation_fracs(
@@ -328,6 +331,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
                 info.duration_secs,
             );
             Ok(FileMeta {
+                audio_track_absent: false,
                 channels: info.channels,
                 sample_rate: info.sample_rate,
                 bits_per_sample: info.bits_per_sample,
@@ -357,6 +361,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             })
         }
         Err(_) => Err(FileMeta {
+            audio_track_absent: false,
             channels: 0,
             sample_rate: 0,
             bits_per_sample: 0,
@@ -387,11 +392,52 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
     }
 }
 
+fn no_audio_video_meta(path: &PathBuf, allow_video_poster: bool) -> Option<FileMeta> {
+    if !crate::media_kind::is_video_path(path) || audio_io::probe_isobmff_audio_track(path).ok()? {
+        return None;
+    }
+    let video = crate::video::probe_video_stream(path).ok()?;
+    let file_meta = std::fs::metadata(path).ok();
+    Some(FileMeta {
+        audio_track_absent: true,
+        channels: 0,
+        sample_rate: 0,
+        bits_per_sample: 0,
+        sample_value_kind: SampleValueKind::Unknown,
+        bit_rate_bps: None,
+        duration_secs: (video.duration_secs.is_finite() && video.duration_secs > 0.0)
+            .then_some(video.duration_secs as f32),
+        total_frames: None,
+        rms_db: None,
+        peak_db: None,
+        peak_db_estimate: false,
+        lufs_i: None,
+        lufs_m_max: None,
+        lufs_s_max: None,
+        true_peak_db: None,
+        bpm: None,
+        silence_lead_ms: None,
+        silence_tail_ms: None,
+        edge_abs: None,
+        blank_pad: None,
+        created_at: file_meta.as_ref().and_then(|m| m.created().ok()),
+        modified_at: file_meta.as_ref().and_then(|m| m.modified().ok()),
+        cover_art: decode_list_thumbnail(path, allow_video_poster),
+        thumb: Vec::new(),
+        marker_fracs: Vec::new(),
+        loop_frac: None,
+        decode_error: None,
+    })
+}
+
 fn decode_full_meta(
     path: &PathBuf,
     blank_threshold_dbfs: f32,
     allow_video_poster: bool,
 ) -> Option<FileMeta> {
+    if let Some(meta) = no_audio_video_meta(path, allow_video_poster) {
+        return Some(meta);
+    }
     let info = audio_io::read_audio_info(path).ok();
     if let Ok((chans, sr, decode_errors)) = audio_io::decode_audio_multi_with_errors(path) {
         // Mono mixdown for RMS/thumbnail
@@ -492,6 +538,7 @@ fn decode_full_meta(
         let (marker_fracs, loop_frac) =
             read_wave_annotation_fracs(path, sr, total_frames, Some(length_secs));
         return Some(FileMeta {
+            audio_track_absent: false,
             channels: ch,
             sample_rate: sr,
             bits_per_sample: bits,
@@ -564,6 +611,7 @@ fn decode_full_meta(
         let (marker_fracs, loop_frac) =
             read_wave_annotation_fracs(path, resolved_sr, total_frames, duration_secs);
         return Some(FileMeta {
+            audio_track_absent: false,
             channels: info.as_ref().map(|i| i.channels).unwrap_or(0),
             sample_rate: resolved_sr,
             bits_per_sample: info.as_ref().map(|i| i.bits_per_sample).unwrap_or(0),
@@ -763,7 +811,9 @@ fn run_meta_task(
 
 #[cfg(test)]
 mod tests {
-    use super::{read_wave_annotation_fracs, spawn_meta_pool, MetaTask};
+    use super::{
+        decode_full_meta, header_meta, read_wave_annotation_fracs, spawn_meta_pool, MetaTask,
+    };
     use crate::markers::MarkerEntry;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -801,6 +851,23 @@ mod tests {
 
     fn approx_eq(a: f32, b: f32) -> bool {
         (a - b).abs() <= 0.03
+    }
+
+    #[test]
+    fn persistent_video_only_fixture_is_no_audio_not_a_decode_error() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test_samples")
+            .join("video")
+            .join("video_no_audio_6s_30fps.mp4");
+        let header = header_meta(&path).expect("valid video-only header");
+        assert!(header.audio_track_absent);
+        assert!(header.decode_error.is_none());
+        assert!((header.duration_secs.unwrap_or_default() - 6.0).abs() < 0.05);
+
+        let full = decode_full_meta(&path, -60.0, false).expect("terminal no-audio metadata");
+        assert!(full.audio_track_absent);
+        assert!(full.decode_error.is_none());
+        assert!(full.thumb.is_empty(), "no waveform should be invented");
     }
 
     #[test]

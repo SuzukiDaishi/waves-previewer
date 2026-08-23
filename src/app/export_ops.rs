@@ -792,7 +792,7 @@ impl super::WavesPreviewer {
                 let mut max_file_samples = task.max_file_samples;
                 if task.write_audio {
                     let (mut channels, src_sr) = if let Some(audio) = task.audio.as_ref() {
-                        (audio.channels.clone(), task.out_sr)
+                        ((*audio.channels).clone(), task.out_sr)
                     } else {
                         match crate::audio_io::decode_audio_multi(&task.src) {
                             Ok((decoded, decoded_sr)) => (decoded, decoded_sr.max(1)),
@@ -1002,7 +1002,7 @@ impl super::WavesPreviewer {
                     failed_paths.push(dst);
                     continue;
                 };
-                let mut channels = audio.channels.clone();
+                let mut channels = (*audio.channels).clone();
                 if task.gain_db.abs() > 0.0001 {
                     let gain = 10.0f32.powf(task.gain_db / 20.0);
                     for ch in channels.iter_mut() {

@@ -23,7 +23,10 @@ impl super::WavesPreviewer {
     fn spawn_spectrogram_job(
         &mut self,
         path: PathBuf,
-        channels: Vec<Vec<f32>>,
+        channels: std::sync::Arc<Vec<Vec<f32>>>,
+        channel_indices: Vec<usize>,
+        use_mixdown: bool,
+        samples_len: usize,
         sample_rate: u32,
         cfg: SpectrogramConfig,
         generation: u64,
@@ -39,8 +42,25 @@ impl super::WavesPreviewer {
             .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
         std::thread::spawn(move || {
             super::threading::lower_current_thread_priority();
-            let channel_count = channels.len().max(1);
-            let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
+            // Clip-sized channel selection and mixdown belong on this worker,
+            // never on the immediate-mode UI thread.
+            let mixdown = use_mixdown
+                .then(|| super::WavesPreviewer::mixdown_channels(&channels, samples_len));
+            let channel_count = if use_mixdown {
+                1
+            } else {
+                channel_indices.len().max(1)
+            };
+            let len = mixdown
+                .as_ref()
+                .map(Vec::len)
+                .or_else(|| {
+                    channel_indices
+                        .first()
+                        .and_then(|&index| channels.get(index))
+                        .map(Vec::len)
+                })
+                .unwrap_or(0);
             let params = crate::app::render::spectrogram::spectrogram_params(len, &cfg);
             if params.frames == 0 {
                 let _ = tx.send(super::types::SpectrogramJobMsg::Done { path, generation });
@@ -51,7 +71,15 @@ impl super::WavesPreviewer {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
                 }
-                let ch = channels.get(ci).map(|c| c.as_slice()).unwrap_or(&[]);
+                let ch = if let Some(mixdown) = mixdown.as_ref() {
+                    mixdown.as_slice()
+                } else {
+                    channel_indices
+                        .get(ci)
+                        .and_then(|&index| channels.get(index))
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[])
+                };
                 let mut start = 0usize;
                 while start < params.frames {
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -87,40 +115,26 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn queue_spectrogram_for_tab(&mut self, tab_idx: usize) {
-        let (path, view_mode, channels, buffer_sample_rate) = {
+        let (path, view_mode, has_audio) = {
             let Some(tab) = self.tabs.get(tab_idx) else {
                 return;
             };
-            let path = tab.path.clone();
-            let view_mode = tab.leaf_view_mode();
-            let channel_view = tab.channel_view.clone();
-            let channel_count = tab.ch_samples.len().max(1);
-            let requested = channel_view.visible_indices(channel_count);
-            let use_mixdown = channel_view.mode == ChannelViewMode::Mixdown || requested.is_empty();
-            let channels = if use_mixdown {
-                vec![super::WavesPreviewer::mixdown_channels(
-                    &tab.ch_samples_arc,
-                    tab.samples_len,
-                )]
-            } else if channel_view.mode == ChannelViewMode::All {
-                (*tab.ch_samples_arc).clone()
-            } else {
-                requested
-                    .iter()
-                    .filter_map(|&idx| tab.ch_samples_arc.get(idx).cloned())
-                    .collect()
-            };
-            (path, view_mode, channels, tab.buffer_sample_rate.max(1))
+            (
+                tab.path.clone(),
+                tab.leaf_view_mode(),
+                tab.samples_len > 0 && tab.ch_samples_arc.iter().any(|channel| !channel.is_empty()),
+            )
         };
         if view_mode == ViewMode::Waveform {
             return;
         }
+        // These guards must precede any clip-sized work. Previously even a
+        // fully cached spectrogram cloned or mixed the complete clip once per
+        // UI frame before reaching these checks.
         if let Some(specs) = self.spectro_cache.get(&path) {
             let empty_cached = specs
                 .iter()
                 .all(|s| s.frames == 0 || s.values_db.is_empty());
-            let has_audio =
-                !channels.is_empty() && channels.get(0).map(|c| !c.is_empty()).unwrap_or(false);
             if empty_cached && has_audio {
                 self.purge_spectro_cache_entry(&path);
             } else {
@@ -130,12 +144,52 @@ impl super::WavesPreviewer {
         if self.spectro_inflight.contains(&path) {
             return;
         }
+
+        let (channels, channel_indices, use_mixdown, samples_len, buffer_sample_rate) = {
+            let Some(tab) = self.tabs.get(tab_idx) else {
+                return;
+            };
+            let channel_view = tab.channel_view.clone();
+            let channel_count = tab.ch_samples.len().max(1);
+            let requested = channel_view.visible_indices(channel_count);
+            let use_mixdown = channel_view.mode == ChannelViewMode::Mixdown || requested.is_empty();
+            let channel_indices = if use_mixdown {
+                Vec::new()
+            } else if channel_view.mode == ChannelViewMode::All {
+                (0..tab.ch_samples_arc.len()).collect()
+            } else {
+                requested
+                    .iter()
+                    .filter_map(|&idx| tab.ch_samples_arc.get(idx).map(|_| idx))
+                    .collect()
+            };
+            (
+                tab.ch_samples_arc.clone(),
+                channel_indices,
+                use_mixdown,
+                tab.samples_len,
+                tab.buffer_sample_rate.max(1),
+            )
+        };
         let sr = buffer_sample_rate;
-        let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
+        let len = if use_mixdown {
+            samples_len
+        } else {
+            channel_indices
+                .first()
+                .and_then(|&index| channels.get(index))
+                .map(Vec::len)
+                .unwrap_or(0)
+        };
+        let output_channel_count = if use_mixdown {
+            1
+        } else {
+            channel_indices.len().max(1)
+        };
         let params = crate::app::render::spectrogram::spectrogram_params(len, &self.spectro_cfg);
         if params.frames == 0 {
-            let mut specs = Vec::with_capacity(channels.len().max(1));
-            for _ in 0..channels.len().max(1) {
+            let mut specs = Vec::with_capacity(output_channel_count);
+            for _ in 0..output_channel_count {
                 specs.push(SpectrogramData {
                     frames: 0,
                     bins: params.bins,
@@ -153,7 +207,7 @@ impl super::WavesPreviewer {
         }
         let tile_frames = super::SPECTRO_TILE_FRAMES;
         let tiles_per_channel = (params.frames + tile_frames - 1) / tile_frames;
-        let total_tiles = tiles_per_channel.saturating_mul(channels.len().max(1));
+        let total_tiles = tiles_per_channel.saturating_mul(output_channel_count);
         self.spectro_progress.insert(
             path.clone(),
             SpectrogramProgress {
@@ -168,6 +222,15 @@ impl super::WavesPreviewer {
         );
         let generation = self.bump_spectrogram_generation(&path);
         self.spectro_inflight.insert(path.clone());
-        self.spawn_spectrogram_job(path, channels, sr, self.spectro_cfg.clone(), generation);
+        self.spawn_spectrogram_job(
+            path,
+            channels,
+            channel_indices,
+            use_mixdown,
+            samples_len,
+            sr,
+            self.spectro_cfg.clone(),
+            generation,
+        );
     }
 }

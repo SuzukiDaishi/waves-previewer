@@ -28,7 +28,7 @@ use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
 use super::container::{VideoCodec, VideoStreamInfo};
-use super::frame::{rgba_to_color_image, Rotation, VideoFrame};
+use super::frame::{bgra_stride_to_color_image, Rotation, VideoFrame};
 use super::VideoDecoder;
 
 /// Per-thread Media Foundation lifecycle.
@@ -65,7 +65,14 @@ pub struct MediaFoundationDecoder {
     info: VideoStreamInfo,
     /// Decoder output size, which is what the frames actually carry.
     frame_size: (u32, u32),
-    rgba_scratch: Vec<u8>,
+    /// A seek starts decoding at the preceding keyframe. Keep walking until
+    /// this exact presentation time is covered before returning a picture.
+    pending_seek_secs: Option<f64>,
+    /// First frame after a seek target, retained for the next sequential call.
+    queued_frame: Option<((u32, u32), VideoFrame)>,
+    /// Last picture returned to the worker. Nearby forward requests can keep
+    /// decoding from here instead of restarting at the preceding keyframe.
+    last_returned_secs: Option<f64>,
     finished: bool,
 }
 
@@ -144,7 +151,9 @@ impl MediaFoundationDecoder {
             _session: session,
             info,
             frame_size: (coded_width, coded_height),
-            rgba_scratch: Vec::new(),
+            pending_seek_secs: None,
+            queued_frame: None,
+            last_returned_secs: None,
             finished: false,
         })
     }
@@ -158,29 +167,8 @@ impl MediaFoundationDecoder {
         self.info.codec_label = container.codec_label.clone();
         self.info.codec = container.codec;
     }
-}
 
-impl VideoDecoder for MediaFoundationDecoder {
-    fn info(&self) -> &VideoStreamInfo {
-        &self.info
-    }
-
-    fn seek(&mut self, secs: f64, _max_forward_walk: usize) -> Result<()> {
-        // 100-nanosecond units, the unit every Media Foundation time uses.
-        // An all-zero time format GUID means "the default", which for a media
-        // source is exactly those units.
-        let hns = (secs.max(0.0) * 10_000_000.0) as i64;
-        let position = PROPVARIANT::from(hns);
-        unsafe {
-            self.reader
-                .SetCurrentPosition(&windows::core::GUID::zeroed(), &position)
-                .context("SetCurrentPosition")?;
-        }
-        self.finished = false;
-        Ok(())
-    }
-
-    fn next_frame(
+    fn read_next_frame(
         &mut self,
         box_px: (u32, u32),
         cancel: &AtomicBool,
@@ -213,8 +201,6 @@ impl VideoDecoder for MediaFoundationDecoder {
                 return Ok(None);
             }
             let Some(sample) = sample else {
-                // A gap or a format change: no picture this time round, but
-                // the stream continues.
                 continue;
             };
             let buffer = unsafe { sample.ConvertToContiguousBuffer() }
@@ -229,41 +215,15 @@ impl VideoDecoder for MediaFoundationDecoder {
             let (w, h) = self.frame_size;
             let image = {
                 let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
-                // An RGB32 buffer is not necessarily tightly packed: rows are
-                // padded out to the decoder's stride, which is why the buffer
-                // has to be walked row by row rather than as one run of
-                // pixels. Reading it flat would slide every row sideways by
-                // the padding and shear the picture.
-                let row_bytes = (w as usize).saturating_mul(4);
+                let row_bytes = w as usize * 4;
                 let stride = if h > 0 {
                     (bytes.len() / h as usize).max(row_bytes)
                 } else {
                     row_bytes
                 };
-                // RGB32 is BGRX in memory; swap into RGBA before scaling.
-                self.rgba_scratch.clear();
-                self.rgba_scratch
-                    .reserve(row_bytes.saturating_mul(h as usize));
-                for row in 0..h as usize {
-                    let start = row.saturating_mul(stride);
-                    let Some(line) = bytes.get(start..start + row_bytes) else {
-                        // A short buffer: keep what arrived rather than
-                        // reading past it. The frame is dropped below.
-                        break;
-                    };
-                    for px in line.chunks_exact(4) {
-                        self.rgba_scratch.push(px[2]);
-                        self.rgba_scratch.push(px[1]);
-                        self.rgba_scratch.push(px[0]);
-                        self.rgba_scratch.push(255);
-                    }
-                }
-                rgba_to_color_image(&self.rgba_scratch, w, h, Rotation::None, box_px.0, box_px.1)
+                bgra_stride_to_color_image(bytes, w, h, stride, box_px.0, box_px.1)
             };
-            // Unlock before anything can return: the buffer stays locked for
-            // the caller otherwise, and `image` already owns its pixels.
             let _ = unsafe { buffer.Unlock() };
-
             let Some(image) = image else {
                 continue;
             };
@@ -271,6 +231,88 @@ impl VideoDecoder for MediaFoundationDecoder {
                 pts_secs: timestamp as f64 / 10_000_000.0,
                 image: Arc::new(image),
             }));
+        }
+    }
+}
+
+impl VideoDecoder for MediaFoundationDecoder {
+    fn info(&self) -> &VideoStreamInfo {
+        &self.info
+    }
+
+    fn seek(&mut self, secs: f64, max_forward_walk: usize) -> Result<()> {
+        let secs = secs.max(0.0);
+        let frame_secs = if self.info.nominal_fps > 1.0 {
+            1.0 / self.info.nominal_fps as f64
+        } else {
+            1.0 / 30.0
+        };
+        let can_walk_forward = self.last_returned_secs.is_some_and(|last| {
+            secs > last + frame_secs * 0.25
+                && secs - last <= frame_secs * max_forward_walk.max(1) as f64
+        });
+        if can_walk_forward {
+            self.pending_seek_secs = Some(secs);
+            self.finished = false;
+            return Ok(());
+        }
+        // 100-nanosecond units, the unit every Media Foundation time uses.
+        // An all-zero time format GUID means "the default", which for a media
+        // source is exactly those units.
+        let hns = (secs * 10_000_000.0) as i64;
+        let position = PROPVARIANT::from(hns);
+        unsafe {
+            self.reader
+                .SetCurrentPosition(&windows::core::GUID::zeroed(), &position)
+                .context("SetCurrentPosition")?;
+        }
+        self.pending_seek_secs = Some(secs);
+        self.queued_frame = None;
+        self.last_returned_secs = None;
+        self.finished = false;
+        Ok(())
+    }
+
+    fn next_frame(
+        &mut self,
+        box_px: (u32, u32),
+        cancel: &AtomicBool,
+    ) -> Result<Option<VideoFrame>> {
+        let take_next = |this: &mut Self| -> Result<Option<VideoFrame>> {
+            if let Some((queued_box, frame)) = this.queued_frame.take() {
+                if queued_box == box_px {
+                    return Ok(Some(frame));
+                }
+            }
+            this.read_next_frame(box_px, cancel)
+        };
+        let Some(target) = self.pending_seek_secs.take() else {
+            let frame = take_next(self)?;
+            if let Some(frame) = &frame {
+                self.last_returned_secs = Some(frame.pts_secs);
+            }
+            return Ok(frame);
+        };
+        let mut at_or_before: Option<VideoFrame> = None;
+        loop {
+            let Some(frame) = take_next(self)? else {
+                if let Some(frame) = &at_or_before {
+                    self.last_returned_secs = Some(frame.pts_secs);
+                }
+                return Ok(at_or_before);
+            };
+            if frame.pts_secs <= target + 1.0e-7 {
+                at_or_before = Some(frame);
+                continue;
+            }
+            if let Some(frame_at_target) = at_or_before {
+                self.queued_frame = Some((box_px, frame));
+                self.last_returned_secs = Some(frame_at_target.pts_secs);
+                return Ok(Some(frame_at_target));
+            }
+            // The requested time precedes the first timestamp in the file.
+            self.last_returned_secs = Some(frame.pts_secs);
+            return Ok(Some(frame));
         }
     }
 }

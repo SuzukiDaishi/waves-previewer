@@ -1821,6 +1821,7 @@ pub fn fade_shape_from_str(s: &str) -> FadeShape {
 
 pub fn missing_file_meta(path: &Path) -> FileMeta {
     FileMeta {
+        audio_track_absent: false,
         channels: 0,
         sample_rate: 0,
         bits_per_sample: 0,

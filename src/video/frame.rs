@@ -172,6 +172,64 @@ pub fn rgba_to_color_image(
     })
 }
 
+/// Scale a stride-padded Media Foundation RGB32 frame directly into the
+/// panel-sized image. RGB32 is BGRX in memory.
+///
+/// The native decoder commonly returns 1080p or 4K frames even though the
+/// mini meter is only a few hundred pixels wide. Sampling four source pixels
+/// per destination pixel avoids first allocating and walking a full-size RGBA
+/// copy on every video frame. Bilinear filtering is ample at this UI size and
+/// keeps the work proportional to the pixels that will actually be uploaded.
+pub fn bgra_stride_to_color_image(
+    bgra: &[u8],
+    src_w: u32,
+    src_h: u32,
+    stride: usize,
+    box_w: u32,
+    box_h: u32,
+) -> Option<egui::ColorImage> {
+    if src_w == 0 || src_h == 0 || stride < src_w as usize * 4 {
+        return None;
+    }
+    let required = stride
+        .checked_mul(src_h.saturating_sub(1) as usize)?
+        .checked_add(src_w as usize * 4)?;
+    if bgra.len() < required {
+        return None;
+    }
+    let (dst_w, dst_h) = fit_within(src_w, src_h, box_w, box_h);
+    let mut pixels = Vec::with_capacity(dst_w as usize * dst_h as usize);
+
+    let sample = |x: u32, y: u32, channel: usize| -> f32 {
+        bgra[y as usize * stride + x as usize * 4 + channel] as f32
+    };
+    for dy in 0..dst_h {
+        let sy = (((dy as f32 + 0.5) * src_h as f32 / dst_h as f32) - 0.5)
+            .clamp(0.0, src_h.saturating_sub(1) as f32);
+        let y0 = sy.floor() as u32;
+        let y1 = (y0 + 1).min(src_h - 1);
+        let fy = sy - y0 as f32;
+        for dx in 0..dst_w {
+            let sx = (((dx as f32 + 0.5) * src_w as f32 / dst_w as f32) - 0.5)
+                .clamp(0.0, src_w.saturating_sub(1) as f32);
+            let x0 = sx.floor() as u32;
+            let x1 = (x0 + 1).min(src_w - 1);
+            let fx = sx - x0 as f32;
+            let channel = |c: usize| -> u8 {
+                let top = sample(x0, y0, c) * (1.0 - fx) + sample(x1, y0, c) * fx;
+                let bottom = sample(x0, y1, c) * (1.0 - fx) + sample(x1, y1, c) * fx;
+                (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8
+            };
+            pixels.push(egui::Color32::from_rgb(channel(2), channel(1), channel(0)));
+        }
+    }
+    Some(egui::ColorImage {
+        size: [dst_w as usize, dst_h as usize],
+        pixels,
+        source_size: egui::vec2(dst_w as f32, dst_h as f32),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +322,26 @@ mod tests {
         let rgba = vec![0u8; 10];
         assert!(rgba_to_color_image(&rgba, 64, 64, Rotation::None, 16, 16).is_none());
         assert!(rgba_to_color_image(&[], 0, 0, Rotation::None, 16, 16).is_none());
+    }
+
+    #[test]
+    fn media_foundation_bgra_scaler_honours_row_stride_and_channel_order() {
+        // Two 2-pixel rows with four bytes of padding after each row.
+        let bytes = vec![
+            0, 0, 255, 0, 255, 0, 0, 0, 9, 9, 9, 9, // red, blue, padding
+            0, 255, 0, 0, 255, 255, 255, 0, 8, 8, 8, 8, // green, white, padding
+        ];
+        let image = bgra_stride_to_color_image(&bytes, 2, 2, 12, 2, 2).expect("BGRA image");
+        assert_eq!(image.size, [2, 2]);
+        assert_eq!(image.pixels[0], egui::Color32::RED);
+        assert_eq!(image.pixels[1], egui::Color32::BLUE);
+        assert_eq!(image.pixels[2], egui::Color32::GREEN);
+        assert_eq!(image.pixels[3], egui::Color32::WHITE);
+    }
+
+    #[test]
+    fn media_foundation_bgra_scaler_rejects_short_or_invalid_rows() {
+        assert!(bgra_stride_to_color_image(&[0; 15], 2, 2, 8, 2, 2).is_none());
+        assert!(bgra_stride_to_color_image(&[0; 16], 2, 2, 7, 2, 2).is_none());
     }
 }

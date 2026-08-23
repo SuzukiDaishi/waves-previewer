@@ -173,14 +173,11 @@ impl super::WavesPreviewer {
                     self.touch_spectro_cache(&tile.path);
                     self.evict_spectro_cache_if_needed();
                 }
-                // New tile data must retire any viewport image rendered from
-                // the partially-filled spectrogram, otherwise the first
-                // render (with black unfilled regions) sticks around until
-                // the user happens to zoom or pan.
-                for tab in self.tabs.iter_mut().filter(|t| t.path == tile.path) {
-                    Self::invalidate_editor_viewport_cache(tab);
-                }
-                ctx.request_repaint();
+                // Viewport rendering starts only after Done. Re-rendering for
+                // every 64-frame tile caused cache churn, worker storms and—
+                // because workers retain an Arc—full spectrogram copies here.
+                // A coalesced progress repaint is enough while tiles arrive.
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
             }
             SpectrogramJobMsg::Done { path, generation } => {
                 if self.spectro_generation.get(&path).copied() != Some(generation) {

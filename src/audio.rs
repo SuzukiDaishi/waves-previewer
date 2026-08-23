@@ -12,20 +12,27 @@ use crate::audio_channels::{ChannelMapMode, ChannelMixMatrix, MAX_SOURCE_CHANNEL
 
 #[derive(Debug)]
 pub struct AudioBuffer {
-    pub channels: Vec<Vec<f32>>, // per-channel samples in [-1, 1]
+    /// Shared immutable channel storage. Editor tabs keep an `Arc` mirror of
+    /// the same samples for analysis workers, so playback can adopt that
+    /// mirror without another clip-sized copy on the UI thread.
+    pub channels: Arc<Vec<Vec<f32>>>, // per-channel samples in [-1, 1]
 }
 
 impl AudioBuffer {
     pub fn from_mono(mono: Vec<f32>) -> Self {
         Self {
-            channels: vec![mono],
+            channels: Arc::new(vec![mono]),
         }
     }
 
     pub fn from_channels(channels: Vec<Vec<f32>>) -> Self {
+        Self::from_shared_channels(Arc::new(channels))
+    }
+
+    pub fn from_shared_channels(channels: Arc<Vec<Vec<f32>>>) -> Self {
         if channels.is_empty() {
             Self {
-                channels: vec![Vec::new()],
+                channels: Arc::new(vec![Vec::new()]),
             }
         } else {
             Self { channels }
@@ -121,6 +128,10 @@ impl MeterTap {
 pub struct SharedAudio {
     pub samples: ArcSwapOption<AudioBuffer>, // multi-channel samples in [-1, 1]
     streamed_wav: ArcSwapOption<MappedWavSource>,
+    /// Length of a zero-valued transport used by valid video files that have
+    /// no audio track. The callback advances it exactly like PCM without
+    /// allocating a duration-sized silent buffer.
+    silent_frames: std::sync::atomic::AtomicUsize,
     pub vol: AtomicF32, // 0.0..1.0 linear gain
     pub playing: std::sync::atomic::AtomicBool,
     pub play_pos: std::sync::atomic::AtomicUsize,
@@ -469,6 +480,7 @@ impl AudioEngine {
         let shared = Arc::new(SharedAudio {
             samples: ArcSwapOption::from(None),
             streamed_wav: ArcSwapOption::from(None),
+            silent_frames: std::sync::atomic::AtomicUsize::new(0),
             vol: AtomicF32::new(1.0),
             playing: std::sync::atomic::AtomicBool::new(false),
             play_pos: std::sync::atomic::AtomicUsize::new(0),
@@ -515,6 +527,10 @@ impl AudioEngine {
         let shared = Self::new_shared(out_channels, out_sample_rate);
         shared.samples.store(previous.samples.load_full());
         shared.streamed_wav.store(previous.streamed_wav.load_full());
+        shared.silent_frames.store(
+            previous.silent_frames.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         shared
             .vol
             .store(previous.vol.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -926,6 +942,9 @@ impl AudioEngine {
             move |data: &mut [T], _| {
                 let maybe_samples = shared.samples.load();
                 let maybe_stream = shared.streamed_wav.load();
+                let silent_frames = shared
+                    .silent_frames
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let playing = shared.playing.load(std::sync::atomic::Ordering::Relaxed);
                 if !playing {
                     Self::fill_silence::<T>(data, &shared);
@@ -1007,6 +1026,19 @@ impl AudioEngine {
                         stream.len(),
                         &params,
                         |c, p| stream.sample_at_interp(c, p),
+                    );
+                    return;
+                }
+
+                if silent_frames > 0 {
+                    Self::render_block::<T, _>(
+                        data,
+                        channels,
+                        &shared,
+                        1,
+                        silent_frames,
+                        &params,
+                        |_c, _p| 0.0,
                     );
                     return;
                 }
@@ -1226,6 +1258,9 @@ impl AudioEngine {
 
     pub fn set_samples(&self, samples: Arc<AudioBuffer>) {
         let len = samples.len();
+        self.shared
+            .silent_frames
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.shared.streamed_wav.store(None);
         self.shared.samples.store(Some(samples));
         self.shared
@@ -1249,6 +1284,10 @@ impl AudioEngine {
 
     pub fn set_samples_channels(&self, channels: Vec<Vec<f32>>) {
         self.set_samples(Arc::new(AudioBuffer::from_channels(channels)));
+    }
+
+    pub fn set_samples_shared_channels(&self, channels: Arc<Vec<Vec<f32>>>) {
+        self.set_samples(Arc::new(AudioBuffer::from_shared_channels(channels)));
     }
 
     pub fn set_samples_buffer(&self, samples: Arc<AudioBuffer>) {
@@ -1290,6 +1329,9 @@ impl AudioEngine {
         let new_len = samples.len();
         let (new_pos, new_pos_f) =
             Self::remap_pos_for_new_source(old_pos_f, from_sr, to_sr, new_len);
+        self.shared
+            .silent_frames
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.shared.streamed_wav.store(None);
         self.shared.samples.store(Some(samples));
         self.shared
@@ -1331,9 +1373,25 @@ impl AudioEngine {
         );
     }
 
+    pub fn set_samples_shared_channels_keep_time_pos(
+        &self,
+        channels: Arc<Vec<Vec<f32>>>,
+        from_sr: u32,
+        to_sr: u32,
+    ) {
+        self.set_samples_buffer_keep_time_pos(
+            Arc::new(AudioBuffer::from_shared_channels(channels)),
+            from_sr,
+            to_sr,
+        );
+    }
+
     pub fn set_streaming_wav_path(&self, path: &Path) -> Result<()> {
         let source = Arc::new(MappedWavSource::open(path)?);
         let len = source.len();
+        self.shared
+            .silent_frames
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.shared.samples.store(None);
         self.shared.streamed_wav.store(Some(source));
         self.shared
@@ -1349,6 +1407,34 @@ impl AudioEngine {
             .loop_end
             .store(len, std::sync::atomic::Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Install a seekable, playable silent timeline without allocating PCM.
+    pub fn set_silent_timeline_frames(&self, frames: usize) {
+        self.shared.samples.store(None);
+        self.shared.streamed_wav.store(None);
+        self.shared
+            .silent_frames
+            .store(frames, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .play_pos
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .play_pos_f
+            .store(0.0, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .loop_start
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .loop_end
+            .store(frames, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_silent_timeline(&self) -> bool {
+        self.shared
+            .silent_frames
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
     }
 
     pub fn clear_streaming_source(&self) {
@@ -1369,6 +1455,11 @@ impl AudioEngine {
                 .as_ref()
                 .map(|src| src.len() > 0)
                 .unwrap_or(false)
+            || self
+                .shared
+                .silent_frames
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
     }
 
     pub fn current_source_len(&self) -> usize {
@@ -1383,6 +1474,13 @@ impl AudioEngine {
                     .load()
                     .as_ref()
                     .map(|src| src.len())
+            })
+            .or_else(|| {
+                let frames = self
+                    .shared
+                    .silent_frames
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                (frames > 0).then_some(frames)
             })
             .unwrap_or(0)
     }
@@ -1410,6 +1508,9 @@ impl AudioEngine {
             .shared
             .play_pos
             .load(std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .silent_frames
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.shared.streamed_wav.store(None);
         self.shared.samples.store(Some(samples));
         if pos >= new_len {
@@ -2098,6 +2199,20 @@ mod tests {
     }
 
     #[test]
+    fn shared_channel_adoption_does_not_copy_the_clip() {
+        let audio = AudioEngine::new_for_test();
+        let channels = Arc::new(vec![vec![0.1; 4_096], vec![-0.2; 4_096]]);
+        audio.set_samples_shared_channels(channels.clone());
+
+        let adopted = audio.shared.samples.load_full().expect("source buffer");
+        assert!(
+            Arc::ptr_eq(&channels, &adopted.channels),
+            "editor handoff must share the channel allocation"
+        );
+        assert_eq!(audio.current_source_len(), 4_096);
+    }
+
+    #[test]
     fn declicked_play_schedules_a_monotonic_fade_without_moving_position() {
         let audio = AudioEngine::new_for_test();
         audio.set_samples_mono(vec![0.5; 48_000]);
@@ -2216,6 +2331,51 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn silent_video_timeline_is_a_real_transport_without_allocated_pcm() {
+        let audio = AudioEngine::new_for_test();
+        audio.set_silent_timeline_frames(96_000);
+        assert!(audio.has_audio_source());
+        assert!(audio.is_silent_timeline());
+        assert_eq!(audio.current_source_len(), 96_000);
+        assert!(audio.shared.samples.load().is_none());
+        assert!(audio.shared.streamed_wav.load().is_none());
+
+        let params = RenderParams {
+            vol: 1.0,
+            audible_mask: u64::MAX,
+            rate: 1.0,
+            looping: false,
+            loop_start: 0,
+            loop_end: 96_000,
+            loop_xfade_samples: 0,
+            loop_xfade_shape: 0,
+            map_mode: ChannelMapMode::default(),
+            pos_f: 0.0,
+        };
+        let mut output = vec![1.0_f32; 480];
+        AudioEngine::render_block::<f32, _>(
+            &mut output,
+            2,
+            &audio.shared,
+            1,
+            96_000,
+            &params,
+            |_channel, _position| 0.0,
+        );
+        assert!(output.iter().all(|sample| *sample == 0.0));
+        assert_eq!(audio.shared.play_pos.load(Ordering::Relaxed), 240);
+    }
+
+    #[test]
+    fn installing_real_audio_replaces_the_silent_video_timeline() {
+        let audio = AudioEngine::new_for_test();
+        audio.set_silent_timeline_frames(48_000);
+        audio.set_samples_mono(vec![0.25; 100]);
+        assert!(!audio.is_silent_timeline());
+        assert_eq!(audio.current_source_len(), 100);
     }
 
     #[test]

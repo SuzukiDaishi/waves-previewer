@@ -324,7 +324,7 @@ impl super::WavesPreviewer {
                     self.finish_feature_analysis(
                         key,
                         generation,
-                        EditorFeatureAnalysisData::Tempogram(data),
+                        EditorFeatureAnalysisData::Tempogram(std::sync::Arc::new(data)),
                     );
                 }
                 EditorFeatureAnalysisJobMsg::ChromagramDone {
@@ -339,7 +339,7 @@ impl super::WavesPreviewer {
                     self.finish_feature_analysis(
                         key,
                         generation,
-                        EditorFeatureAnalysisData::Chromagram(data),
+                        EditorFeatureAnalysisData::Chromagram(std::sync::Arc::new(data)),
                     );
                 }
                 EditorFeatureAnalysisJobMsg::WorldDone {
