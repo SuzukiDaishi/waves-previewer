@@ -451,4 +451,42 @@ impl super::WavesPreviewer {
             self.open_or_activate_tab(path);
         }
     }
+
+    /// Bring an editor tab to the front.
+    ///
+    /// The one sequence a tab switch has to run: drop the outgoing tab's
+    /// preview, point the workspace at the new tab, and queue its activation.
+    /// Returns `false` for an index out of range, or for a tab that is already
+    /// in front -- re-activating re-targets playback and decoding for nothing.
+    pub(super) fn activate_editor_tab(&mut self, tab_idx: usize) -> bool {
+        let already_active = self.workspace_view == super::types::WorkspaceView::Editor
+            && self.active_tab == Some(tab_idx);
+        if already_active {
+            return false;
+        }
+        let Some(tab_path) = self.tabs.get(tab_idx).map(|tab| tab.path.clone()) else {
+            return false;
+        };
+        if let Some(prev) = self.active_tab {
+            if prev != tab_idx {
+                self.clear_preview_if_any(prev);
+            }
+        }
+        self.workspace_view = super::types::WorkspaceView::Editor;
+        self.active_tab = Some(tab_idx);
+        self.debug_mark_tab_switch_start(&tab_path);
+        self.queue_tab_activation(tab_path);
+        true
+    }
+
+    /// The tab `steps` away from the one in front, wrapping at both ends.
+    pub(super) fn editor_tab_index_offset_by(&self, steps: isize) -> Option<usize> {
+        let len = self.tabs.len();
+        if len == 0 {
+            return None;
+        }
+        let current = self.active_tab? as isize;
+        let len_i = len as isize;
+        Some(((current + steps).rem_euclid(len_i)) as usize)
+    }
 }

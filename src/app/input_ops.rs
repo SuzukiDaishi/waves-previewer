@@ -92,25 +92,38 @@ impl super::WavesPreviewer {
                     }
                     self.request_list_focus(ctx);
                 } else {
-                    let tab_idx = idx - 1;
-                    // Already on this tab: re-activating would re-target
-                    // playback/decoding for no reason.
-                    let already_active = self.workspace_view == super::types::WorkspaceView::Editor
-                        && self.active_tab == Some(tab_idx);
-                    if tab_idx < self.tabs.len() && !already_active {
-                        if let Some(prev) = self.active_tab {
-                            if prev != tab_idx {
-                                self.clear_preview_if_any(prev);
-                            }
-                        }
-                        if let Some(tab) = self.tabs.get(tab_idx) {
-                            let tab_path = tab.path.clone();
-                            self.workspace_view = super::types::WorkspaceView::Editor;
-                            self.active_tab = Some(tab_idx);
-                            self.debug_mark_tab_switch_start(&tab_path);
-                            self.queue_tab_activation(tab_path);
-                        }
-                    }
+                    self.activate_editor_tab(idx - 1);
+                }
+            }
+        }
+
+        // Tab / Shift+Tab step through the editor tabs.
+        //
+        // Only while an editor tab is actually in front, and only with more
+        // than one open: in the list, and with a single tab, Tab is still
+        // egui's focus traversal, which is what it is for there.
+        // `workspace_keys_allowed` keeps it out of a text field, a metadata
+        // field, a modal and the shortcut-capture box -- all of which own their
+        // own Tab.
+        if allow_workspace && self.is_editor_workspace_active() && self.tabs.len() > 1 {
+            // Shift first, and this order is load-bearing: egui matches
+            // modifiers *logically*, so a pattern of `NONE` also accepts an
+            // event with Shift held. Asking for the bare Tab first would
+            // swallow Shift+Tab and step forwards for it.
+            let back = ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab));
+            let forward =
+                !back && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+            if forward || back {
+                if let Some(next) = self.editor_tab_index_offset_by(if forward { 1 } else { -1 }) {
+                    self.activate_editor_tab(next);
+                }
+                // egui reads Tab for focus traversal at the very start of the
+                // pass, before any of this runs, so by now it has already moved
+                // focus to some widget in the outgoing tab. Left there it would
+                // swallow the *next* Tab press -- and if it landed on a text
+                // field, every unmodified key after it. Hand the focus back.
+                if let Some(id) = ctx.memory(|m| m.focused()) {
+                    ctx.memory_mut(|m| m.surrender_focus(id));
                 }
             }
         }

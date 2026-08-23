@@ -24,6 +24,7 @@ pub enum Action {
     VolumeDown,
     VolumeUp,
     SwitchTab,
+    CycleEditorTab,
     SaveSession,
     SaveSessionAs,
     NewWindow,
@@ -212,6 +213,14 @@ pub const KEYMAP: &[KeyBinding] = &[
         chord: None,
         keys_label: "Ctrl+1..9",
         desc: "Switch workspace: 1 = List, 2..9 = editor tabs",
+        dispatch: Dispatch::Manual,
+    },
+    KeyBinding {
+        action: Action::CycleEditorTab,
+        context: KeyContext::Global,
+        chord: None,
+        keys_label: "Tab / Shift+Tab",
+        desc: "Next / previous editor tab (wraps; editor workspace only)",
         dispatch: Dispatch::Manual,
     },
     KeyBinding {
