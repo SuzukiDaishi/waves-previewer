@@ -4,6 +4,8 @@ NeoWaves は大量の音声ファイルを素早く一覧表示し、即試聴�
 
 対応フォーマット（デコード）:
 - WAV / AIFF / FLAC / MP3 / M4A (isomp4) / AAC / ALAC / OGG (Vorbis)
+- 動画コンテナ MP4 / MOV / M4V / 3GP / 3G2 — **音声トラックのみ再生**。
+  エディタでは Mini Meter に再生位置の映像フレームを表示する（読み込み専用）
 
 対応フォーマット（エンコード / 書き出し）:
 - WAV / AIFF / FLAC / MP3 / M4A (AAC) / OGG (Vorbis)
@@ -31,6 +33,12 @@ NeoWaves は「加工済み音は offline render、未加工の pristine WAV は
 - 検索（Regex対応）、ソート、列の表示/非表示
 - メタ情報の列表示: 長さ / チャンネル / SR / Bits / Bitrate / dBFS / LUFS / Gain / 波形
 - Auto Play やキーボード操作で高速試聴
+
+### 動画ファイル（読み込み専用）
+- mp4 / mov などをリストに読み込み、音声トラックだけを再生
+- エディタの Mini Meter に再生位置のフレームを表示（音と同期）
+- サムネイルは埋め込みアートワーク優先、無ければ 1 フレーム目
+- 映像エンコーダを持たないため、編集・書き出しは不可
 
 ### エディタ（非破壊）
 - Speed / PitchShift / TimeStretch

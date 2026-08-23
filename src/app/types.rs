@@ -2057,6 +2057,82 @@ impl ChannelView {
     }
 }
 
+/// Why the editor's video panel is showing what it is showing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VideoPanelStatus {
+    /// The worker is opening the file; nothing has arrived yet.
+    Probing,
+    /// Frames are flowing.
+    Ready,
+    /// There is a picture in there, but nothing in this build decodes it
+    /// (ProRes, AV1, HEVC without an OS codec). The audio is unaffected.
+    Unsupported(String),
+    /// The container or the decoder refused the file.
+    Failed(String),
+}
+
+/// The editor's video preview, for a tab whose source is a video file.
+///
+/// Transient, like [`MiniMeterState`] below it: none of this is serialised
+/// with a session, and it is rebuilt whenever the tab is opened.
+///
+/// Decoded frames are held as a short run *ahead* of the playhead rather than
+/// one frame at a time. Asking for a frame and waiting for it costs a round
+/// trip through a worker thread, which reads as the picture trailing the sound
+/// by a frame or two; keeping a run means the panel draws whichever frame the
+/// playhead has just reached, with no wait at all.
+pub struct VideoPanelState {
+    pub info: crate::video::VideoStreamInfo,
+    pub status: VideoPanelStatus,
+    /// Decoded frames in presentation order, at and ahead of the playhead.
+    pub ring: std::collections::VecDeque<(f64, std::sync::Arc<egui::ColorImage>)>,
+    /// One texture for the life of the tab; its contents are replaced as the
+    /// shown frame changes, so playback does not churn GPU allocations.
+    pub texture: Option<egui::TextureHandle>,
+    /// Presentation time of the frame currently in `texture`.
+    pub shown_pts: Option<f64>,
+    /// The source time the worker was last asked for.
+    pub requested_secs: f64,
+    /// The pixel box the frames in `ring` were scaled into.
+    pub box_px: (u32, u32),
+    /// The pixel box the panel wants at its current size, written by the draw
+    /// and read by the request. Zero until the panel has been laid out once.
+    pub wanted_box_px: (u32, u32),
+    /// Bumped on every request so frames from a superseded one are dropped.
+    pub generation: u64,
+    pub inflight: bool,
+}
+
+impl VideoPanelState {
+    pub fn new(info: crate::video::VideoStreamInfo) -> Self {
+        Self {
+            info,
+            status: VideoPanelStatus::Probing,
+            ring: std::collections::VecDeque::new(),
+            texture: None,
+            shown_pts: None,
+            requested_secs: f64::NEG_INFINITY,
+            box_px: (0, 0),
+            wanted_box_px: (0, 0),
+            generation: 0,
+            inflight: false,
+        }
+    }
+
+    /// The frame that should be on screen at `secs`: the latest one whose
+    /// presentation time has already arrived.
+    pub fn frame_at(&self, secs: f64) -> Option<(f64, std::sync::Arc<egui::ColorImage>)> {
+        self.ring
+            .iter()
+            .filter(|(pts, _)| *pts <= secs)
+            .next_back()
+            .cloned()
+            // Before the first frame's timestamp nothing is "current" yet;
+            // show the earliest frame rather than an empty panel.
+            .or_else(|| self.ring.front().cloned())
+    }
+}
+
 /// Transient smoothing/hold state for the editor bottom meter strip
 /// (spectrum analyzer ballistics, per-channel peak hold, correlation).
 #[derive(Clone, Debug, Default)]
@@ -2174,6 +2250,14 @@ pub struct EditorTab {
     #[allow(dead_code)]
     pub loop_enabled: bool,
     pub loading: bool,
+    /// The tab's samples may not be changed.
+    ///
+    /// True for a video source: NeoWaves can read a video's audio track but has
+    /// no video encoder to write one back, so an edit would have nowhere to go.
+    /// Derived from the path once, in [`EditorTab::new_base`], and consulted by
+    /// the tool panel, the destructive shortcuts, the post-frame command
+    /// dispatch and the list's per-file gain. See [`crate::media_kind`].
+    pub read_only: bool,
     /// Large file-backed asset: overview is resident, PCM stays paged/mapped.
     pub paged_asset: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
@@ -2346,10 +2430,13 @@ pub struct EditorTab {
     pub auto_trim_state: Option<AutoTrimState>,
     pub loop_detect_state: Option<LoopDetectState>,
     pub mini_meter: MiniMeterState, // transient bottom meter strip state
+    /// Video preview for a video source; `None` for audio files and for a
+    /// video whose container turned out to have no picture in it.
+    pub video_panel: Option<VideoPanelState>,
     pub world_f0_draft: Option<WorldF0Draft>, // WORLD F0 edit draft (transient)
     pub world_ap_draft: Option<WorldApDraft>, // WORLD aperiodicity draft (transient)
-    pub world_f0_focus: bool,       // WORLD view: zoom the freq axis onto the F0 range
-    pub world_formant_ratio: f32,   // WORLD resynthesis: spectral-envelope warp (1.0 = off)
+    pub world_f0_focus: bool,                 // WORLD view: zoom the freq axis onto the F0 range
+    pub world_formant_ratio: f32, // WORLD resynthesis: spectral-envelope warp (1.0 = off)
     // --- Gain automation curve (DAW-style breakpoint envelope, transient) ---
     pub gain_env_enabled: bool, // Gain tool: edit the curve on the waveform canvas
     pub gain_env_points: Vec<(usize, f32)>, // (sample, dB) breakpoints, kept sorted by sample
@@ -2491,6 +2578,7 @@ impl EditorTab {
     /// fresh load) so new fields need exactly one default here.
     pub fn new_base(path: std::path::PathBuf, display_name: String) -> Self {
         static NEXT_TAB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let read_only = !crate::media_kind::source_allows_destructive_edit(&path);
         Self {
             tab_id: NEXT_TAB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             path: path,
@@ -2499,6 +2587,7 @@ impl EditorTab {
             waveform_pyramid: None,
             loop_enabled: false,
             loading: true,
+            read_only,
             paged_asset: false,
             ch_samples: Vec::new(),
             pencil_draft: None,
@@ -2630,6 +2719,7 @@ impl EditorTab {
             auto_trim_state: None,
             loop_detect_state: None,
             mini_meter: crate::app::types::MiniMeterState::default(),
+            video_panel: None,
             world_f0_draft: None,
             world_ap_draft: None,
             world_f0_focus: false,

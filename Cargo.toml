@@ -59,16 +59,26 @@ egui_kittest = { version = "0.34.3", optional = true, features = ["eframe"] }
 clack-host = { git = "https://github.com/prokopyl/clack", rev = "f874e858ad576c601367b3038af5088a4e671744", package = "clack-host", optional = true }
 clack-extensions = { git = "https://github.com/prokopyl/clack", rev = "f874e858ad576c601367b3038af5088a4e671744", package = "clack-extensions", optional = true, features = ["clack-host", "gui", "params", "state"] }
 vst3 = { version = "0.3.0", optional = true }
+# Cross-platform H.264 decoder for the editor's video preview. Builds Cisco's
+# OpenH264 from the bundled C++ sources via `cc`, which picks up the dynamic
+# CRT on MSVC like every other native dep here (see build.rs). Optional so a
+# build that does not want the C++ compile can drop it; on Windows the Media
+# Foundation backend covers the same ground with more codecs.
+openh264 = { version = "0.9", optional = true }
 libloading = { version = "0.9.0", optional = true }
 
 [features]
-default = ["glow", "plugin_native_vst3", "plugin_native_clap"]
+default = ["glow", "plugin_native_vst3", "plugin_native_clap", "video"]
 glow = ["eframe/glow", "eframe/x11", "eframe/wayland"]
 wgpu = ["eframe/wgpu", "eframe/x11", "eframe/wayland"]
 kittest = ["egui_kittest"]
 kittest_render = ["kittest", "egui_kittest/wgpu"]
 plugin_native_vst3 = ["vst3", "libloading"]
 plugin_native_clap = ["clack-host", "clack-extensions"]
+# Video frame preview. Without it a video file still lists, decodes its audio
+# and plays; only the picture in the mini meter and the first-frame thumbnail
+# go away (on Windows, Media Foundation still supplies both).
+video = ["openh264"]
 
 [profile.release]
 # Thin LTO gives a measurable frame-time win for the per-sample render loops
@@ -94,6 +104,12 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.rubato]
 opt-level = 3
+# OpenH264 is C++ compiled without assembly optimisations here; at the crate
+# default it decodes far too slowly to keep a 30 fps preview panel fed.
+[profile.dev.package.openh264]
+opt-level = 3
+[profile.dev.package.openh264-sys2]
+opt-level = 3
 
 [build-dependencies]
 windows_exe_info = "0.5.2"
@@ -107,6 +123,16 @@ drag = "2.1.1"
 # Mirrors the normalization `drag` performs internally, so the payload can be
 # checked for shell-hostile verbatim paths before handing it over.
 dunce = "1.0.5"
+# Media Foundation for the video preview: the OS decoder covers H.264, HEVC,
+# VP9 and whatever else is installed, with hardware acceleration, where the
+# bundled OpenH264 only does H.264. `windows` rather than `windows-sys`
+# because Media Foundation is COM and needs the interface wrappers.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

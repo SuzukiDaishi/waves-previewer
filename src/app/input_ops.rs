@@ -327,11 +327,13 @@ impl super::WavesPreviewer {
                     // The destructive selection keys additionally stand down
                     // while the Metadata inspector is up: the waveform is not
                     // on screen there, and Delete in particular is a key
-                    // people press reflexively in a metadata table.
-                    let audio_visible = self
-                        .tabs
-                        .get(tab_idx)
-                        .is_some_and(|t| t.primary_view != EditorPrimaryView::Metadata);
+                    // people press reflexively in a metadata table. They also
+                    // stand down on a read-only source (a video), where the
+                    // whole tool panel is greyed out and a key must not be the
+                    // one way around that.
+                    let audio_visible = self.tabs.get(tab_idx).is_some_and(|t| {
+                        t.primary_view != EditorPrimaryView::Metadata && !t.read_only
+                    });
                     if audio_visible {
                         if self.keymap_consume(ctx, Action::EditorTrimSelection)
                             && !self.editor_apply_busy_toast_for_tab(tab_idx)

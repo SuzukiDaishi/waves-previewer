@@ -10,10 +10,12 @@ pub mod flac_meta;
 pub mod ipc;
 pub mod loop_markers;
 pub mod markers;
+pub mod media_kind;
 pub mod metadata;
 pub mod meter;
 pub mod plugin;
 pub mod ui_wake;
+pub mod video;
 pub mod wav_stream;
 pub mod wave;
 

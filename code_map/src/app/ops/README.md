@@ -11,7 +11,8 @@ UI からの入力を受けて state を更新する処理、worker 起動、cha
 | Playback / Processing | `src/app/audio_ops.rs`, `src/app/loading_ops.rs` | output volume、playback FX result、processing result、busy overlay |
 | List state | `src/app/list_state_ops.rs`, `src/app/list_ops.rs`, `src/app/list_undo.rs` | list item lookup、selection、row/path index、undo |
 | Scan / Search | `src/app/scan_ops.rs`, `src/app/search_ops.rs` | folder scan、dummy list、filter、sort、検索反映 |
-| Metadata | `src/app/meta.rs`, `src/app/meta_ops.rs`, `src/app/gain_ops.rs`, `src/app/loudnorm_ops.rs` | duration/sample rate/artwork/transcript/LUFS/gain の非同期取得 |
+| Metadata | `src/app/meta.rs`, `src/app/meta_ops.rs`, `src/app/gain_ops.rs`, `src/app/loudnorm_ops.rs` | duration/sample rate/artwork/transcript/LUFS/gain の非同期取得、動画の 1 フレーム目サムネイル |
+| Video preview | `src/app/video_ops.rs`, `src/video/` | タブごとの映像デコードワーカー、先読みリング、再生位置とフレームの同期 |
 | List preview | `src/app/list_preview_ops.rs`, `src/app/preview.rs`, `src/app/preview_ops.rs` | list 選択時の再生、重い preview / overlay job drain |
 | Editor decode | `src/app/editor_decode_ops.rs`, `src/app/editor_viewport.rs`, `src/app/editor_features.rs` | progressive decode、viewport worker、feature cache |
 | Editor apply | `src/app/editor_ops.rs`, `src/app/tool_ops.rs`, `src/app/tooling.rs`, `src/app/temp_audio_ops.rs` | destructive apply、preview、virtual audio、tool 実行 |

@@ -2847,11 +2847,15 @@ fn mp3_bitrate_from_kbps(kbps: u32) -> Mp3Bitrate {
 
 fn pick_format(src: &Path, dst: &Path) -> Option<String> {
     if let Some(ext) = ext_lower(dst) {
-        if audio_io::is_supported_extension(&ext) {
+        if audio_io::is_encodable_extension(&ext) {
             return Some(ext);
         }
     }
-    ext_lower(src).filter(|ext| audio_io::is_supported_extension(ext))
+    // Falling back to the source extension is only meaningful when the app can
+    // encode it. A video source has no encodable form, so this returns None and
+    // the caller reports an unsupported format rather than writing an .mp4 that
+    // holds a bare audio stream.
+    ext_lower(src).filter(|ext| audio_io::is_encodable_extension(ext))
 }
 
 fn ext_lower(path: &Path) -> Option<String> {
@@ -3903,6 +3907,34 @@ pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f
 
 #[cfg(test)]
 mod tests {
+
+    /// A video source has no encodable form, so the format picker must refuse
+    /// it rather than fall back to the source extension and hand an audio
+    /// encoder an `.mp4` to write.
+    #[test]
+    fn a_video_source_or_target_has_no_export_format() {
+        use std::path::Path;
+        assert_eq!(
+            super::pick_format(Path::new("clip.mp4"), Path::new("out")),
+            None
+        );
+        assert_eq!(
+            super::pick_format(Path::new("clip.mov"), Path::new("out.mp4")),
+            None
+        );
+        // An explicit audio destination still wins over a video source, which
+        // is the path an "extract the audio" feature would later use.
+        assert_eq!(
+            super::pick_format(Path::new("clip.mp4"), Path::new("out.wav")),
+            Some("wav".to_string())
+        );
+        // Audio sources are untouched by any of this.
+        assert_eq!(
+            super::pick_format(Path::new("a.flac"), Path::new("out")),
+            Some("flac".to_string())
+        );
+    }
+
     use super::{
         encode_riff_wave_chunks, export_channels_audio, export_gain_audio, overwrite_gain_wav,
         parse_riff_wave_chunks, process_compressor_offline, process_noise_gate_offline,

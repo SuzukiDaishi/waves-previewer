@@ -261,6 +261,8 @@ impl WavesPreviewer {
         deferrable!(self.apply_spectrogram_updates(ctx));
         deferrable!(self.apply_feature_analysis_updates(ctx));
         deferrable!(self.apply_editor_viewport_render_updates(ctx));
+        deferrable!(self.ensure_video_workers());
+        deferrable!(self.apply_video_frame_updates(ctx));
         self.drain_export_results(ctx);
         deferrable!(self.drain_lufs_recalc_results());
         if self.inspection_run_state.is_some() {
@@ -1135,6 +1137,9 @@ impl WavesPreviewer {
             || !self.startup_maintenance_finished()
             || self.meta_pool_has_pending_work()
             || self.path_status.has_pending()
+            // A paused seek on a video tab has a frame in flight; without this
+            // the picture would not land until the user moved the mouse.
+            || self.video_panel_inflight()
             || !self.toasts.is_empty();
         let repaint_ms = if fast_repaint {
             Some(16)
@@ -1186,6 +1191,9 @@ impl WavesPreviewer {
                 tier.as_str(),
                 self.debug.frame_last_ms
             ));
+            // A demotion does not rebuild the metadata pool, so the budgets it
+            // holds have to be pushed across by hand.
+            self.push_video_poster_limit_to_meta_pool();
         }
     }
 }

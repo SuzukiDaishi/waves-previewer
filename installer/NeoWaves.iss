@@ -65,7 +65,7 @@ Name: "{commondesktop}\{#MyAppShort}"; Filename: "{app}\{#MyAppExeName}"; IconFi
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Additional icons:"
-Name: "assoc"; Description: "Associate .wav/.aiff/.flac/.mp3/.m4a/.ogg/.nwsess with {#MyAppShort}"; GroupDescription: "File associations:"; Flags: unchecked
+Name: "assoc"; Description: "Associate .wav/.aiff/.flac/.mp3/.m4a/.ogg/.mp4/.mov/.m4v/.3gp/.3g2/.nwsess with {#MyAppShort}"; GroupDescription: "File associations:"; Flags: unchecked
 
 [Run]
 ; Run as the original interactive user so per-user HF cache (%USERPROFILE%\.cache\huggingface\hub)
@@ -80,6 +80,11 @@ Root: HKCR; Subkey: ".flac"; ValueType: string; ValueName: ""; ValueData: "{#MyA
 Root: HKCR; Subkey: ".mp3"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: ".m4a"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: ".ogg"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".mp4"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".mov"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".m4v"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".3gp"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".3g2"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: ".nwsess"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: "{#MyAppAssoc}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppName}"; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "{#MyAppAssoc}\\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\\icon.ico"; Flags: uninsdeletekey; Tasks: assoc
@@ -94,6 +99,11 @@ Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: 
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".mp3"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".m4a"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".ogg"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
+Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".mp4"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
+Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".mov"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
+Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".m4v"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
+Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".3gp"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
+Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".3g2"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".nwsess"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: ".wav\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: ".aiff\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
@@ -102,4 +112,9 @@ Root: HKCR; Subkey: ".flac\\OpenWithProgids"; ValueType: string; ValueName: "{#M
 Root: HKCR; Subkey: ".mp3\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: ".m4a\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: ".ogg\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".mp4\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".mov\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".m4v\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".3gp\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".3g2\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: ".nwsess\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc

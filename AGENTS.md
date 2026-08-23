@@ -47,11 +47,14 @@ Repository Layout
     - `temp_audio_ops.rs`: clipboard temp wav export + virtual audio decode helpers.
     - `rename_ops.rs`: rename dialogs + path replacement and batch rename.
     - `audio_ops.rs`: output volume + per-file gain application.
+    - `video_ops.rs`: one decode worker per open video tab, the read-ahead ring that keeps the picture on the playhead rather than a round trip behind it, and the per-frame drain.
   - `src/bin/`: extra binaries/utilities (if present).
   - `src/main.rs`: native startup entry.
   - `src/cli.rs`: CLI arg parsing and startup config helpers.
   - `src/lib.rs`: crate entry.
   - `src/audio*.rs`, `src/wave.rs`, `src/markers.rs`, `src/loop_markers.rs`: audio I/O and DSP utilities.
+  - `src/media_kind.rs`: whether a path is audio or video, and what the app is allowed to do with it (edit / export / write metadata). Every gate that refuses an action on a video source reads one of these predicates rather than comparing extensions, so making video editable later is a change to this file alone.
+  - `src/video/`: video container demux and frame decoding, for preview only — the mini meter picture and the list thumbnail. `container.rs` demuxes ISO-BMFF through the `mp4` crate already used for m4a, `annexb.rs` converts AVCC samples for a raw-bitstream decoder, `frame.rs` rotates and downscales on the worker, and the two backends are Media Foundation (Windows) and OpenH264 (everywhere).
   - `src/ipc.rs`: IPC message definitions.
   - `src/ui_wake.rs`: process-wide handle for waking the UI thread from a background thread (the frame loop sleeps when idle, so a thread pushing into a channel the UI polls must ask for a frame).
   - `src/kittest.rs`: kittest feature helpers.
@@ -145,6 +148,7 @@ Implementation Principles
 - **Never call the filesystem from the UI thread** — no `is_file`, `exists`, `metadata`, `read`, or `walkdir` on any path the user supplied. On a network share one of those blocks for the SMB timeout, which is a hung window on its own; a per-frame budget does not help. Ask `path_status.rs` for existence, and put anything else on a worker. (Paths the app owns — its own prefs and config — are the only exception.)
 - Background sweeps against a user path must back off from their own measured cost, and check `perf_profile.rs` for whether the root is remote before choosing a concurrency.
 - Preserve original files unless the user explicitly saves destructive edits.
+- Video sources are read-only: there is no video encoder here, so an edit or an export has nowhere to go. Ask `src/media_kind.rs` rather than testing the extension.
 - Prefer progressive loading for long audio (preview first, full decode later).
 
 When Changing Audio/Editor Logic

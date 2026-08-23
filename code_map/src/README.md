@@ -13,7 +13,9 @@ GUI の詳細は [app](app/README.md)、plugin worker の詳細は [plugin](plug
 | `src/app.rs` | `WavesPreviewer` state、app module 宣言、`eframe::App` 実装 | app 全体 state と frame entrypoint を確認する |
 | `src/audio.rs` | 再生エンジン、出力デバイス、playback buffer 操作 | 音が鳴らない、停止しない、音量・rate がおかしい |
 | `src/audio_channels.rs` | ソース ch → 出力 ch のスピーカー位置マッピング (up/downmix 行列) | サラウンド機で定位がおかしい、無音の ch がある |
-| `src/audio_io.rs` | WAV/MP3/M4A/OGG などの decode/export、progressive decode | 圧縮音源、長尺 decode、export を追う |
+| `src/audio_io.rs` | WAV/MP3/M4A/OGG/動画コンテナ などの decode/export、対応拡張子の一元管理、progressive decode | 圧縮音源、長尺 decode、export、音声トラック選択を追う |
+| `src/media_kind.rs` | 音声/動画の判別と capability (編集・書き出し・メタ書き込みの可否) | 「このファイルに何をしてよいか」を変えたい |
+| `src/video/` | 動画コンテナの demux、H.264 デコード、フレームの回転・縮小 | Mini Meter の映像プレビュー、サムネイルの 1 フレーム目を追う |
 | `src/wave.rs` | WAV 系ユーティリティ、min/max 波形、sample 変換 | 波形表示、WAV 読み込み、ピーク計算を見る |
 | `src/markers.rs` / `src/loop_markers.rs` | marker / loop marker の読み書き | loop tag、marker 保存互換を確認する |
 | `src/ipc.rs` | 多重起動や外部要求の IPC message | 既存プロセスへの open 要求を追う |

@@ -144,7 +144,11 @@ impl super::WavesPreviewer {
         use std::sync::mpsc;
         let mut targets: Vec<(PathBuf, f32)> = Vec::new();
         for item in &self.items {
-            if item.pending_gain_db.abs() > 0.0001 {
+            // A video source cannot be written back out (see `media_kind`), and
+            // nothing should have been able to put a pending gain on one.
+            if item.pending_gain_db.abs() > 0.0001
+                && crate::media_kind::source_allows_export(&item.path)
+            {
                 targets.push((item.path.clone(), item.pending_gain_db));
             }
         }
@@ -220,7 +224,7 @@ impl super::WavesPreviewer {
             .format_override
             .as_ref()
             .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| crate::audio_io::is_supported_extension(s));
+            .filter(|s| crate::audio_io::is_encodable_extension(s));
         let out_sr = self.audio.shared.out_sample_rate.max(1);
         let mut items: Vec<(PathBuf, f32)> = Vec::new();
         let mut edit_tasks: Vec<EditSaveTask> = Vec::new();
@@ -245,11 +249,21 @@ impl super::WavesPreviewer {
             write_loop_markers: bool,
         }
         let mut virtual_tasks: Vec<VirtualSaveTask> = Vec::new();
+        let mut skipped_video: Vec<PathBuf> = Vec::new();
         for i in indices {
             let Some(item) = self.item_for_row(i) else {
                 continue;
             };
             let p = item.path.clone();
+            // A video source has no encodable form: there is no video encoder
+            // here, so writing one back would either drop the picture or
+            // produce a container the user did not ask for. Skip it before the
+            // job is queued so the reason can be reported plainly, rather than
+            // letting it surface as an "unsupported format" failure.
+            if !crate::media_kind::source_allows_export(&p) {
+                skipped_video.push(p);
+                continue;
+            }
             let db = item.pending_gain_db;
             let effective_sr = self
                 .effective_sample_rate_for_path(&p)
@@ -259,7 +273,7 @@ impl super::WavesPreviewer {
                 .format_override
                 .get(&p)
                 .map(|v| v.trim().trim_start_matches('.').to_ascii_lowercase())
-                .filter(|v| crate::audio_io::is_supported_extension(v));
+                .filter(|v| crate::audio_io::is_encodable_extension(v));
             if item.source == MediaSource::Virtual {
                 let audio = self
                     .edited_audio_for_path(&p)
@@ -599,6 +613,23 @@ impl super::WavesPreviewer {
                     .map(|t| (item.path.clone(), t.clone()))
             })
             .collect();
+        if !skipped_video.is_empty() {
+            let sample = skipped_video
+                .first()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("video file")
+                .to_string();
+            let message = if skipped_video.len() == 1 {
+                format!("{sample} is a video file — it can be played and previewed, but not written back out.")
+            } else {
+                format!(
+                    "{} video files skipped — they can be played and previewed, but not written back out.",
+                    skipped_video.len()
+                )
+            };
+            self.push_toast(crate::app::types::ToastSeverity::Warning, message);
+        }
         let (tx, rx) = mpsc::channel::<ExportResult>();
         std::thread::spawn(move || {
             crate::app::threading::lower_current_thread_priority();
@@ -661,7 +692,7 @@ impl super::WavesPreviewer {
                         let forced_ext = format_override.as_deref();
                         let dst_ext = dst.extension().and_then(|e| e.to_str());
                         let use_dst_ext = dst_ext
-                            .map(|e| crate::audio_io::is_supported_extension(e))
+                            .map(|e| crate::audio_io::is_encodable_extension(e))
                             .unwrap_or(false);
                         if let Some(ext) = forced_ext {
                             dst.set_extension(ext);
@@ -735,7 +766,7 @@ impl super::WavesPreviewer {
                             .or(format_override.as_deref());
                         let dst_ext = dst.extension().and_then(|e| e.to_str());
                         let use_dst_ext = dst_ext
-                            .map(|e| crate::audio_io::is_supported_extension(e))
+                            .map(|e| crate::audio_io::is_encodable_extension(e))
                             .unwrap_or(false);
                         if let Some(ext) = forced_ext {
                             dst.set_extension(ext);
@@ -1127,7 +1158,7 @@ impl super::WavesPreviewer {
 
     pub(super) fn spawn_convert_format_selected(&mut self, paths: Vec<PathBuf>, target_ext: &str) {
         let ext = target_ext.trim().to_ascii_lowercase();
-        if !crate::audio_io::is_supported_extension(&ext) {
+        if !crate::audio_io::is_encodable_extension(&ext) {
             return;
         }
         crate::wave::set_codec_export_options(self.export_cfg.codec);

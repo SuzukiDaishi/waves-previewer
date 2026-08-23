@@ -4,6 +4,18 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### 動画ファイルが開けるようになった
+- **mp4 / mov の音声がそのまま扱える**: 音声が動画コンテナに入ったまま届いた素材は、これまで別のツールで音声を抜き出さないとリストにすら載らなかった。`.mp4` / `.mov` / `.m4v` / `.3gp` / `.3g2` が音声ファイルとまったく同じように読み込まれ、リストに並び、選べば音声トラックが鳴る。波形もラウドネス測定もトランスクリプトも、これまでどおり動く。音声トラックの取り出しは m4a と同じ経路 (fdk-aac、AAC でなければ symphonia) を通るので、新しい再生経路は増えていない。
+  - この対応の前提として、**映像トラックのある mp4 は音声すら読めなかった**バグを直している。symphonia の `default_track()` は「ファイルの先頭のトラック」を返し、その ISO-BMFF リーダーは映像トラックも空のコーデック情報つきでトラックとして並べる。一般的な mp4 は映像トラックが先頭なので、デコーダには「コーデック不明」のトラックが渡され、そこで失敗していた。音声コーデックを名乗る最初のトラックを選ぶようになった。これは `.mp4` を `.m4a` にリネームしただけのファイルにも効く。
+  - QuickTime の `.mov` が持つ非圧縮音声 (`sowt` / `twos` / `in24` / `lpcm`) と ALAC は AAC 用の高速経路では読めないため、そこに当たると symphonia に落ちる。以前は m4a でも「AAC でなければ失敗」だったのが、どちらの経路でも読めるようになった。
+- **エディタの Mini Meter に映像が出る**: どの音を触っているのかが、波形の形ではなく絵で分かる。SCOPE の左に映像パネルが増え、再生位置のフレームを表示する。ストリップの幅が足りなくなったときに先に消えるのは SCOPE のほうで、映像は残る。
+  - **音に張り付かせるために先読みしている**。1 フレームずつ「要求 → デコード → 転送」を往復すると、絵は常に音より 1〜2 フレーム遅れる。再生中はワーカーが再生位置の先を連続してデコードし、UI は手元にあるフレームから「再生位置が今まさに到達したもの」を選ぶだけなので、待ち時間が入らない。表示する時刻は描画されている再生ヘッドそのものから引いているので、絵とヘッドが画面上で食い違うことはない。
+  - 映像のデコードは Windows では Media Foundation (H.264 / HEVC / VP9 など、OS の持つコーデックすべて、ハードウェア支援あり)、それ以外の環境では同梱ビルドの OpenH264 (H.264 のみ) が受け持つ。どちらでも開けないコーデック (ProRes / AV1 など) では**音声は普通に鳴り**、パネルだけが `no preview (コーデック名)` になる。映像トラックの無い `.mp4` ではパネル自体が出ない。
+  - 縦向きで撮った動画は `tkhd` の回転行列を読んで正しい向きで出す。フレームはワーカー側でパネルの大きさまで縮小してから渡すので、4K の素材でも UI スレッドが持つのはパネル 1 枚分だけ。
+- **サムネイルは埋め込みアートワーク、無ければ 1 フレーム目**: 動画も ISO-BMFF なので `covr` atom は m4a と同じように読める。入っていなければ最初のキーフレームを 1 枚だけデコードしてサムネイルにする。1 フレーム取り出す処理は埋め込み画像を読むのと比べて桁違いに重いので、同時に走れる本数を機械の性能ティアから決めており、2 コアの機械では 1 フレーム目の抽出そのものを行わない。フォルダを開いた直後の一覧表示が遅くなることはない。
+- **動画は読み込み専用**: 映像エンコーダを持たないので、編集して書き戻せば映像を失うか、頼まれていないファイルを作ることになる。エディタのツールパネルはまるごと無効化され、パスの隣に `READ-ONLY` バッジが出る。破壊系のショートカット (`T` / `V` / `Delete` / `Ctrl+M`)、リストの per-file gain、変換メニュー、書き出しも同じ判断を見て止まる。marker と loop はサイドカー JSON に書かれるので、動画ファイル自体は一切書き換えられない。
+  - この判断は拡張子の文字列比較ではなく `src/media_kind.rs` の 1 箇所に集約してある。将来編集を解放するときに書き換えるのはそこだけで、20 箇所近いゲートが追従する。
+
 ### Editor: the Trim panel explains itself
 - **The Trim buttons say what they do, and which key does it**: `Mode`, `Preview` and `Apply` had no hover text at all, so nothing in the panel indicated that the buttons act on the selection directly — which is what led to a report that a range had to be "Set" first, for a Set button this tool does not have. Each control now describes its effect and names the equivalent shortcut, read through the rebinding map so a customised key shows the key you actually have. With several ranges selected, the hover text says how many will be affected.
 - **"Add Trim As Virtual" is described in plain terms**: its hover text said "Add the trim range as a virtual item", which a user reported not understanding. It now says what it does — export the selected range as a separate item in the list, leaving the current file untouched, written to disk only when saved — along with the naming and the one-item-per-range behaviour.

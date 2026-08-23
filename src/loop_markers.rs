@@ -27,6 +27,7 @@ pub fn read_loop_markers(path: &Path) -> Option<(u64, u64)> {
             .flatten(),
         "mp3" => read_mp3_loop_markers(path).ok().flatten(),
         "m4a" => read_m4a_loop_markers(path).ok().flatten(),
+        // Video containers: sidecar only, matching how they are written.
         // Formats without in-file loop support (ogg): JSON sidecar.
         _ => read_sidecar_loop_markers(path),
     }
@@ -58,6 +59,12 @@ pub fn write_loop_markers(path: &Path, loop_opt: Option<(u64, u64)>) -> Result<(
         Some("flac") => crate::flac_meta::write_flac_loop_markers(path, loop_opt),
         Some("mp3") => write_mp3_loop_markers(path, loop_opt),
         Some("m4a") => write_m4a_loop_markers(path, loop_opt),
+        // A video container has the same freeform atom an .m4a does, but the
+        // app never rewrites a video file — see `crate::media_kind`. The loop
+        // region goes to the sidecar instead, so the picture is untouched.
+        Some("mp4") | Some("mov") | Some("m4v") | Some("3gp") | Some("3g2") => {
+            write_sidecar_loop_markers(path, loop_opt)
+        }
         // Formats without in-file loop support (ogg): JSON sidecar so a save
         // with a loop region no longer counts as a failure.
         _ => write_sidecar_loop_markers(path, loop_opt),

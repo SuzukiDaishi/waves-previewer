@@ -60,7 +60,7 @@ impl WavesPreviewer {
         #[cfg(not(feature = "kittest"))]
         {
             rfd::FileDialog::new()
-                .add_filter("Audio", crate::audio_io::SUPPORTED_EXTS)
+                .add_filter("Media", crate::audio_io::SUPPORTED_EXTS)
                 .pick_files()
         }
     }

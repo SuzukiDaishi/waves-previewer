@@ -114,6 +114,10 @@ impl super::WavesPreviewer {
         // Only pool construction site, so a pool recreated mid-session keeps
         // measuring Blank Pad at the user's threshold rather than the default.
         pool.set_blank_threshold_dbfs(self.blank_threshold_dbfs);
+        // Pulling a first frame out of a video costs orders of magnitude more
+        // than reading an embedded cover image, so only a couple of workers may
+        // do it at once (none at all on a two-core machine).
+        pool.set_video_poster_limit(self.perf.video_poster_concurrency());
         self.meta_pool = Some(pool);
         self.meta_rx = Some(rx);
         self.meta_inflight.clear();
@@ -144,6 +148,19 @@ impl super::WavesPreviewer {
                     threshold,
                 ));
             }
+        }
+    }
+
+    /// Publish the video thumbnail budget to an already-running pool.
+    ///
+    /// The pool is rebuilt whenever the tier changes by hand or the root's
+    /// locality changes, but an automatic demotion after sustained slow frames
+    /// does not rebuild it — this is how that demotion still reaches the
+    /// budget.
+    pub(super) fn push_video_poster_limit_to_meta_pool(&mut self) {
+        let limit = self.perf.video_poster_concurrency();
+        if let Some(pool) = self.meta_pool.as_ref() {
+            pool.set_video_poster_limit(limit);
         }
     }
 
