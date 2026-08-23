@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use super::transcript;
@@ -35,6 +35,28 @@ fn decode_cover_art_thumbnail(path: &PathBuf) -> Option<Arc<egui::ColorImage>> {
         [width, height],
         rgba.as_raw(),
     )))
+}
+
+/// The list thumbnail for a source: its embedded cover art, or — for a video
+/// with none — its first frame.
+///
+/// `allow_video_poster` is the pool's budget for the fallback (see
+/// [`PosterPermit`]). With it false a video with no cover art simply has no
+/// thumbnail and the list draws its type badge, exactly as it does today for
+/// an untagged wav.
+fn decode_list_thumbnail(
+    path: &PathBuf,
+    allow_video_poster: bool,
+) -> Option<Arc<egui::ColorImage>> {
+    const COVER_ART_THUMB_SIZE: u32 = 40;
+    if let Some(art) = decode_cover_art_thumbnail(path) {
+        return Some(art);
+    }
+    if !allow_video_poster || !crate::media_kind::is_video_path(path) {
+        return None;
+    }
+    let frame = crate::video::decode_poster_frame(path, COVER_ART_THUMB_SIZE)?;
+    Some(frame.image)
 }
 
 fn annotation_total_frames(
@@ -154,6 +176,51 @@ struct MetaQueue {
     /// `MetaTask` on purpose: the queue dedupes tasks by path, so a payload
     /// carrying the threshold would silently keep whichever copy landed first.
     blank_threshold_bits: AtomicU32,
+    /// How many workers may be extracting a first frame from a video at once,
+    /// and how many currently are.
+    ///
+    /// Pulling a keyframe out of an mp4 costs orders of magnitude more than
+    /// reading an embedded cover image, so a folder of video files must not
+    /// turn the thumbnail pass into a decode farm. Zero disables it entirely,
+    /// which is what a two-core machine gets.
+    poster_limit: AtomicUsize,
+    poster_inflight: AtomicUsize,
+}
+
+/// Holds one of [`MetaQueue::poster_limit`] slots for as long as a video
+/// first-frame extraction is running.
+struct PosterPermit {
+    shared: Arc<MetaQueue>,
+}
+
+impl PosterPermit {
+    fn try_acquire(shared: &Arc<MetaQueue>) -> Option<Self> {
+        let limit = shared.poster_limit.load(Ordering::Relaxed);
+        if limit == 0 {
+            return None;
+        }
+        loop {
+            let current = shared.poster_inflight.load(Ordering::Relaxed);
+            if current >= limit {
+                return None;
+            }
+            if shared
+                .poster_inflight
+                .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(Self {
+                    shared: Arc::clone(shared),
+                });
+            }
+        }
+    }
+}
+
+impl Drop for PosterPermit {
+    fn drop(&mut self) {
+        self.shared.poster_inflight.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 pub struct MetaPool {
@@ -161,6 +228,12 @@ pub struct MetaPool {
 }
 
 impl MetaPool {
+    /// How many video first-frame extractions may run at once. Zero turns the
+    /// fallback off, leaving only embedded cover art.
+    pub fn set_video_poster_limit(&self, limit: usize) {
+        self.shared.poster_limit.store(limit, Ordering::Relaxed);
+    }
+
     pub fn set_paused(&self, paused: bool) {
         let changed = self.shared.paused.swap(paused, Ordering::Relaxed) != paused;
         if changed && !paused {
@@ -314,7 +387,11 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
     }
 }
 
-fn decode_full_meta(path: &PathBuf, blank_threshold_dbfs: f32) -> Option<FileMeta> {
+fn decode_full_meta(
+    path: &PathBuf,
+    blank_threshold_dbfs: f32,
+    allow_video_poster: bool,
+) -> Option<FileMeta> {
     let info = audio_io::read_audio_info(path).ok();
     if let Ok((chans, sr, decode_errors)) = audio_io::decode_audio_multi_with_errors(path) {
         // Mono mixdown for RMS/thumbnail
@@ -436,7 +513,7 @@ fn decode_full_meta(path: &PathBuf, blank_threshold_dbfs: f32) -> Option<FileMet
             blank_pad,
             created_at: info.as_ref().and_then(|i| i.created_at),
             modified_at: info.as_ref().and_then(|i| i.modified_at),
-            cover_art: decode_cover_art_thumbnail(path),
+            cover_art: decode_list_thumbnail(path, allow_video_poster),
             thumb,
             marker_fracs,
             loop_frac,
@@ -511,7 +588,7 @@ fn decode_full_meta(path: &PathBuf, blank_threshold_dbfs: f32) -> Option<FileMet
             blank_pad: None,
             created_at: info.as_ref().and_then(|i| i.created_at),
             modified_at: info.as_ref().and_then(|i| i.modified_at),
-            cover_art: decode_cover_art_thumbnail(path),
+            cover_art: decode_list_thumbnail(path, allow_video_poster),
             thumb,
             marker_fracs,
             loop_frac,
@@ -542,6 +619,8 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
         blank_threshold_bits: AtomicU32::new(
             crate::app::inspection::DEFAULT_BLANK_THRESHOLD_DBFS.to_bits(),
         ),
+        poster_limit: AtomicUsize::new(0),
+        poster_inflight: AtomicUsize::new(0),
     });
     let worker_count = workers.max(1);
     for _ in 0..worker_count {
@@ -596,7 +675,9 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                 // BlankPadScan is exactly the one the scan used.
                 let blank_threshold =
                     f32::from_bits(shared.blank_threshold_bits.load(Ordering::Relaxed));
-                run_meta_task(task, &cancel, &tx, blank_threshold);
+                let poster_permit = PosterPermit::try_acquire(&shared);
+                run_meta_task(task, &cancel, &tx, blank_threshold, poster_permit.is_some());
+                drop(poster_permit);
                 let mut guard = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 guard.running.remove(&task_path_owned);
             }
@@ -610,6 +691,7 @@ fn run_meta_task(
     cancel: &AtomicBool,
     tx: &std::sync::mpsc::Sender<MetaUpdate>,
     blank_threshold_dbfs: f32,
+    allow_video_poster: bool,
 ) {
     let (p, do_header, do_decode) = match task {
         MetaTask::Header(path) => (path, true, true),
@@ -658,7 +740,7 @@ fn run_meta_task(
             return;
         }
         // Stage 2: decode and compute RMS/thumbnail/LUFS(I)
-        if let Some(full) = decode_full_meta(&p, blank_threshold_dbfs) {
+        if let Some(full) = decode_full_meta(&p, blank_threshold_dbfs, allow_video_poster) {
             let _ = tx.send(MetaUpdate::Full(p.clone(), full));
         } else if let Some(mut header_meta) = header_meta_opt {
             header_meta.decode_error = Some("Decode failed".to_string());

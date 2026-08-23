@@ -5,5 +5,6 @@ pub mod music_features;
 pub mod overlay;
 pub mod overlay_cache;
 pub mod spectrogram;
+pub mod video_panel;
 pub mod waveform_pyramid;
 pub mod world_features;

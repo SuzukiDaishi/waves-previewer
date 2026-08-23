@@ -125,7 +125,9 @@ impl super::WavesPreviewer {
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
         let base = match ext.as_str() {
-            "mp3" | "m4a" | "ogg" => LIST_PLAY_PREFIX_SECS_COMPRESSED_BASE,
+            "mp3" | "m4a" | "ogg" | "mp4" | "mov" | "m4v" | "3gp" | "3g2" => {
+                LIST_PLAY_PREFIX_SECS_COMPRESSED_BASE
+            }
             _ => LIST_PLAY_PREFIX_SECS_BASE,
         };
         if let Some(dur) = self

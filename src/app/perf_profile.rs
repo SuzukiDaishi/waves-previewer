@@ -289,6 +289,56 @@ impl PerfProfile {
             local_budget.max(1)
         }
     }
+
+    /// How many decoded video frames the editor's preview keeps ahead of the
+    /// playhead.
+    ///
+    /// This is what makes the picture land on the sound rather than a frame or
+    /// two behind it: the panel picks from frames already decoded instead of
+    /// asking for one and waiting. Costs a few hundred KB per frame at panel
+    /// resolution, so a slow machine keeps a shorter run.
+    pub fn video_decode_ahead_frames(&self) -> usize {
+        if self.remote_root {
+            // Reading ahead over a share buys latency for the file the user is
+            // actually listening to.
+            return 1;
+        }
+        match self.tier {
+            PerfTier::Low => 2,
+            PerfTier::Normal => 8,
+            PerfTier::High => 16,
+        }
+    }
+
+    /// How far ahead a seek may reach by decoding forward before it gives up
+    /// and restarts from the previous keyframe.
+    ///
+    /// Walking forward is what keeps ordinary playback smooth; restarting is
+    /// what makes a long scrub land quickly. A slow machine takes the restart
+    /// sooner rather than spending a frame budget walking.
+    pub fn video_forward_walk_frames(&self) -> usize {
+        match self.tier {
+            PerfTier::Low => 8,
+            PerfTier::Normal => 24,
+            PerfTier::High => 48,
+        }
+    }
+
+    /// How many list thumbnails may be extracted from video files at once.
+    ///
+    /// Decoding a keyframe is far more expensive than reading an embedded
+    /// cover image, so this stays deliberately small — a folder of video files
+    /// must not turn the thumbnail pass into a decode farm.
+    pub fn video_poster_concurrency(&self) -> usize {
+        if self.remote_root {
+            return 1;
+        }
+        match self.tier {
+            PerfTier::Low => 0,
+            PerfTier::Normal => 1,
+            PerfTier::High => 2,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -392,6 +442,25 @@ mod tests {
         }
         assert_eq!(profile.tier, PerfTier::High);
         assert!(!profile.demoted_from_hardware());
+    }
+
+    #[test]
+    fn video_budgets_grow_with_the_tier_and_shrink_on_a_share() {
+        let low = PerfProfile::from_cores(2, PerfTierPreference::Auto);
+        let normal = PerfProfile::from_cores(6, PerfTierPreference::Auto);
+        let high = PerfProfile::from_cores(16, PerfTierPreference::Auto);
+        assert!(low.video_decode_ahead_frames() < normal.video_decode_ahead_frames());
+        assert!(normal.video_decode_ahead_frames() < high.video_decode_ahead_frames());
+        assert!(low.video_forward_walk_frames() < normal.video_forward_walk_frames());
+        assert!(normal.video_forward_walk_frames() < high.video_forward_walk_frames());
+        // A two-core machine does not spend its cores extracting thumbnails.
+        assert_eq!(low.video_poster_concurrency(), 0);
+        assert!(high.video_poster_concurrency() >= normal.video_poster_concurrency());
+
+        let mut remote = PerfProfile::from_cores(16, PerfTierPreference::Auto);
+        remote.set_remote_root(true);
+        assert_eq!(remote.video_decode_ahead_frames(), 1);
+        assert_eq!(remote.video_poster_concurrency(), 1);
     }
 
     #[test]

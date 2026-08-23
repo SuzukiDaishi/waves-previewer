@@ -1625,6 +1625,145 @@ impl crate::app::WavesPreviewer {
         );
     }
 
+    /// Draw the video frame column at the left of the mini meter strip and
+    /// report how much width it took (including the gap after it), so the
+    /// audio panels can lay out in what is left.
+    ///
+    /// Returns 0.0 when there is no video, or when the strip is too narrow to
+    /// carry one — in which case the strip looks exactly as it did before this
+    /// panel existed.
+    fn draw_editor_video_panel(
+        ui: &egui::Ui,
+        tab: &mut EditorTab,
+        painter: &egui::Painter,
+        inner: egui::Rect,
+        gap: f32,
+        video_secs: f64,
+    ) -> f32 {
+        use crate::app::render::video_panel;
+        use crate::app::types::VideoPanelStatus;
+
+        let Some(panel) = tab.video_panel.as_mut() else {
+            return 0.0;
+        };
+        // A container with no picture in it (an audio-only .mp4) is an audio
+        // file as far as this strip is concerned.
+        if matches!(&panel.status, VideoPanelStatus::Unsupported(reason) if reason == "no video track")
+        {
+            return 0.0;
+        }
+        let aspect = panel.info.aspect();
+        let column_w = video_panel::video_column_width(inner.width(), inner.height(), aspect);
+        if column_w <= 0.0 {
+            return 0.0;
+        }
+        let column = egui::Rect::from_min_size(inner.min, egui::vec2(column_w, inner.height()));
+        // Tell the decoder what size to produce next. Quantized inside, so a
+        // pixel of window resize does not throw away every cached frame.
+        panel.wanted_box_px =
+            video_panel::frame_box_px(column.shrink(2.0), aspect, ui.ctx().pixels_per_point());
+        let panel_bg = Color32::from_rgb(16, 18, 23);
+        let label_font = egui::FontId::monospace(9.0);
+        let label_col = Color32::from_rgb(120, 132, 150);
+        painter.rect_filled(column, 4.0, panel_bg);
+
+        // Pick the frame whose time the playhead has just reached, and upload
+        // it only when it differs from what is already on the GPU.
+        let mut drawn = false;
+        if let Some((pts, image)) = panel.frame_at(video_secs) {
+            let dims = [image.size[0], image.size[1]];
+            let needs_new_texture = panel
+                .texture
+                .as_ref()
+                .map(|tex| tex.size() != dims)
+                .unwrap_or(true);
+            if needs_new_texture {
+                panel.texture = Some(ui.ctx().load_texture(
+                    format!("editor_video_panel_{}", tab.tab_id),
+                    (*image).clone(),
+                    egui::TextureOptions::LINEAR,
+                ));
+                panel.shown_pts = Some(pts);
+            } else if panel.shown_pts != Some(pts) {
+                if let Some(tex) = panel.texture.as_mut() {
+                    tex.set((*image).clone(), egui::TextureOptions::LINEAR);
+                }
+                panel.shown_pts = Some(pts);
+            }
+            if let Some(tex) = panel.texture.as_ref() {
+                let frame_rect = video_panel::letterbox_rect(column.shrink(2.0), aspect);
+                painter.image(
+                    tex.id(),
+                    frame_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                painter.rect_stroke(
+                    frame_rect,
+                    0.0,
+                    Stroke::new(1.0, Color32::from_rgb(40, 46, 56)),
+                    egui::StrokeKind::Inside,
+                );
+                drawn = true;
+            }
+        }
+
+        if !drawn {
+            let (message, color) = match &panel.status {
+                VideoPanelStatus::Probing | VideoPanelStatus::Ready => {
+                    ("decoding...".to_string(), label_col)
+                }
+                VideoPanelStatus::Unsupported(codec) => (
+                    format!("no preview ({codec})"),
+                    Color32::from_rgb(220, 180, 110),
+                ),
+                VideoPanelStatus::Failed(_) => (
+                    "preview failed".to_string(),
+                    Color32::from_rgb(226, 122, 122),
+                ),
+            };
+            painter.text(
+                column.center(),
+                egui::Align2::CENTER_CENTER,
+                message,
+                label_font.clone(),
+                color,
+            );
+        }
+
+        painter.text(
+            column.left_top() + egui::vec2(4.0, 2.0),
+            egui::Align2::LEFT_TOP,
+            "VIDEO",
+            label_font.clone(),
+            label_col,
+        );
+        // The frame's own timestamp, so a drift between picture and sound is
+        // visible rather than something you have to feel.
+        if let Some(pts) = panel.shown_pts {
+            let mins = (pts / 60.0).floor().max(0.0) as u64;
+            let secs = (pts - mins as f64 * 60.0).max(0.0);
+            painter.text(
+                column.right_bottom() + egui::vec2(-4.0, -2.0),
+                egui::Align2::RIGHT_BOTTOM,
+                format!("{mins}:{secs:05.2}"),
+                label_font,
+                label_col,
+            );
+        }
+        if let VideoPanelStatus::Failed(reason) = &panel.status {
+            let reason = reason.clone();
+            ui.interact(
+                column,
+                egui::Id::new(("editor_video_panel", tab.tab_id)),
+                Sense::hover(),
+            )
+            .on_hover_text(reason);
+        }
+
+        column_w + gap
+    }
+
     /// Realtime "mini meter" strip under the editor: oscilloscope,
     /// dual-resolution spectrum analyzer, stereo vectorscope with
     /// correlation, and per-channel peak/RMS meters of the audio around
@@ -1638,6 +1777,7 @@ impl crate::app::WavesPreviewer {
         preview_playhead: usize,
         preview_sample_rate: u32,
         playing: bool,
+        video_secs: f64,
     ) {
         use crate::app::render::mini_meter;
 
@@ -1646,6 +1786,39 @@ impl crate::app::WavesPreviewer {
         let use_preview = preview_audio.filter(|audio| {
             !audio.channels.is_empty() && audio.channels.iter().any(|channel| !channel.is_empty())
         });
+        // A video whose audio track is empty (or is still decoding) must still
+        // show its picture, so the strip is allocated before this bails.
+        let audio_meters_available = match use_preview {
+            Some(audio) => !audio.channels.is_empty(),
+            None => !tab.ch_samples.is_empty() && tab.samples_len > 0,
+        };
+        if !audio_meters_available && tab.video_panel.is_none() {
+            return;
+        }
+        let (resp, painter) = ui.allocate_painter(egui::vec2(w, h), Sense::hover());
+        let rect = resp.rect;
+        painter.rect_filled(rect, 6.0, Color32::from_rgb(11, 12, 16));
+        painter.rect_stroke(
+            rect,
+            6.0,
+            Stroke::new(1.0, Color32::from_rgb(40, 46, 56)),
+            egui::StrokeKind::Outside,
+        );
+
+        // ---- Video column ------------------------------------------------
+        // Drawn first, and taken off the left of the strip, so the existing
+        // four-panel arithmetic below runs unchanged on what is left. That is
+        // also what gives the strip the right priority for free: SCOPE tests
+        // the *remaining* width against its own threshold, so it is the panel
+        // that yields when the two no longer fit together.
+        let strip_pad = 6.0;
+        let strip_gap = 8.0;
+        let full_inner = rect.shrink(strip_pad);
+        let video_reserved_w =
+            Self::draw_editor_video_panel(ui, tab, &painter, full_inner, strip_gap, video_secs);
+
+        // Bound after the video panel so its `&mut tab` does not collide with
+        // the borrow of `tab.ch_samples` this holds for the rest of the strip.
         let (meter_channels, meter_playhead, sr, meter_len_limit) = if let Some(audio) = use_preview
         {
             (
@@ -1662,19 +1835,6 @@ impl crate::app::WavesPreviewer {
                 tab.samples_len,
             )
         };
-        if meter_channels.is_empty() || meter_len_limit == 0 {
-            return;
-        }
-        let (resp, painter) = ui.allocate_painter(egui::vec2(w, h), Sense::hover());
-        let rect = resp.rect;
-        painter.rect_filled(rect, 6.0, Color32::from_rgb(11, 12, 16));
-        painter.rect_stroke(
-            rect,
-            6.0,
-            Stroke::new(1.0, Color32::from_rgb(40, 46, 56)),
-            egui::StrokeKind::Outside,
-        );
-
         let srf = sr as f32;
         let n_ch = meter_channels.len();
         let buf_len = meter_channels
@@ -1706,9 +1866,19 @@ impl crate::app::WavesPreviewer {
                 const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
         }
 
-        let pad = 6.0;
-        let gap = 8.0;
-        let inner = rect.shrink(pad);
+        let pad = strip_pad;
+        let gap = strip_gap;
+        // Everything below lays out inside what the video column left behind.
+        let inner = {
+            let full = rect.shrink(pad);
+            egui::Rect::from_min_max(
+                egui::pos2(full.left() + video_reserved_w, full.top()),
+                full.max,
+            )
+        };
+        if inner.width() < 40.0 {
+            return;
+        }
         let label_font = egui::FontId::monospace(9.0);
         let label_col = Color32::from_rgb(120, 132, 150);
         let panel_bg = Color32::from_rgb(16, 18, 23);
@@ -2801,6 +2971,9 @@ impl crate::app::WavesPreviewer {
             _ => None,
         });
         let mut touch_spectro_cache = false;
+        // (source seconds, transport running) for this tab's video panel, acted
+        // on after the body so the request can reach `self`.
+        let mut video_request: Option<(f64, bool)> = None;
         let mut pending_viewport_hint: Option<crate::app::editor_viewport::EditorViewportHint> =
             None;
         ui.horizontal(|ui| {
@@ -2815,6 +2988,20 @@ impl crate::app::WavesPreviewer {
                     .truncate()
                     .show_tooltip_when_elided(true),
             );
+            if tab.read_only {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new("READ-ONLY")
+                            .small()
+                            .monospace()
+                            .color(Color32::from_rgb(220, 180, 110)),
+                    )
+                    .sense(egui::Sense::hover()),
+                )
+                .on_hover_text(
+                    "This is a video file. Its audio track plays, measures and previews like any other source, but NeoWaves has no video encoder — so it cannot be edited or written back out.",
+                );
+            }
         });
         let mut discard_preview_for_view_change = false;
         let mut request_preview_refresh = false;
@@ -8062,6 +8249,15 @@ impl crate::app::WavesPreviewer {
                                 .then(|| self.audio.shared.samples.load_full())
                                 .flatten()
                         });
+                    // The picture must sit on the *drawn playhead*, not on a
+                    // separately-derived clock, or the two disagree on screen
+                    // by however much their derivations differ. The tab's
+                    // display timeline is the source file's timeline for a
+                    // video (they are read-only, so no edit can shift one
+                    // against the other — see `EditorTab::read_only`), so
+                    // converting the playhead to seconds is the whole of it.
+                    let video_secs = playhead_display_now as f64
+                        / Self::editor_display_sample_rate_for_tab(tab, out_sr).max(1) as f64;
                     Self::draw_editor_mini_meter(
                         ui,
                         tab,
@@ -8070,7 +8266,9 @@ impl crate::app::WavesPreviewer {
                         pos_audio_now,
                         out_sr,
                         playing,
+                        video_secs,
                     );
+                    video_request = Some((video_secs, playing));
                 }
             }
 
@@ -8179,6 +8377,26 @@ impl crate::app::WavesPreviewer {
                         let style = ui.style_mut();
                         style.spacing.item_spacing = egui::vec2(6.0, 6.0);
                         style.spacing.button_padding = egui::vec2(8.0, 4.0);
+                    }
+                    // A read-only source (a video: its audio can be read but
+                    // there is no encoder to write one back) gets the whole
+                    // tool panel greyed out in one move, rather than an
+                    // `add_enabled` on each of several hundred controls.
+                    if tab.read_only {
+                        ui.label(
+                            RichText::new("Read-only source")
+                                .small()
+                                .color(Color32::from_rgb(220, 180, 110)),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "A video's audio can be played, measured and previewed, but not edited or written back out.",
+                            )
+                            .small()
+                            .color(Color32::from_rgb(150, 158, 172)),
+                        );
+                        ui.add_space(4.0);
+                        ui.disable();
                     }
                     let pencil_can_undo = tab
                         .pencil_draft
@@ -13664,6 +13882,9 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
         self.plugin_preset_name_input = plugin_preset_name_input;
         if touch_spectro_cache {
             self.touch_spectro_cache(&spec_path);
+        }
+        if let Some((secs, playing)) = video_request {
+            self.request_video_frame_for_tab(tab_idx, secs, playing);
         }
         if let Some(hint) = pending_viewport_hint {
             self.ensure_editor_viewport_for_tab(tab_idx, hint);

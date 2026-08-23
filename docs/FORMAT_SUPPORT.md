@@ -1,16 +1,26 @@
 # フォーマット別対応マトリクス (FORMAT_SUPPORT)
 
-最終更新: 2026-07-03 (FLAC 対応追加時)
+最終更新: 2026-08-23 (動画コンテナ対応追加時)
 
 NeoWaves が扱う音声フォーマットごとの、デコード / エンコード / メタ情報
 (loop marker・marker・BPM・artwork 等) の対応状況と、
 「そのフォーマットが native に持てないメタ情報を書き出し時にどう扱うか」の方針をまとめる。
 
-対応拡張子の一覧は `src/audio_io.rs` の `SUPPORTED_EXTS`
-(`wav / aiff / aif / flac / mp3 / m4a / ogg`) に一元化されており、
+対応拡張子の一覧は `src/audio_io.rs` に一元化されている:
+
+- `SUPPORTED_AUDIO_EXTS` = `wav / aiff / aif / flac / mp3 / m4a / ogg`
+- `SUPPORTED_VIDEO_EXTS` = `mp4 / mov / m4v / 3gp / 3g2`
+- `SUPPORTED_EXTS` = 上記の合算 (読み込みの窓口)
+- `is_encodable_extension` = **書き出せる**拡張子 = 音声のみ
+
 ファイルダイアログ・ドラッグ&ドロップ・フォルダスキャン・セッション復元・CLI は
-すべてここを参照する。拡張子を増やす場合はこの定数と
-`installer/NeoWaves.iss` の関連付け、`badges.rs` / `row_menu.rs` の UI を更新する。
+すべて `SUPPORTED_EXTS` を参照する。「何をしてよいか」は拡張子文字列ではなく
+`src/media_kind.rs` の capability (`source_allows_destructive_edit` /
+`source_allows_export` / `source_allows_metadata_write`) が決める。
+
+拡張子を増やす場合はこれらの定数と `installer/NeoWaves.iss` の関連付け、
+`badges.rs` / `row_menu.rs` の UI を更新する。動画を編集可能にするときは
+`src/media_kind.rs` の capability を 1 箇所変えるだけで、ゲートは全て追従する。
 
 ## 1. オーディオ本体
 
@@ -22,6 +32,25 @@ NeoWaves が扱う音声フォーマットごとの、デコード / エンコ�
 | MP3 | symphonia (`mp3`) | mp3lame CBR (96–320 kbps, 設定値) | ステレオまで (3ch 以上は先頭 2ch) |
 | M4A (AAC) | fdk-aac (mp4 demux) → symphonia fallback (`isomp4`/`aac`/`alac`) | fdk-aac AAC-LC CBR | ステレオまで。ALAC はデコードのみ |
 | OGG (Vorbis) | symphonia (`ogg`/`vorbis`) | vorbis_rs quality-VBR | ステレオまで |
+| MP4 / MOV / M4V / 3GP / 3G2 (音声) | m4a と同じ経路 (fdk-aac → symphonia fallback) | **非対応 (読み込み専用)** | 音声トラックのみ再生。AAC 以外 (ALAC / QuickTime の PCM `sowt`/`twos`/`in24`/`lpcm`) は symphonia へフォールバック |
+| MP4 / MOV / M4V / 3GP / 3G2 (映像) | Windows: Media Foundation / 全 OS: openh264 (H.264 のみ) | 非対応 | エディタの Mini Meter にプレビュー表示するためだけにデコードする |
+
+### 動画コンテナの扱い
+
+- 音声トラックは**音声ファイルと完全に同じ経路**で読む。リスト再生・波形・
+  ラウドネス測定・トランスクリプトはすべてそのまま動く。
+- 映像は**プレビュー専用**。エディタの Mini Meter に再生位置のフレームを出し、
+  リストのサムネイルに使う以外の用途では一切デコードしない。
+- **書き出しと破壊的編集は不可** (映像エンコーダを持たないため)。
+  詳細は §6。
+- 映像トラックが無い `.mp4` は実質 `.m4a` として扱われ、Mini Meter に
+  映像パネルは出ない。
+- 映像コーデックが H.264 以外 (ProRes / AV1 / VP9、および Media Foundation の
+  無い環境の HEVC) の場合は、**音声は通常どおり再生され**、映像パネルだけが
+  `no preview (コーデック名)` になる。
+- HDR (PQ / HLG) はトーンマップせず SDR として表示するため、色が浅く出る。
+  Windows の Media Foundation 経路では OS 側が変換するため概ね正しく出る。
+- 縦向き撮影 (`tkhd` の回転行列) は正しい向き・アスペクトで表示する。
 
 ## 2. Loop marker (単一サスティンループ)
 
@@ -35,6 +64,7 @@ NeoWaves が扱う音声フォーマットごとの、デコード / エンコ�
 | MP3 | ID3v2.4 `TXXX` `LOOPSTART` / `LOOPEND` | ✓ | ✓ |
 | M4A | freeform atom `com.apple.iTunes:LOOPSTART/LOOPEND` | ✓ | ✓ |
 | OGG | sidecar `<stem>.loop.json` | ✓ | ✓ |
+| MP4 / MOV / M4V / 3GP / 3G2 | sidecar `<stem>.loop.json` | ✓ | ✓ |
 
 - FLAC / MP3 / M4A の `LOOPSTART`/`LOOPEND` はサンプル単位の値で、
   RPG ツクール等で使われる一般的な慣習に合わせている。
@@ -52,7 +82,7 @@ NeoWaves が扱う音声フォーマットごとの、デコード / エンコ�
 | フォーマット | 格納先 | 読み | 書き |
 | --- | --- | --- | --- |
 | WAV | `cue ` + `LIST/adtl` `labl` チャンク (native) | ✓ | ✓ |
-| それ以外 (AIFF / FLAC / MP3 / M4A / OGG) | sidecar `<stem>.markers.json` | ✓ | ✓ |
+| それ以外 (AIFF / FLAC / MP3 / M4A / OGG / 動画コンテナ) | sidecar `<stem>.markers.json` | ✓ | ✓ |
 
 - 検討メモ:
   - AIFF は `MARK` チャンクで native 表現が可能 (現在 loop 用に 2 点のみ使用)。
@@ -71,6 +101,7 @@ NeoWaves が扱う音声フォーマットごとの、デコード / エンコ�
 | FLAC | Vorbis comment `BPM` / `TEMPO` | `PICTURE` ブロック (先頭) | |
 | MP3 | ID3 `TBPM` | ID3 `APIC` | |
 | M4A | `tmpo` | `covr` | |
+| MP4 / MOV / M4V / 3GP / 3G2 | `tmpo` | `covr`、無ければ**映像の 1 フレーム目** | ISO-BMFF なので m4a と同じ atom を読む |
 | OGG | – | – | |
 
 ## 5. 書き出し時のメタ情報引き継ぎ (carry-over)
@@ -116,13 +147,18 @@ export 側の marker / loop 再書き込み (`export_ops.rs`)。
 | editor デコード戦略 CompressedProgressiveFull | MP3 / OGG | フレーム境界が不定なため。FLAC は streaming overview 経路 |
 | stem タイミングリスク警告 (`source_audio_has_timing_risk`) | MP3 / AAC / M4A / MP4 / OGG / Opus / WMA | encoder delay があるフォーマットのみ。FLAC/WAV/AIFF は正確 |
 | 録音の保存 | WAV 固定 | 録音パイプラインの仕様 |
+| 書き出し・破壊的編集・per-file gain を禁止 | 動画コンテナ | 映像エンコーダが無く、書き戻すと映像を失うか要求と違うファイルになるため。エディタはツールパネル全体を無効化し `READ-ONLY` バッジを出す |
+| loop / marker を sidecar のみに書く | 動画コンテナ | native な atom はあるが、元ファイルを一切書き換えない方針のため |
+| Mini Meter に映像パネルを表示 | 動画コンテナ | SCOPE の左。幅が足りないときは SCOPE から先に隠れる |
+| リストのサムネイルに 1 フレーム目を使う | 動画コンテナ | 埋め込みアートワークが無い場合のみ。`perf_profile` の tier で同時実行数を制限し、Low tier では行わない |
 
 ## 7. インストーラ / OS 関連付け
 
 `installer/NeoWaves.iss` の "assoc" タスクで
-`.wav / .aiff / .aif / .flac / .mp3 / .m4a / .ogg / .nwsess` を
+`.wav / .aiff / .aif / .flac / .mp3 / .m4a / .ogg / .mp4 / .mov / .m4v / .3gp / .3g2 / .nwsess` を
 ProgId `NeoWaves.Audio` に関連付け + `OpenWithProgids` / `SupportedTypes` 登録。
 (2026-07-03: それまで `.aiff/.aif/.ogg` が漏れていたのを修正、`.flac` を追加)
+(2026-08-23: 動画コンテナ 5 種を追加)
 
 ドラッグ&ドロップ:
 

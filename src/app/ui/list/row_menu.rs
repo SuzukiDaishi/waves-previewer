@@ -168,7 +168,10 @@ impl WavesPreviewer {
                 .map(|item| item.source == crate::app::types::MediaSource::File)
                 .unwrap_or(false);
             // Same reasoning as the transcript targets above: no stat here.
-            can_convert_bits = is_wav && is_file_source && self.path_is_file_cached(p);
+            can_convert_bits = is_wav
+                && is_file_source
+                && crate::media_kind::source_allows_export(p)
+                && self.path_is_file_cached(p);
         }
         let convert_targets = if can_convert_bits {
             selected.clone()
@@ -207,46 +210,73 @@ impl WavesPreviewer {
                 ui.close();
             }
         });
+        // A video source has no encodable form — the app can read its audio but
+        // has no video encoder to write one back — so converting it is refused
+        // rather than silently producing an audio-only file with a .mp4 name.
+        let can_convert_format = has_selection
+            && selected
+                .iter()
+                .all(|p| crate::media_kind::source_allows_export(p));
+        let convert_format_disabled_reason =
+            "Video sources are read-only in this version — their audio can be played and previewed, but not written back out.";
         ui.menu_button("Convert Format", |ui| {
-            if ui
-                .add_enabled(has_selection, egui::Button::new("To WAV"))
-                .clicked()
-            {
+            let button = ui.add_enabled(can_convert_format, egui::Button::new("To WAV"));
+            let button = if can_convert_format {
+                button
+            } else {
+                button.on_disabled_hover_text(convert_format_disabled_reason)
+            };
+            if button.clicked() {
                 self.spawn_convert_format_selected(selected.clone(), "wav");
                 ui.close();
             }
-            if ui
-                .add_enabled(has_selection, egui::Button::new("To AIFF"))
-                .clicked()
-            {
+            let button = ui.add_enabled(can_convert_format, egui::Button::new("To AIFF"));
+            let button = if can_convert_format {
+                button
+            } else {
+                button.on_disabled_hover_text(convert_format_disabled_reason)
+            };
+            if button.clicked() {
                 self.spawn_convert_format_selected(selected.clone(), "aiff");
                 ui.close();
             }
-            if ui
-                .add_enabled(has_selection, egui::Button::new("To FLAC"))
-                .clicked()
-            {
+            let button = ui.add_enabled(can_convert_format, egui::Button::new("To FLAC"));
+            let button = if can_convert_format {
+                button
+            } else {
+                button.on_disabled_hover_text(convert_format_disabled_reason)
+            };
+            if button.clicked() {
                 self.spawn_convert_format_selected(selected.clone(), "flac");
                 ui.close();
             }
-            if ui
-                .add_enabled(has_selection, egui::Button::new("To MP3"))
-                .clicked()
-            {
+            let button = ui.add_enabled(can_convert_format, egui::Button::new("To MP3"));
+            let button = if can_convert_format {
+                button
+            } else {
+                button.on_disabled_hover_text(convert_format_disabled_reason)
+            };
+            if button.clicked() {
                 self.spawn_convert_format_selected(selected.clone(), "mp3");
                 ui.close();
             }
-            if ui
-                .add_enabled(has_selection, egui::Button::new("To M4A"))
-                .clicked()
-            {
+            let button = ui.add_enabled(can_convert_format, egui::Button::new("To M4A"));
+            let button = if can_convert_format {
+                button
+            } else {
+                button.on_disabled_hover_text(convert_format_disabled_reason)
+            };
+            if button.clicked() {
                 self.spawn_convert_format_selected(selected.clone(), "m4a");
                 ui.close();
             }
-            if ui
-                .add_enabled(has_selection, egui::Button::new("To OGG"))
-                .clicked()
-            {
+            let button = ui.add_enabled(can_convert_format, egui::Button::new("To OGG"));
+            let button = if can_convert_format {
+                button
+            } else {
+                button.on_disabled_hover_text(convert_format_disabled_reason)
+            };
+            if button.clicked() {
                 self.spawn_convert_format_selected(selected.clone(), "ogg");
                 ui.close();
             }

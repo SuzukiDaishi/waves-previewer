@@ -20,7 +20,19 @@ use symphonia::core::probe::Hint;
 use symphonia::core::sample::SampleFormat;
 use symphonia::default::{get_codecs, get_probe};
 
-pub const SUPPORTED_EXTS: &[&str] = &["wav", "aiff", "aif", "flac", "mp3", "m4a", "ogg"];
+/// Extensions whose whole content is audio.
+pub const SUPPORTED_AUDIO_EXTS: &[&str] = &["wav", "aiff", "aif", "flac", "mp3", "m4a", "ogg"];
+/// Video containers the app will open for the sake of their audio track.
+///
+/// All ISO base media file format, so they demux through the same `mp4` crate
+/// reader the `.m4a` path already uses. Only the audio track is ever played;
+/// the picture is decoded separately, for preview only. See
+/// [`crate::media_kind`] for what the app is and is not allowed to do with one.
+pub const SUPPORTED_VIDEO_EXTS: &[&str] = &["mp4", "mov", "m4v", "3gp", "3g2"];
+/// Every extension the app will list, scan, open and decode.
+pub const SUPPORTED_EXTS: &[&str] = &[
+    "wav", "aiff", "aif", "flac", "mp3", "m4a", "ogg", "mp4", "mov", "m4v", "3gp", "3g2",
+];
 pub const EDITOR_PROXY_OVERVIEW_MAX_TOTAL_SAMPLES: usize = 16_384;
 const REMOTE_WAV_PROXY_MAX_WINDOWS: usize = 256;
 const REMOTE_WAV_PROXY_WINDOW_BYTES: usize = 64 * 1024;
@@ -120,6 +132,16 @@ pub fn is_supported_extension(ext: &str) -> bool {
     SUPPORTED_EXTS.iter().any(|e| ext.eq_ignore_ascii_case(e))
 }
 
+/// Whether the app can *write* this extension.
+///
+/// Every audio extension it can read it can also encode; video containers it
+/// can only read, so an export must never resolve to one.
+pub fn is_encodable_extension(ext: &str) -> bool {
+    SUPPORTED_AUDIO_EXTS
+        .iter()
+        .any(|e| ext.eq_ignore_ascii_case(e))
+}
+
 pub fn is_supported_audio_path(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
@@ -127,11 +149,71 @@ pub fn is_supported_audio_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn is_m4a_path(path: &Path) -> bool {
+/// Extensions that are ISO base media file format (ISO/IEC 14496-12) containers:
+/// `m4a` audio and the video containers that share the same box layout. They all
+/// demux through the same `mp4` crate reader, so every ISO-BMFF-specific path in
+/// this module keys off this predicate rather than a bare `"m4a"` comparison.
+pub(crate) fn is_isobmff_path(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("m4a"))
+        .map(|ext| {
+            ["m4a", "mp4", "mov", "m4v", "3gp", "3g2"]
+                .iter()
+                .any(|known| ext.eq_ignore_ascii_case(known))
+        })
         .unwrap_or(false)
+}
+
+/// Whether the first audio track of an ISO-BMFF file is AAC in an `mp4a` sample
+/// entry, which is the only shape the fdk-aac fast path can decode.
+///
+/// A `.m4a` holding ALAC, or a QuickTime `.mov` holding PCM (`sowt` / `twos` /
+/// `in24` / `lpcm`), parses as ISO-BMFF but has to go through symphonia instead.
+/// The streaming and progressive decoders emit chunks as they go, so they cannot
+/// discover the mismatch halfway and start over — they ask this first.
+fn isobmff_audio_is_aac(path: &Path) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let Ok(size) = file.metadata().map(|m| m.len()) else {
+        return false;
+    };
+    let Ok(reader) = Mp4Reader::read_header(file, size) else {
+        return false;
+    };
+    reader.tracks().values().any(|track| {
+        matches!(track.track_type(), Ok(TrackType::Audio))
+            && track.trak.mdia.minf.stbl.stsd.mp4a.is_some()
+    })
+}
+
+/// The first track symphonia can actually decode as audio.
+///
+/// `FormatReader::default_track` returns `tracks().first()`, and the ISO-BMFF
+/// demuxer publishes a `Track` for *every* `trak` in the file — video ones
+/// included, with an empty `CodecParameters`. In a typical mp4 the video track
+/// comes first, so taking the default track there hands us a `CODEC_TYPE_NULL`
+/// track and the decode fails before it starts. Picking the first track that
+/// names an audio codec keeps single-track files (wav/mp3/flac/ogg) behaving
+/// exactly as before while making a video container decode its audio.
+fn pick_audio_track(
+    format: &dyn symphonia::core::formats::FormatReader,
+) -> Option<&symphonia::core::formats::Track> {
+    format
+        .tracks()
+        .iter()
+        .find(|track| {
+            track.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL
+                && (track.codec_params.sample_rate.is_some()
+                    || track.codec_params.channels.is_some()
+                    || track.codec_params.channel_layout.is_some())
+        })
+        .or_else(|| {
+            format
+                .tracks()
+                .iter()
+                .find(|track| track.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        })
 }
 
 fn is_wav_path(path: &Path) -> bool {
@@ -153,7 +235,7 @@ fn channel_config_count(cfg: ChannelConfig) -> u16 {
     }
 }
 
-fn read_audio_info_m4a_mp4(
+fn read_audio_info_isobmff(
     path: &Path,
     created_at: Option<SystemTime>,
     modified_at: Option<SystemTime>,
@@ -857,6 +939,14 @@ fn decode_m4a_fdk(path: &Path, max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, 
         }
     }
     let (track_id, track) = picked.context("m4a: no audio track")?;
+    // The fast path builds an AAC AudioSpecificConfig out of the `mp4a` sample
+    // entry. ALAC, and the PCM flavours a QuickTime .mov carries (`sowt`,
+    // `twos`, `in24`, `lpcm`), have no `mp4a` entry — decoding them here would
+    // read AAC parameters that are not there. Bail so the caller falls through
+    // to symphonia, which handles both.
+    if track.trak.mdia.minf.stbl.stsd.mp4a.is_none() {
+        anyhow::bail!("isobmff: audio track is not AAC: {}", path.display());
+    }
     let sample_rate = track
         .sample_freq_index()
         .map(|idx| idx.freq())
@@ -1071,6 +1161,14 @@ where
         }
     }
     let (track_id, track) = picked.context("m4a: no audio track")?;
+    // The fast path builds an AAC AudioSpecificConfig out of the `mp4a` sample
+    // entry. ALAC, and the PCM flavours a QuickTime .mov carries (`sowt`,
+    // `twos`, `in24`, `lpcm`), have no `mp4a` entry — decoding them here would
+    // read AAC parameters that are not there. Bail so the caller falls through
+    // to symphonia, which handles both.
+    if track.trak.mdia.minf.stbl.stsd.mp4a.is_none() {
+        anyhow::bail!("isobmff: audio track is not AAC: {}", path.display());
+    }
     let sample_rate = track
         .sample_freq_index()
         .map(|idx| idx.freq())
@@ -1323,7 +1421,7 @@ where
     C: FnMut() -> bool,
     F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
 {
-    if is_m4a_path(path) {
+    if is_isobmff_path(path) && isobmff_audio_is_aac(path) {
         decode_m4a_fdk_progressive_chunks(path, emit_every_secs, should_cancel, on_chunk)
     } else {
         decode_audio_multi_symphonia_chunks(path, emit_every_secs, should_cancel, on_chunk)
@@ -1393,8 +1491,8 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
     let probed = match probe_once(ext_hint) {
         Ok(v) => v,
         Err(first_err) => {
-            if is_m4a_path(path) {
-                if let Ok(info) = read_audio_info_m4a_mp4(path, created_at, modified_at, file_size)
+            if is_isobmff_path(path) {
+                if let Ok(info) = read_audio_info_isobmff(path, created_at, modified_at, file_size)
                 {
                     return Ok(info);
                 }
@@ -1403,9 +1501,9 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
                 match probe_once(None) {
                     Ok(v) => v,
                     Err(err) => {
-                        if is_m4a_path(path) {
+                        if is_isobmff_path(path) {
                             if let Ok(info) =
-                                read_audio_info_m4a_mp4(path, created_at, modified_at, file_size)
+                                read_audio_info_isobmff(path, created_at, modified_at, file_size)
                             {
                                 return Ok(info);
                             }
@@ -1424,7 +1522,7 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
         }
     };
     let format = probed.format;
-    let track = format.default_track().context("no default track")?;
+    let track = pick_audio_track(format.as_ref()).context("no audio track")?;
     let cp = &track.codec_params;
     let codec_name = format!("{:?}", cp.codec);
     let mut channels = cp.channels.map(|c| c.count() as u16).unwrap_or(0);
@@ -1545,7 +1643,7 @@ fn decode_audio_head_info(path: &Path) -> Option<(u16, u32, u16, SampleValueKind
 pub fn read_audio_bpm(path: &Path) -> Option<f32> {
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
     match ext.to_ascii_lowercase().as_str() {
-        "m4a" => read_bpm_m4a(path),
+        "m4a" | "mp4" | "mov" | "m4v" | "3gp" | "3g2" => read_bpm_m4a(path),
         "mp3" => read_bpm_id3(path),
         "wav" => read_bpm_wav(path),
         "flac" => crate::flac_meta::read_flac_bpm(path),
@@ -1556,7 +1654,10 @@ pub fn read_audio_bpm(path: &Path) -> Option<f32> {
 pub fn read_embedded_artwork(path: &Path) -> Option<Vec<u8>> {
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
     match ext.to_ascii_lowercase().as_str() {
-        "m4a" => read_artwork_m4a(path),
+        // Every ISO-BMFF container stores cover art the same way (the iTunes
+        // `covr` atom), so a video file with a poster frame baked in reads
+        // exactly like an .m4a does.
+        "m4a" | "mp4" | "mov" | "m4v" | "3gp" | "3g2" => read_artwork_m4a(path),
         "mp3" | "wav" => read_artwork_id3(path),
         "flac" => crate::flac_meta::read_flac_artwork(path),
         _ => None,
@@ -1710,14 +1811,16 @@ fn open_decoder(
         }
     };
     let format = probed.format;
-    let track = format.default_track().context("no default track")?.clone();
+    let track = pick_audio_track(format.as_ref())
+        .context("no audio track")?
+        .clone();
     let decoder = get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
     let sample_rate_hint = track.codec_params.sample_rate.unwrap_or(0);
     Ok((format, decoder, track.id, sample_rate_hint))
 }
 
 pub fn decode_audio_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
-    if is_m4a_path(path) {
+    if is_isobmff_path(path) {
         let (chans, sr) = decode_audio_multi(path)?;
         let mono = mixdown_to_mono(&chans);
         io_trace(
@@ -1799,25 +1902,27 @@ pub fn decode_audio_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
 }
 
 pub fn decode_audio_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>, u32, bool)> {
-    if is_m4a_path(path) {
+    if is_isobmff_path(path) {
         let max = if max_secs <= 0.0 {
             None
         } else {
             Some(max_secs)
         };
-        let (chans, sr, reached_eof) = decode_m4a_fdk(path, max)?;
-        let mono = mixdown_to_mono(&chans);
-        io_trace(
-            "decode_mono_prefix_m4a",
-            path,
-            path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
-            "aac",
-            sr,
-            1,
-            16,
-            Some(mono.len()),
-        );
-        return Ok((mono, sr, !reached_eof));
+        // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
+        if let Ok((chans, sr, reached_eof)) = decode_m4a_fdk(path, max) {
+            let mono = mixdown_to_mono(&chans);
+            io_trace(
+                "decode_mono_prefix_m4a",
+                path,
+                path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
+                "aac",
+                sr,
+                1,
+                16,
+                Some(mono.len()),
+            );
+            return Ok((mono, sr, !reached_eof));
+        }
     }
     if max_secs <= 0.0 {
         let (mono, sr) = decode_audio_mono(path)?;
@@ -1924,23 +2029,25 @@ pub fn decode_audio_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>,
 }
 
 pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
-    if is_m4a_path(path) {
-        let (chans, sr, _) = decode_m4a_fdk(path, None)?;
-        #[cfg(debug_assertions)]
-        let mut chans = chans;
-        #[cfg(debug_assertions)]
-        sanitize_non_finite_multi(path, "decode_multi_m4a", &mut chans);
-        io_trace(
-            "decode_multi_m4a",
-            path,
-            path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
-            "aac",
-            sr,
-            chans.len() as u16,
-            16,
-            chans.get(0).map(|c| c.len()),
-        );
-        return Ok((chans, sr));
+    if is_isobmff_path(path) {
+        // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
+        if let Ok((chans, sr, _)) = decode_m4a_fdk(path, None) {
+            #[cfg(debug_assertions)]
+            let mut chans = chans;
+            #[cfg(debug_assertions)]
+            sanitize_non_finite_multi(path, "decode_multi_m4a", &mut chans);
+            io_trace(
+                "decode_multi_m4a",
+                path,
+                path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
+                "aac",
+                sr,
+                chans.len() as u16,
+                16,
+                chans.get(0).map(|c| c.len()),
+            );
+            return Ok((chans, sr));
+        }
     }
     let res = (|| {
         let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
@@ -2009,7 +2116,7 @@ pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
         );
         Ok((chans, sample_rate))
     })();
-    if res.is_err() && is_m4a_path(path) {
+    if res.is_err() && is_isobmff_path(path) {
         if let Ok((chans, sr, _)) = decode_m4a_fdk(path, None) {
             #[cfg(debug_assertions)]
             let mut chans = chans;
@@ -2032,14 +2139,16 @@ pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
 }
 
 pub fn decode_audio_multi_prefix(path: &Path, max_secs: f32) -> Result<(Vec<Vec<f32>>, u32, bool)> {
-    if is_m4a_path(path) {
+    if is_isobmff_path(path) {
         let max = if max_secs <= 0.0 {
             None
         } else {
             Some(max_secs)
         };
-        let (chans, sr, reached_eof) = decode_m4a_fdk(path, max)?;
-        return Ok((chans, sr, !reached_eof));
+        // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
+        if let Ok((chans, sr, reached_eof)) = decode_m4a_fdk(path, max) {
+            return Ok((chans, sr, !reached_eof));
+        }
     }
     if max_secs <= 0.0 {
         let (chans, sr) = decode_audio_multi(path)?;
@@ -2160,7 +2269,7 @@ where
     C: FnMut() -> bool,
     F: FnMut(Vec<Vec<f32>>, u32, bool) -> bool,
 {
-    if is_m4a_path(path) {
+    if is_isobmff_path(path) && isobmff_audio_is_aac(path) {
         let wants_prefix = prefix_secs > 0.0;
         let wants_emit = emit_every_secs > 0.0;
         if !wants_prefix && !wants_emit {
@@ -2452,15 +2561,17 @@ pub fn decode_audio_mono_prefix_with_errors(
     path: &Path,
     max_secs: f32,
 ) -> Result<(Vec<f32>, u32, bool, u32)> {
-    if is_m4a_path(path) {
+    if is_isobmff_path(path) {
         let max = if max_secs <= 0.0 {
             None
         } else {
             Some(max_secs)
         };
-        let (chans, sr, reached_eof) = decode_m4a_fdk(path, max)?;
-        let mono = mixdown_to_mono(&chans);
-        return Ok((mono, sr, reached_eof, 0));
+        // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
+        if let Ok((chans, sr, reached_eof)) = decode_m4a_fdk(path, max) {
+            let mono = mixdown_to_mono(&chans);
+            return Ok((mono, sr, reached_eof, 0));
+        }
     }
     if max_secs <= 0.0 {
         let (mono, sr, err) = decode_audio_mono_with_errors(path)?;
@@ -2598,23 +2709,25 @@ pub fn decode_audio_mono_with_errors(path: &Path) -> Result<(Vec<f32>, u32, u32)
 }
 
 pub fn decode_audio_multi_with_errors(path: &Path) -> Result<(Vec<Vec<f32>>, u32, u32)> {
-    if is_m4a_path(path) {
-        let (chans, sr, _) = decode_m4a_fdk(path, None)?;
-        #[cfg(debug_assertions)]
-        let mut chans = chans;
-        #[cfg(debug_assertions)]
-        sanitize_non_finite_multi(path, "decode_multi_m4a", &mut chans);
-        io_trace(
-            "decode_multi_m4a",
-            path,
-            path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
-            "aac",
-            sr,
-            chans.len() as u16,
-            16,
-            chans.get(0).map(|c| c.len()),
-        );
-        return Ok((chans, sr, 0));
+    if is_isobmff_path(path) {
+        // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
+        if let Ok((chans, sr, _)) = decode_m4a_fdk(path, None) {
+            #[cfg(debug_assertions)]
+            let mut chans = chans;
+            #[cfg(debug_assertions)]
+            sanitize_non_finite_multi(path, "decode_multi_m4a", &mut chans);
+            io_trace(
+                "decode_multi_m4a",
+                path,
+                path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
+                "aac",
+                sr,
+                chans.len() as u16,
+                16,
+                chans.get(0).map(|c| c.len()),
+            );
+            return Ok((chans, sr, 0));
+        }
     }
     let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
     let mut chans: Vec<Vec<f32>> = Vec::new();
@@ -2673,6 +2786,113 @@ pub fn decode_audio_multi_with_errors(path: &Path) -> Result<(Vec<Vec<f32>>, u32
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_extension_lists_stay_in_step() {
+        // SUPPORTED_EXTS is spelled out rather than concatenated so it can be
+        // a `const`; this is what keeps it honest.
+        let mut joined: Vec<&str> = super::SUPPORTED_AUDIO_EXTS
+            .iter()
+            .chain(super::SUPPORTED_VIDEO_EXTS.iter())
+            .copied()
+            .collect();
+        let mut all: Vec<&str> = super::SUPPORTED_EXTS.to_vec();
+        joined.sort_unstable();
+        all.sort_unstable();
+        assert_eq!(joined, all);
+    }
+
+    #[test]
+    fn only_audio_extensions_can_be_written() {
+        for ext in super::SUPPORTED_AUDIO_EXTS {
+            assert!(
+                super::is_encodable_extension(ext),
+                "{ext} should be encodable"
+            );
+        }
+        for ext in super::SUPPORTED_VIDEO_EXTS {
+            assert!(
+                super::is_supported_extension(ext),
+                "{ext} should be readable"
+            );
+            assert!(
+                !super::is_encodable_extension(ext),
+                "{ext} must never be an export target"
+            );
+        }
+    }
+
+    /// The bug this whole video feature had to fix first.
+    ///
+    /// symphonia's `default_track()` is `tracks().first()`, and its ISO-BMFF
+    /// demuxer publishes a `Track` for every `trak` — video ones included,
+    /// with an empty `CodecParameters`. A normal mp4 puts the video track
+    /// first, so taking the default track handed the decoder a
+    /// `CODEC_TYPE_NULL` track and the file failed to decode at all.
+    mod video_container_audio {
+        use crate::video::test_fixture::FixtureFile;
+
+        #[test]
+        fn audio_reads_out_of_an_mp4_whose_video_track_comes_first() {
+            let fixture = FixtureFile::build("audio_track", 8, 0.5).expect("fixture");
+            let info = crate::audio_io::read_audio_info(&fixture.path).expect("probe mp4");
+            assert_eq!(info.sample_rate, 48_000, "should report the audio track");
+            assert_eq!(info.channels, 1);
+            assert!(
+                info.duration_secs.unwrap_or(0.0) > 0.2,
+                "duration {:?} should come from the audio track",
+                info.duration_secs
+            );
+
+            let (chans, sr) =
+                crate::audio_io::decode_audio_multi(&fixture.path).expect("decode mp4 audio");
+            assert_eq!(sr, 48_000);
+            assert_eq!(chans.len(), 1);
+            let frames = chans[0].len();
+            assert!(
+                frames > 48_000 / 4,
+                "expected roughly half a second of audio, got {frames} frames"
+            );
+            let peak = chans[0].iter().fold(0.0f32, |a, v| a.max(v.abs()));
+            assert!(peak > 0.05, "decoded a silent buffer (peak {peak})");
+        }
+
+        #[test]
+        fn the_prefix_and_streaming_decoders_agree_with_the_full_one() {
+            let fixture = FixtureFile::build("audio_prefix", 8, 0.5).expect("fixture");
+            let (full, sr) =
+                crate::audio_io::decode_audio_multi(&fixture.path).expect("full decode");
+            let (prefix, prefix_sr, _truncated) =
+                crate::audio_io::decode_audio_multi_prefix(&fixture.path, 0.2)
+                    .expect("prefix decode");
+            assert_eq!(prefix_sr, sr);
+            assert_eq!(prefix.len(), full.len());
+            assert!(!prefix[0].is_empty());
+
+            let mut streamed = 0usize;
+            crate::audio_io::decode_audio_multi_streaming_chunks(
+                &fixture.path,
+                0.1,
+                || false,
+                |chunk, chunk_sr, _frames, _final| {
+                    assert_eq!(chunk_sr, sr);
+                    streamed += chunk.first().map(|c| c.len()).unwrap_or(0);
+                    true
+                },
+            )
+            .expect("streaming decode");
+            assert!(streamed > 0, "streaming decode produced nothing");
+        }
+
+        #[test]
+        fn a_video_with_no_audio_track_reports_that_rather_than_hanging() {
+            let fixture = FixtureFile::build("no_audio", 8, 0.0).expect("fixture");
+            assert!(
+                crate::audio_io::decode_audio_multi(&fixture.path).is_err(),
+                "a video with no audio track has nothing to decode"
+            );
+        }
+    }
+
     use super::{
         enforce_stable_channel_count, enforce_stable_sample_rate, proxy_output_sample_rate,
         read_embedded_artwork,

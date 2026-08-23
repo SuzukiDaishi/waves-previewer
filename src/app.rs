@@ -113,6 +113,7 @@ mod transcript_onnx;
 mod transcript_ops;
 mod types;
 mod ui;
+mod video_ops;
 pub mod watch;
 mod world_edit_ops;
 mod zoo_assets;
@@ -626,6 +627,14 @@ pub struct WavesPreviewer {
     pub editor_viewport_tx: Option<std::sync::mpsc::Sender<EditorViewportJobMsg>>,
     pub editor_viewport_rx: Option<std::sync::mpsc::Receiver<EditorViewportJobMsg>>,
     editor_viewport_generation_counter: u64,
+    /// Result channel shared by every video decode worker; see `video_ops`.
+    video_frame_tx: Option<std::sync::mpsc::Sender<video_ops::VideoFrameMsg>>,
+    video_frame_rx: Option<std::sync::mpsc::Receiver<video_ops::VideoFrameMsg>>,
+    /// One entry per open video tab. Dropping a handle stops its worker.
+    video_workers: Vec<video_ops::VideoWorkerHandle>,
+    /// No window and nobody watching: the headless CLI. Background work whose
+    /// only product is something on screen is skipped.
+    headless: bool,
     pub editor_feature_cache: HashMap<EditorAnalysisKey, std::sync::Arc<EditorFeatureAnalysisData>>,
     pub editor_feature_inflight: HashSet<EditorAnalysisKey>,
     pub editor_feature_progress: HashMap<EditorAnalysisKey, AnalysisProgress>,
@@ -1564,6 +1573,9 @@ impl WavesPreviewer {
             self.playback_stop_if_editor_source_invalidated(path.as_path());
         }
         self.cache_dirty_tab_at(idx);
+        if let Some(tab_id) = self.tabs.get(idx).map(|t| t.tab_id) {
+            self.stop_video_worker_for_tab_id(tab_id);
+        }
         let prev_active = self.active_tab;
         self.tabs.remove(idx);
         // The effect-graph workspace remembers which editor tab to restore by
@@ -2089,6 +2101,13 @@ impl WavesPreviewer {
             }
         }
         base.to_string()
+    }
+
+    /// Same as [`Self::editor_display_sample_rate`], reachable from the UI
+    /// module so the video panel can convert the drawn playhead to seconds
+    /// with exactly the rate the playhead itself was computed against.
+    pub(crate) fn editor_display_sample_rate_for_tab(tab: &EditorTab, fallback_out_sr: u32) -> u32 {
+        Self::editor_display_sample_rate(tab, fallback_out_sr)
     }
 
     fn editor_display_sample_rate(tab: &EditorTab, fallback_out_sr: u32) -> u32 {
@@ -3048,6 +3067,7 @@ impl WavesPreviewer {
     pub fn new_headless(startup: StartupConfig) -> Result<Self> {
         let audio = AudioEngine::new_for_test();
         let mut app = Self::build_app(startup, audio);
+        app.headless = true;
         app.finish_test_startup();
         Ok(app)
     }

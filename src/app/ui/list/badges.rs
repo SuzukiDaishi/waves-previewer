@@ -79,6 +79,27 @@ impl WavesPreviewer {
                         Color32::from_rgb(88, 106, 128),
                         Color32::from_rgb(172, 198, 228),
                     ),
+                    // Video containers get a violet family of their own so a
+                    // row that only plays its audio track reads as different
+                    // at a glance from a plain audio row.
+                    "mp4" | "m4v" => (
+                        "MP4".to_string(),
+                        "MP4 video (audio track only)".to_string(),
+                        Color32::from_rgb(112, 62, 148),
+                        Color32::from_rgb(206, 156, 246),
+                    ),
+                    "mov" => (
+                        "MOV".to_string(),
+                        "QuickTime video (audio track only)".to_string(),
+                        Color32::from_rgb(112, 62, 148),
+                        Color32::from_rgb(206, 156, 246),
+                    ),
+                    "3gp" | "3g2" => (
+                        "3GP".to_string(),
+                        "3GPP video (audio track only)".to_string(),
+                        Color32::from_rgb(112, 62, 148),
+                        Color32::from_rgb(206, 156, 246),
+                    ),
                     _ => {
                         let upper = if ext.is_empty() {
                             "FILE".to_string()

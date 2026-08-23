@@ -10,6 +10,7 @@ UI は `src/app/ui/editor.rs` から呼ばれることが多く、重い計算�
 | `src/app/render/waveform_pyramid.rs` | 長尺波形向けの pyramid / minmax 補助 | zoom/pan 時の波形描画負荷を下げたい |
 | `src/app/render/spectrogram.rs` | spectrogram の描画補助 | spectrogram texture / tile 描画を追う |
 | `src/app/render/overlay.rs` | waveform overlay / preview overlay | preview apply 前後の比較表示を見る |
+| `src/app/render/video_panel.rs` | Mini Meter の映像パネルの幅計算・レターボックス・要求解像度 | 映像パネルの大きさや SCOPE との優先順位を変えたい |
 | `src/app/render/music_features.rs` | music feature / chroma / tempogram 系描画 | music analysis 結果の可視化を見る |
 | `src/app/render/binning.rs` | sample binning / downsample 補助 | 描画用集約の計算量を確認する |
 | `src/app/render/colors.rs` | 描画色 / palette | waveform / spectrogram の色を調整する |
