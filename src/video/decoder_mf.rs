@@ -16,8 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use windows::core::{Interface, HSTRING, PCWSTR};
-use windows::Win32::Foundation::S_OK;
+use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
     MFCreateSourceReaderFromURL, MFMediaType_Video, MFShutdown, MFStartup, MFVideoFormat_RGB32,
@@ -25,6 +24,7 @@ use windows::Win32::Media::MediaFoundation::{
     MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
     MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
 };
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
 use super::container::{VideoCodec, VideoStreamInfo};
@@ -167,8 +167,10 @@ impl VideoDecoder for MediaFoundationDecoder {
 
     fn seek(&mut self, secs: f64, _max_forward_walk: usize) -> Result<()> {
         // 100-nanosecond units, the unit every Media Foundation time uses.
+        // An all-zero time format GUID means "the default", which for a media
+        // source is exactly those units.
         let hns = (secs.max(0.0) * 10_000_000.0) as i64;
-        let position = windows::Win32::System::Variant::VARIANT::from(hns);
+        let position = PROPVARIANT::from(hns);
         unsafe {
             self.reader
                 .SetCurrentPosition(&windows::core::GUID::zeroed(), &position)
@@ -227,20 +229,40 @@ impl VideoDecoder for MediaFoundationDecoder {
             let (w, h) = self.frame_size;
             let image = {
                 let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+                // An RGB32 buffer is not necessarily tightly packed: rows are
+                // padded out to the decoder's stride, which is why the buffer
+                // has to be walked row by row rather than as one run of
+                // pixels. Reading it flat would slide every row sideways by
+                // the padding and shear the picture.
+                let row_bytes = (w as usize).saturating_mul(4);
+                let stride = if h > 0 {
+                    (bytes.len() / h as usize).max(row_bytes)
+                } else {
+                    row_bytes
+                };
                 // RGB32 is BGRX in memory; swap into RGBA before scaling.
                 self.rgba_scratch.clear();
-                self.rgba_scratch.reserve(bytes.len());
-                for px in bytes.chunks_exact(4) {
-                    self.rgba_scratch.push(px[2]);
-                    self.rgba_scratch.push(px[1]);
-                    self.rgba_scratch.push(px[0]);
-                    self.rgba_scratch.push(255);
+                self.rgba_scratch
+                    .reserve(row_bytes.saturating_mul(h as usize));
+                for row in 0..h as usize {
+                    let start = row.saturating_mul(stride);
+                    let Some(line) = bytes.get(start..start + row_bytes) else {
+                        // A short buffer: keep what arrived rather than
+                        // reading past it. The frame is dropped below.
+                        break;
+                    };
+                    for px in line.chunks_exact(4) {
+                        self.rgba_scratch.push(px[2]);
+                        self.rgba_scratch.push(px[1]);
+                        self.rgba_scratch.push(px[0]);
+                        self.rgba_scratch.push(255);
+                    }
                 }
                 rgba_to_color_image(&self.rgba_scratch, w, h, Rotation::None, box_px.0, box_px.1)
             };
-            let unlock = unsafe { buffer.Unlock() };
-            debug_assert!(unlock.is_ok() || unlock.is_err());
-            let _ = S_OK;
+            // Unlock before anything can return: the buffer stays locked for
+            // the caller otherwise, and `image` already owns its pixels.
+            let _ = unsafe { buffer.Unlock() };
 
             let Some(image) = image else {
                 continue;
@@ -253,22 +275,8 @@ impl VideoDecoder for MediaFoundationDecoder {
     }
 }
 
-impl Drop for MediaFoundationDecoder {
-    fn drop(&mut self) {
-        // Nothing beyond the default field drops; spelled out so the ordering
-        // comment on `reader` has somewhere to point.
-    }
-}
-
 // Safety: every method takes `&mut self`, and one decoder is owned by exactly
 // one worker thread for its whole life (created there, dropped there). The COM
 // objects are apartment-agnostic under COINIT_MULTITHREADED, which the session
 // guard establishes on that same thread.
 unsafe impl Send for MediaFoundationDecoder {}
-
-/// Wrap a `windows` `Interface` import so the unused-import lint stays quiet
-/// on builds that do not exercise every path.
-const _: fn() = || {
-    fn assert_interface<T: Interface>() {}
-    assert_interface::<IMFSourceReader>();
-};

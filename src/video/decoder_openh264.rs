@@ -120,8 +120,9 @@ impl OpenH264Decoder {
         let Some(bytes) = bytes else {
             return Ok(true);
         };
-        let params = self.container.params.clone();
-        if !annexb::sample_to_annexb(&bytes, &params, &mut self.annexb_scratch) {
+        // Disjoint fields, so the parameter sets can be borrowed straight out
+        // of the container instead of being cloned once per decoded frame.
+        if !annexb::sample_to_annexb(&bytes, &self.container.params, &mut self.annexb_scratch) {
             return Ok(true);
         }
 

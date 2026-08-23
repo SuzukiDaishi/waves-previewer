@@ -58,7 +58,10 @@ pub(super) enum VideoFrameMsg {
 pub(super) struct VideoWorkerHandle {
     pub tab_id: u64,
     tx: Sender<VideoFrameRequest>,
-    cancel: Arc<AtomicBool>,
+    /// Set once, when the tab closes, and never cleared. Interrupts a decode
+    /// already in flight so the worker does not finish a batch nobody is
+    /// waiting for.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl VideoWorkerHandle {
@@ -71,7 +74,7 @@ impl Drop for VideoWorkerHandle {
     fn drop(&mut self) {
         // Unblocks a decode already in flight; dropping `tx` then ends the
         // worker's receive loop and closes the file.
-        self.cancel.store(true, Ordering::Relaxed);
+        self.shutdown.store(true, Ordering::Relaxed);
     }
 }
 
@@ -118,19 +121,22 @@ impl WavesPreviewer {
 
         let out_tx = self.ensure_video_channel();
         let (tx, rx) = std::sync::mpsc::channel::<VideoFrameRequest>();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let worker_cancel = cancel.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = shutdown.clone();
         let worker_path = path.clone();
         std::thread::Builder::new()
             .name("neowaves-video".to_string())
             .spawn(move || {
                 crate::app::threading::lower_current_thread_priority();
-                video_worker_main(tab_id, worker_path, rx, out_tx, worker_cancel);
+                video_worker_main(tab_id, worker_path, rx, out_tx, worker_shutdown);
             })
             .ok();
 
-        self.video_workers
-            .push(VideoWorkerHandle { tab_id, tx, cancel });
+        self.video_workers.push(VideoWorkerHandle {
+            tab_id,
+            tx,
+            shutdown,
+        });
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if tab.video_panel.is_none() {
                 tab.video_panel = Some(VideoPanelState::new(placeholder_stream_info()));
@@ -393,7 +399,7 @@ fn video_worker_main(
     path: PathBuf,
     rx: Receiver<VideoFrameRequest>,
     tx: Sender<VideoFrameMsg>,
-    cancel: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
 ) {
     let mut decoder = match crate::video::open_video_decoder(&path) {
         Ok(decoder) => decoder,
@@ -419,16 +425,18 @@ fn video_worker_main(
     crate::ui_wake::wake_ui();
 
     while let Ok(request) = rx.recv() {
-        if cancel.load(Ordering::Relaxed) {
+        if shutdown.load(Ordering::Relaxed) {
             return;
         }
         // Only the newest request matters: everything queued behind it is a
-        // position the playhead has already left.
+        // position the playhead has already left. Superseding happens here,
+        // before any decoding starts, so there is nothing to interrupt
+        // mid-batch and no per-request cancellation to track — `shutdown` is
+        // the tab closing, and it is never cleared.
         let mut request = request;
         while let Ok(newer) = rx.try_recv() {
             request = newer;
         }
-        cancel.store(false, Ordering::Relaxed);
 
         if let Err(err) = decoder.seek(request.target_secs, request.max_forward_walk) {
             let _ = tx.send(VideoFrameMsg::Failed {
@@ -442,10 +450,10 @@ fn video_worker_main(
         let mut frames = Vec::new();
         let wanted = request.decode_ahead.max(1);
         for _ in 0..wanted {
-            if cancel.load(Ordering::Relaxed) {
+            if shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            match decoder.next_frame(request.box_px, &cancel) {
+            match decoder.next_frame(request.box_px, &shutdown) {
                 Ok(Some(frame)) => frames.push((frame.pts_secs, frame.image)),
                 Ok(None) => break,
                 Err(err) => {
