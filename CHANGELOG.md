@@ -4,6 +4,15 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### エディタ: 範囲を伸ばすのと、音を伸ばすのを分けた
+
+- **選択範囲の縦線をドラッグしても、もう音は書き換わらない**: 選択範囲の両端はキャンバス全高のタイムストレッチ用グリップになっていて、線のどこを掴んでも破壊的なリサンプルが走っていた。範囲をほんの少し詰めたいだけの操作が、そのたびに音声そのものを作り直していたことになる。縦線の本体は**範囲を伸縮するだけ**の操作に戻した。掴んだ側だけが動き、反対の端は固定、`Alt` でゼロクロススナップ、反対の端を追い越せば範囲が反転する（ワーカーも Undo ステップも増えない）。
+- **音を伸ばすのは、上端のグリップだけになった**: タイムストレッチはキャンバス最上部の小さなつまみからのみ始まる。的の大きさを役割に合わせたということで、取り返しのつく操作（範囲の伸縮）に線の全高を、取り返しのつかない操作（音声の書き換え）に 18px のつまみを割り当てている。掴める範囲は描かれているつまみと同じ寸法で、見た目より広く反応することはない。
+  - つまみは 10x18px に少し大きくし、中に左右の矢印を描いた。これまで波形の**中央**に描かれていた `<>` の山記号は削除した。あれは全高が掴める時代の目印で、いまは掴めない場所に立っているだけの記号になる。
+  - ホバーしたカーソルで見分けられる: 上端のグリップは手のひら（ドラッグ中は握った手）、縦線の残りは従来どおり ↔。選択範囲の端はどの表示モードでも伸縮できるので、カーソルの表示もスペクトログラム等で出るようになった。
+- **Loop Edit でループ端と選択端が重なっていても、両方使える**: 「選択範囲からループを作る」を通した直後は 2 つの端がぴったり同じ x に立つ。これまではループマーカーが高さを問わず勝っていて、その場所ではストレッチが一切できなかった。いまは高さで分担する — 上端のグリップはストレッチ、その下の縦線はループマーカーの移動。
+- **掴んだ操作は離すまで持ち主が変わらない**: ループマーカーのドラッグはボタンの「押下中」で武装するため、範囲の伸縮中にポインタがたまたまループ端の 7px 以内を通ると、そこから先はループが動きはじめて範囲のほうが固まる、という取り違えが起きえた。押した時点の持ち主が離すまで持ち続ける。
+
 ### 動画ファイルが開けるようになった
 - **mp4 / mov の音声がそのまま扱える**: 音声が動画コンテナに入ったまま届いた素材は、これまで別のツールで音声を抜き出さないとリストにすら載らなかった。`.mp4` / `.mov` / `.m4v` / `.3gp` / `.3g2` が音声ファイルとまったく同じように読み込まれ、リストに並び、選べば音声トラックが鳴る。波形もラウドネス測定もトランスクリプトも、これまでどおり動く。音声トラックの取り出しは m4a と同じ経路 (fdk-aac、AAC でなければ symphonia) を通るので、新しい再生経路は増えていない。
   - この対応の前提として、**映像トラックのある mp4 は音声すら読めなかった**バグを直している。symphonia の `default_track()` は「ファイルの先頭のトラック」を返し、その ISO-BMFF リーダーは映像トラックも空のコーデック情報つきでトラックとして並べる。一般的な mp4 は映像トラックが先頭なので、デコーダには「コーデック不明」のトラックが渡され、そこで失敗していた。音声コーデックを名乗る最初のトラックを選ぶようになった。これは `.mp4` を `.m4a` にリネームしただけのファイルにも効く。
@@ -21,7 +30,7 @@ All notable changes in this repository (hand-written).
 - **"Add Trim As Virtual" is described in plain terms**: its hover text said "Add the trim range as a virtual item", which a user reported not understanding. It now says what it does — export the selected range as a separate item in the list, leaving the current file untouched, written to disk only when saved — along with the naming and the one-item-per-range behaviour.
 
 ### Editor: one range on the waveform
-- **Selection edges can be dragged**: adjusting a range meant redrawing it from scratch — Shift+click only ever moved the edge away from the drag's anchor, so after a left-to-right drag the start could not be pulled back at all. Both edges now carry a grab handle and can be dragged to lengthen or shorten the range, in every tool, with the opposite edge staying put. `Alt` snaps to a zero crossing and the playhead snaps as it does when drawing a selection, so a nudged edge lands where a fresh drag would. Dragging an edge past the other flips the range, exactly like drawing one. Speed and Time Stretch already use the selection's right edge for their own stretch gesture, so there only the left edge is draggable — and only the left handle is drawn, so what is shown matches what can be grabbed.
+- **Selection edges can be dragged**: adjusting a range meant redrawing it from scratch — Shift+click only ever moved the edge away from the drag's anchor, so after a left-to-right drag the start could not be pulled back at all. Both edges now carry a grab handle and can be dragged to lengthen or shorten the range, in every tool, with the opposite edge staying put. `Alt` snaps to a zero crossing and the playhead snaps as it does when drawing a selection, so a nudged edge lands where a fresh drag would. Dragging an edge past the other flips the range, exactly like drawing one. (Both edges are draggable in every tool; the Time Stretch grip that later took over the top of the same line is described under "エディタ: 範囲を伸ばすのと、音を伸ばすのを分けた" above.)
 - **The orange Trim band is gone**: the waveform drew a second, orange range for the Trim tool on top of the blue selection. Nothing in the UI had set that range for some time — only Auto Trim wrote it, and Auto Trim writes the *same* span to the selection, so one range was being drawn twice and read as "a range you had to establish separately". Hovering its edges even produced a resize cursor, for a drag that was never implemented. The selection is now the only range the waveform draws, and the header no longer labels a range it isn't drawing.
 
 ### Editor: selection shortcuts

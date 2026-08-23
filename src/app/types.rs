@@ -2281,10 +2281,14 @@ pub struct EditorTab {
     pub vertical_view_center: f32,          // centered waveform viewport anchor in [-1, 1]
     pub last_wave_w: f32,                   // last waveform width (for resize anchoring)
     pub last_amplitude_nav_rect: Option<egui::Rect>, // transient right rail rect for UI tests
+    /// Last painted waveform canvas rect. Transient, for UI tests: the Time
+    /// Stretch grip is anchored to its top, and a pointer-driven test has no
+    /// other way to land inside a band measured from there.
+    pub last_wave_canvas_rect: Option<egui::Rect>,
     pub last_amplitude_viewport_rect: Option<egui::Rect>, // transient right rail viewport
-    pub last_amplitude_nav_click_at: f64,   // transient double-click timing for amplitude rail
+    pub last_amplitude_nav_click_at: f64, // transient double-click timing for amplitude rail
     pub last_amplitude_nav_click_pos: Option<egui::Pos2>, // transient double-click location
-    pub viewport_source_generation: u64,    // transient source generation for viewport cache
+    pub viewport_source_generation: u64,  // transient source generation for viewport cache
     pub viewport_render_requested_generation: u64, // transient latest queued viewport request
     pub viewport_render_requested_key: Option<EditorViewportRenderKey>, // transient desired key
     pub viewport_render_pending_fine_at: Option<Instant>, // transient fine render debounce
@@ -2293,7 +2297,7 @@ pub struct EditorTab {
     pub viewport_render_coarse: Option<EditorViewportRenderCache>, // transient coarse viewport
     pub viewport_render_fine: Option<EditorViewportRenderCache>, // transient fine viewport
     pub viewport_render_last: Option<EditorViewportRenderCache>, // transient stale fallback
-    pub dirty: bool,                        // unsaved edits exist
+    pub dirty: bool,                      // unsaved edits exist
     #[allow(dead_code)]
     pub ops: Vec<EditOp>, // non-destructive operations (skeleton)
     // --- Editing state (MVP) ---
@@ -2406,6 +2410,11 @@ pub struct EditorTab {
     /// A cancelled stretch keeps primary-pointer ownership until release so
     /// the same held press cannot fall through into a fresh range selection.
     pub selection_stretch_cancel_until_release: bool,
+    /// Transient plain selection-edge resize, armed by grabbing the edge line
+    /// anywhere below the Time Stretch grip. Holds the *anchor* — the edge that
+    /// stays put — rather than the edge that was grabbed, so dragging past the
+    /// other end flips the range the same way drawing one does.
+    pub selection_edge_drag_anchor: Option<usize>,
     // Preview audio state (non-destructive): tool-driven preview, cleared on tool/tab/view changes
     pub preview_audio_tool: Option<ToolKind>,
     /// Audition buffer that produced the visible green preview waveform.
@@ -2607,6 +2616,7 @@ impl EditorTab {
             vertical_view_center: 0.0,
             last_wave_w: 0.0,
             last_amplitude_nav_rect: None,
+            last_wave_canvas_rect: None,
             last_amplitude_viewport_rect: None,
             last_amplitude_nav_click_at: 0.0,
             last_amplitude_nav_click_pos: None,
@@ -2701,6 +2711,7 @@ impl EditorTab {
             dragging_marker: None,
             selection_stretch_gesture: None,
             selection_stretch_cancel_until_release: false,
+            selection_edge_drag_anchor: None,
             preview_audio_tool: None,
             preview_audio_buffer: None,
             active_tool_last: None,

@@ -188,6 +188,7 @@ impl crate::app::WavesPreviewer {
         tab.dragging_marker = None;
         tab.selection_stretch_gesture = None;
         tab.selection_stretch_cancel_until_release = false;
+        tab.selection_edge_drag_anchor = None;
         // Scan markers describe the pre-edit buffer.
         tab.declick_scan = None;
         Self::editor_clear_selection_anchor(tab);

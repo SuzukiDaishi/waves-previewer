@@ -2972,8 +2972,10 @@ impl WavesPreviewer {
             tab.dragging_marker = None;
             tab.selection_stretch_gesture = None;
             tab.selection_stretch_cancel_until_release = false;
+            tab.selection_edge_drag_anchor = None;
             tab.preview_offset_samples = None;
             tab.last_amplitude_nav_rect = None;
+            tab.last_wave_canvas_rect = None;
             tab.last_amplitude_viewport_rect = None;
             tab.last_amplitude_nav_click_at = 0.0;
             tab.last_amplitude_nav_click_pos = None;

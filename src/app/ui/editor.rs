@@ -160,6 +160,26 @@ impl EditorDisplayGeometry {
 /// handle can never teleport the edge onto the playhead on the first frame.
 const SELECTION_EDGE_GRAB_RADIUS: f32 = 7.0;
 
+// The selection's Time Stretch grip: a tab at the very top of the canvas, and
+// the only place the destructive stretch can be started from.
+//
+// Below this band the same edge line is a plain range resize, so what is drawn
+// and what is grabbable must stay the same number — a grip that reaches
+// further than it looks turns a range nudge into a resample.
+const SELECTION_STRETCH_HANDLE_W: f32 = 10.0;
+const SELECTION_STRETCH_HANDLE_H: f32 = 18.0;
+
+/// Is `y` inside the stretch grip's band for a canvas whose top is `canvas_top`?
+fn in_selection_stretch_band(canvas_top: f32, y: f32) -> bool {
+    y >= canvas_top && y <= canvas_top + SELECTION_STRETCH_HANDLE_H
+}
+
+/// The grip's height, for pointer-driven UI tests that must aim inside it.
+#[cfg(feature = "kittest")]
+pub(crate) fn selection_stretch_handle_height() -> f32 {
+    SELECTION_STRETCH_HANDLE_H
+}
+
 /// Nearest handle to `x` within `radius`, returning that handle's payload.
 ///
 /// Ties resolve toward the later entry, so on a selection narrower than two
@@ -3052,6 +3072,7 @@ impl crate::app::WavesPreviewer {
                 {
                     tab.selection_stretch_cancel_until_release = true;
                 }
+                tab.selection_edge_drag_anchor = None;
                 let prev_preview_supported =
                     Self::view_supports_wave_preview(prev_view, tab.show_waveform_overlay);
                 tab.set_leaf_view_mode(selected_view);
@@ -3789,6 +3810,7 @@ impl crate::app::WavesPreviewer {
                         None
                     };
                     tab.last_amplitude_nav_rect = amplitude_nav_rect;
+                    tab.last_wave_canvas_rect = Some(rect);
                     tab.last_amplitude_viewport_rect = amplitude_nav_rect.map(|nav_rect| {
                         Self::amplitude_nav_viewport_rect(
                             nav_rect,
@@ -5151,9 +5173,16 @@ impl crate::app::WavesPreviewer {
                         geom.contains_boundary(sample)
                             && (pos.x - geom.sample_boundary_x_unclamped(sample)).abs() <= radius
                     };
+                    let press_in_stretch_band =
+                        in_selection_stretch_band(rect.top(), pos.y);
                     let mut specialized_handle_hit = false;
                     match tab.active_tool {
-                        ToolKind::LoopEdit => {
+                        // A loop edge almost always sits exactly on the
+                        // selection edge (Set loop from selection), so the two
+                        // grips overlap. Split them by height rather than
+                        // letting one swallow the other: the tab at the top
+                        // stretches, the line below it moves the loop marker.
+                        ToolKind::LoopEdit if !press_in_stretch_band => {
                             if let Some((a, b)) = tab.loop_region {
                                 specialized_handle_hit =
                                     near_x(a.min(b), 7.0) || near_x(a.max(b), 7.0);
@@ -5206,7 +5235,7 @@ impl crate::app::WavesPreviewer {
                         _ => {}
                     }
 
-                    if !specialized_handle_hit && sel_e > sel_s {
+                    if !specialized_handle_hit && press_in_stretch_band && sel_e > sel_s {
                         let mut candidates = Vec::with_capacity(2);
                         if geom.contains_boundary(sel_s) {
                             candidates.push((geom.sample_boundary_x_unclamped(sel_s), 0usize));
@@ -5991,7 +6020,17 @@ impl crate::app::WavesPreviewer {
                     let to_sample = |x: f32| geom.x_to_display_sample(x);
                     let to_x = |samp: usize| geom.sample_boundary_x(samp);
                     let hit_radius = 7.0;
-                    if tab.dragging_marker.is_none() {
+                    // This block arms on `pointer_down`, not on the press, so
+                    // without these guards a gesture that started on the
+                    // selection's edge would also pick up a marker drag on a
+                    // later frame, the moment the pointer happened to pass
+                    // within grab range of a loop edge. Whoever owns the press
+                    // keeps it until release.
+                    if tab.dragging_marker.is_none()
+                        && tab.selection_edge_drag_anchor.is_none()
+                        && tab.selection_stretch_gesture.is_none()
+                        && !tab.selection_stretch_cancel_until_release
+                    {
                         if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                             let x = pos.x;
                             match tab.active_tool {
@@ -6301,6 +6340,105 @@ impl crate::app::WavesPreviewer {
                 } else if !pointer_down {
                     // No release event means focus/input capture was lost.
                     tab.selection_stretch_gesture = None;
+                }
+            }
+
+            // Grab the selection's edge line — anywhere below the Time Stretch
+            // grip at the top — to lengthen or shorten the range. This moves
+            // nothing but the range: no resample, no undo step, no worker.
+            // Tool-independent, like the selection itself, and placed before
+            // the drag-select block below so a grab on an existing edge wins
+            // over starting a fresh range on the same press.
+            if (pointer_over_waveform || tab.selection_edge_drag_anchor.is_some())
+                && !world_f0_editing
+                && !tool_gesture_active
+                && display_samples_len > 0
+            {
+                let sel = tab.selection.map(|(a0, b0)| {
+                    if a0 <= b0 {
+                        (a0, b0)
+                    } else {
+                        (b0, a0)
+                    }
+                });
+                match sel.filter(|&(a, b)| b > a) {
+                    Some((sel_s, sel_e)) => {
+                        // Candidates are (handle x, the anchor that stays put).
+                        let mut candidates: Vec<(f32, usize)> = Vec::new();
+                        if geom.contains_boundary(sel_s) {
+                            candidates.push((geom.sample_boundary_x_unclamped(sel_s), sel_e));
+                        }
+                        if geom.contains_boundary(sel_e) {
+                            candidates.push((geom.sample_boundary_x_unclamped(sel_e), sel_s));
+                        }
+
+                        // Grab on the raw button press, not `drag_started_by`:
+                        // a handle has to respond without the drag threshold's
+                        // worth of movement. The Time Stretch grip owns the top
+                        // of the same line, so a press inside its band is never
+                        // a resize — not even when the stretch itself declined
+                        // it. `dragging_marker` is tested here rather than on
+                        // the block, so the clear-on-release branch below stays
+                        // reachable whatever else armed in the meantime.
+                        if tab.selection_edge_drag_anchor.is_none()
+                            && tab.dragging_marker.is_none()
+                            && ui.input(|i| i.pointer.primary_pressed())
+                        {
+                            if let Some(pos) = ui
+                                .input(|i| i.pointer.press_origin())
+                                .or_else(|| ui.input(|i| i.pointer.hover_pos()))
+                            {
+                                let grip_owns_press = view_mode == ViewMode::Waveform
+                                    && in_selection_stretch_band(rect.top(), pos.y);
+                                if !grip_owns_press {
+                                    if let Some(anchor) = nearest_handle(
+                                        &candidates,
+                                        pos.x,
+                                        SELECTION_EDGE_GRAB_RADIUS,
+                                    ) {
+                                        tab.selection_edge_drag_anchor = Some(anchor);
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(anchor) = tab.selection_edge_drag_anchor {
+                            if ui.input(|i| i.pointer.primary_down()) {
+                                // Only once the pointer has actually moved.
+                                // Handles are drawn on the sample *boundary*
+                                // but x -> sample is centre-based, so feeding
+                                // the press position straight back would shift
+                                // the edge by a sample on a bare click.
+                                let moved = ui
+                                    .input(|i| i.pointer.press_origin())
+                                    .zip(ui.input(|i| i.pointer.hover_pos()))
+                                    .is_none_or(|(origin, pos)| (pos.x - origin.x).abs() >= 0.5);
+                                if let Some(pos) =
+                                    ui.input(|i| i.pointer.hover_pos()).filter(|_| moved)
+                                {
+                                    let raw = to_range_selection_display_sample(pos.x);
+                                    let samp = if alt_now {
+                                        zc_snap_nearest(
+                                            &tab.ch_samples,
+                                            self.zero_cross_epsilon,
+                                            raw,
+                                        )
+                                    } else {
+                                        raw
+                                    };
+                                    Self::editor_set_selection_from_anchor(tab, anchor, samp);
+                                }
+                            } else {
+                                tab.selection_edge_drag_anchor = None;
+                            }
+                            // Held past the release frame as well: a grab with
+                            // no movement is reported as a click, and the
+                            // click handler would clear the whole selection.
+                            tool_gesture_active = true;
+                            suppress_seek = true;
+                        }
+                    }
+                    None => tab.selection_edge_drag_anchor = None,
                 }
             }
 
@@ -7286,11 +7424,17 @@ impl crate::app::WavesPreviewer {
                                     egui::StrokeKind::Inside,
                                 );
                             }
-                            // Time Stretch grips exist only in the primary
-                            // Waveform view. The blue selection fill above
-                            // remains visible in every other analysis view.
+                            // The edge line runs the full height and is a
+                            // plain range resize anywhere along it. Only the
+                            // tab at the very top stretches audio, and it is
+                            // drawn only in the primary Waveform view — the
+                            // blue fill above remains in every other view.
                             if view_mode == ViewMode::Waveform {
                                 let handle_col = Color32::from_rgb(90, 220, 255);
+                                // Dark enough to read against the grip's fill;
+                                // the arrows are the only thing that says this
+                                // tab does something the line below does not.
+                                let arrow_col = Color32::from_rgb(12, 18, 24);
                                 let draw_stretch_handle = |x: f32| {
                                     painter.line_segment(
                                         [
@@ -7299,16 +7443,29 @@ impl crate::app::WavesPreviewer {
                                         ],
                                         egui::Stroke::new(2.0, handle_col),
                                     );
-                                    draw_handle(x, handle_col);
-                                    let cy = rect.center().y;
+                                    painter.rect_filled(
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(
+                                                x - SELECTION_STRETCH_HANDLE_W * 0.5,
+                                                rect.top(),
+                                            ),
+                                            egui::pos2(
+                                                x + SELECTION_STRETCH_HANDLE_W * 0.5,
+                                                rect.top() + SELECTION_STRETCH_HANDLE_H,
+                                            ),
+                                        ),
+                                        2.0,
+                                        handle_col,
+                                    );
+                                    let cy = rect.top() + SELECTION_STRETCH_HANDLE_H * 0.5;
                                     for dir in [-1.0f32, 1.0f32] {
                                         painter.add(egui::Shape::line(
                                             vec![
-                                                egui::pos2(x + dir * 4.0, cy - 5.0),
-                                                egui::pos2(x + dir * 8.0, cy),
-                                                egui::pos2(x + dir * 4.0, cy + 5.0),
+                                                egui::pos2(x + dir * 1.0, cy - 2.5),
+                                                egui::pos2(x + dir * 3.5, cy),
+                                                egui::pos2(x + dir * 1.0, cy + 2.5),
                                             ],
-                                            egui::Stroke::new(1.5, handle_col),
+                                            egui::Stroke::new(1.2, arrow_col),
                                         ));
                                     }
                                 };
@@ -7706,32 +7863,29 @@ impl crate::app::WavesPreviewer {
                     }
                 }
 
-                // Cursor feedback for editor handles
-                if pointer_over_waveform && view_mode == ViewMode::Waveform {
+                // Cursor feedback for editor handles. The per-tool handles
+                // below are Waveform-only, but the selection's edges are
+                // draggable in every view, so their branch reads `view_mode`
+                // itself rather than sitting behind the gate.
+                if pointer_over_waveform {
                     let handle_radius = 7.0;
-                    if tab.dragging_marker.is_some()
-                        || tab.selection_stretch_gesture.is_some()
+                    let waveform_view = view_mode == ViewMode::Waveform;
+                    if tab.selection_stretch_gesture.is_some() {
+                        // A closed hand for the one gesture that rewrites audio.
+                        hover_cursor = Some(egui::CursorIcon::Grabbing);
+                    } else if tab.dragging_marker.is_some()
+                        || tab.selection_edge_drag_anchor.is_some()
                     {
                         hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
                     } else if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
                         let x = pos.x;
                         let near = |hx: f32| (x - hx).abs() <= handle_radius;
-                        // Both selection edges are always Time Stretch grips
-                        // in Waveform mode, independent of the active tool.
-                        if let Some((a0, b0)) = tab.selection {
-                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                            if b > a {
-                                if (geom.contains_boundary(a)
-                                    && near(geom.sample_boundary_x_unclamped(a)))
-                                    || (geom.contains_boundary(b)
-                                        && near(geom.sample_boundary_x_unclamped(b)))
-                                {
-                                    hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
-                                }
-                            }
-                        }
+                        // Per-tool handles first, so the selection's own grip
+                        // below can override them. A loop edge normally sits
+                        // exactly on the selection edge, and the grip at the
+                        // top belongs to the stretch even there.
                         match tab.active_tool {
-                            ToolKind::LoopEdit => {
+                            ToolKind::LoopEdit if waveform_view => {
                                 if let Some((a0, b0)) = tab.loop_region {
                                     let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
                                     let ax = to_x(a);
@@ -7741,7 +7895,7 @@ impl crate::app::WavesPreviewer {
                                     }
                                 }
                             }
-                            ToolKind::Fade => {
+                            ToolKind::Fade if waveform_view => {
                                 if let Some(xh) = fade_in_handle {
                                     if near(xh) {
                                         hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
@@ -7754,6 +7908,29 @@ impl crate::app::WavesPreviewer {
                                 }
                             }
                             _ => {}
+                        }
+                        // The selection's edges are tool-independent. The grip
+                        // at the top stretches audio (an open hand); the line
+                        // below it only moves the range (a resize arrow).
+                        if let Some((a0, b0)) = tab.selection {
+                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                            if b > a {
+                                let edge_near = |sample: usize| {
+                                    geom.contains_boundary(sample)
+                                        && near(geom.sample_boundary_x_unclamped(sample))
+                                };
+                                if edge_near(a) || edge_near(b) {
+                                    // The grip exists only in the Waveform
+                                    // view; elsewhere the whole line resizes.
+                                    let on_grip = waveform_view
+                                        && in_selection_stretch_band(rect.top(), pos.y);
+                                    hover_cursor = Some(if on_grip {
+                                        egui::CursorIcon::Grab
+                                    } else {
+                                        egui::CursorIcon::ResizeHorizontal
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -14255,8 +14432,9 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
 #[cfg(test)]
 mod tests {
     use super::{
-        nearest_handle, selection_stretch_rate, selection_stretch_target_len,
-        EditorDisplayGeometry, SELECTION_EDGE_GRAB_RADIUS,
+        in_selection_stretch_band, nearest_handle, selection_stretch_rate,
+        selection_stretch_target_len, EditorDisplayGeometry, SELECTION_EDGE_GRAB_RADIUS,
+        SELECTION_STRETCH_HANDLE_H, SELECTION_STRETCH_HANDLE_W,
     };
     use crate::app::types::SelectionStretchEdge;
 
@@ -14358,5 +14536,36 @@ mod tests {
         assert_eq!(longest, 1_600);
         assert_eq!(selection_stretch_rate(source_len, shortest), 4.0);
         assert_eq!(selection_stretch_rate(source_len, longest), 0.25);
+    }
+
+    /// The whole contract of the split: what is drawn as the grip is what
+    /// stretches, and one pixel below it is a different, harmless gesture.
+    #[test]
+    fn the_stretch_band_is_exactly_the_drawn_grip() {
+        let top = 100.0;
+        assert!(in_selection_stretch_band(top, top));
+        assert!(in_selection_stretch_band(
+            top,
+            top + SELECTION_STRETCH_HANDLE_H
+        ));
+        assert!(!in_selection_stretch_band(
+            top,
+            top + SELECTION_STRETCH_HANDLE_H + 0.1
+        ));
+        assert!(!in_selection_stretch_band(top, top - 0.1));
+    }
+
+    /// The grab radius must cover the tab the user is aiming at, or part of
+    /// what is painted as the grip would quietly resize instead.
+    #[test]
+    fn everything_drawn_in_the_grip_is_grabbable() {
+        assert!(SELECTION_EDGE_GRAB_RADIUS >= SELECTION_STRETCH_HANDLE_W * 0.5);
+    }
+
+    /// The destructive gesture stays the small target. 180.0 is the canvas's
+    /// minimum height, so the grip can never grow into most of the edge line.
+    #[test]
+    fn the_grip_leaves_the_edge_line_to_the_resize() {
+        assert!(SELECTION_STRETCH_HANDLE_H < 180.0 * 0.25);
     }
 }

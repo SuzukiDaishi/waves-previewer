@@ -1918,6 +1918,20 @@ impl super::WavesPreviewer {
         true
     }
 
+    pub fn test_editor_wave_canvas_rect(&self) -> Option<egui::Rect> {
+        let tab_idx = self.active_tab?;
+        self.tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.last_wave_canvas_rect)
+    }
+
+    /// Height of the selection's Time Stretch grip, measured down from the
+    /// waveform canvas top. Pointer tests need it to tell the grip from the
+    /// plain range-resize part of the same edge line.
+    pub fn test_editor_selection_stretch_handle_height() -> f32 {
+        crate::app::ui::editor::selection_stretch_handle_height()
+    }
+
     pub fn test_tab_amplitude_nav_rect(&self) -> Option<egui::Rect> {
         let tab_idx = self.active_tab?;
         self.tabs
