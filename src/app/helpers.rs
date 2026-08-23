@@ -51,13 +51,39 @@ pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(r, g, bl)
 }
 
+/// Waveform trace colour for a column whose peak amplitude is `a`.
+///
+/// Quiet is cool, loud is hot, and the amber stop in the middle is what makes
+/// the ramp readable: cyan interpolated straight to red crosses a desaturated
+/// mauve right where most material sits, and — worse — it got *darker* as it
+/// got louder (the old endpoints were luminance 170 quiet, 125 loud), so a
+/// waveform's peaks were the dimmest thing drawn. Brightness now rises with
+/// amplitude across almost the whole range and only eases off at the top,
+/// where the colour turns to warn about level.
+///
+/// This is the editor canvas *and* the list's Wave column thumbnails.
+const WAVE_QUIET: Color32 = Color32::from_rgb(72, 206, 250);
+const WAVE_MID: Color32 = Color32::from_rgb(250, 208, 84);
+const WAVE_LOUD: Color32 = Color32::from_rgb(255, 124, 96);
+/// Where `WAVE_MID` sits on the ramp. Past halfway, so ordinary material —
+/// which lands around t = 0.25..0.66 after the `powf` below — is drawn with
+/// the brightest part of the ramp rather than the crossing between stops.
+const WAVE_MID_T: f32 = 0.62;
+
 pub fn amp_to_color(a: f32) -> Color32 {
     let t = a.clamp(0.0, 1.0).powf(0.6); // emphasize loud parts
-    lerp_color(
-        Color32::from_rgb(80, 200, 255),
-        Color32::from_rgb(255, 70, 70),
-        t,
-    )
+    if t <= WAVE_MID_T {
+        lerp_color(WAVE_QUIET, WAVE_MID, t / WAVE_MID_T)
+    } else {
+        lerp_color(WAVE_MID, WAVE_LOUD, (t - WAVE_MID_T) / (1.0 - WAVE_MID_T))
+    }
+}
+
+/// Rec.601 perceived luminance, 0..255. Only used to hold the waveform ramp
+/// to a brightness floor in tests.
+#[cfg(test)]
+fn perceived_luminance(c: Color32) -> f32 {
+    0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32
 }
 
 pub fn sortable_header(
@@ -404,5 +430,52 @@ mod reveal_tests {
     #[test]
     fn reveal_command_none_without_parent() {
         assert!(reveal_in_folder_command(Path::new("/")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod waveform_color_tests {
+    use super::{amp_to_color, perceived_luminance};
+
+    /// Largest difference between any two channels: 0 is a pure grey.
+    fn chroma(c: egui::Color32) -> f32 {
+        let (r, g, b) = (c.r() as f32, c.g() as f32, c.b() as f32);
+        r.max(g).max(b) - r.min(g).min(b)
+    }
+
+    #[test]
+    fn the_ramp_never_crosses_through_grey() {
+        // The ramp this replaced ran cyan straight to red, whose midpoint is
+        // rgb(167, 135, 162) -- chroma 32, a mauve. That crossing is where
+        // ordinary material sits, so the busiest part of a waveform was also
+        // the least legible.
+        let mut worst = f32::INFINITY;
+        for step in 0..=200 {
+            let amp = step as f32 / 200.0;
+            worst = worst.min(chroma(amp_to_color(amp)));
+        }
+        assert!(worst >= 40.0, "waveform ramp desaturates to chroma {worst}");
+    }
+
+    #[test]
+    fn peaks_are_not_the_dimmest_thing_on_screen() {
+        // The old ramp ended at rgb(255, 70, 70) -- luminance 125, darker than
+        // its own quiet end at 170. Amplitude and brightness ran in opposite
+        // directions, so the loudest columns receded instead of standing out.
+        let mut worst = f32::INFINITY;
+        for step in 0..=200 {
+            let amp = step as f32 / 200.0;
+            worst = worst.min(perceived_luminance(amp_to_color(amp)));
+        }
+        assert!(worst >= 155.0, "waveform ramp dims to luminance {worst}");
+    }
+
+    #[test]
+    fn ordinary_material_lands_on_the_brightest_part_of_the_ramp() {
+        // A column peaking around -9 dBFS is the common case; it should be
+        // drawn brighter than either end of the ramp, not between them.
+        let ordinary = perceived_luminance(amp_to_color(0.35));
+        assert!(ordinary > perceived_luminance(amp_to_color(0.0)));
+        assert!(ordinary > perceived_luminance(amp_to_color(1.0)));
     }
 }

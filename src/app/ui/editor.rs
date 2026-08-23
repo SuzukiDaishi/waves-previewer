@@ -180,6 +180,25 @@ pub(crate) fn selection_stretch_handle_height() -> f32 {
     SELECTION_STRETCH_HANDLE_H
 }
 
+// The amplitude-0 line and the dB scale around it.
+//
+// These were one colour and one width, which made the line that says where the
+// waveform is centred indistinguishable from the two that are only a scale.
+// The centre line belongs to the same family as the zero lines the amplitude
+// (`rgb(86, 98, 116)`) and time (`rgb(84, 94, 110)`) navigators already draw;
+// the grid sits below it so the two roles read apart. Both stay well under the
+// waveform's own brightness — this is a reference, not a feature.
+const WAVE_CENTER_LINE_COL: Color32 = Color32::from_rgb(96, 104, 120);
+const WAVE_CENTER_LINE_W: f32 = 1.4;
+const WAVE_CENTER_LABEL_COL: Color32 = Color32::from_rgb(150, 158, 172);
+const WAVE_DB_GRID_COL: Color32 = Color32::from_rgb(38, 38, 44);
+
+/// Laid over a lane whose channel is muted (or lost to someone else's solo).
+/// The canvas background at ~59% alpha, so the lane fades toward the backdrop
+/// instead of changing hue. Written premultiplied because that is the `const`
+/// constructor: rgb(16, 16, 18) x 150/255.
+const WAVE_INAUDIBLE_SCRIM: Color32 = Color32::from_rgba_premultiplied(9, 9, 11, 150);
+
 /// Nearest handle to `x` within `radius`, returning that handle's payload.
 ///
 /// Ties resolve toward the later entry, so on a selection narrower than two
@@ -1095,6 +1114,19 @@ impl crate::app::WavesPreviewer {
         vertical_view_center: f32,
     ) -> f32 {
         Self::waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, 0.0)
+    }
+
+    /// Is this channel actually being monitored right now?
+    ///
+    /// Mirrors the engine's own rule (`audible_mask` in `src/audio.rs`): a solo
+    /// anywhere silences everything that is not soloed, and only when nothing
+    /// is soloed does mute decide.
+    pub(crate) fn editor_channel_is_audible(tab: &EditorTab, channel: usize) -> bool {
+        if tab.ch_solo.iter().any(|&s| s) {
+            tab.ch_solo.get(channel).copied().unwrap_or(false)
+        } else {
+            !tab.ch_muted.get(channel).copied().unwrap_or(false)
+        }
     }
 
     fn amplitude_nav_y_from_amp(rail_rect: egui::Rect, amp: f32) -> f32 {
@@ -6603,12 +6635,34 @@ impl crate::app::WavesPreviewer {
                 let lane_rect = egui::Rect::from_min_size(egui::pos2(wave_left, lane_top), egui::vec2(wave_w, lane_h));
                 let waveform_columns =
                     ov::compute_waveform_device_columns(lane_rect, pixels_per_point);
-                // dB lines: -6, -12 dBFS and center line (0 amp)
+                // The amplitude-0 line, and the -6/-12 dBFS grid around it.
+                //
+                // These used to be the same colour and the same width, so the
+                // one line that says where the waveform is centred was
+                // indistinguishable from the two that are only a scale. The
+                // centre line is now the brighter of the two, in the same
+                // family as the zero lines the amplitude and time navigators
+                // already draw, and the grid steps back to let it read.
                 let dbs = [-6.0f32, -12.0f32];
-                // center
                 let center_y =
                     Self::waveform_center_y(lane_rect, tab.vertical_zoom, tab.vertical_view_center);
-                painter.line_segment([egui::pos2(lane_rect.left(), center_y), egui::pos2(lane_rect.right(), center_y)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
+                painter.line_segment(
+                    [
+                        egui::pos2(lane_rect.left(), center_y),
+                        egui::pos2(lane_rect.right(), center_y),
+                    ],
+                    egui::Stroke::new(WAVE_CENTER_LINE_W, WAVE_CENTER_LINE_COL),
+                );
+                // The gutter is left of the waveform area, so this never lands
+                // on the trace or on a marker.
+                let gutter_font = TextStyle::Monospace.resolve(ui.style());
+                painter.text(
+                    egui::pos2(rect.left() + 2.0, center_y),
+                    egui::Align2::LEFT_CENTER,
+                    "0",
+                    gutter_font.clone(),
+                    WAVE_CENTER_LABEL_COL,
+                );
                 for &db in &dbs {
                     let a = db_to_amp(db).clamp(0.0, 1.0);
                     let y0 = Self::waveform_y_from_amp(
@@ -6623,11 +6677,10 @@ impl crate::app::WavesPreviewer {
                         tab.vertical_view_center,
                         -a,
                     );
-                    painter.line_segment([egui::pos2(lane_rect.left(), y0), egui::pos2(lane_rect.right(), y0)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
-                    painter.line_segment([egui::pos2(lane_rect.left(), y1), egui::pos2(lane_rect.right(), y1)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
+                    painter.line_segment([egui::pos2(lane_rect.left(), y0), egui::pos2(lane_rect.right(), y0)], egui::Stroke::new(1.0, WAVE_DB_GRID_COL));
+                    painter.line_segment([egui::pos2(lane_rect.left(), y1), egui::pos2(lane_rect.right(), y1)], egui::Stroke::new(1.0, WAVE_DB_GRID_COL));
                     // labels on the left gutter
-                    let fid = TextStyle::Monospace.resolve(ui.style());
-                    painter.text(egui::pos2(rect.left() + 2.0, y0), egui::Align2::LEFT_CENTER, format!("{db:.0} dB"), fid, Color32::GRAY);
+                    painter.text(egui::pos2(rect.left() + 2.0, y0), egui::Align2::LEFT_CENTER, format!("{db:.0} dB"), gutter_font.clone(), Color32::GRAY);
                 }
 
                 if visible_len > 0 {
@@ -7311,6 +7364,18 @@ impl crate::app::WavesPreviewer {
                 }
             }
             }
+
+                // A lane nobody can hear recedes. Mute and solo reached the M/S
+                // buttons and the engine but never the canvas, so a silenced
+                // channel drew exactly as brightly as the one actually playing.
+                // The scrim covers this lane's trace and its grid and nothing
+                // above it, so the selection, markers and playhead stay equally
+                // readable across every lane.
+                if let Some(ch) = channel_index {
+                    if !Self::editor_channel_is_audible(&*tab, ch) {
+                        painter.rect_filled(lane_rect, 0.0, WAVE_INAUDIBLE_SCRIM);
+                    }
+                }
                 }
             }
 
