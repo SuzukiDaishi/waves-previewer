@@ -340,7 +340,33 @@ impl super::WavesPreviewer {
         ctx.request_repaint();
     }
 
-    pub(super) fn paste_clipboard_to_list(&mut self) {
+    /// Is there anything a list paste could bring in right now?
+    ///
+    /// Asks the same three sources, in the same order, that the paste itself
+    /// does, so the menu item is never greyed out over a clipboard that would
+    /// in fact have worked.
+    pub(super) fn can_paste_into_list(&self) -> bool {
+        if self
+            .clipboard_payload
+            .as_ref()
+            .is_some_and(|p| !p.items.is_empty())
+        {
+            return true;
+        }
+        if !self.get_clipboard_files().is_empty() {
+            return true;
+        }
+        self.get_clipboard_text()
+            .is_some_and(|text| !parse_pasted_file_paths(&text).is_empty())
+    }
+
+    /// Paste into the list.
+    ///
+    /// `pasted_text` is the text egui handed over with the paste event, which
+    /// is the only way to see the clipboard's text on platforms with no native
+    /// reader for it. `None` is fine: the OS file list is tried first anyway,
+    /// and where a text reader exists it is asked directly.
+    pub(super) fn paste_clipboard_to_list(&mut self, pasted_text: Option<&str>) {
         let before = self.capture_list_selection_snapshot();
         let payload = self.clipboard_payload.clone();
         let mut added_any = false;
@@ -499,30 +525,61 @@ impl super::WavesPreviewer {
         }
         let existing_paths: HashSet<PathBuf> =
             self.items.iter().map(|item| item.path.clone()).collect();
-        let files = self.get_clipboard_files();
-        if self.debug.cfg.enabled {
-            self.debug_trace_input(format!("paste os files={}", files.len()));
-        }
-        if !files.is_empty() {
-            let added = self.add_files_merge(&files);
-            if added > 0 {
-                self.after_add_refresh();
-                let new_paths: Vec<PathBuf> = self
-                    .items
-                    .iter()
-                    .filter(|item| !existing_paths.contains(&item.path))
-                    .map(|item| item.path.clone())
-                    .collect();
-                self.record_list_insert_from_paths(&new_paths, before);
-                if self.debug.cfg.enabled {
-                    self.debug.last_paste_at = Some(std::time::Instant::now());
-                    self.debug.last_paste_count = added;
-                    self.debug.last_paste_source = Some("os".to_string());
-                    self.debug_trace_input(format!("paste_clipboard_to_list os files={added}"));
-                }
+        // Priority: the OS file list, then whatever the clipboard's text can be
+        // read as. A native file list only exists on some platforms, and even
+        // where it does a foreign copy may only offer text -- but every desktop
+        // file manager puts a `file://` URI list or plain paths on the text
+        // target, so the fallback is what makes this work everywhere.
+        let mut files = self.get_clipboard_files();
+        let mut source = "os";
+        if files.is_empty() {
+            let text = pasted_text
+                .map(str::to_string)
+                .or_else(|| self.get_clipboard_text());
+            if let Some(text) = text {
+                files = parse_pasted_file_paths(&text);
+                source = "text";
             }
-        } else if self.debug.cfg.enabled {
-            self.debug_trace_input("paste_clipboard_to_list os empty");
+        }
+        if self.debug.cfg.enabled {
+            self.debug_trace_input(format!("paste {source} files={}", files.len()));
+        }
+        if files.is_empty() {
+            if self.debug.cfg.enabled {
+                self.debug_trace_input("paste_clipboard_to_list os empty");
+            }
+            return;
+        }
+        let counts = self.add_files_merge_counted(&files);
+        if counts.added > 0 {
+            self.after_add_refresh();
+            let new_paths: Vec<PathBuf> = self
+                .items
+                .iter()
+                .filter(|item| !existing_paths.contains(&item.path))
+                .map(|item| item.path.clone())
+                .collect();
+            self.record_list_insert_from_paths(&new_paths, before);
+        }
+        // A clipboard is invisible until something appears in the list, so
+        // silently dropping duplicates and non-audio the way drag and drop does
+        // reads as "paste is broken" rather than "those were skipped".
+        if let Some(summary) = counts.summary() {
+            let severity = if counts.added > 0 {
+                super::types::ToastSeverity::Info
+            } else {
+                super::types::ToastSeverity::Warning
+            };
+            self.push_toast(severity, summary);
+        }
+        if self.debug.cfg.enabled {
+            self.debug.last_paste_at = Some(std::time::Instant::now());
+            self.debug.last_paste_count = counts.added;
+            self.debug.last_paste_source = Some(source.to_string());
+            self.debug_trace_input(format!(
+                "paste_clipboard_to_list {source} added={} dup={} unsupported={} missing={}",
+                counts.added, counts.duplicates, counts.unsupported, counts.missing
+            ));
         }
     }
 
@@ -848,7 +905,7 @@ impl super::WavesPreviewer {
             }
         }
         if paste_trigger {
-            self.paste_clipboard_to_list();
+            self.paste_clipboard_to_list(paste_text.as_deref());
             if self.debug.cfg.enabled {
                 if let Some(text) = paste_text.as_deref() {
                     self.debug_trace_input(format!(
@@ -1027,5 +1084,179 @@ mod tests {
             .collect();
         let result = String::from_utf16_lossy(&decoded);
         assert!(result.starts_with("neowaves_paste"), "round-trip: {result}");
+    }
+}
+
+/// Percent-decode a `file://` URI's path component.
+///
+/// Written out rather than pulled in: the only escapes that matter here are the
+/// ones a file manager produces for a path, and a path is bytes, so the decode
+/// has to happen at byte level before it is read back as UTF-8. Doing it per
+/// `char` would mangle any non-ASCII name -- which on this codebase's usual
+/// material means every Japanese filename.
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Pull file paths out of pasted clipboard text.
+///
+/// The OS file list is the first choice and this is the fallback, covering the
+/// other three shapes a file manager might hand over: a `text/uri-list` of
+/// `file://` URIs, several newline-separated paths, or a single path. Every
+/// desktop file manager puts at least one of these on the text target, which is
+/// what makes paste-to-import work where no native file-list reader exists.
+///
+/// Anything that is not path-shaped is dropped rather than guessed at, so
+/// pasting a sentence into the list does nothing instead of inventing entries.
+pub(super) fn parse_pasted_file_paths(text: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        // `text/uri-list` says lines starting with `#` are comments.
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let path = if let Some(rest) = line
+            .strip_prefix("file://")
+            .or_else(|| line.strip_prefix("FILE://"))
+        {
+            let decoded = percent_decode(rest);
+            // `file:///c:/x` and `file:///home/x` carry an empty authority;
+            // `file://server/share/x` is a UNC host worth keeping.
+            match decoded.strip_prefix('/') {
+                Some(after_slash) => {
+                    // A Windows drive letter arrives as `/C:/...`.
+                    let looks_like_drive =
+                        after_slash.as_bytes().get(1).is_some_and(|&c| c == b':')
+                            && after_slash
+                                .as_bytes()
+                                .first()
+                                .is_some_and(|c| c.is_ascii_alphabetic());
+                    if looks_like_drive {
+                        PathBuf::from(after_slash)
+                    } else {
+                        PathBuf::from(decoded)
+                    }
+                }
+                None => PathBuf::from(format!(r"\\{decoded}")),
+            }
+        } else if line.starts_with('/')
+            || line.starts_with(r"\\")
+            || line
+                .as_bytes()
+                .get(1)
+                .is_some_and(|&c| c == b':' || c == b'|')
+        {
+            PathBuf::from(line)
+        } else {
+            continue;
+        };
+        if seen.insert(path.clone()) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod pasted_path_tests {
+    use super::parse_pasted_file_paths;
+    use std::path::PathBuf;
+
+    fn parse(text: &str) -> Vec<String> {
+        parse_pasted_file_paths(text)
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_single_plain_path_is_enough() {
+        assert_eq!(parse("/home/u/kick.wav"), vec!["/home/u/kick.wav"]);
+    }
+
+    #[test]
+    fn newline_separated_paths_all_come_through() {
+        assert_eq!(
+            parse("/a/one.wav\n/a/two.wav\r\n/a/three.wav\n"),
+            vec!["/a/one.wav", "/a/two.wav", "/a/three.wav"]
+        );
+    }
+
+    #[test]
+    fn file_uris_are_percent_decoded() {
+        assert_eq!(
+            parse("file:///home/u/my%20kick.wav"),
+            vec!["/home/u/my kick.wav"]
+        );
+    }
+
+    #[test]
+    fn japanese_names_survive_the_decode() {
+        // Decoding per char instead of per byte would mangle this, which is the
+        // whole reason the decoder works on bytes.
+        assert_eq!(
+            parse("file:///home/u/%E5%8A%B9%E6%9E%9C%E9%9F%B3.wav"),
+            vec!["/home/u/効果音.wav"]
+        );
+    }
+
+    #[test]
+    fn a_windows_drive_letter_loses_the_leading_slash() {
+        assert_eq!(
+            parse("file:///C:/Audio/kick.wav"),
+            vec![r"C:/Audio/kick.wav"]
+        );
+    }
+
+    #[test]
+    fn a_unc_host_is_kept_as_a_unc_path() {
+        assert_eq!(
+            parse("file://server/share/kick.wav"),
+            vec![r"\\server/share/kick.wav"]
+        );
+        assert_eq!(
+            parse(r"\\server\share\kick.wav"),
+            vec![r"\\server\share\kick.wav"]
+        );
+    }
+
+    #[test]
+    fn uri_list_comments_and_blank_lines_are_skipped() {
+        assert_eq!(
+            parse("# this is a uri-list comment\n\nfile:///a/one.wav\n"),
+            vec!["/a/one.wav"]
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_a_path_yields_nothing() {
+        assert!(parse("just some copied words").is_empty());
+        assert!(parse("neowaves://clipboard").is_empty());
+        assert!(parse("").is_empty());
+    }
+
+    #[test]
+    fn the_same_path_twice_is_listed_once() {
+        assert_eq!(
+            parse_pasted_file_paths("/a/one.wav\n/a/one.wav\n"),
+            vec![PathBuf::from("/a/one.wav")]
+        );
     }
 }

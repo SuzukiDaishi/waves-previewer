@@ -35,17 +35,12 @@ impl WavesPreviewer {
             self.copy_selected_to_clipboard();
             ui.close();
         }
-        let can_paste = self
-            .clipboard_payload
-            .as_ref()
-            .map(|p| !p.items.is_empty())
-            .unwrap_or(false)
-            || !self.get_clipboard_files().is_empty();
+        let can_paste = self.can_paste_into_list();
         if ui
             .add_enabled(can_paste, egui::Button::new("Paste"))
             .clicked()
         {
-            self.paste_clipboard_to_list();
+            self.paste_clipboard_to_list(None);
             ui.close();
         }
         if ui

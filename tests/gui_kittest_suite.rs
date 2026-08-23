@@ -11490,4 +11490,77 @@ mod kittest_suite {
             "+6 dB should roughly double the monitor gain, got {boosted}"
         );
     }
+
+    #[test]
+    fn pasting_file_paths_as_text_imports_them_into_the_list() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        harness.run_steps(2);
+        let before = harness.state().test_visible_list_paths().len();
+
+        // Files that exist but are not in the open folder, plus two paths that
+        // should be turned away: one non-audio, one that is not there at all.
+        let extra = make_temp_dir("paste_import");
+        let sr = 48_000;
+        let chans = synth_stereo(sr, 0.25);
+        let mut lines = Vec::new();
+        for name in ["pasted_one.wav", "pasted_two.wav"] {
+            let path = extra.join(name);
+            neowaves::wave::export_channels_audio(&chans, sr, &path)
+                .unwrap_or_else(|e| panic!("export {name} failed: {e}"));
+            lines.push(format!("file://{}", path.display()));
+        }
+        let notes = extra.join("notes.txt");
+        std::fs::write(&notes, b"not audio").expect("write notes.txt");
+        lines.push(format!("file://{}", notes.display()));
+        lines.push(format!("file://{}", extra.join("gone.wav").display()));
+
+        // The list paste only fires while the list owns the keys and has
+        // something selected, which is the state a user pasting into it is in.
+        harness.state_mut().test_list_select_all();
+        harness.run_steps(2);
+        harness.event(egui::Event::Paste(lines.join("\n")));
+        harness.run_steps(6);
+
+        assert_eq!(
+            harness.state().test_visible_list_paths().len(),
+            before + 2,
+            "both pasted wavs should have been imported"
+        );
+        let toast = harness.state().test_toast_messages().join(" | ");
+        assert!(
+            toast.contains("Added 2"),
+            "the paste should report what it did, got {toast:?}"
+        );
+        assert!(
+            toast.contains("not audio") && toast.contains("not found"),
+            "and what it turned away, got {toast:?}"
+        );
+    }
+
+    #[test]
+    fn pasting_the_same_paths_again_says_they_are_already_there() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        harness.run_steps(2);
+
+        let path = harness
+            .state()
+            .test_visible_list_paths()
+            .first()
+            .map(|p| p.display().to_string())
+            .expect("a row in the list");
+        harness.state_mut().test_list_select_all();
+        harness.run_steps(2);
+        let before = harness.state().test_visible_list_paths().len();
+        harness.event(egui::Event::Paste(path));
+        harness.run_steps(6);
+
+        assert_eq!(harness.state().test_visible_list_paths().len(), before);
+        let toast = harness.state().test_toast_messages().join(" | ");
+        assert!(
+            toast.contains("already in the list"),
+            "a paste that adds nothing must say why, got {toast:?}"
+        );
+    }
 }
