@@ -5,9 +5,10 @@ use std::sync::Arc;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, TextStyle, Visuals};
 
 use super::types::{
-    ConflictPolicy, EditorHorizontalZoomAnchorMode, EditorPauseResumeMode, ExportConfig,
-    ItemBgMode, ListColumnConfig, SaveMode, SpectrogramConfig, SpectrogramScale, SrcQuality,
-    ThemeMode, TranscriptComputeTarget, TranscriptModelVariant, TranscriptPerfMode, WindowFunction,
+    ConflictPolicy, EditorHorizontalScrollSpeed, EditorHorizontalZoomAnchorMode,
+    EditorPauseResumeMode, ExportConfig, ItemBgMode, ListColumnConfig, SaveMode, SpectrogramConfig,
+    SpectrogramScale, SrcQuality, ThemeMode, TranscriptComputeTarget, TranscriptModelVariant,
+    TranscriptPerfMode, WindowFunction,
 };
 use super::WavesPreviewer;
 
@@ -434,6 +435,9 @@ impl WavesPreviewer {
                     "playhead" => EditorHorizontalZoomAnchorMode::Playhead,
                     _ => EditorHorizontalZoomAnchorMode::Pointer,
                 };
+            } else if let Some(rest) = line.strip_prefix("editor_horizontal_scroll_speed=") {
+                self.editor_horizontal_scroll_speed =
+                    EditorHorizontalScrollSpeed::from_key(rest.trim()).unwrap_or_default();
             } else if let Some(rest) = line.strip_prefix("editor_pause_resume_mode=") {
                 self.editor_pause_resume_mode = match rest.trim().to_ascii_lowercase().as_str() {
                     "continue_from_pause" => EditorPauseResumeMode::ContinueFromPause,
@@ -947,6 +951,7 @@ editor_invert_wave_zoom_wheel={}\n\
 editor_invert_shift_wheel_pan={}\n\
 editor_wheel_mode={}\n\
 editor_horizontal_zoom_anchor={}\n\
+editor_horizontal_scroll_speed={}\n\
 editor_pause_resume_mode={}\n\
 spectro_fft={}\n\
 spectro_window={}\n\
@@ -1016,6 +1021,7 @@ zoo_flip_manual={}\n",
             invert_shift_wheel_pan,
             editor_wheel_mode,
             horizontal_zoom_anchor,
+            self.editor_horizontal_scroll_speed.to_key(),
             editor_pause_resume_mode,
             self.spectro_cfg.fft_size,
             window,
@@ -1331,6 +1337,43 @@ mod tests {
         assert_eq!(loaded.list_col_widths.get("file").copied(), Some(314.5));
         assert_eq!(loaded.list_col_widths.get("wave").copied(), Some(220.0));
         assert!(!loaded.list_click_audition);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn editor_horizontal_scroll_speed_prefs_roundtrip() {
+        let dir = temp_dir("h_scroll_speed");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        assert_eq!(
+            app.editor_horizontal_scroll_speed,
+            EditorHorizontalScrollSpeed::X1,
+            "default is the unmultiplied step"
+        );
+        app.editor_horizontal_scroll_speed = EditorHorizontalScrollSpeed::X4;
+        app.save_prefs_to_path(&prefs);
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(
+            loaded.editor_horizontal_scroll_speed,
+            EditorHorizontalScrollSpeed::X4,
+            "the chosen speed must round-trip"
+        );
+
+        // An unreadable value falls back to the default rather than refusing
+        // to load the rest of the prefs file.
+        std::fs::write(&prefs, "editor_horizontal_scroll_speed=bogus\n").expect("write prefs");
+        let mut fallback =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        fallback.editor_horizontal_scroll_speed = EditorHorizontalScrollSpeed::X2;
+        fallback.load_prefs_from_path(&prefs);
+        assert_eq!(
+            fallback.editor_horizontal_scroll_speed,
+            EditorHorizontalScrollSpeed::X1
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

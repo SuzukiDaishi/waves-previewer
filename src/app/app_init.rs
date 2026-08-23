@@ -295,6 +295,7 @@ impl WavesPreviewer {
             invert_shift_wheel_pan: false,
             editor_wheel_scrolls: false,
             horizontal_zoom_anchor_mode: EditorHorizontalZoomAnchorMode::Pointer,
+            editor_horizontal_scroll_speed: EditorHorizontalScrollSpeed::default(),
             editor_pause_resume_mode: EditorPauseResumeMode::ReturnToLastStart,
             mode: RateMode::Speed,
             processing: None,

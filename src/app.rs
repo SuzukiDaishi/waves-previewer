@@ -843,6 +843,8 @@ pub struct WavesPreviewer {
     // When on, a plain wheel scrolls the view horizontally and Ctrl+wheel zooms.
     editor_wheel_scrolls: bool,
     horizontal_zoom_anchor_mode: EditorHorizontalZoomAnchorMode,
+    // How far one Shift+wheel notch pans, as a multiple of the base step.
+    editor_horizontal_scroll_speed: EditorHorizontalScrollSpeed,
     editor_pause_resume_mode: EditorPauseResumeMode,
     // processing mode
     mode: RateMode,

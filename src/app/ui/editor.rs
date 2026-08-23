@@ -551,6 +551,22 @@ impl crate::app::WavesPreviewer {
         changed
     }
 
+    /// Timeline pixels to pan per pixel of wheel travel, for Shift+wheel.
+    ///
+    /// Sized so one ordinary notch — about `WHEEL_NOTCH_PX` of smooth delta —
+    /// moves `HORIZONTAL_PAN_NOTCH_FRACTION` of the visible width at 1x. That
+    /// keeps the gesture feeling the same whatever the zoom, and lets the
+    /// speed multiplier mean something concrete: 4x is a little over half the
+    /// viewport per notch.
+    pub(crate) fn editor_horizontal_pan_gain(
+        wave_w: f32,
+        speed: EditorHorizontalScrollSpeed,
+    ) -> f32 {
+        const WHEEL_NOTCH_PX: f32 = 50.0;
+        const HORIZONTAL_PAN_NOTCH_FRACTION: f32 = 0.15;
+        wave_w.max(1.0) * HORIZONTAL_PAN_NOTCH_FRACTION / WHEEL_NOTCH_PX * speed.multiplier()
+    }
+
     pub(crate) fn normalized_loop_range(range: Option<(usize, usize)>) -> Option<(usize, usize)> {
         range.map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
     }
@@ -5084,7 +5100,20 @@ impl crate::app::WavesPreviewer {
                     scroll_for_pan = -scroll_for_pan;
                 }
                 if modifiers.shift && scroll_for_pan.abs() > 0.0 && display_samples_len > 0 {
-                    let delta_px = -scroll_for_pan.signum() * 60.0; // a page step
+                    // Proportional, and measured against the viewport rather
+                    // than a fixed 60 px.
+                    //
+                    // A fixed step meant crossing a long file took as many
+                    // notches at any zoom, which is what made scrubbing through
+                    // a long take feel like it went nowhere. Taking `.signum()`
+                    // also threw away how far the wheel actually turned, and
+                    // because egui smooths one physical notch across several
+                    // frames, that turned one notch into as many steps as the
+                    // frame rate happened to allow. Scaling the real delta
+                    // fixes both: a notch moves the same fraction of what is on
+                    // screen every time.
+                    let delta_px =
+                        -scroll_for_pan * Self::editor_horizontal_pan_gain(wave_w, self.editor_horizontal_scroll_speed);
                     let vis = (wave_w * tab.samples_per_px).ceil() as usize;
                     let max_left = display_samples_len.saturating_sub(vis);
                     let next_exact = tab.view_offset_exact + (delta_px * tab.samples_per_px) as f64;
@@ -14629,7 +14658,7 @@ mod tests {
         selection_stretch_target_len, EditorDisplayGeometry, SELECTION_EDGE_GRAB_RADIUS,
         SELECTION_STRETCH_HANDLE_H, SELECTION_STRETCH_HANDLE_W,
     };
-    use crate::app::types::SelectionStretchEdge;
+    use crate::app::types::{EditorHorizontalScrollSpeed, SelectionStretchEdge};
 
     fn geom(view_offset: usize, spp: f32) -> EditorDisplayGeometry {
         EditorDisplayGeometry {
@@ -14760,5 +14789,54 @@ mod tests {
     #[test]
     fn the_grip_leaves_the_edge_line_to_the_resize() {
         assert!(SELECTION_STRETCH_HANDLE_H < 180.0 * 0.25);
+    }
+
+    #[test]
+    fn one_wheel_notch_pans_the_same_share_of_the_viewport_at_any_width() {
+        // The step this replaced was a flat 60 px, so a wide window crossed
+        // proportionally less of the file per notch than a narrow one, and a
+        // long take took the same many notches however far it was zoomed out.
+        let notch = 50.0f32;
+        for width in [320.0f32, 900.0, 2400.0] {
+            let moved = notch
+                * crate::app::WavesPreviewer::editor_horizontal_pan_gain(
+                    width,
+                    EditorHorizontalScrollSpeed::X1,
+                );
+            assert!(
+                (moved / width - 0.15).abs() < 1.0e-4,
+                "a notch should move 15% of a {width}px viewport, moved {moved}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_speed_setting_multiplies_that_share() {
+        let width = 900.0f32;
+        let base = crate::app::WavesPreviewer::editor_horizontal_pan_gain(
+            width,
+            EditorHorizontalScrollSpeed::X1,
+        );
+        for (speed, factor) in [
+            (EditorHorizontalScrollSpeed::X2, 2.0f32),
+            (EditorHorizontalScrollSpeed::X4, 4.0),
+        ] {
+            let scaled = crate::app::WavesPreviewer::editor_horizontal_pan_gain(width, speed);
+            assert!(
+                (scaled / base - factor).abs() < 1.0e-4,
+                "{speed:?} should be {factor}x"
+            );
+        }
+    }
+
+    #[test]
+    fn a_degenerate_canvas_width_still_yields_a_finite_step() {
+        for width in [0.0f32, -5.0] {
+            let gain = crate::app::WavesPreviewer::editor_horizontal_pan_gain(
+                width,
+                EditorHorizontalScrollSpeed::X1,
+            );
+            assert!(gain.is_finite() && gain > 0.0, "width {width} gave {gain}");
+        }
     }
 }

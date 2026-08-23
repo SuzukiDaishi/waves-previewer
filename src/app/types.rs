@@ -1968,6 +1968,61 @@ pub enum EditorHorizontalZoomAnchorMode {
     Playhead,
 }
 
+/// How far Shift+wheel pans the waveform, as a multiple of the base step.
+///
+/// The base step is a fraction of the visible width, so this multiplier reads
+/// the same at every zoom. Long takes are the reason it exists: at 1x, crossing
+/// an hour-long file is a lot of notches.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EditorHorizontalScrollSpeed {
+    #[default]
+    X1,
+    X2,
+    X4,
+}
+
+impl EditorHorizontalScrollSpeed {
+    pub fn multiplier(self) -> f32 {
+        match self {
+            EditorHorizontalScrollSpeed::X1 => 1.0,
+            EditorHorizontalScrollSpeed::X2 => 2.0,
+            EditorHorizontalScrollSpeed::X4 => 4.0,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            EditorHorizontalScrollSpeed::X1 => "1x",
+            EditorHorizontalScrollSpeed::X2 => "2x",
+            EditorHorizontalScrollSpeed::X4 => "4x",
+        }
+    }
+
+    /// Stable token for the prefs file.
+    pub fn to_key(self) -> &'static str {
+        match self {
+            EditorHorizontalScrollSpeed::X1 => "1x",
+            EditorHorizontalScrollSpeed::X2 => "2x",
+            EditorHorizontalScrollSpeed::X4 => "4x",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "1x" => Some(EditorHorizontalScrollSpeed::X1),
+            "2x" => Some(EditorHorizontalScrollSpeed::X2),
+            "4x" => Some(EditorHorizontalScrollSpeed::X4),
+            _ => None,
+        }
+    }
+
+    pub const ALL: [EditorHorizontalScrollSpeed; 3] = [
+        EditorHorizontalScrollSpeed::X1,
+        EditorHorizontalScrollSpeed::X2,
+        EditorHorizontalScrollSpeed::X4,
+    ];
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EditorPauseResumeMode {
     ReturnToLastStart,
