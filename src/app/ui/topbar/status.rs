@@ -731,7 +731,9 @@ impl WavesPreviewer {
         )
         .on_hover_text(
             "Realtime loudness of what's playing: M = momentary LUFS (400 ms), \
-                 S = short-term LUFS (3 s), TP = true peak (dBTP, 4x oversampled)",
+                 S = short-term LUFS (3 s), TP = true peak (dBTP, 4x oversampled).\n\
+                 Measured on the material, so the monitor volume does not move these \
+                 numbers; per-channel mute/solo and channel routing do.",
         );
         if m.is_some() || s.is_some() || tp.is_some() {
             ui.ctx()

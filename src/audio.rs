@@ -61,7 +61,9 @@ pub const METER_VALUE_INVALID: i32 = i32::MIN;
 /// the engine quietly clamped it away at unity.
 pub const MAX_MONITOR_GAIN: f32 = 1.9952624;
 
-/// Lock-free SPSC tap: the audio callback publishes post-gain L/R frames,
+/// Lock-free SPSC tap: the audio callback publishes the L/R programme --
+/// after routing and mute/solo, before the monitor volume, the seek ramp and
+/// the output clamp -- and
 /// a low-priority meter thread drains them. Overwrite semantics — a slow
 /// reader just loses the oldest frames.
 pub struct MeterTap {
@@ -1156,10 +1158,21 @@ impl AudioEngine {
 
             let mut tap_frame = [0.0f32; 2];
             for (out_ch, out_sample) in frame.iter_mut().enumerate() {
-                let out = (matrix.mix(out_ch, &src_frame) * vol * ramp_gain).clamp(-1.0, 1.0);
+                // `mixed` is the programme: routing and any per-channel mute or
+                // solo have been applied, but nothing to do with how loudly it
+                // is being monitored. `out` is what the device gets.
+                let mixed = matrix.mix(out_ch, &src_frame);
+                let out = (mixed * vol * ramp_gain).clamp(-1.0, 1.0);
                 *out_sample = T::from_sample(out);
                 if out_ch < 2 {
-                    tap_frame[out_ch] = out;
+                    // The loudness meter reads the programme, not the monitor.
+                    // It used to read `out`, so the M / S / TP figures moved
+                    // with the volume slider and could not be compared with the
+                    // list's LUFS column or with any target -- turning the
+                    // monitor down made the material look quieter than it is.
+                    // Master volume, the anti-click seek ramp and the output
+                    // clamp are all monitoring, so none of them belong here.
+                    tap_frame[out_ch] = mixed;
                 }
                 meter_sum_sq += f64::from(out * out);
                 meter_count = meter_count.saturating_add(1);
@@ -1854,6 +1867,69 @@ mod tests {
             }
         }
         matrix.mix(out_ch, &src_frame)
+    }
+
+    fn render_probe(vol: f32) -> (Vec<f32>, Vec<f32>) {
+        let shared = AudioEngine::new_shared(2, 48_000);
+        let params = RenderParams {
+            vol,
+            audible_mask: u64::MAX,
+            rate: 1.0,
+            looping: false,
+            loop_start: 0,
+            loop_end: 0,
+            loop_xfade_samples: 0,
+            loop_xfade_shape: 0,
+            map_mode: crate::audio_channels::ChannelMapMode::Direct,
+            pos_f: 0.0,
+        };
+        const FRAMES: usize = 128;
+        let mut data = vec![0.0f32; FRAMES * 2];
+        AudioEngine::render_block::<f32, _>(
+            &mut data,
+            2,
+            &shared,
+            2,
+            FRAMES,
+            &params,
+            // A quiet tone, so nothing is lost to the output clamp and the two
+            // renders differ only by the gain under test.
+            |_ch, pos| (pos as f32 * 0.05).sin() * 0.25,
+        );
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        shared.meter_tap.read_since(0, &mut left, &mut right);
+        assert_eq!(left.len(), FRAMES, "the tap should see every frame");
+        let _ = right;
+        (data, left)
+    }
+
+    #[test]
+    fn the_loudness_tap_ignores_the_monitor_volume() {
+        // The meter thread reads this tap to publish M / S / TP. It used to be
+        // fed the device output, so those figures moved with the volume slider
+        // and could not be compared against the list's LUFS column or a target.
+        let (loud_out, loud_tap) = render_probe(1.0);
+        let (quiet_out, quiet_tap) = render_probe(0.1);
+
+        assert_eq!(
+            loud_tap, quiet_tap,
+            "loudness is a property of the material, not of how loudly it is being played"
+        );
+        assert!(
+            loud_tap.iter().any(|v| v.abs() > 0.01),
+            "the probe has to actually produce signal for this to mean anything"
+        );
+
+        // ...while the device output, and the dBFS output meter that shares it,
+        // still follow the monitor gain.
+        let loud_rms = (loud_out.iter().map(|v| v * v).sum::<f32>() / loud_out.len() as f32).sqrt();
+        let quiet_rms =
+            (quiet_out.iter().map(|v| v * v).sum::<f32>() / quiet_out.len() as f32).sqrt();
+        assert!(
+            quiet_rms < loud_rms * 0.2,
+            "output should still follow the monitor volume: {quiet_rms} vs {loud_rms}"
+        );
     }
 
     #[test]
