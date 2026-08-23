@@ -11642,4 +11642,52 @@ mod kittest_suite {
             "and must not move the loop while doing it"
         );
     }
+
+    #[test]
+    fn ctrl_a_selects_the_whole_file_and_says_so() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.40, 0.45));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let samples_len = harness.state().tabs[tab_idx].samples_len;
+        assert!(samples_len > 0);
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().test_tab_selection(),
+            Some((0, samples_len)),
+            "Ctrl+A should reach both ends of the file"
+        );
+        let toast = harness.state().test_toast_messages().join(" | ");
+        assert!(
+            toast.contains("entire file"),
+            "zoomed out this looks like any other range, so it has to be stated: {toast:?}"
+        );
+    }
+
+    #[test]
+    fn ctrl_a_belongs_to_the_list_when_the_list_is_in_front() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.40, 0.45));
+        harness.run_steps(2);
+        let before = harness.state().test_tab_selection();
+
+        // Back to the list, with the editor tab still open behind it.
+        harness.state_mut().test_switch_to_list_workspace();
+        harness.run_steps(3);
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().test_tab_selection(),
+            before,
+            "the editor's Ctrl+A must not fire from behind the list"
+        );
+    }
 }

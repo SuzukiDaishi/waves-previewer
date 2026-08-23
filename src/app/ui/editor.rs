@@ -1056,7 +1056,11 @@ impl crate::app::WavesPreviewer {
             - (anchor_ratio as f64 * wave_w.max(1.0) as f64 * spp.max(0.0001) as f64)
     }
 
-    fn editor_set_selection_from_anchor(tab: &mut EditorTab, anchor: usize, target: usize) {
+    pub(in crate::app) fn editor_set_selection_from_anchor(
+        tab: &mut EditorTab,
+        anchor: usize,
+        target: usize,
+    ) {
         let (start, end) = if target >= anchor {
             (anchor, target)
         } else {
@@ -8938,8 +8942,14 @@ impl crate::app::WavesPreviewer {
                         let start_sec = (a as f32 / sr).max(0.0);
                         let end_sec = (b as f32 / sr).max(0.0);
                         let len_sec = (len as f32 / sr).max(0.0);
+                        // Say so when the range covers everything. Zoomed out,
+                        // a whole-file selection and a nearly-whole-file one
+                        // look identical, and Ctrl+A gives no other sign that
+                        // it reached both ends.
+                        let whole_file = a == 0 && b >= tab.samples_len && tab.samples_len > 0;
+                        let scope = if whole_file { " (entire file)" } else { "" };
                         let range_text = format!(
-                            "{kind}: {a}..{b} ({len} smp) / {}..{} ({})",
+                            "{kind}{scope}: {a}..{b} ({len} smp) / {}..{} ({})",
                             crate::app::helpers::format_time_s(start_sec),
                             crate::app::helpers::format_time_s(end_sec),
                             crate::app::helpers::format_time_s(len_sec)

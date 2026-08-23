@@ -347,6 +347,43 @@ impl super::WavesPreviewer {
                     let audio_visible = self.tabs.get(tab_idx).is_some_and(|t| {
                         t.primary_view != EditorPrimaryView::Metadata && !t.read_only
                     });
+                    // Select all is not a destructive edit, so unlike the
+                    // block below it applies to a read-only source too. It does
+                    // need the waveform to be the thing on screen: in the
+                    // Metadata inspector, Ctrl+A belongs to whatever table or
+                    // field is in front.
+                    let waveform_visible = self
+                        .tabs
+                        .get(tab_idx)
+                        .is_some_and(|t| t.primary_view != EditorPrimaryView::Metadata);
+                    if waveform_visible && self.keymap_consume(ctx, Action::EditorSelectAll) {
+                        let selected = self.tabs.get_mut(tab_idx).and_then(|tab| {
+                            (tab.samples_len > 0).then(|| {
+                                tab.extra_selections.clear();
+                                Self::editor_set_selection_from_anchor(tab, 0, tab.samples_len);
+                                tab.samples_len
+                            })
+                        });
+                        if let Some(len) = selected {
+                            // Zoomed out, a whole-file selection looks the same
+                            // as one that stops just short of either end, so say
+                            // outright what happened.
+                            let out_sr = self.audio.shared.out_sample_rate.max(1);
+                            let sr = self
+                                .tabs
+                                .get(tab_idx)
+                                .map(|tab| Self::editor_display_sample_rate_for_tab(tab, out_sr))
+                                .unwrap_or(out_sr)
+                                .max(1) as f32;
+                            self.push_toast(
+                                super::types::ToastSeverity::Info,
+                                format!(
+                                    "Selected the entire file ({})",
+                                    super::helpers::format_time_s(len as f32 / sr)
+                                ),
+                            );
+                        }
+                    }
                     if audio_visible {
                         if self.keymap_consume(ctx, Action::EditorTrimSelection)
                             && !self.editor_apply_busy_toast_for_tab(tab_idx)

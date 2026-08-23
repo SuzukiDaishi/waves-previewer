@@ -47,6 +47,7 @@ pub enum Action {
     EditorToggleBpm,
     EditorAddMarker,
     EditorToggleZeroCross,
+    EditorSelectAll,
     EditorDeleteSelection,
     EditorTrimSelection,
     EditorMuteSelection,
@@ -384,6 +385,14 @@ pub const KEYMAP: &[KeyBinding] = &[
         chord: Some((Mods::None, Key::R)),
         keys_label: "",
         desc: "Toggle zero-cross snap",
+        dispatch: Dispatch::Table,
+    },
+    KeyBinding {
+        action: Action::EditorSelectAll,
+        context: KeyContext::Editor,
+        chord: Some((Mods::Command, Key::A)),
+        keys_label: "",
+        desc: "Select the whole file",
         dispatch: Dispatch::Table,
     },
     KeyBinding {
