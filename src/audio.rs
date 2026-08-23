@@ -56,6 +56,11 @@ pub const METER_TAP_CAPACITY: usize = 1 << 15;
 /// Sentinel for "no valid reading" in the milli-LUFS / milli-dB atomics.
 pub const METER_VALUE_INVALID: i32 = i32::MIN;
 
+/// Ceiling for the monitor gain, matching the volume slider's own +6 dB top
+/// end (`10^(6/20)`). The slider has advertised that headroom all along while
+/// the engine quietly clamped it away at unity.
+pub const MAX_MONITOR_GAIN: f32 = 1.9952624;
+
 /// Lock-free SPSC tap: the audio callback publishes post-gain L/R frames,
 /// a low-priority meter thread drains them. Overwrite semantics — a slow
 /// reader just loses the oldest frames.
@@ -1469,10 +1474,20 @@ impl AudioEngine {
         )
     }
 
+    /// Set the monitor gain, as a linear multiplier.
+    ///
+    /// The ceiling is the slider's own +6 dB (`10^(6/20)` ~ 1.995), not unity.
+    /// Clamping to 1.0 made the whole top half of a control that advertises
+    /// "+6 dB" do nothing at all -- which mattered little while the default sat
+    /// 12 dB down and mostly nobody went above it, and matters now that unity
+    /// *is* the default. Individual output samples are still clamped to
+    /// [-1, 1] where they are written, so pushing past unity distorts, which is
+    /// what a monitor gain above unity is expected to do.
     pub fn set_volume(&self, v: f32) {
-        self.shared
-            .vol
-            .store(v.clamp(0.0, 1.0), std::sync::atomic::Ordering::Relaxed);
+        self.shared.vol.store(
+            v.clamp(0.0, MAX_MONITOR_GAIN),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub fn toggle_play(&self) {

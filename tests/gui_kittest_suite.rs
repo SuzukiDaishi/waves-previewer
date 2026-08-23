@@ -11465,4 +11465,29 @@ mod kittest_suite {
             "the reset has to reach the engine, not just the readout"
         );
     }
+
+    #[test]
+    fn the_volume_slider_can_actually_reach_its_own_top_end() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        harness.run_steps(2);
+
+        harness.state_mut().test_set_volume_db(0.0);
+        harness.run_steps(2);
+        let unity = harness.state().test_audio_output_volume_linear();
+        assert!(
+            (unity - 1.0).abs() < 1.0e-3,
+            "0 dB should be unity, got {unity}"
+        );
+
+        // The slider advertises +6 dB; the engine used to clamp the linear gain
+        // at 1.0, so its whole upper half did nothing.
+        harness.state_mut().test_set_volume_db(6.0);
+        harness.run_steps(2);
+        let boosted = harness.state().test_audio_output_volume_linear();
+        assert!(
+            boosted > unity * 1.9,
+            "+6 dB should roughly double the monitor gain, got {boosted}"
+        );
+    }
 }
