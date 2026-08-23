@@ -495,6 +495,10 @@ pub struct WavesPreviewer {
     meter_ch_hold_db: Vec<f32>,
     meter_ch_last_time: Option<std::time::Instant>,
     topbar_volume_rect: Option<egui::Rect>,
+    /// When and where the volume control was last clicked, for the
+    /// double-click-to-unity reset. See the note at its use site: a bare
+    /// `Response::double_clicked()` is not enough on its own here.
+    topbar_volume_last_click: Option<(std::time::Instant, egui::Pos2)>,
     topbar_output_meter_rect: Option<egui::Rect>,
     topbar_search_rect: Option<egui::Rect>,
     editor_inspector_rect: Option<egui::Rect>,

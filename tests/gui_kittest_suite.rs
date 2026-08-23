@@ -11405,4 +11405,64 @@ mod kittest_suite {
             "the playhead must continue past a landmark it already stopped on"
         );
     }
+
+    fn double_click_at(harness: &mut Harness<'static, WavesPreviewer>, pos: egui::Pos2) {
+        for _ in 0..2 {
+            harness.hover_at(pos);
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run_steps(1);
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+        harness.run_steps(2);
+    }
+
+    #[test]
+    fn the_monitor_volume_starts_at_unity() {
+        let harness = harness_with_editor_fixture();
+        assert_eq!(
+            harness.state().test_volume_db(),
+            0.0,
+            "a fresh app should monitor at unity, not 12 dB down"
+        );
+    }
+
+    #[test]
+    fn double_clicking_the_volume_control_returns_it_to_unity() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        harness.run_steps(2);
+        harness.state_mut().test_set_volume_db(-31.0);
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_volume_db(), -31.0);
+
+        let rect = harness
+            .state()
+            .test_topbar_volume_rect()
+            .expect("volume control rect");
+        // Deliberately off the knob: the whole control resets, and the first
+        // click of the pair would otherwise set the volume from the pointer
+        // position and hide a reset that never happened.
+        double_click_at(&mut harness, egui::pos2(rect.left() + 6.0, rect.center().y));
+
+        assert_eq!(
+            harness.state().test_volume_db(),
+            0.0,
+            "double click should put the monitor back at unity"
+        );
+        assert!(
+            (harness.state().test_audio_output_volume_linear() - 1.0).abs() < 1.0e-4,
+            "the reset has to reach the engine, not just the readout"
+        );
+    }
 }
