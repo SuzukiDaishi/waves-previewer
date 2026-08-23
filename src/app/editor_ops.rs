@@ -186,6 +186,7 @@ impl crate::app::WavesPreviewer {
         tab.preview_offset_samples = None;
         tab.pending_loop_unwrap = None;
         tab.dragging_marker = None;
+        tab.loop_drag_moved = false;
         tab.selection_stretch_gesture = None;
         tab.selection_stretch_cancel_until_release = false;
         tab.selection_edge_drag_anchor = None;

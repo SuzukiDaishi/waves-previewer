@@ -160,6 +160,33 @@ impl EditorDisplayGeometry {
 /// handle can never teleport the edge onto the playhead on the first frame.
 const SELECTION_EDGE_GRAB_RADIUS: f32 = 7.0;
 
+/// Grab radius for a loop edge on the waveform.
+///
+/// The same 7 px the selection's edges use, and for the same reason: the loop
+/// line stands in the middle of the canvas where a plain click is the seek
+/// gesture. It was three separate literals before — the hit test, the hover
+/// cursor, and the stretch grip's "decline, a loop edge is here" test — which
+/// is three chances for the grabbable area and the drawn one to drift apart.
+const LOOP_EDGE_GRAB_RADIUS: f32 = 7.0;
+
+/// How close a dragged loop edge has to come to a marker to land exactly on it.
+///
+/// Decided in pixels, not samples, so the magnet feels identical at every zoom.
+/// Kept just above the grab radius, matching the playhead magnet the range drag
+/// already uses: a snap that reached further than the grab would pull an edge
+/// out from under the press on the frame it was picked up.
+const LOOP_SNAP_RADIUS: f32 = 8.0;
+
+/// The loop edge's grab tab: a downward triangle at the top of the loop line.
+///
+/// It sits immediately below the Time Stretch grip rather than at the very top
+/// of the canvas, where it used to be drawn. The grip took that band over, so
+/// the one glyph that says "grab here to move the loop" was standing exactly
+/// where grabbing does something else entirely. It now starts where the loop
+/// drag starts.
+const LOOP_HANDLE_W: f32 = 11.0;
+const LOOP_HANDLE_H: f32 = 9.0;
+
 // The selection's Time Stretch grip: a tab at the very top of the canvas, and
 // the only place the destructive stretch can be started from.
 //
@@ -526,6 +553,46 @@ impl crate::app::WavesPreviewer {
 
     pub(crate) fn normalized_loop_range(range: Option<(usize, usize)>) -> Option<(usize, usize)> {
         range.map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
+    }
+
+    /// Where a loop edge dragged to `x` should land.
+    ///
+    /// Markers win over zero crossings, which is the order that matters when
+    /// both are in reach: a marker is a place the user put deliberately, a zero
+    /// crossing is one the signal happens to offer. Zero crossings only apply
+    /// when the tab's own Zero Cross Snap is on — the `R` key has advertised
+    /// that setting since before anything on the canvas read it.
+    ///
+    /// A snapped edge takes the marker's own sample index. Rounding back
+    /// through the pixel it was drawn at would leave the loop a sample or two
+    /// off the marker it is meant to sit exactly on. (The two still draw half a
+    /// sample apart at extreme zoom, because a range edge lies *between*
+    /// samples while a marker lies *on* one. The indices are equal, which is
+    /// what loop export and playback read.)
+    fn loop_edge_snap_sample(
+        tab: &EditorTab,
+        geom: &EditorDisplayGeometry,
+        zero_cross_epsilon: f32,
+        x: f32,
+    ) -> usize {
+        let mut nearest: Option<(f32, usize)> = None;
+        for marker in &tab.markers {
+            if !geom.contains_sample_center(marker.sample) {
+                continue;
+            }
+            let dx = (geom.sample_center_x_unclamped(marker.sample) - x).abs();
+            if dx <= LOOP_SNAP_RADIUS && nearest.is_none_or(|(best, _)| dx < best) {
+                nearest = Some((dx, marker.sample));
+            }
+        }
+        if let Some((_, sample)) = nearest {
+            return sample;
+        }
+        let raw = geom.x_to_display_sample(x);
+        if tab.snap_zero_cross {
+            return zc_snap_nearest(&tab.ch_samples, zero_cross_epsilon, raw);
+        }
+        raw
     }
 
     pub(crate) fn resolve_editor_loop_visual_ranges(
@@ -5217,7 +5284,8 @@ impl crate::app::WavesPreviewer {
                         ToolKind::LoopEdit if !press_in_stretch_band => {
                             if let Some((a, b)) = tab.loop_region {
                                 specialized_handle_hit =
-                                    near_x(a.min(b), 7.0) || near_x(a.max(b), 7.0);
+                                    near_x(a.min(b), LOOP_EDGE_GRAB_RADIUS)
+                                        || near_x(a.max(b), LOOP_EDGE_GRAB_RADIUS);
                             }
                         }
                         ToolKind::Fade => {
@@ -6043,74 +6111,109 @@ impl crate::app::WavesPreviewer {
                 && matches!(tab.active_tool, ToolKind::LoopEdit)
                 && display_samples_len > 0
             {
-                let pointer_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+                let pointer_down = ui.input(|i| i.pointer.primary_down());
                 let pointer_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
                 if pointer_released || !pointer_down {
                     tab.dragging_marker = None;
+                    tab.loop_drag_moved = false;
                 }
                 if pointer_down {
-                    let to_sample = |x: f32| geom.x_to_display_sample(x);
-                    let to_x = |samp: usize| geom.sample_boundary_x(samp);
-                    let hit_radius = 7.0;
-                    // This block arms on `pointer_down`, not on the press, so
-                    // without these guards a gesture that started on the
-                    // selection's edge would also pick up a marker drag on a
-                    // later frame, the moment the pointer happened to pass
-                    // within grab range of a loop edge. Whoever owns the press
-                    // keeps it until release.
+                    // Arm on the press, and only on the press.
+                    //
+                    // This used to arm from `button_down` — true on every frame
+                    // the button is held — and then fall through and move the
+                    // loop point in the same frame, so a plain click on a loop
+                    // edge dragged it to the clicked pixel before the pointer
+                    // had moved at all. Clicking a loop edge to put the playhead
+                    // on it is the everyday gesture; moving the edge is the
+                    // rarer one. Now the click seeks and only a drag moves.
                     if tab.dragging_marker.is_none()
+                        && ui.input(|i| i.pointer.primary_pressed())
                         && tab.selection_edge_drag_anchor.is_none()
                         && tab.selection_stretch_gesture.is_none()
                         && !tab.selection_stretch_cancel_until_release
                     {
-                        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-                            let x = pos.x;
-                            match tab.active_tool {
-                                ToolKind::LoopEdit => {
-                                    if let Some((a0, b0)) = tab.loop_region {
-                                        let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                        let ax = to_x(a);
-                                        let bx = to_x(b);
-                                        if (x - ax).abs() <= hit_radius {
-                                            if pending_edit_undo.is_none() {
-                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
-                                            }
-                                            tab.dragging_marker = Some(MarkerKind::A);
-                                        } else if (x - bx).abs() <= hit_radius {
-                                            if pending_edit_undo.is_none() {
-                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
-                                            }
-                                            tab.dragging_marker = Some(MarkerKind::B);
-                                        }
+                        if let Some(pos) = ui
+                            .input(|i| i.pointer.press_origin())
+                            .or_else(|| ui.input(|i| i.pointer.hover_pos()))
+                        {
+                            // The Time Stretch grip owns the top of this same
+                            // line, so a press inside its band is never a loop
+                            // drag — even when the stretch itself declined it.
+                            let grip_owns_press = view_mode == ViewMode::Waveform
+                                && in_selection_stretch_band(rect.top(), pos.y);
+                            if !grip_owns_press {
+                                if let Some((a, b)) = Self::normalized_loop_range(tab.loop_region) {
+                                    // Unclamped, and only for edges actually on
+                                    // screen: `sample_boundary_x` pins an edge
+                                    // scrolled off to the left onto the canvas
+                                    // border, where it answered presses nowhere
+                                    // near the loop.
+                                    let mut candidates: Vec<(f32, usize)> = Vec::new();
+                                    if geom.contains_boundary(a) {
+                                        candidates.push((geom.sample_boundary_x_unclamped(a), 0));
                                     }
+                                    if geom.contains_boundary(b) {
+                                        candidates.push((geom.sample_boundary_x_unclamped(b), 1));
+                                    }
+                                    // Nearest, not first. The `if / else if`
+                                    // this replaces handed the start every
+                                    // press on a loop shorter than two grab
+                                    // radii, so the end could not be grabbed.
+                                    tab.dragging_marker = nearest_handle(
+                                        &candidates,
+                                        pos.x,
+                                        LOOP_EDGE_GRAB_RADIUS,
+                                    )
+                                    .map(|which| {
+                                        if which == 0 {
+                                            MarkerKind::A
+                                        } else {
+                                            MarkerKind::B
+                                        }
+                                    });
                                 }
-                                _ => {}
                             }
                         }
                     }
                     if let Some(marker) = tab.dragging_marker {
-                        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-                            let samp = to_sample(pos.x);
-                            match tab.active_tool {
-                                ToolKind::LoopEdit => {
-                                    if let Some((a0, b0)) = tab.loop_region {
-                                        let (mut a, mut b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                        if pending_edit_undo.is_none() {
-                                            pending_edit_undo = Some(Self::capture_undo_state(tab));
-                                        }
-                                        match marker {
-                                            MarkerKind::A => a = samp.min(b),
-                                            MarkerKind::B => b = samp.max(a),
-                                        }
-                                        tab.loop_region = Some((a, b));
-                                        Self::update_loop_markers_dirty(tab);
-                                        apply_pending_loop = true;
-                                    }
-                                }
-                                _ => {}
-                            }
+                        // Handles are drawn on the sample *boundary* but
+                        // x -> sample is centre-based, so feeding the press
+                        // position straight back would shift the edge by a
+                        // sample on a bare click. Latched, because a drag that
+                        // wandered back through its own start would otherwise
+                        // hand the release back to the seek handler.
+                        if !tab.loop_drag_moved {
+                            tab.loop_drag_moved = ui
+                                .input(|i| i.pointer.press_origin())
+                                .zip(ui.input(|i| i.pointer.hover_pos()))
+                                .is_some_and(|(origin, pos)| (pos.x - origin.x).abs() >= 0.5);
                         }
-                        suppress_seek = true;
+                        if tab.loop_drag_moved {
+                            if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                                if let Some((mut a, mut b)) =
+                                    Self::normalized_loop_range(tab.loop_region)
+                                {
+                                    if pending_edit_undo.is_none() {
+                                        pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                    }
+                                    let samp = Self::loop_edge_snap_sample(
+                                        tab,
+                                        &geom,
+                                        self.zero_cross_epsilon,
+                                        pos.x,
+                                    );
+                                    match marker {
+                                        MarkerKind::A => a = samp.min(b),
+                                        MarkerKind::B => b = samp.max(a),
+                                    }
+                                    tab.loop_region = Some((a, b));
+                                    Self::update_loop_markers_dirty(tab);
+                                    apply_pending_loop = true;
+                                }
+                            }
+                            suppress_seek = true;
+                        }
                     }
                 }
             }
@@ -7394,6 +7497,22 @@ impl crate::app::WavesPreviewer {
                     );
                     painter.rect_filled(r, 2.0, col);
                 };
+                // Where the loop's own handles and labels live: under the
+                // Time Stretch grip's band, so the two never overlap and each
+                // glyph stands where its gesture actually starts.
+                let loop_handle_top = rect.top() + SELECTION_STRETCH_HANDLE_H;
+                let loop_label_top = loop_handle_top + LOOP_HANDLE_H + 1.0;
+                let draw_loop_handle = |x: f32, col: Color32| {
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            egui::pos2(x - LOOP_HANDLE_W * 0.5, loop_handle_top),
+                            egui::pos2(x + LOOP_HANDLE_W * 0.5, loop_handle_top),
+                            egui::pos2(x, loop_handle_top + LOOP_HANDLE_H),
+                        ],
+                        col,
+                        egui::Stroke::NONE,
+                    ));
+                };
                 let sr = sr_ctx.max(1.0);
 
                 let mut fade_in_handle: Option<f32> = None;
@@ -7689,9 +7808,9 @@ impl crate::app::WavesPreviewer {
                             [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
                             egui::Stroke::new(2.0, line),
                         );
-                        draw_handle(ax, line);
+                        draw_loop_handle(ax, line);
                         painter.text(
-                            egui::pos2(ax + 6.0, rect.top() + 2.0),
+                            egui::pos2(ax + 8.0, loop_label_top),
                             egui::Align2::LEFT_TOP,
                             "S",
                             fid,
@@ -7714,17 +7833,17 @@ impl crate::app::WavesPreviewer {
                             [egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())],
                             egui::Stroke::new(2.0, line),
                         );
-                        draw_handle(ax, line);
-                        draw_handle(bx, line);
+                        draw_loop_handle(ax, line);
+                        draw_loop_handle(bx, line);
                         painter.text(
-                            egui::pos2(ax + 6.0, rect.top() + 2.0),
+                            egui::pos2(ax + 8.0, loop_label_top),
                             egui::Align2::LEFT_TOP,
                             "S",
                             fid.clone(),
                             Color32::from_rgb(170, 200, 255),
                         );
                         painter.text(
-                            egui::pos2(bx + 6.0, rect.top() + 2.0),
+                            egui::pos2(bx + 8.0, loop_label_top),
                             egui::Align2::LEFT_TOP,
                             "E",
                             fid.clone(),
@@ -7733,7 +7852,7 @@ impl crate::app::WavesPreviewer {
                         let dur = (b.saturating_sub(a)) as f32 / sr;
                         let label = crate::app::helpers::format_time_s(dur);
                         painter.text(
-                            egui::pos2(ax + 6.0, rect.top() + 18.0),
+                            egui::pos2(ax + 8.0, loop_label_top + 14.0),
                             egui::Align2::LEFT_TOP,
                             format!("Loop {label}"),
                             fid,
@@ -7951,11 +8070,20 @@ impl crate::app::WavesPreviewer {
                         // top belongs to the stretch even there.
                         match tab.active_tool {
                             ToolKind::LoopEdit if waveform_view => {
-                                if let Some((a0, b0)) = tab.loop_region {
-                                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                    let ax = to_x(a);
-                                    let bx = to_x(b);
-                                    if near(ax) || near(bx) {
+                                // The same reach, and the same "is it actually
+                                // on screen" test, as the drag itself — so the
+                                // cursor never offers a handle the press will
+                                // not find. `to_x` clamps, and a resize arrow
+                                // over the canvas border for a loop scrolled
+                                // out of view is exactly the phantom the drag
+                                // no longer answers.
+                                if let Some((a, b)) = Self::normalized_loop_range(tab.loop_region) {
+                                    let edge_near = |sample: usize| {
+                                        geom.contains_boundary(sample)
+                                            && (x - geom.sample_boundary_x_unclamped(sample)).abs()
+                                                <= LOOP_EDGE_GRAB_RADIUS
+                                    };
+                                    if edge_near(a) || edge_near(b) {
                                         hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
                                     }
                                 }

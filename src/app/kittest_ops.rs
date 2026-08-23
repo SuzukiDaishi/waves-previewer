@@ -2386,6 +2386,29 @@ impl super::WavesPreviewer {
         self.tabs.get(tab_idx).map(|t| t.markers.len()).unwrap_or(0)
     }
 
+    /// Marker sample indices, so a snap test can assert the loop point landed
+    /// on the marker exactly rather than near it.
+    pub fn test_marker_samples(&self) -> Vec<usize> {
+        let Some(tab_idx) = self.active_tab else {
+            return Vec::new();
+        };
+        self.tabs
+            .get(tab_idx)
+            .map(|t| t.markers.iter().map(|m| m.sample).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn test_set_zero_cross_snap(&mut self, on: bool) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.snap_zero_cross = on;
+        true
+    }
+
     pub fn test_loop_region(&self) -> Option<(usize, usize)> {
         let Some(tab_idx) = self.active_tab else {
             return None;

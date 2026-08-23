@@ -11183,4 +11183,180 @@ mod kittest_suite {
             eprintln!("[shot] wrote {}", out_dir.join(name).display());
         }
     }
+
+    /// Position the pointer on a loop edge's line, below the Time Stretch grip
+    /// and below the loop's own handle — the part of the line that answers a
+    /// loop drag.
+    fn editor_pos_at_loop_edge(
+        harness: &Harness<'static, WavesPreviewer>,
+        display_sample: usize,
+    ) -> egui::Pos2 {
+        let x = harness
+            .state()
+            .test_editor_display_sample_boundary_x_offset(display_sample)
+            .expect("boundary x");
+        let canvas = harness
+            .state()
+            .test_editor_wave_canvas_rect()
+            .expect("wave canvas rect");
+        egui::pos2(editor_wave_left(harness) + x, canvas.center().y)
+    }
+
+    #[test]
+    fn loop_edge_click_seeks_and_leaves_the_loop_alone() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.70));
+        harness.run_steps(2);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before = harness.state().test_loop_region().expect("loop region");
+        let undo_before = harness.state().tabs[tab_idx].undo_stack.len();
+
+        // Press and release on the loop's start edge without moving. This used
+        // to drag the edge onto the clicked pixel on the press frame.
+        let pos = editor_pos_at_loop_edge(&harness, before.0);
+        editor_primary_click_at_pos(&mut harness, pos);
+
+        assert_eq!(
+            harness.state().test_loop_region(),
+            Some(before),
+            "a click on a loop edge must not move it"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].undo_stack.len(),
+            undo_before,
+            "a click that changes nothing must not push an undo step"
+        );
+        let playhead = harness
+            .state()
+            .test_playhead_display_now()
+            .expect("playhead after clicking a loop edge");
+        assert!(
+            playhead.abs_diff(before.0) < harness.state().tabs[tab_idx].samples_len / 20,
+            "the click should have seeked to the loop edge: {playhead} vs {}",
+            before.0
+        );
+    }
+
+    #[test]
+    fn loop_edge_drag_moves_the_loop() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_set_zero_cross_snap(false));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.70));
+        harness.run_steps(2);
+
+        let before = harness.state().test_loop_region().expect("loop region");
+        let from = editor_pos_at_loop_edge(&harness, before.1);
+        let to = egui::pos2(from.x - 80.0, from.y);
+        editor_pointer_drag(&mut harness, from, to);
+
+        let after = harness.state().test_loop_region().expect("loop region");
+        assert_eq!(after.0, before.0, "the opposite edge stays put");
+        assert!(
+            after.1 < before.1,
+            "dragging the end edge inward shortens the loop: {before:?} -> {after:?}"
+        );
+    }
+
+    #[test]
+    fn loop_edge_drag_lands_exactly_on_a_marker() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_add_marker_frac(0.50));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.20, 0.80));
+        harness.run_steps(2);
+
+        let marker = harness.state().test_marker_samples()[0];
+        let before = harness.state().test_loop_region().expect("loop region");
+
+        // Aim a few pixels short of the marker, inside the magnet's reach.
+        let from = editor_pos_at_loop_edge(&harness, before.0);
+        let marker_x = harness
+            .state()
+            .test_editor_display_sample_boundary_x_offset(marker)
+            .expect("marker x");
+        let to = egui::pos2(editor_wave_left(&harness) + marker_x - 4.0, from.y);
+        editor_pointer_drag(&mut harness, from, to);
+
+        let after = harness.state().test_loop_region().expect("loop region");
+        assert_eq!(
+            after.0, marker,
+            "a loop edge dropped within the magnet takes the marker's own \
+             sample index, not the one the pixel rounds to"
+        );
+    }
+
+    #[test]
+    fn a_loop_scrolled_out_of_view_has_no_handle_at_the_canvas_edge() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_set_zero_cross_snap(false));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.02, 0.06));
+        harness.run_steps(2);
+        let before = harness.state().test_loop_region().expect("loop region");
+
+        // Zoom in on the far end, so both loop edges are off the left of the
+        // canvas. `sample_boundary_x` reports them as sitting exactly on the
+        // canvas border, which used to make the border grabbable.
+        for _ in 0..14 {
+            editor_zoom_in_at_frac(&mut harness, 0.90);
+        }
+        harness.run_steps(2);
+
+        let canvas = harness
+            .state()
+            .test_editor_wave_canvas_rect()
+            .expect("wave canvas rect");
+        let from = egui::pos2(editor_wave_left(&harness) + 1.0, canvas.center().y);
+        let to = egui::pos2(from.x + 70.0, from.y);
+        editor_pointer_drag(&mut harness, from, to);
+
+        assert_eq!(
+            harness.state().test_loop_region(),
+            Some(before),
+            "the canvas border is not a loop handle"
+        );
+    }
+
+    #[test]
+    fn the_end_of_a_narrow_loop_can_still_be_grabbed() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_set_zero_cross_snap(false));
+        // Short enough that both edges are inside one grab radius of each
+        // other, which is where the old `if / else if` always chose the start.
+        assert!(harness.state_mut().test_set_loop_region_frac(0.50, 0.502));
+        harness.run_steps(2);
+
+        let before = harness.state().test_loop_region().expect("loop region");
+        let from = editor_pos_at_loop_edge(&harness, before.1);
+        let to = egui::pos2(from.x + 120.0, from.y);
+        editor_pointer_drag(&mut harness, from, to);
+
+        let after = harness.state().test_loop_region().expect("loop region");
+        assert_eq!(
+            after.0, before.0,
+            "the start must not have been the one that moved"
+        );
+        assert!(
+            after.1 > before.1,
+            "the end edge should have taken the press: {before:?} -> {after:?}"
+        );
+    }
 }

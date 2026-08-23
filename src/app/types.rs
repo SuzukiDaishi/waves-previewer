@@ -2405,6 +2405,12 @@ pub struct EditorTab {
     pub tool_state: ToolState,       // simple per-tool parameters
     pub loop_mode: LoopMode,         // Off / On (whole) / Marker
     pub dragging_marker: Option<MarkerKind>, // transient while dragging A/B
+    /// Has the armed loop-edge drag actually moved yet?
+    ///
+    /// Latched for the life of the press: a press that never moves stays a
+    /// click, and the click seeks. Without the latch a drag that wandered back
+    /// through its own start would hand the release back to the seek handler.
+    pub loop_drag_moved: bool,
     /// Transient Waveform-only selection-handle Time Stretch gesture.
     pub selection_stretch_gesture: Option<SelectionStretchGesture>,
     /// A cancelled stretch keeps primary-pointer ownership until release so
@@ -2709,6 +2715,7 @@ impl EditorTab {
             tool_state: crate::app::types::ToolState::default_values(),
             loop_mode: crate::app::types::LoopMode::Off,
             dragging_marker: None,
+            loop_drag_moved: false,
             selection_stretch_gesture: None,
             selection_stretch_cancel_until_release: false,
             selection_edge_drag_anchor: None,
