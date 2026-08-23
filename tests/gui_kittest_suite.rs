@@ -11359,4 +11359,50 @@ mod kittest_suite {
             "the end edge should have taken the press: {before:?} -> {after:?}"
         );
     }
+
+    #[test]
+    fn arrow_keys_stop_on_a_loop_point() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.60));
+        harness.run_steps(2);
+        let (loop_start, _) = harness.state().test_loop_region().expect("loop region");
+
+        harness.key_press(Key::Home);
+        harness.run_steps(2);
+
+        // Step right with the grid. Somewhere on the way the step has to cross
+        // the loop start, and when it does the playhead must land exactly on
+        // it rather than skip past to the next grid multiple.
+        let mut landed = false;
+        for _ in 0..40 {
+            harness.key_press(Key::ArrowRight);
+            harness.run_steps(2);
+            let playhead = harness
+                .state()
+                .test_playhead_display_now()
+                .expect("playhead while stepping");
+            if playhead == loop_start {
+                landed = true;
+                break;
+            }
+            if playhead > loop_start {
+                break;
+            }
+        }
+        assert!(
+            landed,
+            "stepping right past the loop start should have stopped on it ({loop_start})"
+        );
+
+        // And the next press has to move on, not sit on the same landmark.
+        harness.key_press(Key::ArrowRight);
+        harness.run_steps(2);
+        assert!(
+            harness.state().test_playhead_display_now().unwrap() > loop_start,
+            "the playhead must continue past a landmark it already stopped on"
+        );
+    }
 }

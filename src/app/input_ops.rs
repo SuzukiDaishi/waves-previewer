@@ -663,7 +663,21 @@ impl super::WavesPreviewer {
         }
     }
 
-    pub(super) fn stop_with_marker_if_needed(
+    /// Clip an arrow-key seek to the first landmark it would have stepped over.
+    ///
+    /// The arrow keys move by a grid step, not from landmark to landmark, so
+    /// this is what makes them land *on* things: if the step would jump the
+    /// playhead across a landmark, it stops there instead.
+    ///
+    /// Loop start and end count as landmarks alongside markers. They are the
+    /// two positions people most often need the playhead exactly on -- to
+    /// audition a seam, or to check where a loop was placed -- and before this
+    /// the only way to reach one exactly was to zoom in far enough that a grid
+    /// step was a single sample.
+    ///
+    /// Returns one position, so a marker sitting on a loop point stops the
+    /// playhead once rather than twice.
+    pub(super) fn stop_at_landmark_if_needed(
         tab: &super::types::EditorTab,
         current_display: usize,
         target_display: usize,
@@ -672,23 +686,25 @@ impl super::WavesPreviewer {
         if dir == 0 || target_display == current_display {
             return target_display;
         }
+        // Markers are kept sorted, but folding the loop points in breaks that,
+        // so take the nearest in the direction of travel rather than the first
+        // one the iterator offers.
+        let landmarks = tab.markers.iter().map(|m| m.sample).chain(
+            crate::app::WavesPreviewer::normalized_loop_range(tab.loop_region)
+                .into_iter()
+                .flat_map(|(a, b)| [a, b]),
+        );
         if dir > 0 {
-            if let Some(marker) = tab
-                .markers
-                .iter()
-                .find(|m| m.sample > current_display && m.sample <= target_display)
-            {
-                return marker.sample;
-            }
-        } else if let Some(marker) = tab
-            .markers
-            .iter()
-            .rev()
-            .find(|m| m.sample < current_display && m.sample >= target_display)
-        {
-            return marker.sample;
+            landmarks
+                .filter(|&s| s > current_display && s <= target_display)
+                .min()
+                .unwrap_or(target_display)
+        } else {
+            landmarks
+                .filter(|&s| s < current_display && s >= target_display)
+                .max()
+                .unwrap_or(target_display)
         }
-        target_display
     }
 
     pub(super) fn handle_undo_redo_hotkeys(&mut self, ctx: &egui::Context) {
@@ -821,5 +837,93 @@ impl super::WavesPreviewer {
         // Edit menu must not gray Undo out while that path would fire.
         let overwrite_export = !redo && !self.overwrite_undo_stack.is_empty();
         graph || editor || list || overwrite_export
+    }
+}
+
+#[cfg(test)]
+mod landmark_tests {
+    use crate::app::types::EditorTab;
+    use crate::app::WavesPreviewer;
+    use crate::markers::MarkerEntry;
+
+    fn tab(markers: &[usize], loop_region: Option<(usize, usize)>) -> EditorTab {
+        let mut tab = EditorTab::new_base(std::path::PathBuf::from("/t.wav"), "t.wav".to_string());
+        tab.markers = markers
+            .iter()
+            .map(|&sample| MarkerEntry {
+                sample,
+                label: String::new(),
+            })
+            .collect();
+        tab.loop_region = loop_region;
+        tab
+    }
+
+    fn stop(tab: &EditorTab, from: usize, to: usize, dir: i32) -> usize {
+        WavesPreviewer::stop_at_landmark_if_needed(tab, from, to, dir)
+    }
+
+    #[test]
+    fn a_step_that_clears_everything_lands_where_it_meant_to() {
+        let t = tab(&[500], Some((600, 700)));
+        assert_eq!(stop(&t, 100, 200, 1), 200);
+        assert_eq!(stop(&t, 900, 800, -1), 800);
+        // dir 0 and a step of nothing are both pass-throughs.
+        assert_eq!(stop(&t, 100, 900, 0), 900);
+        assert_eq!(stop(&t, 100, 100, 1), 100);
+    }
+
+    #[test]
+    fn markers_still_stop_the_step() {
+        let t = tab(&[150, 400], None);
+        assert_eq!(stop(&t, 100, 300, 1), 150);
+        assert_eq!(stop(&t, 500, 300, -1), 400);
+    }
+
+    #[test]
+    fn loop_points_stop_the_step_too() {
+        let t = tab(&[], Some((300, 700)));
+        assert_eq!(stop(&t, 100, 500, 1), 300, "loop start going right");
+        assert_eq!(stop(&t, 500, 900, 1), 700, "loop end going right");
+        assert_eq!(stop(&t, 900, 500, -1), 700, "loop end going left");
+        assert_eq!(stop(&t, 500, 100, -1), 300, "loop start going left");
+    }
+
+    #[test]
+    fn the_nearest_landmark_wins_whichever_kind_it_is() {
+        // The markers are sorted but the loop points are not folded into that
+        // order, so taking the first candidate the iterator offers would step
+        // straight past the loop start to the marker beyond it.
+        let t = tab(&[250, 900], Some((400, 800)));
+        assert_eq!(stop(&t, 100, 950, 1), 250, "marker before the loop start");
+        assert_eq!(stop(&t, 300, 950, 1), 400, "loop start before the marker");
+        assert_eq!(stop(&t, 950, 100, -1), 900, "marker after the loop end");
+        assert_eq!(stop(&t, 850, 100, -1), 800, "loop end before the marker");
+    }
+
+    #[test]
+    fn a_marker_on_a_loop_point_stops_the_playhead_once() {
+        let t = tab(&[400], Some((400, 800)));
+        // Both name sample 400, and one position comes back, so the next press
+        // continues past it instead of stopping on the same sample again.
+        assert_eq!(stop(&t, 100, 600, 1), 400);
+        assert_eq!(stop(&t, 400, 600, 1), 600);
+    }
+
+    #[test]
+    fn a_landmark_exactly_on_the_target_is_where_the_step_ends_anyway() {
+        let t = tab(&[], Some((300, 700)));
+        assert_eq!(stop(&t, 100, 300, 1), 300);
+        assert_eq!(stop(&t, 900, 700, -1), 700);
+        // A landmark the step starts on must not hold it there.
+        assert_eq!(stop(&t, 300, 500, 1), 500);
+        assert_eq!(stop(&t, 700, 500, -1), 500);
+    }
+
+    #[test]
+    fn a_reversed_loop_region_is_normalized_before_it_is_used() {
+        let t = tab(&[], Some((700, 300)));
+        assert_eq!(stop(&t, 100, 500, 1), 300);
+        assert_eq!(stop(&t, 900, 500, -1), 700);
     }
 }

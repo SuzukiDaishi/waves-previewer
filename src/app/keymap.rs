@@ -497,7 +497,7 @@ pub const KEYMAP: &[KeyBinding] = &[
         context: KeyContext::Editor,
         chord: None,
         keys_label: "Left/Right (+Shift/Alt/Ctrl)",
-        desc: "Seek; Shift extends selection, Alt steps zero-cross, Ctrl steps one sample",
+        desc: "Seek, stopping on markers and loop points; Shift extends selection, Alt steps zero-cross, Ctrl steps one sample",
         dispatch: Dispatch::Manual,
     },
 ];

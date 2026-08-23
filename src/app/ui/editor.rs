@@ -3535,7 +3535,7 @@ impl crate::app::WavesPreviewer {
                         }
                     };
                     let mut new_display = raw_target.min(max_display);
-                    new_display = Self::stop_with_marker_if_needed(
+                    new_display = Self::stop_at_landmark_if_needed(
                         &self.tabs[tab_idx],
                         cur_display,
                         new_display,
