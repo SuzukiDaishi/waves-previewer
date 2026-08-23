@@ -11690,4 +11690,67 @@ mod kittest_suite {
             "the editor's Ctrl+A must not fire from behind the list"
         );
     }
+
+    #[test]
+    fn shift_l_cycles_the_loop_mode_without_l_taking_it() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        // No loop region and no selection, so the mode cycle is the only thing
+        // either key can do -- which is what makes this test about the split.
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness
+            .state_mut()
+            .test_set_loop_mode(neowaves::LoopMode::Off));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert_eq!(
+            harness.state().tabs[tab_idx].loop_mode,
+            neowaves::LoopMode::Off
+        );
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::L);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].loop_mode,
+            neowaves::LoopMode::OnWhole,
+            "Shift+L must reach the cycle rather than being swallowed by bare L"
+        );
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::L);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].loop_mode,
+            neowaves::LoopMode::Marker
+        );
+
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::L);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].loop_mode,
+            neowaves::LoopMode::Off,
+            "and wraps"
+        );
+    }
+
+    #[test]
+    fn l_still_falls_back_to_the_cycle_with_nothing_to_loop() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness
+            .state_mut()
+            .test_set_loop_mode(neowaves::LoopMode::Off));
+        harness.run_steps(2);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+
+        harness.key_press(Key::L);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].loop_mode,
+            neowaves::LoopMode::OnWhole,
+            "splitting the cycle out must not change what bare L does"
+        );
+    }
 }

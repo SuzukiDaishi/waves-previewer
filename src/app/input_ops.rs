@@ -258,25 +258,20 @@ impl super::WavesPreviewer {
                         self.push_editor_undo_state(tab_idx, state, true);
                     }
                 }
-                if self.keymap_consume(ctx, Action::EditorApplyLoop) {
+                // Shift+L before L: egui matches modifiers logically, so the
+                // bare-`L` pattern also accepts an event with Shift held and
+                // would swallow the cycle.
+                if self.keymap_consume(ctx, Action::EditorCycleLoopMode) {
+                    self.editor_cycle_loop_mode(tab_idx);
+                } else if self.keymap_consume(ctx, Action::EditorToggleMarkerLoop) {
                     if !self.apply_current_loop_region(tab_idx) {
                         if self.has_selected_range(tab_idx) {
                             self.apply_loop_from_selection(tab_idx);
                         } else {
-                            if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                                tab.loop_mode = if tab.loop_region.is_some() {
-                                    LoopMode::Marker
-                                } else {
-                                    match tab.loop_mode {
-                                        LoopMode::Off => LoopMode::OnWhole,
-                                        LoopMode::OnWhole => LoopMode::Marker,
-                                        LoopMode::Marker => LoopMode::Off,
-                                    }
-                                };
-                            }
-                            if let Some(tab_ro) = self.tabs.get(tab_idx) {
-                                self.apply_loop_mode_for_tab(tab_ro);
-                            }
+                            // Nothing to make a loop out of: fall back to the
+                            // mode cycle, which is what this key did before the
+                            // two were separated.
+                            self.editor_cycle_loop_mode(tab_idx);
                         }
                     }
                 }
@@ -732,6 +727,28 @@ impl super::WavesPreviewer {
     ///
     /// Returns one position, so a marker sitting on a loop point stops the
     /// playhead once rather than twice.
+    /// Step the loop mode: off -> whole file -> marker loop -> off.
+    ///
+    /// A loop region forces marker loop, since that is the only mode that uses
+    /// one and landing anywhere else with a region set reads as the key having
+    /// done nothing.
+    pub(super) fn editor_cycle_loop_mode(&mut self, tab_idx: usize) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.loop_mode = if tab.loop_region.is_some() {
+                LoopMode::Marker
+            } else {
+                match tab.loop_mode {
+                    LoopMode::Off => LoopMode::OnWhole,
+                    LoopMode::OnWhole => LoopMode::Marker,
+                    LoopMode::Marker => LoopMode::Off,
+                }
+            };
+        }
+        if let Some(tab_ro) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab_ro);
+        }
+    }
+
     pub(super) fn stop_at_landmark_if_needed(
         tab: &super::types::EditorTab,
         current_display: usize,

@@ -1,4 +1,4 @@
-use crate::app::keymap::{self, Action, Dispatch, KeyContext, KEYMAP};
+use crate::app::keymap::{self, Action, Dispatch, KeyCategory, KeyContext, KEYMAP};
 use crate::app::types::ToastSeverity;
 
 impl crate::app::WavesPreviewer {
@@ -108,6 +108,17 @@ impl crate::app::WavesPreviewer {
         Ok(())
     }
 
+    /// The description column: the one-liner, plus the longer note where a row
+    /// has one.
+    fn keymap_row_description(ui: &mut egui::Ui, binding: &keymap::KeyBinding) {
+        ui.vertical(|ui| {
+            ui.label(binding.desc);
+            if !binding.detail.is_empty() {
+                ui.label(egui::RichText::new(binding.detail).small().weak());
+            }
+        });
+    }
+
     pub(crate) fn ui_keymap_window(&mut self, ctx: &egui::Context) {
         if !self.show_keymap_window {
             return;
@@ -137,60 +148,78 @@ impl crate::app::WavesPreviewer {
                     (KeyContext::Editor, "Editor"),
                 ] {
                     ui.heading(title);
-                    egui::Grid::new(("keymap_grid", title))
-                        .num_columns(3)
-                        .min_col_width(150.0)
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for binding in KEYMAP.iter().filter(|b| b.context == context) {
-                                let rebindable =
-                                    binding.dispatch == Dispatch::Table && binding.chord.is_some();
-                                if !rebindable {
-                                    // Manual rows keep their dedicated handlers;
-                                    // shown grayed so the list stays complete.
-                                    ui.add_enabled(
-                                        false,
-                                        egui::Button::new(
-                                            egui::RichText::new(binding.keys_text()).monospace(),
-                                        ),
-                                    );
-                                    ui.label(binding.desc);
-                                    ui.label("");
-                                    ui.end_row();
-                                    continue;
-                                }
-                                let capturing = self.keymap_capture == Some(binding.action);
-                                let overridden =
-                                    self.keymap_overrides.contains_key(&binding.action);
-                                let keys_text = if capturing {
-                                    "press a key...".to_string()
-                                } else {
-                                    self.keymap_effective_chord(binding.action)
-                                        .map(|(m, k)| keymap::chord_text(m, k))
-                                        .unwrap_or_default()
-                                };
-                                let mut text = egui::RichText::new(keys_text).monospace();
-                                if capturing || overridden {
-                                    text = text.strong();
-                                }
-                                if ui
-                                    .add(egui::Button::new(text))
-                                    .on_hover_text("Click, then press the new key chord")
-                                    .clicked()
-                                {
-                                    start_capture = Some(binding.action);
-                                }
-                                ui.label(binding.desc);
-                                if overridden {
-                                    if ui.small_button("Reset").clicked() {
-                                        reset_action = Some(binding.action);
+                    // Same grouping the read-only Shortcuts window uses, so the
+                    // two lists read as the same list.
+                    for category in KeyCategory::ALL {
+                        let rows: Vec<&keymap::KeyBinding> = KEYMAP
+                            .iter()
+                            .filter(|b| b.context == context && b.category == category)
+                            .collect();
+                        if rows.is_empty() {
+                            continue;
+                        }
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(category.title())
+                                .strong()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        egui::Grid::new(("keymap_grid", title, category.title()))
+                            .num_columns(3)
+                            .min_col_width(150.0)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for binding in rows {
+                                    let rebindable = binding.dispatch == Dispatch::Table
+                                        && binding.chord.is_some();
+                                    if !rebindable {
+                                        // Manual rows keep their dedicated handlers;
+                                        // shown grayed so the list stays complete.
+                                        ui.add_enabled(
+                                            false,
+                                            egui::Button::new(
+                                                egui::RichText::new(binding.keys_text())
+                                                    .monospace(),
+                                            ),
+                                        );
+                                        Self::keymap_row_description(ui, binding);
+                                        ui.label("");
+                                        ui.end_row();
+                                        continue;
                                     }
-                                } else {
-                                    ui.label("");
+                                    let capturing = self.keymap_capture == Some(binding.action);
+                                    let overridden =
+                                        self.keymap_overrides.contains_key(&binding.action);
+                                    let keys_text = if capturing {
+                                        "press a key...".to_string()
+                                    } else {
+                                        self.keymap_effective_chord(binding.action)
+                                            .map(|(m, k)| keymap::chord_text(m, k))
+                                            .unwrap_or_default()
+                                    };
+                                    let mut text = egui::RichText::new(keys_text).monospace();
+                                    if capturing || overridden {
+                                        text = text.strong();
+                                    }
+                                    if ui
+                                        .add(egui::Button::new(text))
+                                        .on_hover_text("Click, then press the new key chord")
+                                        .clicked()
+                                    {
+                                        start_capture = Some(binding.action);
+                                    }
+                                    Self::keymap_row_description(ui, binding);
+                                    if overridden {
+                                        if ui.small_button("Reset").clicked() {
+                                            reset_action = Some(binding.action);
+                                        }
+                                    } else {
+                                        ui.label("");
+                                    }
+                                    ui.end_row();
                                 }
-                                ui.end_row();
-                            }
-                        });
+                            });
+                    }
                     ui.add_space(10.0);
                 }
                 ui.separator();
