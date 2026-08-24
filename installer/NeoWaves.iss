@@ -51,11 +51,16 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\neowaves_plugin_worker.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\neowaves_plugin_gui_worker.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Every native dependency is statically linked, so no codec or runtime DLL is
+; expected here: the ort crate links ONNX Runtime as a static library, and
+; onig-sys, mp3lame-sys, fdk-aac-sys and libsqlite3-sys all compile their C
+; with cc. Lines for dnnl, mklml and onig were removed because they can never
+; match -- MKL-ML was dropped from ONNX Runtime after v1.6.0 and the DNNL
+; provider is not enabled. The two below are kept as a safety net only until a
+; Windows release run confirms nothing lands in target\release; check that and
+; drop them too.
 Source: "..\target\release\onnxruntime*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\target\release\onnxruntime_providers*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\target\release\dnnl*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\target\release\mklml*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\target\release\onig*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\commands\*"; DestDir: "{app}\commands"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\icons\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 

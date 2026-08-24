@@ -47,6 +47,42 @@ provided that:
 
 MP3 patents expired in 2017, so nothing here is a patent question.
 
+SELLING A CLOSED-SOURCE BUILD
+-----------------------------
+
+A common misreading: the LGPL does *not* require you to publish your own source
+code, even when selling commercially. That is the difference between the GPL
+and the Lesser GPL, and it is the whole reason the LAME authors chose the
+latter. The obligation is about the *library* and about the user's ability to
+replace it -- not about your application.
+
+NeoWaves publishes its source because it is a free and open project, not
+because the LGPL forces it to. If this were ever sold as a closed-source
+product, the route would be:
+
+  * Link LAME dynamically instead of statically. That satisfies section
+    4(d)(1), and 4(d)(0) -- the relinkable-object requirement that static
+    linking triggers -- stops applying entirely.
+  * Keep doing 4(a), 4(b) and 4(c): the notice, the two licence texts, and the
+    copyright display. Those are cheap and are already in place here.
+  * Publish LAME's own source. Unmodified, that is satisfied by pointing at
+    https://lame.sourceforge.io/ .
+
+Nothing of the application's own code would have to be disclosed. Today LAME is
+linked statically (`cargo:rustc-link-lib=static=mp3lame`), which is why the
+4(d)(0) route is the one described above.
+
+NOTHING IS SHIPPED AS A SEPARATE BINARY
+---------------------------------------
+
+Every native dependency in NeoWaves is statically linked into the executable:
+ONNX Runtime, Oniguruma, LAME, the Fraunhofer FDK and SQLite all end up inside
+it, and the Windows installer copies no codec or runtime DLL of its own.
+
+That does not weaken any obligation -- if anything the opposite, since the code
+really is inside the binary being distributed. Every one of those components is
+listed here with its full licence text for exactly that reason.
+
 A BUILD WITH NO COPYLEFT AT ALL
 -------------------------------
 

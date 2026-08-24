@@ -459,11 +459,12 @@ mod tests {
         }
     }
 
-    /// A crate without a licence text is a crate whose copyright notice we are
-    /// failing to reproduce. The zoo assets are the one known gap and are
-    /// flagged as such in extra.json.
+    /// A component without a licence text is one whose copyright notice this
+    /// binary is failing to reproduce. There is no longer any exception: the
+    /// zoo assets were the last gap and are now MIT like the rest of the
+    /// project, so the bar is simply "every component, no exceptions".
     #[test]
-    fn only_known_components_lack_licence_text() {
+    fn every_component_has_licence_text() {
         let manifest = manifest();
         let missing: Vec<&str> = manifest
             .components
@@ -471,11 +472,45 @@ mod tests {
             .filter(|c| c.license_keys.is_empty())
             .map(|c| c.name.as_str())
             .collect();
-        assert_eq!(
-            missing,
-            vec!["Zoo default assets (default.gif / default.wav)"],
-            "a component lost its licence text"
+        assert!(
+            missing.is_empty(),
+            "these components ship with no licence text: {missing:?}"
         );
+    }
+
+    /// Every native dependency is statically linked -- ONNX Runtime through
+    /// `ort`, and Oniguruma, LAME, the FDK and SQLite through `-sys` crates
+    /// that compile their C with `cc`. The installer copies no codec or
+    /// runtime DLL, so nothing may claim to be a redistributed one: saying so
+    /// would describe an obligation that does not exist and hide the real one,
+    /// which is that the code is inside the executable.
+    #[test]
+    fn nothing_claims_to_be_a_redistributed_dll() {
+        let manifest = manifest();
+        let claimed: Vec<&str> = manifest
+            .components
+            .iter()
+            .filter(|c| c.kind == "runtime-dll")
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(
+            claimed.is_empty(),
+            "these claim to be shipped as separate DLLs, but everything is \
+             statically linked: {claimed:?}"
+        );
+        // The two that used to be filed that way must still be listed, just in
+        // the category that matches how they actually reach the binary.
+        for name in ["ONNX Runtime", "Oniguruma"] {
+            let component = manifest
+                .components
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("{name} disappeared from the snapshot"));
+            assert_eq!(
+                component.kind, "bundled-native",
+                "{name} is statically linked and should be filed as bundled native code"
+            );
+        }
     }
 
     #[test]

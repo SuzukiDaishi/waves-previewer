@@ -447,12 +447,6 @@
       "text": "// Copyright 2019-2024 Brian Smith.\n//\n// Permission to use, copy, modify, and/or distribute this software for any\n// purpose with or without fee is hereby granted, provided that the above\n// copyright notice and this permission notice appear in all copies.\n//\n// THE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES\n// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF\n// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY\n// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES\n// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION\n// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN\n// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.\n\nuse super::BlockLen;\n\npub(super) use self::{\n    sha2_32::{block_data_order_32, State32, SHA256_BLOCK_LEN},\n    sha2_64::{block_data_order_64, State64, SHA512_BLOCK_LEN},\n};\n\npub(super) const CHAINING_WORDS: usize = 8;\n\n#[cfg(any(\n    all(target_arch = \"aarch64\", target_endian = \"little\"),\n    all(target_arch = \"arm\", target_endian = \"little\"),\n    target_arch = \"x86_64\"\n))]\n#[macro_use]\nmod ffi;\n\npub(super) mod fallback;\nmod sha2_32;\nmod sha2_64;\n"
     },
     {
-      "key": "Intel-Simplified-Software-License",
-      "id": "Intel-Simplified-Software-License",
-      "name": "Intel Simplified Software License",
-      "text": "Intel Simplified Software License\n\nCopyright (c) Intel Corporation.\n\nUse and Redistribution. You are granted the right to use, copy, and\nredistribute the Materials, in binary form only, subject to the following\nterms and conditions:\n\n  * Redistributions must reproduce the above copyright notice and these terms\n    of use in the Software and in the documentation and/or other materials\n    provided with the distribution.\n  * Neither the name of Intel nor the names of its suppliers may be used to\n    endorse or promote products derived from this Software without specific\n    prior written permission.\n  * No reverse engineering, decompilation, or disassembly of the Materials is\n    permitted.\n\nNo other licenses. Except as provided in the preceding section, Intel grants\nno licenses or other rights, express or implied, by estoppel or otherwise, to,\nor under, any patents, copyrights, trademarks, trade names, trade secrets, or\nother intellectual property owned or controlled by Intel.\n\nThird party software. The Materials may include third party software that is\nsubject to separate license terms.\n\nDISCLAIMER. THE MATERIALS ARE PROVIDED \"AS IS\" WITHOUT ANY EXPRESS OR IMPLIED\nWARRANTY OF ANY KIND INCLUDING WARRANTIES OF MERCHANTABILITY, NONINFRINGEMENT\nOF INTELLECTUAL PROPERTY RIGHTS, OR FITNESS FOR ANY PARTICULAR PURPOSE.\n\nLIMITATION OF LIABILITY. IN NO EVENT WILL INTEL BE LIABLE FOR ANY DIRECT,\nINDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE\nOR INABILITY TO USE THE MATERIALS.\n\nThis is the licence that applies to the Intel MKL-ML runtime redistributables\n(`mklml*.dll`) that the ONNX Runtime build may pull in and that the NeoWaves\ninstaller copies alongside the executable. Confirm the exact text shipped with\nthe ONNX Runtime release you build against.\n\nSource: https://www.intel.com/content/www/us/en/developer/articles/license/"
-    },
-    {
       "key": "LGPL-2.0",
       "id": "LGPL-2.0",
       "name": "GNU Library General Public License v2.0",
@@ -1919,14 +1913,14 @@
     {
       "key": "Microsoft-DirectML",
       "id": "Microsoft-DirectML",
-      "name": "Microsoft DirectML redistribution terms",
-      "text": "Microsoft DirectML / ONNX Runtime DirectML Execution Provider\n\nCopyright (c) Microsoft Corporation.\n\n`DirectML.dll` and the ONNX Runtime DirectML execution provider\n(`onnxruntime_providers_*.dll`) are Microsoft redistributables. The ONNX\nRuntime code itself is MIT licensed, but the DirectML binary component is\ngoverned by the Microsoft Software License Terms that accompany the\nMicrosoft.AI.DirectML NuGet package, which grant a right to redistribute the\nbinary as part of an application while prohibiting reverse engineering and\nseparate distribution.\n\nNeoWaves does not modify these binaries; the Windows installer copies them\nnext to the executable so the ONNX Runtime DirectML backend can be used for\nGPU inference (`installer/NeoWaves.iss`).\n\nConfirm the exact terms shipped with the Microsoft.AI.DirectML package version\nthat your ONNX Runtime build links against:\nhttps://www.nuget.org/packages/Microsoft.AI.DirectML/License"
+      "name": "Microsoft DirectML (called, not redistributed)",
+      "text": "Microsoft DirectML — called, not redistributed\n\nCopyright (c) Microsoft Corporation.\n\nOn Windows, NeoWaves asks ONNX Runtime for the DirectML execution provider so\nthat transcription and music analysis can run on the GPU, and falls back to the\nCPU provider silently when it is not available (see `music_onnx.rs`, where the\nprovider is built with `.fail_silently()`).\n\nNeoWaves does not ship DirectML. `DirectML.dll` is a Windows component that has\nbeen part of the operating system since Windows 10 version 1903, and the\ninstaller does not copy it. ONNX Runtime itself is statically linked into the\nexecutable through the `ort` crate, so there is no `onnxruntime.dll` or\nprovider DLL alongside it either.\n\nBecause nothing is redistributed, the Microsoft.AI.DirectML redistribution\nterms do not attach to a NeoWaves build. This entry exists so the dependency is\nvisible rather than because an obligation follows from it.\n\nIf a future build ever bundles a specific DirectML redistributable instead of\nusing the OS copy, that changes: the Microsoft Software License Terms shipped\nwith the Microsoft.AI.DirectML package would then apply, permitting\nredistribution as part of an application while prohibiting reverse engineering\nand standalone distribution.\n\nhttps://learn.microsoft.com/windows/ai/directml/dml\nhttps://www.nuget.org/packages/Microsoft.AI.DirectML/License"
     },
     {
       "key": "NeoWaves-Compliance",
       "id": "NeoWaves-Compliance",
       "name": "What you may do with a NeoWaves build",
-      "text": "What you may do with a NeoWaves build\n\nNeoWaves is published as source and distributed free of charge. Nothing here\nis sold, and every obligation below is met by the project itself rather than\nbeing passed on to you.\n\nTHE SHORT VERSION\n-----------------\n\n  * NeoWaves's own source code is MIT. See LICENSE.\n  * The default binary also links LAME, which is LGPL-3.0. That makes the\n    binary as a whole a \"Combined Work\" under LGPL-3.0 section 4 — not plain\n    MIT, and not GPL.\n  * No GPL-licensed code is in any NeoWaves build, deliberately. Where a\n    dependency offered a GPL route and a non-GPL route, the non-GPL route was\n    taken.\n  * A build with no copyleft in it at all is one command away (below).\n\nHOW LGPL-3.0 SECTION 4 IS SATISFIED\n-----------------------------------\n\nMP3 export uses LAME through the `mp3lame-encoder` crate, statically linked.\nLGPL-3.0 section 4 lets a Combined Work be conveyed under terms of your choice\nprovided that:\n\n  4(a) the work carries prominent notice that the Library is used and covered\n       by the LGPL\n         -> this window, plus README.md.\n\n  4(b) the work is accompanied by copies of the GNU GPL and the LGPL\n         -> both texts are embedded in this binary and listed here as\n            \"GNU Lesser General Public License v3.0\" and \"GNU General Public\n            License v3.0\".\n\n  4(c) a Combined Work that displays copyright notices during execution must\n       include the Library's and a reference to the licences\n         -> this window.\n\n  4(d)(0) the Minimal Corresponding Source and the Corresponding Application\n       Code must be conveyed in a form suitable for the user to recombine the\n       application with a modified Library\n         -> the complete source of NeoWaves is published under MIT, and\n            Cargo.lock pins every dependency version. Anyone can substitute a\n            modified LAME and rebuild the identical application. LAME's own\n            source is at https://lame.sourceforge.io/ and is fetched by the\n            build from the pinned `mp3lame-sys` crate.\n\nMP3 patents expired in 2017, so nothing here is a patent question.\n\nA BUILD WITH NO COPYLEFT AT ALL\n-------------------------------\n\n    cargo build --release --no-default-features \\\n        --features glow,plugin_native_vst3,plugin_native_clap\n\nThat drops LAME (and with it the LGPL) and Fraunhofer's FDK. MP3 and AAC\n*decoding* are unaffected — symphonia handles both in pure Rust under MPL-2.0\n— so such a build still opens the same files. Only MP3 and M4A/AAC export go\naway, and the app hides those formats rather than failing at the end of an\nexport.\n\nWHAT IS NOT IN THE DEFAULT BUILD\n--------------------------------\n\nCisco's OpenH264 is behind the `video` feature and is off by default, so the\nreleased binaries contain no self-compiled H.264 codec. On Windows the OS\nMedia Foundation decoder supplies the video preview instead. See the OpenH264\nentry for why that distinction matters.\n\nONE RULE FOR FUTURE CHANGES\n---------------------------\n\nNever introduce GPL-licensed code while the `aac_fdk` feature exists. The\nFraunhofer FDK licence is GPL-incompatible: the two cannot ship in the same\nbinary. This is enforced by a unit test in src/app/licenses.rs."
+      "text": "What you may do with a NeoWaves build\n\nNeoWaves is published as source and distributed free of charge. Nothing here\nis sold, and every obligation below is met by the project itself rather than\nbeing passed on to you.\n\nTHE SHORT VERSION\n-----------------\n\n  * NeoWaves's own source code is MIT. See LICENSE.\n  * The default binary also links LAME, which is LGPL-3.0. That makes the\n    binary as a whole a \"Combined Work\" under LGPL-3.0 section 4 — not plain\n    MIT, and not GPL.\n  * No GPL-licensed code is in any NeoWaves build, deliberately. Where a\n    dependency offered a GPL route and a non-GPL route, the non-GPL route was\n    taken.\n  * A build with no copyleft in it at all is one command away (below).\n\nHOW LGPL-3.0 SECTION 4 IS SATISFIED\n-----------------------------------\n\nMP3 export uses LAME through the `mp3lame-encoder` crate, statically linked.\nLGPL-3.0 section 4 lets a Combined Work be conveyed under terms of your choice\nprovided that:\n\n  4(a) the work carries prominent notice that the Library is used and covered\n       by the LGPL\n         -> this window, plus README.md.\n\n  4(b) the work is accompanied by copies of the GNU GPL and the LGPL\n         -> both texts are embedded in this binary and listed here as\n            \"GNU Lesser General Public License v3.0\" and \"GNU General Public\n            License v3.0\".\n\n  4(c) a Combined Work that displays copyright notices during execution must\n       include the Library's and a reference to the licences\n         -> this window.\n\n  4(d)(0) the Minimal Corresponding Source and the Corresponding Application\n       Code must be conveyed in a form suitable for the user to recombine the\n       application with a modified Library\n         -> the complete source of NeoWaves is published under MIT, and\n            Cargo.lock pins every dependency version. Anyone can substitute a\n            modified LAME and rebuild the identical application. LAME's own\n            source is at https://lame.sourceforge.io/ and is fetched by the\n            build from the pinned `mp3lame-sys` crate.\n\nMP3 patents expired in 2017, so nothing here is a patent question.\n\nSELLING A CLOSED-SOURCE BUILD\n-----------------------------\n\nA common misreading: the LGPL does *not* require you to publish your own source\ncode, even when selling commercially. That is the difference between the GPL\nand the Lesser GPL, and it is the whole reason the LAME authors chose the\nlatter. The obligation is about the *library* and about the user's ability to\nreplace it -- not about your application.\n\nNeoWaves publishes its source because it is a free and open project, not\nbecause the LGPL forces it to. If this were ever sold as a closed-source\nproduct, the route would be:\n\n  * Link LAME dynamically instead of statically. That satisfies section\n    4(d)(1), and 4(d)(0) -- the relinkable-object requirement that static\n    linking triggers -- stops applying entirely.\n  * Keep doing 4(a), 4(b) and 4(c): the notice, the two licence texts, and the\n    copyright display. Those are cheap and are already in place here.\n  * Publish LAME's own source. Unmodified, that is satisfied by pointing at\n    https://lame.sourceforge.io/ .\n\nNothing of the application's own code would have to be disclosed. Today LAME is\nlinked statically (`cargo:rustc-link-lib=static=mp3lame`), which is why the\n4(d)(0) route is the one described above.\n\nNOTHING IS SHIPPED AS A SEPARATE BINARY\n---------------------------------------\n\nEvery native dependency in NeoWaves is statically linked into the executable:\nONNX Runtime, Oniguruma, LAME, the Fraunhofer FDK and SQLite all end up inside\nit, and the Windows installer copies no codec or runtime DLL of its own.\n\nThat does not weaken any obligation -- if anything the opposite, since the code\nreally is inside the binary being distributed. Every one of those components is\nlisted here with its full licence text for exactly that reason.\n\nA BUILD WITH NO COPYLEFT AT ALL\n-------------------------------\n\n    cargo build --release --no-default-features \\\n        --features glow,plugin_native_vst3,plugin_native_clap\n\nThat drops LAME (and with it the LGPL) and Fraunhofer's FDK. MP3 and AAC\n*decoding* are unaffected — symphonia handles both in pure Rust under MPL-2.0\n— so such a build still opens the same files. Only MP3 and M4A/AAC export go\naway, and the app hides those formats rather than failing at the end of an\nexport.\n\nWHAT IS NOT IN THE DEFAULT BUILD\n--------------------------------\n\nCisco's OpenH264 is behind the `video` feature and is off by default, so the\nreleased binaries contain no self-compiled H.264 codec. On Windows the OS\nMedia Foundation decoder supplies the video preview instead. See the OpenH264\nentry for why that distinction matters.\n\nONE RULE FOR FUTURE CHANGES\n---------------------------\n\nNever introduce GPL-licensed code while the `aac_fdk` feature exists. The\nFraunhofer FDK licence is GPL-incompatible: the two cannot ship in the same\nbinary. This is enforced by a unit test in src/app/licenses.rs."
     },
     {
       "key": "OFL-1.1",
@@ -1950,7 +1944,7 @@
       "key": "Steinberg-VST3",
       "id": "Steinberg-VST3",
       "name": "Steinberg VST 3 SDK / VST trademark",
-      "text": "Steinberg VST 3 — SDK licence and trademark\n\nLICENCE\n-------\n\nSince VST 3.8 (announced 2025-10-29) the VST 3 SDK is released under the MIT\nLicense:\n\n    MIT License\n    Copyright (c) 2026, Steinberg Media Technologies GmbH\n\n    Permission is hereby granted, free of charge, to any person obtaining a\n    copy of this software and associated documentation files (the \"Software\"),\n    to deal in the Software without restriction, including without limitation\n    the rights to use, copy, modify, merge, publish, distribute, sublicense,\n    and/or sell copies of the Software, and to permit persons to whom the\n    Software is furnished to do so, subject to the following conditions:\n\n    The above copyright notice and this permission notice shall be included in\n    all copies or substantial portions of the Software.\n\n    THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT ANY WARRANTY OF ANY KIND,\n    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\n    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN\n    NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,\n    DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR\n    OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE\n    USE OR OTHER DEALINGS IN THE SOFTWARE.\n\nBefore that release the SDK was dual-licensed GPLv3 / proprietary, and a\ncommercial VST 3 host had to either accept GPLv3 for its binaries or sign\nSteinberg's own agreement. Neither applies any more.\n\nNeoWaves in any case redistributes no Steinberg source. It reaches VST 3\nthrough the `vst3` Rust crate, which supplies its own MIT OR Apache-2.0\nbindings to the VST 3 C interface and ships no SDK files.\n\nTRADEMARK\n---------\n\nThe licence change covers copyright only. \"VST\" remains a registered trademark\nof Steinberg Media Technologies GmbH, and its use in product names, logos and\nmarketing still follows Steinberg's usage guidelines.\n\n    VST is a registered trademark of Steinberg Media Technologies GmbH.\n\nA NOTE ON ASIO\n--------------\n\nThe same round of changes moved ASIO in the opposite direction — to GPLv3 /\nproprietary. NeoWaves does not use ASIO: `cpal` is built without its `asio`\nfeature and no ASIO crate appears in Cargo.lock. Enabling it would pull GPLv3\ninto the binary, which would in turn make the Fraunhofer FDK AAC encoder\nundistributable (see that entry).\n\nSee https://www.steinberg.net/press/2025/vst-3-8/ and\nhttps://github.com/steinbergmedia/vst3sdk"
+      "text": "Steinberg VST 3 — SDK licence and trademark\n\nLICENCE\n-------\n\nSince VST 3.8 (announced 2025-10-29) the VST 3 SDK is released under the MIT\nLicense:\n\n    MIT License\n    Copyright (c) 2026, Steinberg Media Technologies GmbH\n\n    Permission is hereby granted, free of charge, to any person obtaining a\n    copy of this software and associated documentation files (the \"Software\"),\n    to deal in the Software without restriction, including without limitation\n    the rights to use, copy, modify, merge, publish, distribute, sublicense,\n    and/or sell copies of the Software, and to permit persons to whom the\n    Software is furnished to do so, subject to the following conditions:\n\n    The above copyright notice and this permission notice shall be included in\n    all copies or substantial portions of the Software.\n\n    THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT ANY WARRANTY OF ANY KIND,\n    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\n    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN\n    NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,\n    DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR\n    OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE\n    USE OR OTHER DEALINGS IN THE SOFTWARE.\n\nBefore that release the SDK was dual-licensed GPLv3 / proprietary, and a\ncommercial VST 3 host had to either accept GPLv3 for its binaries or sign\nSteinberg's own agreement. Neither applies any more.\n\nNeoWaves in any case redistributes no Steinberg source. It reaches VST 3\nthrough the `vst3` Rust crate, which supplies its own MIT OR Apache-2.0\nbindings to the VST 3 C interface and ships no SDK files.\n\nTRADEMARK\n---------\n\nThe licence change covers copyright only. \"VST\" remains a registered trademark\nof Steinberg Media Technologies GmbH.\n\n    VST is a registered trademark of Steinberg Media Technologies GmbH.\n\nUnder the MIT licence, *using the trademark at all is optional*: nothing\nobliges a project to display the VST name or the VST Compatible logo, and\ndeclining to use them carries no obligation whatsoever. Steinberg's usage\nguidelines attach only if you choose to brand with it, and then they ask for\nthe ® symbol on first use, the attribution line above in product credits and\ndocumentation, and the VST Compatible logo on packaging and on every web page\npromoting the product. Not following them is a trademark matter and does not\naffect the MIT rights to the SDK.\n\nNeoWaves does not brand itself with VST. Where \"VST3\" appears it names a plug-in\nformat, a file extension or the operating system's own plug-in folder -- the\ndescriptive use every DAW makes of it -- in three user-visible strings: the\nplug-in file-picker filter and two \"not a recognized VST3/CLAP plugin\" errors.\nThe attribution above is reproduced here regardless, because it costs nothing\nand is the courteous thing to do.\n\nIf the product name, icon or marketing ever adopts the VST name or logo, the\nguidelines above start to apply and should be read in full:\nhttps://steinbergmedia.github.io/vst3_dev_portal/pages/VST+3+Licensing/Usage+guidelines.html\n\nA NOTE ON ASIO\n--------------\n\nThe same round of changes moved ASIO in the opposite direction — to GPLv3 /\nproprietary. NeoWaves does not use ASIO: `cpal` is built without its `asio`\nfeature and no ASIO crate appears in Cargo.lock. Enabling it would pull GPLv3\ninto the binary, which would in turn make the Fraunhofer FDK AAC encoder\nundistributable (see that entry).\n\nSee https://www.steinberg.net/press/2025/vst-3-8/ and\nhttps://github.com/steinbergmedia/vst3sdk"
     },
     {
       "key": "UCS-Terms",
@@ -2067,6 +2061,42 @@
       "feature": "mp3_lame"
     },
     {
+      "name": "Oniguruma",
+      "version": "statically linked via onig-sys",
+      "kind": "bundled-native",
+      "license_expr": "BSD-2-Clause-Oniguruma",
+      "license_ids": [
+        "BSD-2-Clause-Oniguruma"
+      ],
+      "license_keys": [
+        "BSD-2-Clause-Oniguruma"
+      ],
+      "authors": "K. Kosako and contributors",
+      "repository": "https://github.com/kkos/oniguruma",
+      "flag": null,
+      "note": "Regex engine behind the tokenizers crate's `onig` feature, used by the transcription model's tokenizer. onig-sys compiles the C sources with `cc`, so it is statically linked on every platform and its BSD-2 notice ships inside the executable.",
+      "topic": null,
+      "feature": null
+    },
+    {
+      "name": "ONNX Runtime",
+      "version": "statically linked via the ort crate",
+      "kind": "bundled-native",
+      "license_expr": "MIT-onnxruntime",
+      "license_ids": [
+        "MIT-onnxruntime"
+      ],
+      "license_keys": [
+        "MIT-onnxruntime"
+      ],
+      "authors": "Microsoft Corporation",
+      "repository": "https://github.com/microsoft/onnxruntime",
+      "flag": null,
+      "note": "Machine-learning inference for the transcription and music-analysis features. The `ort` crate's download-binaries feature fetches a static library and links it into the executable -- there is no onnxruntime DLL to ship. Static linking does not remove the attribution requirement; MIT still wants the notice below to travel with the binary.",
+      "topic": null,
+      "feature": null
+    },
+    {
       "name": "Signalsmith Stretch (C++)",
       "version": "bundled via vendor/signalsmith-stretch",
       "kind": "bundled-native",
@@ -2104,8 +2134,8 @@
     },
     {
       "name": "DirectML execution provider",
-      "version": "shipped as onnxruntime_providers_*.dll / DirectML.dll",
-      "kind": "runtime-dll",
+      "version": "-",
+      "kind": "spec",
       "license_expr": "Microsoft-DirectML",
       "license_ids": [
         "Microsoft-DirectML"
@@ -2115,80 +2145,8 @@
       ],
       "authors": "Microsoft Corporation",
       "repository": "https://www.nuget.org/packages/Microsoft.AI.DirectML/",
-      "flag": "notice",
-      "note": "Redistributed by the Windows installer for GPU inference. Governed by the Microsoft.AI.DirectML licence terms rather than ONNX Runtime's MIT. Redistribution as part of an application is permitted; reverse engineering and standalone distribution are not.",
-      "topic": null,
-      "feature": null
-    },
-    {
-      "name": "Intel MKL-ML",
-      "version": "shipped as mklml*.dll",
-      "kind": "runtime-dll",
-      "license_expr": "Intel-Simplified-Software-License",
-      "license_ids": [
-        "Intel-Simplified-Software-License"
-      ],
-      "license_keys": [
-        "Intel-Simplified-Software-License"
-      ],
-      "authors": "Intel Corporation",
-      "repository": "https://www.intel.com/",
-      "flag": "notice",
-      "note": "Proprietary Intel binary that some ONNX Runtime builds pull in; the installer copies it if present. Binary redistribution is allowed but the Intel copyright notice and terms must be reproduced, and reverse engineering is prohibited. If the ONNX Runtime build in use does not actually produce this DLL, drop the installer line and this entry.",
-      "topic": null,
-      "feature": null
-    },
-    {
-      "name": "oneDNN (DNNL)",
-      "version": "shipped as dnnl*.dll",
-      "kind": "runtime-dll",
-      "license_expr": "Apache-2.0",
-      "license_ids": [
-        "Apache-2.0"
-      ],
-      "license_keys": [
-        "Apache-2.0"
-      ],
-      "authors": "Intel Corporation and oneDNN contributors",
-      "repository": "https://github.com/oneapi-src/oneDNN",
       "flag": null,
-      "note": "Optional ONNX Runtime CPU acceleration library copied by the installer. Apache-2.0: the licence text and the upstream NOTICE file must travel with the binary.",
-      "topic": null,
-      "feature": null
-    },
-    {
-      "name": "Oniguruma",
-      "version": "shipped as onig*.dll",
-      "kind": "runtime-dll",
-      "license_expr": "BSD-2-Clause-Oniguruma",
-      "license_ids": [
-        "BSD-2-Clause-Oniguruma"
-      ],
-      "license_keys": [
-        "BSD-2-Clause-Oniguruma"
-      ],
-      "authors": "K. Kosako and contributors",
-      "repository": "https://github.com/kkos/oniguruma",
-      "flag": null,
-      "note": "Regex engine behind the tokenizers crate's `onig` feature, used by the transcription model's tokenizer.",
-      "topic": null,
-      "feature": null
-    },
-    {
-      "name": "ONNX Runtime",
-      "version": "shipped as onnxruntime*.dll",
-      "kind": "runtime-dll",
-      "license_expr": "MIT-onnxruntime",
-      "license_ids": [
-        "MIT-onnxruntime"
-      ],
-      "license_keys": [
-        "MIT-onnxruntime"
-      ],
-      "authors": "Microsoft Corporation",
-      "repository": "https://github.com/microsoft/onnxruntime",
-      "flag": null,
-      "note": "Prebuilt binaries fetched by the `ort` crate's download-binaries feature and copied next to the executable by installer/NeoWaves.iss. MIT; only the notice below is required.",
+      "note": "NOT REDISTRIBUTED. On Windows the ONNX Runtime DirectML execution provider is asked for first and falls back to CPU silently if it is unavailable (music_onnx.rs). DirectML.dll itself is a Windows component that has shipped with the OS since Windows 10 1903; NeoWaves calls it rather than bundling it, so no redistribution terms attach. Listed here only so the dependency is visible.",
       "topic": null,
       "feature": null
     },
@@ -2247,16 +2205,20 @@
       "feature": null
     },
     {
-      "name": "Zoo default assets (default.gif / default.wav)",
+      "name": "Zoo default assets",
       "version": "-",
       "kind": "data",
-      "license_expr": "",
-      "license_ids": [],
-      "license_keys": [],
-      "authors": "unconfirmed",
-      "repository": "",
-      "flag": "notice",
-      "note": "PROVENANCE UNCONFIRMED. assets/zoo/default.gif and assets/zoo/default.wav are embedded in the binary (src/app/zoo_assets.rs) but no origin or licence is recorded for them. Confirm who made them and under what terms, then fill this entry in — or replace the files with something of known origin before distributing commercially.",
+      "license_expr": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_keys": [
+        "MIT"
+      ],
+      "authors": "zukky",
+      "repository": "https://github.com/SuzukiDaishi/waves-previewer",
+      "flag": null,
+      "note": "assets/zoo/default.gif and assets/zoo/default.wav, embedded in the binary by src/app/zoo_assets.rs. Made by the author of NeoWaves and covered by the same MIT licence as the rest of the project.",
       "topic": null,
       "feature": null
     },

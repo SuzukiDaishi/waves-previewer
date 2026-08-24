@@ -39,10 +39,29 @@ TRADEMARK
 ---------
 
 The licence change covers copyright only. "VST" remains a registered trademark
-of Steinberg Media Technologies GmbH, and its use in product names, logos and
-marketing still follows Steinberg's usage guidelines.
+of Steinberg Media Technologies GmbH.
 
     VST is a registered trademark of Steinberg Media Technologies GmbH.
+
+Under the MIT licence, *using the trademark at all is optional*: nothing
+obliges a project to display the VST name or the VST Compatible logo, and
+declining to use them carries no obligation whatsoever. Steinberg's usage
+guidelines attach only if you choose to brand with it, and then they ask for
+the ® symbol on first use, the attribution line above in product credits and
+documentation, and the VST Compatible logo on packaging and on every web page
+promoting the product. Not following them is a trademark matter and does not
+affect the MIT rights to the SDK.
+
+NeoWaves does not brand itself with VST. Where "VST3" appears it names a plug-in
+format, a file extension or the operating system's own plug-in folder -- the
+descriptive use every DAW makes of it -- in three user-visible strings: the
+plug-in file-picker filter and two "not a recognized VST3/CLAP plugin" errors.
+The attribution above is reproduced here regardless, because it costs nothing
+and is the courteous thing to do.
+
+If the product name, icon or marketing ever adopts the VST name or logo, the
+guidelines above start to apply and should be read in full:
+https://steinbergmedia.github.io/vst3_dev_portal/pages/VST+3+Licensing/Usage+guidelines.html
 
 A NOTE ON ASIO
 --------------

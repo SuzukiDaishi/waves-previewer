@@ -70,6 +70,7 @@ Cargo Features
 - `aac_fdk` gates Fraunhofer's FDK (AAC decode fast path + M4A/AAC export); `mp3_lame` gates LAME (MP3 export). Turning either off leaves *decoding* intact -- symphonia handles both -- and only removes the encoder. `wave::export_format_is_available` is the single predicate every format picker consults, so an unavailable format is hidden rather than failing at the end of an export.
 - Never add GPL-licensed code while `aac_fdk` exists: the FDK licence is GPL-incompatible and the two cannot ship in one binary. `licenses::tests::fdk_aac_never_shares_a_binary_with_gpl` enforces this.
 - A build with no copyleft at all: `cargo build --no-default-features --features glow,plugin_native_vst3,plugin_native_clap`.
+- Every native dependency is statically linked -- ONNX Runtime via `ort`, and Oniguruma/LAME/FDK/SQLite via `-sys` crates that compile their C with `cc`. The installer ships no codec or runtime DLL, and `licenses::tests::nothing_claims_to_be_a_redistributed_dll` keeps the licence data honest about that. Do not add DLL-copying installer lines without first checking `target/release` for the file.
 
 Console Quick Start (PowerShell)
 - Build: `cargo build`
