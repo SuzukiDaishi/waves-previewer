@@ -75,6 +75,8 @@ struct RawComponent {
     note: Option<String>,
     #[serde(default)]
     topic: Option<String>,
+    #[serde(default)]
+    feature: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,9 +91,14 @@ pub struct Component {
     pub repository: String,
     pub flag: Option<Flag>,
     pub note: Option<String>,
-    /// Groups entries that are all one issue -- a wrapper crate, its `-sys`
-    /// crate and the C library they build -- so the summary says it once.
+    /// Groups entries that are all one issue — a wrapper crate, its `-sys`
+    /// crate and the C library they build — so the summary says it once.
     pub topic: Option<String>,
+    /// The cargo feature gating this component, if any.
+    pub feature: Option<String>,
+    /// Whether that feature is compiled into *this* binary. `true` for
+    /// everything unconditional.
+    pub active: bool,
     /// Lowercased `name + version + licence + authors`, so the search box can
     /// filter six hundred rows per keystroke without allocating.
     haystack: String,
@@ -125,22 +132,55 @@ impl Manifest {
         self.by_key.get(key).map(|idx| &self.licenses[*idx])
     }
 
-    /// How many components carry a flag, before topic grouping folds the
-    /// duplicates together.
+    /// How many components carry a flag *and* are compiled into this binary,
+    /// before topic grouping folds the duplicates together.
     pub fn flagged_count(&self) -> usize {
-        self.components.iter().filter(|c| c.flag.is_some()).count()
+        self.components
+            .iter()
+            .filter(|c| c.flag.is_some() && c.active)
+            .count()
+    }
+
+    /// The optional components this build did and did not compile in.
+    ///
+    /// Returned in snapshot order, which puts the bundled native code and the
+    /// VST 3 entry ahead of the crates that wrap them, so the names a reader
+    /// recognises come first.
+    pub fn build_contents(&self) -> (Vec<&Component>, Vec<&Component>) {
+        let mut included = Vec::new();
+        let mut excluded = Vec::new();
+        for component in self.components.iter().filter(|c| c.feature.is_some()) {
+            // One row per feature: the first component carrying it is the
+            // authoritative one, and its wrapper crates would only repeat it.
+            let already = |seen: &Vec<&Component>| {
+                seen.iter()
+                    .any(|c: &&Component| c.feature == component.feature)
+            };
+            if component.active {
+                if !already(&included) {
+                    included.push(component);
+                }
+            } else if !already(&excluded) {
+                excluded.push(component);
+            }
+        }
+        (included, excluded)
     }
 
     /// The flagged components collapsed by topic, for the summary section.
     ///
     /// One AAC problem spread across `fdk-aac`, `fdk-aac-sys` and the
     /// Fraunhofer sources they compile is one thing to know, not three. The
-    /// authoritative entry leads -- components are stored kind-first, so the
-    /// bundled C library outranks the crates wrapping it -- and the rest are
+    /// authoritative entry leads — components are stored kind-first, so the
+    /// bundled C library outranks the crates wrapping it — and the rest are
     /// named alongside it. Untopiced entries stand alone.
     pub fn flagged_topics(&self) -> Vec<FlaggedTopic<'_>> {
         let mut topics: Vec<FlaggedTopic<'_>> = Vec::new();
-        for component in self.components.iter().filter(|c| c.flag.is_some()) {
+        for component in self
+            .components
+            .iter()
+            .filter(|c| c.flag.is_some() && c.active)
+        {
             let existing = component.topic.as_ref().and_then(|topic| {
                 topics
                     .iter_mut()
@@ -173,7 +213,7 @@ impl Manifest {
     /// one LGPL entry is.
     pub fn license_id_counts(&self) -> Vec<(&str, usize)> {
         let mut counts: HashMap<&str, usize> = HashMap::new();
-        for component in &self.components {
+        for component in self.components.iter().filter(|c| c.active) {
             for id in &component.license_ids {
                 *counts.entry(id.as_str()).or_default() += 1;
             }
@@ -183,10 +223,18 @@ impl Manifest {
         counts
     }
 
+    /// NeoWaves's own statement about what a build of it may be used for.
+    ///
+    /// Not a third-party component, so it is kept out of the tables below and
+    /// given its own block at the top of the window.
+    pub fn distribution_terms(&self) -> Option<&Component> {
+        self.components.iter().find(|c| c.kind == "distribution")
+    }
+
     /// The `kind` groups present, in the order the snapshot lists them.
     pub fn kinds(&self) -> Vec<&str> {
         let mut kinds: Vec<&str> = Vec::new();
-        for component in &self.components {
+        for component in self.components.iter().filter(|c| c.kind != "distribution") {
             if !kinds.contains(&component.kind.as_str()) {
                 kinds.push(component.kind.as_str());
             }
@@ -195,9 +243,32 @@ impl Manifest {
     }
 }
 
+/// Whether a cargo feature named in the snapshot is compiled into this binary.
+///
+/// The snapshot is generated once against the widest feature set the project
+/// supports, so it lists components a given build may not contain. Resolving
+/// the name here with `cfg!` is what lets the window describe the binary in
+/// front of the reader instead of the repository — and, more to the point,
+/// stops it claiming obligations for code that was never linked in.
+///
+/// `None` means the snapshot named a feature this table does not know, which
+/// is a bug in `extra.json`; `encumbered_components_declare_a_known_feature`
+/// fails on it.
+pub fn feature_active(name: &str) -> Option<bool> {
+    match name {
+        "video" => Some(cfg!(feature = "video")),
+        "aac_fdk" => Some(cfg!(feature = "aac_fdk")),
+        "mp3_lame" => Some(cfg!(feature = "mp3_lame")),
+        "plugin_native_vst3" => Some(cfg!(feature = "plugin_native_vst3")),
+        "plugin_native_clap" => Some(cfg!(feature = "plugin_native_clap")),
+        _ => None,
+    }
+}
+
 /// Human-readable heading for a `kind` group.
 pub fn kind_title(kind: &str) -> &str {
     match kind {
+        "distribution" => "About this distribution",
         "bundled-native" => "Bundled native code (compiled into the binary)",
         "runtime-dll" => "Redistributed binaries (copied by the installer)",
         "spec" => "Interfaces and trademarks",
@@ -246,6 +317,12 @@ pub fn manifest() -> &'static Manifest {
                     repository: c.repository,
                     flag: Flag::parse(c.flag.as_deref()),
                     note: c.note,
+                    active: c
+                        .feature
+                        .as_deref()
+                        .map(|f| feature_active(f).unwrap_or(true))
+                        .unwrap_or(true),
+                    feature: c.feature,
                     topic: c.topic,
                     haystack,
                 }
@@ -273,6 +350,29 @@ pub fn plain_text() -> String {
     out.push_str(&format!("Snapshot generated {}\n", manifest.generated_at));
     out.push_str(&format!("{} components\n\n", manifest.components.len()));
 
+    if let Some(terms) = manifest.distribution_terms() {
+        out.push_str("== About this distribution ==\n\n");
+        if let Some(note) = &terms.note {
+            out.push_str(&format!("{note}\n\n"));
+        }
+        for key in &terms.license_keys {
+            if let Some(license) = manifest.license(key) {
+                out.push_str(&license.text);
+                out.push_str("\n\n");
+            }
+        }
+    }
+
+    let (included, excluded) = manifest.build_contents();
+    out.push_str("== Optional components in this build ==\n\n");
+    for component in &included {
+        out.push_str(&format!("  [x] {}\n", component.name));
+    }
+    for component in &excluded {
+        out.push_str(&format!("  [ ] {} (not in this build)\n", component.name));
+    }
+    out.push('\n');
+
     out.push_str("== Licences in this build ==\n\n");
     for (id, count) in manifest.license_id_counts() {
         out.push_str(&format!("  {id} x{count}\n"));
@@ -298,7 +398,11 @@ pub fn plain_text() -> String {
 
     for kind in manifest.kinds() {
         out.push_str(&format!("\n== {} ==\n\n", kind_title(kind)));
-        for component in manifest.components.iter().filter(|c| c.kind == kind) {
+        for component in manifest
+            .components
+            .iter()
+            .filter(|c| c.kind == kind && c.active)
+        {
             out.push_str(&format!(
                 "{} {} -- {}\n",
                 component.name, component.version, component.license_expr
@@ -395,36 +499,168 @@ mod tests {
         }
     }
 
-    /// The three dependencies that need action before commercial distribution
-    /// must keep saying so. If a future edit drops one of these notes, the
-    /// window silently stops warning about it.
+    /// Every flag still has to explain itself, whatever its level.
     #[test]
-    fn commercial_cautions_survive() {
+    fn flags_are_explained() {
         let manifest = manifest();
-        let cautions: Vec<&str> = manifest
+        for component in manifest.components.iter().filter(|c| c.flag.is_some()) {
+            assert!(
+                component.note.is_some(),
+                "{} carries a flag with no explanation",
+                component.name
+            );
+        }
+    }
+
+    /// The four entries that used to need action before distribution are now
+    /// resolved, and each still says so. If a future edit drops one of these
+    /// notes the window silently stops explaining a real obligation.
+    #[test]
+    fn the_resolved_obligations_still_explain_themselves() {
+        let manifest = manifest();
+        for (name, must_mention) in [
+            ("Cisco OpenH264", "NOT IN THE DEFAULT BUILD"),
+            ("Fraunhofer FDK AAC Codec Library", "GPL-incompatible"),
+            ("LAME (libmp3lame)", "section 4"),
+            ("Steinberg VST 3 interface", "MIT"),
+            ("NeoWaves distribution terms", "LGPL-3.0"),
+        ] {
+            let component = manifest
+                .components
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("{name} disappeared from the snapshot"));
+            let note = component.note.as_deref().unwrap_or("");
+            assert!(
+                note.contains(must_mention),
+                "{name}'s note no longer mentions {must_mention:?}"
+            );
+        }
+    }
+
+    /// The project's own terms lead the window and must not be mixed in with
+    /// the third-party components, where they would sort alphabetically into
+    /// the middle of the notes.
+    #[test]
+    fn distribution_terms_lead_and_stay_out_of_the_tables() {
+        let manifest = manifest();
+        let terms = manifest
+            .distribution_terms()
+            .expect("the distribution terms went missing");
+        assert!(terms.note.is_some());
+        assert!(
+            !terms.license_keys.is_empty(),
+            "the terms should carry their full text"
+        );
+        assert!(
+            !manifest.kinds().contains(&"distribution"),
+            "the terms must not appear as a component group"
+        );
+        assert!(
+            !manifest
+                .flagged_topics()
+                .iter()
+                .any(|t| t.primary.kind == "distribution"),
+            "the terms have their own block, not a row in the notes"
+        );
+        assert!(plain_text().contains("About this distribution"));
+    }
+
+    /// The FDK AAC licence is GPL-incompatible: FFmpeg has to gate it behind
+    /// `--enable-nonfree` for exactly this reason. Every GPL-or-not decision in
+    /// this project was made to keep the two apart, so pin it here — adding a
+    /// GPL dependency later would quietly make the AAC-enabled binary
+    /// undistributable.
+    #[test]
+    fn fdk_aac_never_shares_a_binary_with_gpl() {
+        let manifest = manifest();
+        let has_fdk = manifest
             .components
             .iter()
-            .filter(|c| c.flag == Some(Flag::Caution))
-            .map(|c| c.name.as_str())
-            .collect();
-        for expected in [
-            "Cisco OpenH264",
-            "Fraunhofer FDK AAC Codec Library",
-            "LAME (libmp3lame)",
-        ] {
+            .any(|c| c.license_ids.iter().any(|id| id == "FDK-AAC"));
+        if !has_fdk {
+            return;
+        }
+        for component in &manifest.components {
+            for id in &component.license_ids {
+                // LGPL is fine, and GPL-3.0 is pooled only because LGPL-3.0 is
+                // written as additional permissions on top of it.
+                let is_gpl = (id.starts_with("GPL-") || id.starts_with("AGPL-"))
+                    && component.name != "LAME (libmp3lame)";
+                assert!(
+                    !is_gpl,
+                    "{} is {id}, which cannot share a binary with the FDK AAC codec",
+                    component.name
+                );
+            }
+        }
+    }
+
+    /// A `feature` in the snapshot that `feature_active` does not know would be
+    /// silently treated as always-compiled-in, so the window would claim an
+    /// obligation for code that is not there. Catch the typo at test time.
+    #[test]
+    fn gated_components_declare_a_known_feature() {
+        let manifest = manifest();
+        let mut seen = 0usize;
+        for component in &manifest.components {
+            let Some(feature) = component.feature.as_deref() else {
+                continue;
+            };
+            seen += 1;
             assert!(
-                cautions.contains(&expected),
-                "{expected} lost its caution flag"
+                feature_active(feature).is_some(),
+                "{} is gated on unknown feature `{feature}`; add it to feature_active()",
+                component.name
             );
         }
         assert!(
-            manifest
-                .components
-                .iter()
-                .filter(|c| c.flag == Some(Flag::Caution))
-                .all(|c| c.note.is_some()),
-            "a caution without an explanation is not much of a warning"
+            seen >= 4,
+            "expected the optional codecs to declare features"
         );
+    }
+
+    /// OpenH264 is off by default so the released binary carries no
+    /// self-compiled H.264 codec. Under the default features it must land on
+    /// the excluded side and stay out of the obligations summary.
+    #[test]
+    #[cfg(not(feature = "video"))]
+    fn a_default_build_excludes_openh264() {
+        let manifest = manifest();
+        let (included, excluded) = manifest.build_contents();
+        assert!(
+            excluded.iter().any(|c| c.name == "Cisco OpenH264"),
+            "OpenH264 should be listed as absent from a default build"
+        );
+        assert!(
+            !included.iter().any(|c| c.name == "Cisco OpenH264"),
+            "OpenH264 is not in a default build"
+        );
+        assert!(
+            !manifest
+                .flagged_topics()
+                .iter()
+                .any(|t| t.primary.name == "Cisco OpenH264"),
+            "a component that was never linked in must not claim an obligation"
+        );
+        assert!(
+            !plain_text().contains("openh264-sys2"),
+            "the copyable notices should not list a crate this build never used"
+        );
+    }
+
+    /// The mirror of the above: with `video` on, OpenH264 is really there and
+    /// the page has to say so.
+    #[test]
+    #[cfg(feature = "video")]
+    fn a_video_build_includes_openh264() {
+        let manifest = manifest();
+        let (included, _) = manifest.build_contents();
+        assert!(included.iter().any(|c| c.name == "Cisco OpenH264"));
+        assert!(manifest
+            .flagged_topics()
+            .iter()
+            .any(|t| t.primary.name == "Cisco OpenH264"));
     }
 
     /// Nothing in the graph may be strong copyleft. LGPL is present on purpose
@@ -461,14 +697,23 @@ mod tests {
             "grouping did not collapse anything"
         );
 
-        for (primary, expected_also) in [
-            (
+        // Each codec only leads a row in a build that actually contains it, so
+        // the expectations follow the features rather than assuming a default
+        // build.
+        let mut expectations = Vec::new();
+        if cfg!(feature = "aac_fdk") {
+            expectations.push((
                 "Fraunhofer FDK AAC Codec Library",
                 vec!["fdk-aac", "fdk-aac-sys"],
-            ),
-            ("LAME (libmp3lame)", vec!["mp3lame-encoder", "mp3lame-sys"]),
-            ("Cisco OpenH264", vec!["openh264", "openh264-sys2"]),
-        ] {
+            ));
+        }
+        if cfg!(feature = "mp3_lame") {
+            expectations.push(("LAME (libmp3lame)", vec!["mp3lame-encoder", "mp3lame-sys"]));
+        }
+        if cfg!(feature = "video") {
+            expectations.push(("Cisco OpenH264", vec!["openh264", "openh264-sys2"]));
+        }
+        for (primary, expected_also) in expectations {
             let topic = topics
                 .iter()
                 .find(|t| t.primary.name == primary)
@@ -477,7 +722,8 @@ mod tests {
             assert_eq!(also, expected_also, "wrong members grouped under {primary}");
         }
 
-        // Every flagged component reaches the summary exactly once.
+        // Every flagged component that this build actually contains reaches the
+        // summary exactly once.
         let reached: usize = topics.iter().map(|t| 1 + t.also.len()).sum();
         assert_eq!(reached, manifest.flagged_count());
     }
@@ -491,9 +737,11 @@ mod tests {
             "not sorted by count"
         );
         let total: usize = counts.iter().map(|(_, n)| n).sum();
+        // Only what this build actually linked in is counted.
         let expected: usize = manifest
             .components
             .iter()
+            .filter(|c| c.active)
             .map(|c| c.license_ids.len())
             .sum();
         assert_eq!(total, expected);

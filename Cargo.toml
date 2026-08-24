@@ -36,8 +36,8 @@ sha2 = "0.10"
 same-file = "1.0"
 id3 = "1.17.0"
 mp4ameta = "0.13"
-mp3lame-encoder = "0.2.4"
-fdk-aac = "0.8"
+mp3lame-encoder = { version = "0.2.4", optional = true }
+fdk-aac = { version = "0.8", optional = true }
 mp4 = "0.14"
 vorbis_rs = "0.5.5"
 bytes = "1.11.1"
@@ -68,17 +68,37 @@ openh264 = { version = "0.9", optional = true }
 libloading = { version = "0.9.0", optional = true }
 
 [features]
-default = ["glow", "plugin_native_vst3", "plugin_native_clap", "video"]
+# `video` is deliberately NOT in the default set. The `openh264` crate compiles
+# Cisco's H.264 sources with `cc`, and Cisco only pays the AVC patent pool on
+# behalf of users of *their* prebuilt binaries -- a self-compiled OpenH264 puts
+# that obligation on whoever ships the result. The only binary this project
+# releases is the Windows installer, and `video::open_video_decoder` tries
+# Media Foundation first there (H.264, HEVC, VP9, hardware accelerated), so
+# leaving it out costs the release nothing. Build with `--features video` to get
+# the picture back on Linux/macOS.
+default = ["glow", "plugin_native_vst3", "plugin_native_clap", "aac_fdk", "mp3_lame"]
 glow = ["eframe/glow", "eframe/x11", "eframe/wayland"]
 wgpu = ["eframe/wgpu", "eframe/x11", "eframe/wayland"]
 kittest = ["egui_kittest"]
 kittest_render = ["kittest", "egui_kittest/wgpu"]
 plugin_native_vst3 = ["vst3", "libloading"]
 plugin_native_clap = ["clack-host", "clack-extensions"]
-# Video frame preview. Without it a video file still lists, decodes its audio
-# and plays; only the picture in the mini meter and the first-frame thumbnail
-# go away (on Windows, Media Foundation still supplies both).
+# Video frame preview through the bundled OpenH264. Without it a video file
+# still lists, decodes its audio and plays; only the picture in the mini meter
+# and the first-frame thumbnail go away (on Windows, Media Foundation still
+# supplies both). Off by default -- see the note on `default` above.
 video = ["openh264"]
+# AAC decode fast path and M4A/AAC export via Fraunhofer's FDK. Dropping it
+# leaves AAC *decoding* intact -- `audio_io` falls through to symphonia's
+# pure-Rust decoder -- and removes only the encoder. The FDK licence grants no
+# patent rights, and it is GPL-incompatible, so a build that ever needs to
+# combine with GPL code has to turn this off.
+aac_fdk = ["fdk-aac"]
+# MP3 export via LAME. The crate is LGPL-3.0, so the linked binary is a
+# Combined Work under LGPL-3.0 section 4 rather than plain MIT; NeoWaves
+# satisfies that by publishing all of its own source. Turn it off for a build
+# with no copyleft in it at all (MP3 *decoding* is symphonia's and stays).
+mp3_lame = ["mp3lame-encoder"]
 
 [profile.release]
 # Thin LTO gives a measurable frame-time win for the per-sample render loops

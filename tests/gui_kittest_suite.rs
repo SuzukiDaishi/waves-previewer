@@ -2348,11 +2348,40 @@ mod kittest_suite {
             );
         }
 
-        // The three entries that need a decision before commercial
-        // distribution must be visible without scrolling past 600 crates.
+        // The obligations that do apply must be visible without scrolling past
+        // 600 crates. Nothing is CAUTION any more — every one was resolved --
+        // so NOTICE is what should be there.
         assert!(
-            harness.query_all_by_label("CAUTION").next().is_some(),
-            "no caution rows rendered"
+            harness.query_all_by_label("NOTICE").next().is_some(),
+            "no notice rows rendered"
+        );
+        assert!(
+            harness.query_all_by_label("CAUTION").next().is_none(),
+            "a CAUTION row came back; all four obligations are supposed to be resolved"
+        );
+
+        // The page reports the binary in front of the reader, so a default
+        // build has to show OpenH264 struck through rather than claiming it.
+        assert!(
+            harness
+                .query_all_by_label("Optional components in this build")
+                .next()
+                .is_some(),
+            "build contents section missing"
+        );
+        assert!(
+            harness
+                .query_all_by_label("✕ Cisco OpenH264")
+                .next()
+                .is_some(),
+            "a default build should show OpenH264 as absent"
+        );
+        assert!(
+            harness
+                .query_all_by_label("✔ LAME (libmp3lame)")
+                .next()
+                .is_some(),
+            "a default build does contain LAME and should say so"
         );
 
         // Filtering narrows the table rather than emptying it.
@@ -9374,7 +9403,7 @@ mod kittest_suite {
     /// `total - visible` stopped short and the last few rows were laid out
     /// below the clip rect with no inner scroll able to reveal them.
     ///
-    /// Asserting on `test_list_scroll_row` cannot catch this -- the rows *were*
+    /// Asserting on `test_list_scroll_row` cannot catch this — the rows *were*
     /// in the rendered window. Only the painted rect proves it.
     #[test]
     fn list_tail_is_reachable_at_max_scroll() {
@@ -10146,7 +10175,7 @@ mod kittest_suite {
     /// Not an assertion test: renders the list with a seek in progress so the
     /// playhead, the progress fill and the undecoded shading can be eyeballed
     /// at the real row height. Run with:
-    ///   cargo test --features kittest_render -- --ignored seek_bar_screenshot --nocapture
+    ///   cargo test --features kittest_render — --ignored seek_bar_screenshot --nocapture
     #[cfg(feature = "kittest_render")]
     #[test]
     #[ignore]
@@ -10183,7 +10212,7 @@ mod kittest_suite {
     }
 
     /// Screenshot of the list scrolled to its end, showing the end-of-list row.
-    ///   cargo test --features kittest_render -- --ignored end_of_list_screenshot --nocapture
+    ///   cargo test --features kittest_render — --ignored end_of_list_screenshot --nocapture
     #[cfg(feature = "kittest_render")]
     #[test]
     #[ignore]
@@ -10210,7 +10239,7 @@ mod kittest_suite {
     }
 
     /// The list ends with a row stating the total. Reaching it is what tells
-    /// the user they are at the end -- previously they had to infer it from a
+    /// the user they are at the end — previously they had to infer it from a
     /// half-drawn row, and a row clipped by the viewport looked exactly like a
     /// row with more below it.
     #[test]
@@ -10360,7 +10389,7 @@ mod kittest_suite {
         let image = harness.render().expect("render image");
         // The retired band's stroke was (255,140,0) at alpha 190; over the dark
         // canvas that lands near (195,110,7). Match that hue specifically --
-        // green well under 3/4 of red, almost no blue -- rather than "warm",
+        // green well under 3/4 of red, almost no blue — rather than "warm",
         // which also catches the gold (195,166,77) label text in the inspector.
         let is_band_orange = |p: &image::Rgba<u8>| {
             let [r, g, b, _a] = p.0;
@@ -11292,7 +11321,7 @@ mod kittest_suite {
     }
 
     /// Stable visual evidence for the list label and before/after video seek.
-    ///   cargo test --features kittest_render -- --ignored video_mini_meter_screenshots --nocapture
+    ///   cargo test --features kittest_render — --ignored video_mini_meter_screenshots --nocapture
     #[cfg(feature = "kittest_render")]
     #[test]
     #[ignore]
@@ -11394,7 +11423,7 @@ mod kittest_suite {
     }
 
     /// Visual evidence set for Waveform-only handles, held ghost, and apply.
-    ///   cargo test --features kittest_render -- --ignored selection_time_stretch_handle_screenshots --nocapture
+    ///   cargo test --features kittest_render — --ignored selection_time_stretch_handle_screenshots --nocapture
     #[cfg(feature = "kittest_render")]
     #[test]
     #[ignore]
@@ -11988,7 +12017,7 @@ mod kittest_suite {
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         // No loop region and no selection, so the mode cycle is the only thing
-        // either key can do -- which is what makes this test about the split.
+        // either key can do — which is what makes this test about the split.
         assert!(harness.state_mut().test_clear_markers());
         assert!(harness
             .state_mut()

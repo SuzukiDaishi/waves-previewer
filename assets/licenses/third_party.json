@@ -1923,6 +1923,12 @@
       "text": "Microsoft DirectML / ONNX Runtime DirectML Execution Provider\n\nCopyright (c) Microsoft Corporation.\n\n`DirectML.dll` and the ONNX Runtime DirectML execution provider\n(`onnxruntime_providers_*.dll`) are Microsoft redistributables. The ONNX\nRuntime code itself is MIT licensed, but the DirectML binary component is\ngoverned by the Microsoft Software License Terms that accompany the\nMicrosoft.AI.DirectML NuGet package, which grant a right to redistribute the\nbinary as part of an application while prohibiting reverse engineering and\nseparate distribution.\n\nNeoWaves does not modify these binaries; the Windows installer copies them\nnext to the executable so the ONNX Runtime DirectML backend can be used for\nGPU inference (`installer/NeoWaves.iss`).\n\nConfirm the exact terms shipped with the Microsoft.AI.DirectML package version\nthat your ONNX Runtime build links against:\nhttps://www.nuget.org/packages/Microsoft.AI.DirectML/License"
     },
     {
+      "key": "NeoWaves-Compliance",
+      "id": "NeoWaves-Compliance",
+      "name": "What you may do with a NeoWaves build",
+      "text": "What you may do with a NeoWaves build\n\nNeoWaves is published as source and distributed free of charge. Nothing here\nis sold, and every obligation below is met by the project itself rather than\nbeing passed on to you.\n\nTHE SHORT VERSION\n-----------------\n\n  * NeoWaves's own source code is MIT. See LICENSE.\n  * The default binary also links LAME, which is LGPL-3.0. That makes the\n    binary as a whole a \"Combined Work\" under LGPL-3.0 section 4 — not plain\n    MIT, and not GPL.\n  * No GPL-licensed code is in any NeoWaves build, deliberately. Where a\n    dependency offered a GPL route and a non-GPL route, the non-GPL route was\n    taken.\n  * A build with no copyleft in it at all is one command away (below).\n\nHOW LGPL-3.0 SECTION 4 IS SATISFIED\n-----------------------------------\n\nMP3 export uses LAME through the `mp3lame-encoder` crate, statically linked.\nLGPL-3.0 section 4 lets a Combined Work be conveyed under terms of your choice\nprovided that:\n\n  4(a) the work carries prominent notice that the Library is used and covered\n       by the LGPL\n         -> this window, plus README.md.\n\n  4(b) the work is accompanied by copies of the GNU GPL and the LGPL\n         -> both texts are embedded in this binary and listed here as\n            \"GNU Lesser General Public License v3.0\" and \"GNU General Public\n            License v3.0\".\n\n  4(c) a Combined Work that displays copyright notices during execution must\n       include the Library's and a reference to the licences\n         -> this window.\n\n  4(d)(0) the Minimal Corresponding Source and the Corresponding Application\n       Code must be conveyed in a form suitable for the user to recombine the\n       application with a modified Library\n         -> the complete source of NeoWaves is published under MIT, and\n            Cargo.lock pins every dependency version. Anyone can substitute a\n            modified LAME and rebuild the identical application. LAME's own\n            source is at https://lame.sourceforge.io/ and is fetched by the\n            build from the pinned `mp3lame-sys` crate.\n\nMP3 patents expired in 2017, so nothing here is a patent question.\n\nA BUILD WITH NO COPYLEFT AT ALL\n-------------------------------\n\n    cargo build --release --no-default-features \\\n        --features glow,plugin_native_vst3,plugin_native_clap\n\nThat drops LAME (and with it the LGPL) and Fraunhofer's FDK. MP3 and AAC\n*decoding* are unaffected — symphonia handles both in pure Rust under MPL-2.0\n— so such a build still opens the same files. Only MP3 and M4A/AAC export go\naway, and the app hides those formats rather than failing at the end of an\nexport.\n\nWHAT IS NOT IN THE DEFAULT BUILD\n--------------------------------\n\nCisco's OpenH264 is behind the `video` feature and is off by default, so the\nreleased binaries contain no self-compiled H.264 codec. On Windows the OS\nMedia Foundation decoder supplies the video preview instead. See the OpenH264\nentry for why that distinction matters.\n\nONE RULE FOR FUTURE CHANGES\n---------------------------\n\nNever introduce GPL-licensed code while the `aac_fdk` feature exists. The\nFraunhofer FDK licence is GPL-incompatible: the two cannot ship in the same\nbinary. This is enforced by a unit test in src/app/licenses.rs."
+    },
+    {
       "key": "OFL-1.1",
       "id": "OFL-1.1",
       "name": "SIL Open Font License 1.1",
@@ -1944,7 +1950,7 @@
       "key": "Steinberg-VST3",
       "id": "Steinberg-VST3",
       "name": "Steinberg VST 3 SDK / VST trademark",
-      "text": "Steinberg VST 3 Plug-In SDK / VST trademark\n\nNeoWaves acts as a VST 3 *host*: it loads third-party VST 3 plug-ins through\nthe `vst3` Rust crate (MIT OR Apache-2.0 bindings to the VST 3 C interface).\nNo Steinberg VST 3 SDK source code is redistributed with NeoWaves.\n\nHowever, the VST 3 interface itself is a Steinberg Media Technologies GmbH\nspecification, and \"VST\" is a registered trademark of Steinberg Media\nTechnologies GmbH. Steinberg distributes the VST 3 SDK under a dual licence:\n\n  * GPLv3, or\n  * the proprietary Steinberg VST 3 Licence Agreement (offered free of charge,\n    but it must be signed and registered with Steinberg).\n\nAnyone shipping a VST 3 host or plug-in commercially is expected to have\naccepted one of those two, and to follow Steinberg's VST usage guidelines for\nnaming and logo use.\n\nVST is a registered trademark of Steinberg Media Technologies GmbH.\nSee https://www.steinberg.net/developers/ for the current agreement."
+      "text": "Steinberg VST 3 — SDK licence and trademark\n\nLICENCE\n-------\n\nSince VST 3.8 (announced 2025-10-29) the VST 3 SDK is released under the MIT\nLicense:\n\n    MIT License\n    Copyright (c) 2026, Steinberg Media Technologies GmbH\n\n    Permission is hereby granted, free of charge, to any person obtaining a\n    copy of this software and associated documentation files (the \"Software\"),\n    to deal in the Software without restriction, including without limitation\n    the rights to use, copy, modify, merge, publish, distribute, sublicense,\n    and/or sell copies of the Software, and to permit persons to whom the\n    Software is furnished to do so, subject to the following conditions:\n\n    The above copyright notice and this permission notice shall be included in\n    all copies or substantial portions of the Software.\n\n    THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT ANY WARRANTY OF ANY KIND,\n    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\n    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN\n    NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,\n    DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR\n    OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE\n    USE OR OTHER DEALINGS IN THE SOFTWARE.\n\nBefore that release the SDK was dual-licensed GPLv3 / proprietary, and a\ncommercial VST 3 host had to either accept GPLv3 for its binaries or sign\nSteinberg's own agreement. Neither applies any more.\n\nNeoWaves in any case redistributes no Steinberg source. It reaches VST 3\nthrough the `vst3` Rust crate, which supplies its own MIT OR Apache-2.0\nbindings to the VST 3 C interface and ships no SDK files.\n\nTRADEMARK\n---------\n\nThe licence change covers copyright only. \"VST\" remains a registered trademark\nof Steinberg Media Technologies GmbH, and its use in product names, logos and\nmarketing still follows Steinberg's usage guidelines.\n\n    VST is a registered trademark of Steinberg Media Technologies GmbH.\n\nA NOTE ON ASIO\n--------------\n\nThe same round of changes moved ASIO in the opposite direction — to GPLv3 /\nproprietary. NeoWaves does not use ASIO: `cpal` is built without its `asio`\nfeature and no ASIO crate appears in Cargo.lock. Enabling it would pull GPLv3\ninto the binary, which would in turn make the Fraunhofer FDK AAC encoder\nundistributable (see that entry).\n\nSee https://www.steinberg.net/press/2025/vst-3-8/ and\nhttps://github.com/steinbergmedia/vst3sdk"
     },
     {
       "key": "UCS-Terms",
@@ -1985,6 +1991,24 @@
   ],
   "components": [
     {
+      "name": "NeoWaves distribution terms",
+      "version": "-",
+      "kind": "distribution",
+      "license_expr": "NeoWaves-Compliance",
+      "license_ids": [
+        "NeoWaves-Compliance"
+      ],
+      "license_keys": [
+        "NeoWaves-Compliance"
+      ],
+      "authors": "zukky",
+      "repository": "https://github.com/SuzukiDaishi/waves-previewer",
+      "flag": null,
+      "note": "NeoWaves's own source is MIT. The default binary also links LAME, making it a Combined Work under LGPL-3.0 section 4 -- not plain MIT, and deliberately not GPL. Open this entry for how each obligation is met and for the one command that builds a NeoWaves with no copyleft in it at all.",
+      "topic": null,
+      "feature": null
+    },
+    {
       "name": "Cisco OpenH264",
       "version": "bundled via openh264-sys2",
       "kind": "bundled-native",
@@ -1997,9 +2021,10 @@
       ],
       "authors": "Cisco Systems, Inc.",
       "repository": "https://github.com/cisco/openh264",
-      "flag": "caution",
-      "note": "Compiled from the bundled C++ sources for the editor's video frame preview (feature `video`, on by default). The code is BSD-2-Clause, but Cisco only pays AVC/H.264 patent royalties on behalf of users of Cisco's own precompiled binaries. A self-compiled OpenH264 puts the AVC patent obligation to Via LA on whoever distributes it. On Windows the Media Foundation backend covers the same formats without this dependency.",
-      "topic": "h264"
+      "flag": "notice",
+      "note": "NOT IN THE DEFAULT BUILD. Cisco pays the AVC/H.264 patent pool only for users of Cisco's own prebuilt binaries; compiling the bundled C++ sources, as this crate does, moves that obligation to whoever ships the result. So `video` was taken out of the default feature set. The only binary this project releases is the Windows installer, where open_video_decoder tries Media Foundation first anyway (H.264, HEVC, VP9, hardware accelerated), so nothing was lost. If you build with --features video and then redistribute that binary, the AVC obligation is yours.",
+      "topic": "h264",
+      "feature": "video"
     },
     {
       "name": "Fraunhofer FDK AAC Codec Library",
@@ -2014,9 +2039,10 @@
       ],
       "authors": "Fraunhofer-Gesellschaft zur Förderung der angewandten Forschung e.V.",
       "repository": "https://github.com/mstorsjo/fdk-aac",
-      "flag": "caution",
-      "note": "Compiled from C sources and statically linked; used for M4A/AAC export. The FDK-AAC licence is BSD-shaped for copyright but section 3 states in capitals that NO PATENT LICENCE IS GRANTED. Commercial AAC encoding/decoding needs a separate patent licence from the Via LA AAC pool or the individual patent holders. The Fraunhofer attribution above must be reproduced in the product documentation.",
-      "topic": "aac"
+      "flag": "notice",
+      "note": "Used for the AAC decode fast path and M4A/AAC export; behind the `aac_fdk` feature. Two things to know. (1) Patents: the FDK licence grants no patent rights, but Via LA's AAC terms state that \"License fees are due on the sale of encoders and/or decoders only\" and NeoWaves is not sold. (2) The FDK licence is GPL-incompatible, so this must never share a binary with GPL code -- the reason no GPL route was taken anywhere in this project. Turning the feature off leaves AAC decoding intact via symphonia and removes only the encoder. Fraunhofer's attribution must be reproduced in the product documentation.",
+      "topic": "aac",
+      "feature": "aac_fdk"
     },
     {
       "name": "LAME (libmp3lame)",
@@ -2035,9 +2061,10 @@
       ],
       "authors": "The LAME project",
       "repository": "https://lame.sourceforge.io/",
-      "flag": "caution",
-      "note": "Used for MP3 export. libmp3lame is LGPL-2.0 and the mp3lame-encoder crate that wraps it is LGPL-3.0, so the linked binary is not simply MIT. LGPL-3.0 section 4 requires either dynamic linking or shipping relinkable object files, plus the LGPL and GPL texts and a visible notice that the work uses the library. MP3 patents expired in 2017, so this is a copyleft-compliance obligation, not a patent one.",
-      "topic": "mp3"
+      "flag": "notice",
+      "note": "MP3 export, behind the `mp3_lame` feature. LGPL-3.0, so the linked binary is a Combined Work under LGPL-3.0 section 4 rather than plain MIT -- but not GPL, and the copyleft does not reach NeoWaves's own code. Every clause of section 4 is satisfied because the full source is published: 4(a) notice here and in README, 4(b) both licence texts embedded below, 4(c) this window, 4(d)(0) all source under MIT with Cargo.lock pinned so anyone can relink against a modified LAME. MP3 patents expired in 2017. See \"What you may do with a NeoWaves build\".",
+      "topic": "mp3",
+      "feature": "mp3_lame"
     },
     {
       "name": "Signalsmith Stretch (C++)",
@@ -2054,7 +2081,8 @@
       "repository": "https://github.com/Signalsmith-Audio/signalsmith-stretch",
       "flag": null,
       "note": "The pitch-shift / time-stretch engine, compiled from the git submodule under vendor/. The Rust wrapper crate (Colin Marc) is MIT as well and is listed separately with the crates.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "SQLite",
@@ -2071,7 +2099,8 @@
       "repository": "https://www.sqlite.org/",
       "flag": null,
       "note": "Amalgamation compiled in through the rusqlite `bundled` feature. Public domain; no obligations.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "DirectML execution provider",
@@ -2088,7 +2117,8 @@
       "repository": "https://www.nuget.org/packages/Microsoft.AI.DirectML/",
       "flag": "notice",
       "note": "Redistributed by the Windows installer for GPU inference. Governed by the Microsoft.AI.DirectML licence terms rather than ONNX Runtime's MIT. Redistribution as part of an application is permitted; reverse engineering and standalone distribution are not.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "Intel MKL-ML",
@@ -2105,7 +2135,8 @@
       "repository": "https://www.intel.com/",
       "flag": "notice",
       "note": "Proprietary Intel binary that some ONNX Runtime builds pull in; the installer copies it if present. Binary redistribution is allowed but the Intel copyright notice and terms must be reproduced, and reverse engineering is prohibited. If the ONNX Runtime build in use does not actually produce this DLL, drop the installer line and this entry.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "oneDNN (DNNL)",
@@ -2122,7 +2153,8 @@
       "repository": "https://github.com/oneapi-src/oneDNN",
       "flag": null,
       "note": "Optional ONNX Runtime CPU acceleration library copied by the installer. Apache-2.0: the licence text and the upstream NOTICE file must travel with the binary.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "Oniguruma",
@@ -2139,7 +2171,8 @@
       "repository": "https://github.com/kkos/oniguruma",
       "flag": null,
       "note": "Regex engine behind the tokenizers crate's `onig` feature, used by the transcription model's tokenizer.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ONNX Runtime",
@@ -2156,7 +2189,8 @@
       "repository": "https://github.com/microsoft/onnxruntime",
       "flag": null,
       "note": "Prebuilt binaries fetched by the `ort` crate's download-binaries feature and copied next to the executable by installer/NeoWaves.iss. MIT; only the notice below is required.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "Steinberg VST 3 interface",
@@ -2171,9 +2205,10 @@
       ],
       "authors": "Steinberg Media Technologies GmbH",
       "repository": "https://www.steinberg.net/developers/",
-      "flag": "caution",
-      "note": "NeoWaves is a VST 3 host (feature `plugin_native_vst3`). No Steinberg SDK source is redistributed — the vst3 crate provides MIT/Apache-2.0 bindings — but the VST 3 interface is Steinberg's and \"VST\" is their registered trademark. Shipping a VST 3 host commercially normally means accepting Steinberg's VST 3 Licence Agreement (free of charge, but it must be signed) or licensing under GPLv3.",
-      "topic": "vst3"
+      "flag": "notice",
+      "note": "RESOLVED as of VST 3.8 (2025-10-29): Steinberg relicensed the VST 3 SDK to MIT, replacing the old GPLv3-or-proprietary dual licence. No agreement to sign and no GPL to take on. NeoWaves redistributes no Steinberg source in any case -- the `vst3` crate ships its own MIT/Apache-2.0 bindings. What remains is the trademark: VST is a registered trademark of Steinberg Media Technologies GmbH. Note the same round of changes moved ASIO to GPLv3/proprietary; NeoWaves does not use ASIO, and enabling it would make the FDK AAC encoder undistributable.",
+      "topic": "vst3",
+      "feature": "plugin_native_vst3"
     },
     {
       "name": "Noto Sans JP",
@@ -2190,7 +2225,8 @@
       "repository": "https://github.com/notofonts",
       "flag": null,
       "note": "Embedded as assets/fonts/NotoSansJP-Regular.otf for Japanese UI text. SIL OFL 1.1: the font may ship with the application, but the licence must travel with it and the font itself may not be sold on its own.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "Universal Category System 8.2.1 category data",
@@ -2207,7 +2243,8 @@
       "repository": "https://universalcategorysystem.com/",
       "flag": null,
       "note": "Embedded as src/metadata/data/ucs_8_2_1.tsv for offline CatID lookup. Published as a public-domain initiative, free for commercial use.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "Zoo default assets (default.gif / default.wav)",
@@ -2220,7 +2257,8 @@
       "repository": "",
       "flag": "notice",
       "note": "PROVENANCE UNCONFIRMED. assets/zoo/default.gif and assets/zoo/default.wav are embedded in the binary (src/app/zoo_assets.rs) but no origin or licence is recorded for them. Confirm who made them and under what terms, then fill this entry in — or replace the files with something of known origin before distributing commercially.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "deepghs/silero-vad-onnx",
@@ -2237,7 +2275,8 @@
       "repository": "https://huggingface.co/deepghs/silero-vad-onnx",
       "flag": null,
       "note": "Voice activity detection for transcription segmentation. Downloaded at runtime; not redistributed.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "onnx-community/whisper-large-v3-turbo",
@@ -2254,7 +2293,8 @@
       "repository": "https://huggingface.co/onnx-community/whisper-large-v3-turbo",
       "flag": "notice",
       "note": "Downloaded at runtime for transcription; not redistributed with NeoWaves. The upstream openai/whisper-large-v3-turbo weights are MIT, but the ONNX conversion repository carries no licence tag of its own. Worth pinning to a specific revision and asking the maintainer to tag the licence.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zukky/allinone-DLL-ONNX",
@@ -2271,7 +2311,8 @@
       "repository": "https://huggingface.co/zukky/allinone-DLL-ONNX",
       "flag": null,
       "note": "Beat/downbeat/section models (harmonix-*) from mir-aidj/all-in-one and stem separation (htdemucs) from facebookresearch/demucs, both MIT upstream. Downloaded at runtime; not redistributed. See THIRD_PARTY_NOTICES.md in that repository.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "accesskit",
@@ -2288,7 +2329,8 @@
       "repository": "https://github.com/AccessKit/accesskit",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "adler2",
@@ -2305,7 +2347,8 @@
       "repository": "https://github.com/oyvindln/adler2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ahash",
@@ -2322,7 +2365,8 @@
       "repository": "https://github.com/tkaitchuck/ahash",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "aho-corasick",
@@ -2339,7 +2383,8 @@
       "repository": "https://github.com/BurntSushi/aho-corasick",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "aligned",
@@ -2356,7 +2401,8 @@
       "repository": "https://github.com/rust-embedded-community/aligned",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "aligned-vec",
@@ -2373,7 +2419,8 @@
       "repository": "https://github.com/sarah-ek/aligned-vec/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "alsa",
@@ -2390,7 +2437,8 @@
       "repository": "https://github.com/diwic/alsa-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "alsa-sys",
@@ -2407,7 +2455,8 @@
       "repository": "https://github.com/diwic/alsa-sys",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "anstream",
@@ -2424,7 +2473,8 @@
       "repository": "https://github.com/rust-cli/anstyle.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "anstyle",
@@ -2441,7 +2491,8 @@
       "repository": "https://github.com/rust-cli/anstyle.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "anstyle-parse",
@@ -2458,7 +2509,8 @@
       "repository": "https://github.com/rust-cli/anstyle.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "anstyle-query",
@@ -2475,7 +2527,8 @@
       "repository": "https://github.com/rust-cli/anstyle.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "anstyle-wincon",
@@ -2492,7 +2545,8 @@
       "repository": "https://github.com/rust-cli/anstyle.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "anyhow",
@@ -2509,7 +2563,8 @@
       "repository": "https://github.com/dtolnay/anyhow",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "aotuv_lancer_vorbis_sys",
@@ -2527,7 +2582,8 @@
       "repository": "https://github.com/ComunidadAylas/vorbis-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "arboard",
@@ -2544,7 +2600,8 @@
       "repository": "https://github.com/1Password/arboard",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "arc-swap",
@@ -2561,7 +2618,8 @@
       "repository": "https://github.com/vorner/arc-swap",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "arg_enum_proc_macro",
@@ -2578,7 +2636,8 @@
       "repository": "https://github.com/lu-zero/arg_enum_proc_macro",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "arrayvec",
@@ -2595,7 +2654,8 @@
       "repository": "https://github.com/bluss/arrayvec",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "as-raw-xcb-connection",
@@ -2612,7 +2672,8 @@
       "repository": "https://github.com/psychon/as-raw-xcb-connection",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "as-slice",
@@ -2629,7 +2690,8 @@
       "repository": "https://github.com/japaric/as-slice",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ascii",
@@ -2646,7 +2708,8 @@
       "repository": "https://github.com/tomprogrammer/rust-ascii",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "atk",
@@ -2663,7 +2726,8 @@
       "repository": "https://github.com/gtk-rs/gtk3-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "atk-sys",
@@ -2680,7 +2744,8 @@
       "repository": "https://github.com/gtk-rs/gtk3-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "atoi_simd",
@@ -2697,7 +2762,8 @@
       "repository": "https://github.com/RoDmitry/atoi_simd",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "atomic-waker",
@@ -2715,7 +2781,8 @@
       "repository": "https://github.com/smol-rs/atomic-waker",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "atomic_float",
@@ -2732,7 +2799,8 @@
       "repository": "https://github.com/thomcc/atomic_float",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "audio-core",
@@ -2749,7 +2817,8 @@
       "repository": "https://github.com/udoprog/audio",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "audioadapter",
@@ -2766,7 +2835,8 @@
       "repository": "https://github.com/HEnquist/audioadapter-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "audioadapter-buffers",
@@ -2783,7 +2853,8 @@
       "repository": "https://github.com/HEnquist/audioadapter-buffers-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "audioadapter-sample",
@@ -2800,7 +2871,8 @@
       "repository": "https://github.com/HEnquist/audioadapter-sample-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "autocfg",
@@ -2817,7 +2889,8 @@
       "repository": "https://github.com/cuviper/autocfg",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "autotools",
@@ -2834,7 +2907,8 @@
       "repository": "https://github.com/lu-zero/autotools-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "av-scenechange",
@@ -2851,7 +2925,8 @@
       "repository": "https://github.com/rust-av/av-scenechange",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "av1-grain",
@@ -2868,7 +2943,8 @@
       "repository": "https://github.com/rust-av/av1-grain",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "avif-serialize",
@@ -2885,7 +2961,8 @@
       "repository": "https://github.com/kornelski/avif-serialize",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "base64",
@@ -2902,7 +2979,8 @@
       "repository": "https://github.com/marshallpierce/rust-base64",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "base64",
@@ -2919,7 +2997,8 @@
       "repository": "https://github.com/marshallpierce/rust-base64",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "base64",
@@ -2936,7 +3015,8 @@
       "repository": "https://github.com/marshallpierce/rust-base64",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "base64ct",
@@ -2953,7 +3033,8 @@
       "repository": "https://github.com/RustCrypto/formats",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "bindgen",
@@ -2970,7 +3051,8 @@
       "repository": "https://github.com/rust-lang/rust-bindgen",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "bit_field",
@@ -2987,7 +3069,8 @@
       "repository": "https://github.com/phil-opp/rust-bit-field",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "bitflags",
@@ -3004,7 +3087,8 @@
       "repository": "https://github.com/bitflags/bitflags",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "bitflags",
@@ -3021,7 +3105,8 @@
       "repository": "https://github.com/bitflags/bitflags",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "bitstream-io",
@@ -3038,7 +3123,8 @@
       "repository": "https://github.com/tuffy/bitstream-io",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "block-buffer",
@@ -3055,7 +3141,8 @@
       "repository": "https://github.com/RustCrypto/utils",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "block2",
@@ -3072,7 +3159,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "block2",
@@ -3089,7 +3177,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "built",
@@ -3106,7 +3195,8 @@
       "repository": "https://github.com/lukaslueg/built",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "built",
@@ -3123,7 +3213,8 @@
       "repository": "https://github.com/lukaslueg/built",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "bumpalo",
@@ -3140,7 +3231,8 @@
       "repository": "https://github.com/fitzgen/bumpalo",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "bytemuck",
@@ -3157,7 +3249,8 @@
       "repository": "https://github.com/Lokathor/bytemuck",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "bytemuck_derive",
@@ -3174,7 +3267,8 @@
       "repository": "https://github.com/Lokathor/bytemuck",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "byteorder",
@@ -3191,7 +3285,8 @@
       "repository": "https://github.com/BurntSushi/byteorder",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "byteorder-lite",
@@ -3208,7 +3303,8 @@
       "repository": "https://github.com/image-rs/byteorder-lite",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "bytes",
@@ -3225,7 +3321,8 @@
       "repository": "https://github.com/tokio-rs/bytes",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "cairo-rs",
@@ -3242,7 +3339,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "cairo-sys-rs",
@@ -3259,7 +3357,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "calamine",
@@ -3276,7 +3375,8 @@
       "repository": "https://github.com/tafia/calamine",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "calloop",
@@ -3293,7 +3393,8 @@
       "repository": "https://github.com/Smithay/calloop",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "calloop",
@@ -3310,7 +3411,8 @@
       "repository": "https://github.com/Smithay/calloop",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "calloop-wayland-source",
@@ -3327,7 +3429,8 @@
       "repository": "https://github.com/smithay/calloop-wayland-source",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "calloop-wayland-source",
@@ -3344,7 +3447,8 @@
       "repository": "https://github.com/smithay/calloop-wayland-source",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "camino",
@@ -3361,7 +3465,8 @@
       "repository": "https://github.com/camino-rs/camino",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "cc",
@@ -3378,7 +3483,8 @@
       "repository": "https://github.com/rust-lang/cc-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "cexpr",
@@ -3395,7 +3501,8 @@
       "repository": "https://github.com/jethrogb/rust-cexpr",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "cfg-expr",
@@ -3412,7 +3519,8 @@
       "repository": "https://github.com/EmbarkStudios/cfg-expr",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "cfg-if",
@@ -3429,7 +3537,8 @@
       "repository": "https://github.com/rust-lang/cfg-if",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "cfg_aliases",
@@ -3447,7 +3556,8 @@
       "repository": "https://github.com/katharostech/cfg_aliases",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "cgl",
@@ -3464,7 +3574,8 @@
       "repository": "https://github.com/servo/cgl-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "chrono",
@@ -3481,7 +3592,8 @@
       "repository": "https://github.com/chronotope/chrono",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "chunked_transfer",
@@ -3498,7 +3610,8 @@
       "repository": "https://github.com/frewsxcv/rust-chunked-transfer",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "clack-common",
@@ -3515,7 +3628,8 @@
       "repository": "https://github.com/prokopyl/clack",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "clack-extensions",
@@ -3532,7 +3646,8 @@
       "repository": "https://github.com/prokopyl/clack",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "clack-host",
@@ -3549,7 +3664,8 @@
       "repository": "https://github.com/prokopyl/clack",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "clang-sys",
@@ -3566,7 +3682,8 @@
       "repository": "https://github.com/KyleMayes/clang-sys",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "clap",
@@ -3583,7 +3700,8 @@
       "repository": "https://github.com/clap-rs/clap",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "clap-sys",
@@ -3600,7 +3718,8 @@
       "repository": "https://github.com/micahrj/clap-sys",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "clap_builder",
@@ -3617,7 +3736,8 @@
       "repository": "https://github.com/clap-rs/clap",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "clap_derive",
@@ -3634,7 +3754,8 @@
       "repository": "https://github.com/clap-rs/clap",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "clap_lex",
@@ -3651,7 +3772,8 @@
       "repository": "https://github.com/clap-rs/clap",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "clipboard-win",
@@ -3668,7 +3790,8 @@
       "repository": "https://github.com/DoumanAsh/clipboard-win",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "codepage",
@@ -3685,7 +3808,8 @@
       "repository": "https://github.com/hsivonen/codepage",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "color",
@@ -3702,7 +3826,8 @@
       "repository": "https://github.com/linebender/color",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "color_quant",
@@ -3719,7 +3844,8 @@
       "repository": "https://github.com/image-rs/color_quant.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "colorchoice",
@@ -3736,7 +3862,8 @@
       "repository": "https://github.com/rust-cli/anstyle.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "com-scrape-types",
@@ -3753,7 +3880,8 @@
       "repository": "https://github.com/coupler-rs/vst3-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "concurrent-queue",
@@ -3770,7 +3898,8 @@
       "repository": "https://github.com/smol-rs/concurrent-queue",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "console",
@@ -3787,7 +3916,8 @@
       "repository": "https://github.com/console-rs/console",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "core-foundation",
@@ -3804,7 +3934,8 @@
       "repository": "https://github.com/servo/core-foundation-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "core-foundation",
@@ -3821,7 +3952,8 @@
       "repository": "https://github.com/servo/core-foundation-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "core-foundation-sys",
@@ -3838,7 +3970,8 @@
       "repository": "https://github.com/servo/core-foundation-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "core-graphics",
@@ -3855,7 +3988,8 @@
       "repository": "https://github.com/servo/core-foundation-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "core-graphics",
@@ -3872,7 +4006,8 @@
       "repository": "https://github.com/servo/core-foundation-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "core-graphics-types",
@@ -3889,7 +4024,8 @@
       "repository": "https://github.com/servo/core-foundation-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "core-graphics-types",
@@ -3906,7 +4042,8 @@
       "repository": "https://github.com/servo/core-foundation-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "coreaudio-rs",
@@ -3923,7 +4060,8 @@
       "repository": "https://github.com/RustAudio/coreaudio-rs.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "cpal",
@@ -3940,7 +4078,8 @@
       "repository": "https://github.com/RustAudio/cpal",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "cpufeatures",
@@ -3957,7 +4096,8 @@
       "repository": "https://github.com/RustCrypto/utils",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "crc",
@@ -3974,7 +4114,8 @@
       "repository": "https://github.com/mrhooray/crc-rs.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "crc-catalog",
@@ -3991,7 +4132,8 @@
       "repository": "https://github.com/akhilles/crc-catalog.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "crc32fast",
@@ -4008,7 +4150,8 @@
       "repository": "https://github.com/srijs/rust-crc32fast",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "crossbeam-deque",
@@ -4025,7 +4168,8 @@
       "repository": "https://github.com/crossbeam-rs/crossbeam",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "crossbeam-epoch",
@@ -4042,7 +4186,8 @@
       "repository": "https://github.com/crossbeam-rs/crossbeam",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "crossbeam-utils",
@@ -4059,7 +4204,8 @@
       "repository": "https://github.com/crossbeam-rs/crossbeam",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "crypto-common",
@@ -4076,7 +4222,8 @@
       "repository": "https://github.com/RustCrypto/traits",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "csv",
@@ -4093,7 +4240,8 @@
       "repository": "https://github.com/BurntSushi/rust-csv",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "csv-core",
@@ -4110,7 +4258,8 @@
       "repository": "https://github.com/BurntSushi/rust-csv",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "cursor-icon",
@@ -4127,7 +4276,8 @@
       "repository": "https://github.com/rust-windowing/cursor-icon",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "darling",
@@ -4144,7 +4294,8 @@
       "repository": "https://github.com/TedDriggs/darling",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "darling_core",
@@ -4161,7 +4312,8 @@
       "repository": "https://github.com/TedDriggs/darling",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "darling_macro",
@@ -4178,7 +4330,8 @@
       "repository": "https://github.com/TedDriggs/darling",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dasp",
@@ -4195,7 +4348,8 @@
       "repository": "https://github.com/rustaudio/dasp.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dasp_envelope",
@@ -4212,7 +4366,8 @@
       "repository": "https://github.com/rustaudio/dasp.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dasp_frame",
@@ -4229,7 +4384,8 @@
       "repository": "https://github.com/rustaudio/dasp.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dasp_interpolate",
@@ -4246,7 +4402,8 @@
       "repository": "https://github.com/rustaudio/dasp.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dasp_peak",
@@ -4263,7 +4420,8 @@
       "repository": "https://github.com/rustaudio/dasp.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dasp_ring_buffer",
@@ -4280,7 +4438,8 @@
       "repository": "https://github.com/rustaudio/dasp.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dasp_rms",
@@ -4297,7 +4456,8 @@
       "repository": "https://github.com/rustaudio/dasp.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dasp_sample",
@@ -4314,7 +4474,8 @@
       "repository": "https://github.com/rustaudio/sample.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dasp_signal",
@@ -4331,7 +4492,8 @@
       "repository": "https://github.com/rustaudio/dasp.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dasp_slice",
@@ -4348,7 +4510,8 @@
       "repository": "https://github.com/rustaudio/dasp.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dasp_window",
@@ -4365,7 +4528,8 @@
       "repository": "https://github.com/rustaudio/dasp.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "debug_unsafe",
@@ -4382,7 +4546,8 @@
       "repository": "https://github.com/RoDmitry/debug_unsafe",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "der",
@@ -4399,7 +4564,8 @@
       "repository": "https://github.com/RustCrypto/formats",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "derive_builder",
@@ -4416,7 +4582,8 @@
       "repository": "https://github.com/colin-kiegel/rust-derive-builder",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "derive_builder_core",
@@ -4433,7 +4600,8 @@
       "repository": "https://github.com/colin-kiegel/rust-derive-builder",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "derive_builder_macro",
@@ -4450,7 +4618,8 @@
       "repository": "https://github.com/colin-kiegel/rust-derive-builder",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "digest",
@@ -4467,7 +4636,8 @@
       "repository": "https://github.com/RustCrypto/traits",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dirs",
@@ -4484,7 +4654,8 @@
       "repository": "https://github.com/soc/dirs-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dirs-sys",
@@ -4501,7 +4672,8 @@
       "repository": "https://github.com/dirs-dev/dirs-sys-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dispatch",
@@ -4518,7 +4690,8 @@
       "repository": "http://github.com/SSheldon/rust-dispatch",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dispatch2",
@@ -4535,7 +4708,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "displaydoc",
@@ -4552,7 +4726,8 @@
       "repository": "https://github.com/yaahc/displaydoc",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dlib",
@@ -4569,7 +4744,8 @@
       "repository": "https://github.com/elinorbgr/dlib",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "document-features",
@@ -4586,7 +4762,8 @@
       "repository": "https://github.com/slint-ui/document-features",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "downcast-rs",
@@ -4603,7 +4780,8 @@
       "repository": "https://github.com/marcianx/downcast-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dpi",
@@ -4622,7 +4800,8 @@
       "repository": "https://github.com/rust-windowing/winit",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "drag",
@@ -4639,7 +4818,8 @@
       "repository": "",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "dunce",
@@ -4656,7 +4836,8 @@
       "repository": "https://gitlab.com/kornelski/dunce",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ecolor",
@@ -4673,7 +4854,8 @@
       "repository": "https://github.com/emilk/egui",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "eframe",
@@ -4690,7 +4872,8 @@
       "repository": "https://github.com/emilk/egui/tree/main/crates/eframe",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "egui",
@@ -4707,7 +4890,8 @@
       "repository": "https://github.com/emilk/egui",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "egui-winit",
@@ -4724,7 +4908,8 @@
       "repository": "https://github.com/emilk/egui/tree/main/crates/egui-winit",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "egui_extras",
@@ -4741,7 +4926,8 @@
       "repository": "https://github.com/emilk/egui",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "egui_glow",
@@ -4758,7 +4944,8 @@
       "repository": "https://github.com/emilk/egui/tree/main/crates/egui_glow",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "either",
@@ -4775,7 +4962,8 @@
       "repository": "https://github.com/rayon-rs/either",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "emath",
@@ -4792,7 +4980,8 @@
       "repository": "https://github.com/emilk/egui/tree/main/crates/emath",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "embed-resource",
@@ -4809,7 +4998,8 @@
       "repository": "https://github.com/nabijaczleweli/rust-embed-resource",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "encode_unicode",
@@ -4826,7 +5016,8 @@
       "repository": "https://github.com/tormol/encode_unicode",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "encoding_rs",
@@ -4846,7 +5037,8 @@
       "repository": "https://github.com/hsivonen/encoding_rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "enum-map",
@@ -4863,7 +5055,8 @@
       "repository": "https://codeberg.org/xfix/enum-map",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "enum-map-derive",
@@ -4880,7 +5073,8 @@
       "repository": "https://codeberg.org/xfix/enum-map",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "epaint",
@@ -4897,7 +5091,8 @@
       "repository": "https://github.com/emilk/egui/tree/main/crates/epaint",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "epaint_default_fonts",
@@ -4918,7 +5113,8 @@
       "repository": "https://github.com/emilk/egui/tree/main/crates/epaint_default_fonts",
       "flag": "notice",
       "note": "Carries egui's bundled default fonts (Hack, Ubuntu-Light, Noto Emoji), which is why OFL-1.1 and Ubuntu-font-1.0 appear in an otherwise font-free dependency graph. Both permit redistribution inside an application; their texts must ship with it.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "equator",
@@ -4935,7 +5131,8 @@
       "repository": "https://github.com/sarah-ek/equator/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "equator-macro",
@@ -4952,7 +5149,8 @@
       "repository": "https://github.com/sarah-ek/equator/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "equivalent",
@@ -4969,7 +5167,8 @@
       "repository": "https://github.com/indexmap-rs/equivalent",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "errno",
@@ -4986,7 +5185,8 @@
       "repository": "https://github.com/lambda-fairy/rust-errno",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "error-code",
@@ -5003,7 +5203,8 @@
       "repository": "https://github.com/DoumanAsh/error-code",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "esaxx-rs",
@@ -5020,7 +5221,8 @@
       "repository": "https://github.com/Narsil/esaxx-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "exr",
@@ -5037,7 +5239,8 @@
       "repository": "https://github.com/johannesvollmer/exrs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "extended",
@@ -5054,7 +5257,8 @@
       "repository": "https://github.com/depp/extended-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "fallible-iterator",
@@ -5071,7 +5275,8 @@
       "repository": "https://github.com/sfackler/rust-fallible-iterator",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "fallible-streaming-iterator",
@@ -5088,7 +5293,8 @@
       "repository": "https://github.com/sfackler/fallible-streaming-iterator",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "fast-float2",
@@ -5105,7 +5311,8 @@
       "repository": "https://github.com/Alexhuszagh/fast-float-rust",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "fastrand",
@@ -5122,7 +5329,8 @@
       "repository": "https://github.com/smol-rs/fastrand",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "fax",
@@ -5139,7 +5347,8 @@
       "repository": "https://github.com/pdf-rs/fax",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "fdeflate",
@@ -5156,7 +5365,8 @@
       "repository": "https://github.com/image-rs/fdeflate",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "fdk-aac",
@@ -5171,9 +5381,10 @@
       ],
       "authors": "Hailey Somerville <hailey@hails.org>",
       "repository": "https://github.com/haileys/fdk-aac-rs",
-      "flag": "caution",
+      "flag": "notice",
       "note": "The Rust crate is MIT, but fdk-aac-sys compiles Fraunhofer's FDK AAC C sources into the binary — see the Fraunhofer entry under Bundled native code for the patent position.",
-      "topic": "aac"
+      "topic": "aac",
+      "feature": "aac_fdk"
     },
     {
       "name": "fdk-aac-sys",
@@ -5188,9 +5399,10 @@
       ],
       "authors": "Hailey Somerville <hailey@hailey.lol>",
       "repository": "https://github.com/haileys/fdk-aac-rs",
-      "flag": "caution",
+      "flag": "notice",
       "note": "Builds and statically links the Fraunhofer FDK AAC codec. See the Fraunhofer entry under Bundled native code.",
-      "topic": "aac"
+      "topic": "aac",
+      "feature": "aac_fdk"
     },
     {
       "name": "fearless_simd",
@@ -5207,7 +5419,8 @@
       "repository": "https://github.com/linebender/fearless_simd",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "field-offset",
@@ -5224,7 +5437,8 @@
       "repository": "https://github.com/Diggsey/rust-field-offset",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "find-msvc-tools",
@@ -5241,7 +5455,8 @@
       "repository": "https://github.com/rust-lang/cc-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "flacenc",
@@ -5258,7 +5473,8 @@
       "repository": "https://github.com/yotarok/flacenc-rs/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "flate2",
@@ -5275,7 +5491,8 @@
       "repository": "https://github.com/rust-lang/flate2-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "fnv",
@@ -5292,7 +5509,8 @@
       "repository": "https://github.com/servo/rust-fnv",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "foldhash",
@@ -5309,7 +5527,8 @@
       "repository": "https://github.com/orlp/foldhash",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "font-types",
@@ -5326,7 +5545,8 @@
       "repository": "https://github.com/googlefonts/fontations",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "foreign-types",
@@ -5343,7 +5563,8 @@
       "repository": "https://github.com/sfackler/foreign-types",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "foreign-types",
@@ -5360,7 +5581,8 @@
       "repository": "https://github.com/sfackler/foreign-types",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "foreign-types-macros",
@@ -5377,7 +5599,8 @@
       "repository": "https://github.com/sfackler/foreign-types",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "foreign-types-shared",
@@ -5394,7 +5617,8 @@
       "repository": "https://github.com/sfackler/foreign-types",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "foreign-types-shared",
@@ -5411,7 +5635,8 @@
       "repository": "https://github.com/sfackler/foreign-types",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "form_urlencoded",
@@ -5428,7 +5653,8 @@
       "repository": "https://github.com/servo/rust-url",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "futures",
@@ -5445,7 +5671,8 @@
       "repository": "https://github.com/rust-lang/futures-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "futures-channel",
@@ -5462,7 +5689,8 @@
       "repository": "https://github.com/rust-lang/futures-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "futures-core",
@@ -5479,7 +5707,8 @@
       "repository": "https://github.com/rust-lang/futures-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "futures-executor",
@@ -5496,7 +5725,8 @@
       "repository": "https://github.com/rust-lang/futures-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "futures-io",
@@ -5513,7 +5743,8 @@
       "repository": "https://github.com/rust-lang/futures-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "futures-macro",
@@ -5530,7 +5761,8 @@
       "repository": "https://github.com/rust-lang/futures-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "futures-sink",
@@ -5547,7 +5779,8 @@
       "repository": "https://github.com/rust-lang/futures-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "futures-task",
@@ -5564,7 +5797,8 @@
       "repository": "https://github.com/rust-lang/futures-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "futures-util",
@@ -5581,7 +5815,8 @@
       "repository": "https://github.com/rust-lang/futures-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gdk",
@@ -5598,7 +5833,8 @@
       "repository": "https://github.com/gtk-rs/gtk3-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gdk-pixbuf",
@@ -5615,7 +5851,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gdk-pixbuf-sys",
@@ -5632,7 +5869,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gdk-sys",
@@ -5649,7 +5887,8 @@
       "repository": "https://github.com/gtk-rs/gtk3-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gdkx11",
@@ -5666,7 +5905,8 @@
       "repository": "https://github.com/gtk-rs/gtk3-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gdkx11-sys",
@@ -5683,7 +5923,8 @@
       "repository": "https://github.com/gtk-rs/gtk3-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "generic-array",
@@ -5700,7 +5941,8 @@
       "repository": "https://github.com/fizyk20/generic-array.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gethostname",
@@ -5717,7 +5959,8 @@
       "repository": "https://codeberg.org/swsnr/gethostname.rs.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "getrandom",
@@ -5734,7 +5977,8 @@
       "repository": "https://github.com/rust-random/getrandom",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "getrandom",
@@ -5751,7 +5995,8 @@
       "repository": "https://github.com/rust-random/getrandom",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "getrandom",
@@ -5768,7 +6013,8 @@
       "repository": "https://github.com/rust-random/getrandom",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gif",
@@ -5785,7 +6031,8 @@
       "repository": "https://github.com/image-rs/image-gif",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gio",
@@ -5802,7 +6049,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gio-sys",
@@ -5819,7 +6067,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gl_generator",
@@ -5836,7 +6085,8 @@
       "repository": "https://github.com/brendanzab/gl-rs/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "glib",
@@ -5853,7 +6103,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "glib-macros",
@@ -5870,7 +6121,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "glib-sys",
@@ -5887,7 +6139,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "glob",
@@ -5904,7 +6157,8 @@
       "repository": "https://github.com/rust-lang/glob",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "glow",
@@ -5921,7 +6175,8 @@
       "repository": "https://github.com/grovesNL/glow",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "glutin",
@@ -5938,7 +6193,8 @@
       "repository": "https://github.com/rust-windowing/glutin",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "glutin-winit",
@@ -5955,7 +6211,8 @@
       "repository": "https://github.com/rust-windowing/glutin",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "glutin_egl_sys",
@@ -5972,7 +6229,8 @@
       "repository": "https://github.com/rust-windowing/glutin",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "glutin_glx_sys",
@@ -5989,7 +6247,8 @@
       "repository": "https://github.com/rust-windowing/glutin",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "glutin_wgl_sys",
@@ -6006,7 +6265,8 @@
       "repository": "https://github.com/rust-windowing/glutin",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gobject-sys",
@@ -6023,7 +6283,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gtk",
@@ -6040,7 +6301,8 @@
       "repository": "https://github.com/gtk-rs/gtk3-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gtk-sys",
@@ -6057,7 +6319,8 @@
       "repository": "https://github.com/gtk-rs/gtk3-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "gtk3-macros",
@@ -6074,7 +6337,8 @@
       "repository": "https://github.com/gtk-rs/gtk3-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "h2",
@@ -6091,7 +6355,8 @@
       "repository": "https://github.com/hyperium/h2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "half",
@@ -6108,7 +6373,8 @@
       "repository": "https://github.com/VoidStarKat/half-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "hash32",
@@ -6125,7 +6391,8 @@
       "repository": "https://github.com/japaric/hash32",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "hashbrown",
@@ -6142,7 +6409,8 @@
       "repository": "https://github.com/rust-lang/hashbrown",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "hashbrown",
@@ -6159,7 +6427,8 @@
       "repository": "https://github.com/rust-lang/hashbrown",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "hashlink",
@@ -6176,7 +6445,8 @@
       "repository": "https://github.com/djc/hashlink",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "heapless",
@@ -6193,7 +6463,8 @@
       "repository": "https://github.com/rust-embedded/heapless",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "heck",
@@ -6210,7 +6481,8 @@
       "repository": "https://github.com/withoutboats/heck",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "heck",
@@ -6227,7 +6499,8 @@
       "repository": "https://github.com/withoutboats/heck",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "hf-hub",
@@ -6244,7 +6517,8 @@
       "repository": "https://github.com/huggingface/hf-hub",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "hmac-sha256",
@@ -6261,7 +6535,8 @@
       "repository": "https://github.com/jedisct1/rust-hmac-sha256",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "hound",
@@ -6278,7 +6553,8 @@
       "repository": "https://github.com/ruuda/hound",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "http",
@@ -6295,7 +6571,8 @@
       "repository": "https://github.com/hyperium/http",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "http-body",
@@ -6312,7 +6589,8 @@
       "repository": "https://github.com/hyperium/http-body",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "http-body-util",
@@ -6329,7 +6607,8 @@
       "repository": "https://github.com/hyperium/http-body",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "httparse",
@@ -6346,7 +6625,8 @@
       "repository": "https://github.com/seanmonstar/httparse",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "httpdate",
@@ -6363,7 +6643,8 @@
       "repository": "https://github.com/pyfisch/httpdate",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "hyper",
@@ -6380,7 +6661,8 @@
       "repository": "https://github.com/hyperium/hyper",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "hyper-tls",
@@ -6397,7 +6679,8 @@
       "repository": "https://github.com/hyperium/hyper-tls",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "hyper-util",
@@ -6414,7 +6697,8 @@
       "repository": "https://github.com/hyperium/hyper-util",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "iana-time-zone",
@@ -6431,7 +6715,8 @@
       "repository": "https://github.com/strawlab/iana-time-zone",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "icu_collections",
@@ -6448,7 +6733,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "icu_locale_core",
@@ -6465,7 +6751,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "icu_normalizer",
@@ -6482,7 +6769,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "icu_normalizer_data",
@@ -6499,7 +6787,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "icu_properties",
@@ -6516,7 +6805,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "icu_properties_data",
@@ -6533,7 +6823,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "icu_provider",
@@ -6550,7 +6841,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "id3",
@@ -6567,7 +6859,8 @@
       "repository": "https://codeberg.org/polyfloyd/rust-id3",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ident_case",
@@ -6584,7 +6877,8 @@
       "repository": "https://github.com/TedDriggs/ident_case",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "idna",
@@ -6601,7 +6895,8 @@
       "repository": "https://github.com/servo/rust-url/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "idna_adapter",
@@ -6618,7 +6913,8 @@
       "repository": "https://github.com/hsivonen/idna_adapter",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "image",
@@ -6635,7 +6931,8 @@
       "repository": "https://github.com/image-rs/image",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "image-webp",
@@ -6652,7 +6949,8 @@
       "repository": "https://github.com/image-rs/image-webp",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "imgref",
@@ -6669,7 +6967,8 @@
       "repository": "https://github.com/kornelski/imgref",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "indexmap",
@@ -6686,7 +6985,8 @@
       "repository": "https://github.com/indexmap-rs/indexmap",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "indicatif",
@@ -6703,7 +7003,8 @@
       "repository": "https://github.com/console-rs/indicatif",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ipnet",
@@ -6720,7 +7021,8 @@
       "repository": "https://github.com/krisprice/ipnet",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "is_terminal_polyfill",
@@ -6737,7 +7039,8 @@
       "repository": "https://github.com/polyfill-rs/is_terminal_polyfill",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "itertools",
@@ -6754,7 +7057,8 @@
       "repository": "https://github.com/rust-itertools/itertools",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "itertools",
@@ -6771,7 +7075,8 @@
       "repository": "https://github.com/rust-itertools/itertools",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "itertools",
@@ -6788,7 +7093,8 @@
       "repository": "https://github.com/rust-itertools/itertools",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "itertools",
@@ -6805,7 +7111,8 @@
       "repository": "https://github.com/rust-itertools/itertools",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "itoa",
@@ -6822,7 +7129,8 @@
       "repository": "https://github.com/dtolnay/itoa",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "jobserver",
@@ -6839,7 +7147,8 @@
       "repository": "https://github.com/rust-lang/jobserver-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "khronos_api",
@@ -6856,7 +7165,8 @@
       "repository": "https://github.com/brendanzab/gl-rs/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "kurbo",
@@ -6873,7 +7183,8 @@
       "repository": "https://github.com/linebender/kurbo",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "lazy_static",
@@ -6890,7 +7201,8 @@
       "repository": "https://github.com/rust-lang-nursery/lazy-static.rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "lebe",
@@ -6907,7 +7219,8 @@
       "repository": "https://github.com/johannesvollmer/lebe",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "libc",
@@ -6924,7 +7237,8 @@
       "repository": "https://github.com/rust-lang/libc",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "libloading",
@@ -6941,7 +7255,8 @@
       "repository": "https://github.com/nagisa/rust_libloading/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "libloading",
@@ -6958,7 +7273,8 @@
       "repository": "https://github.com/nagisa/rust_libloading/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "libm",
@@ -6975,7 +7291,8 @@
       "repository": "https://github.com/rust-lang/compiler-builtins",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "libsqlite3-sys",
@@ -6992,7 +7309,8 @@
       "repository": "https://github.com/rusqlite/rusqlite",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "linebender_resource_handle",
@@ -7009,7 +7327,8 @@
       "repository": "https://github.com/linebender/raw_resource_handle",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "linux-raw-sys",
@@ -7026,7 +7345,8 @@
       "repository": "https://github.com/sunfishcode/linux-raw-sys",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "linux-raw-sys",
@@ -7043,7 +7363,8 @@
       "repository": "https://github.com/sunfishcode/linux-raw-sys",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "litemap",
@@ -7060,7 +7381,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "litrs",
@@ -7077,7 +7399,8 @@
       "repository": "https://github.com/LukasKalbertodt/litrs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "lock_api",
@@ -7094,7 +7417,8 @@
       "repository": "https://github.com/Amanieu/parking_lot",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "log",
@@ -7111,7 +7435,8 @@
       "repository": "https://github.com/rust-lang/log",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "loop9",
@@ -7128,7 +7453,8 @@
       "repository": "https://gitlab.com/kornelski/loop9.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "lzma-rust2",
@@ -7145,7 +7471,8 @@
       "repository": "https://github.com/hasenbanck/lzma-rust2/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "mach2",
@@ -7162,7 +7489,8 @@
       "repository": "https://github.com/JohnTitor/mach2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "macro_rules_attribute",
@@ -7179,7 +7507,8 @@
       "repository": "https://github.com/danielhenrymantilla/macro_rules_attribute-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "macro_rules_attribute-proc_macro",
@@ -7196,7 +7525,8 @@
       "repository": "https://github.com/danielhenrymantilla/macro_rules_attribute-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "matrixmultiply",
@@ -7213,7 +7543,8 @@
       "repository": "https://github.com/bluss/matrixmultiply/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "maybe-rayon",
@@ -7230,7 +7561,8 @@
       "repository": "https://github.com/shssoichiro/maybe-rayon",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "md-5",
@@ -7247,7 +7579,8 @@
       "repository": "https://github.com/RustCrypto/hashes",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "memchr",
@@ -7264,7 +7597,8 @@
       "repository": "https://github.com/BurntSushi/memchr",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "memmap2",
@@ -7281,7 +7615,8 @@
       "repository": "https://github.com/RazrFalcon/memmap2-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "memoffset",
@@ -7298,7 +7633,8 @@
       "repository": "https://github.com/Gilnaa/memoffset",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "mime",
@@ -7315,7 +7651,8 @@
       "repository": "https://github.com/hyperium/mime",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "mime_guess2",
@@ -7332,7 +7669,8 @@
       "repository": "https://github.com/ttys3/mime_guess2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "minimal-lexical",
@@ -7349,7 +7687,8 @@
       "repository": "https://github.com/Alexhuszagh/minimal-lexical",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "miniz_oxide",
@@ -7367,7 +7706,8 @@
       "repository": "https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "mio",
@@ -7384,7 +7724,8 @@
       "repository": "https://github.com/tokio-rs/mio",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "monostate",
@@ -7401,7 +7742,8 @@
       "repository": "https://github.com/dtolnay/monostate",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "monostate-impl",
@@ -7418,7 +7760,8 @@
       "repository": "https://github.com/dtolnay/monostate",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "moxcms",
@@ -7435,7 +7778,8 @@
       "repository": "https://github.com/awxkee/moxcms.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "mp3lame-encoder",
@@ -7450,9 +7794,10 @@
       ],
       "authors": "",
       "repository": "https://github.com/DoumanAsh/mp3lame-encoder",
-      "flag": "caution",
+      "flag": "notice",
       "note": "LGPL-3.0. The Rust wrapper inherits LAME's copyleft, so the statically linked binary cannot simply be described as MIT — see the LAME entry under Bundled native code for the obligations.",
-      "topic": "mp3"
+      "topic": "mp3",
+      "feature": "mp3_lame"
     },
     {
       "name": "mp3lame-sys",
@@ -7467,9 +7812,10 @@
       ],
       "authors": "",
       "repository": "https://github.com/DoumanAsh/mp3lame-sys",
-      "flag": "caution",
+      "flag": "notice",
       "note": "Builds and statically links libmp3lame. See the LAME entry under Bundled native code for the LGPL obligations this places on the distributed binary.",
-      "topic": "mp3"
+      "topic": "mp3",
+      "feature": "mp3_lame"
     },
     {
       "name": "mp4",
@@ -7486,7 +7832,8 @@
       "repository": "https://github.com/alfg/mp4-rust",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "mp4ameta",
@@ -7503,7 +7850,8 @@
       "repository": "https://github.com/Saecki/rust-mp4ameta",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "nasm-rs",
@@ -7520,7 +7868,8 @@
       "repository": "https://github.com/medek/nasm-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "native-tls",
@@ -7537,7 +7886,8 @@
       "repository": "https://github.com/rust-native-tls/rust-native-tls",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ndarray",
@@ -7554,7 +7904,8 @@
       "repository": "https://github.com/rust-ndarray/ndarray",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "neowaves",
@@ -7575,7 +7926,8 @@
       "repository": "",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "new_debug_unreachable",
@@ -7592,7 +7944,8 @@
       "repository": "https://github.com/mbrubeck/rust-debug-unreachable",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "no_std_io2",
@@ -7609,7 +7962,8 @@
       "repository": "https://github.com/wcampbell0x2a/no-std-io2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "nohash-hasher",
@@ -7626,7 +7980,8 @@
       "repository": "https://github.com/paritytech/nohash-hasher",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "nom",
@@ -7643,7 +7998,8 @@
       "repository": "https://github.com/Geal/nom",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "nom",
@@ -7660,7 +8016,8 @@
       "repository": "https://github.com/rust-bakery/nom",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "noop_proc_macro",
@@ -7677,7 +8034,8 @@
       "repository": "https://github.com/lu-zero/noop_proc_macro",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "num-bigint",
@@ -7694,7 +8052,8 @@
       "repository": "https://github.com/rust-num/num-bigint",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "num-complex",
@@ -7711,7 +8070,8 @@
       "repository": "https://github.com/rust-num/num-complex",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "num-derive",
@@ -7728,7 +8088,8 @@
       "repository": "https://github.com/rust-num/num-derive",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "num-integer",
@@ -7745,7 +8106,8 @@
       "repository": "https://github.com/rust-num/num-integer",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "num-rational",
@@ -7762,7 +8124,8 @@
       "repository": "https://github.com/rust-num/num-rational",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "num-traits",
@@ -7779,7 +8142,8 @@
       "repository": "https://github.com/rust-num/num-traits",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "num_cpus",
@@ -7796,7 +8160,8 @@
       "repository": "https://github.com/seanmonstar/num_cpus",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "number_prefix",
@@ -7813,7 +8178,8 @@
       "repository": "https://github.com/ogham/rust-number-prefix",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc-sys",
@@ -7830,7 +8196,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2",
@@ -7847,7 +8214,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2",
@@ -7864,7 +8232,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-app-kit",
@@ -7881,7 +8250,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-app-kit",
@@ -7898,7 +8268,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-audio-toolbox",
@@ -7915,7 +8286,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-cloud-kit",
@@ -7932,7 +8304,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-core-audio",
@@ -7949,7 +8322,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-core-audio-types",
@@ -7966,7 +8340,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-core-data",
@@ -7983,7 +8358,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-core-foundation",
@@ -8000,7 +8376,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-core-graphics",
@@ -8017,7 +8394,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-core-image",
@@ -8034,7 +8412,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-core-text",
@@ -8051,7 +8430,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-core-video",
@@ -8068,7 +8448,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-encode",
@@ -8085,7 +8466,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-foundation",
@@ -8102,7 +8484,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-foundation",
@@ -8119,7 +8502,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "objc2-quartz-core",
@@ -8136,7 +8520,8 @@
       "repository": "https://github.com/madsmtm/objc2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ogg_next_sys",
@@ -8153,7 +8538,8 @@
       "repository": "https://github.com/ComunidadAylas/vorbis-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "once_cell",
@@ -8170,7 +8556,8 @@
       "repository": "https://github.com/matklad/once_cell",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "once_cell_polyfill",
@@ -8187,7 +8574,8 @@
       "repository": "https://github.com/polyfill-rs/once_cell_polyfill",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "onig",
@@ -8204,7 +8592,8 @@
       "repository": "https://github.com/iwillspeak/rust-onig",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "onig_sys",
@@ -8221,7 +8610,8 @@
       "repository": "https://github.com/rust-onig/rust-onig",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "openh264",
@@ -8236,9 +8626,10 @@
       ],
       "authors": "Ralf Biedert <rb@xr.io>",
       "repository": "https://github.com/ralfbiedert/openh264-rs",
-      "flag": "caution",
-      "note": "The Rust crate is BSD-2-Clause, but openh264-sys2 compiles Cisco's OpenH264 C++ sources rather than using Cisco's precompiled binary — which is what moves the AVC/H.264 patent obligation onto the distributor. See the Cisco OpenH264 entry under Bundled native code.",
-      "topic": "h264"
+      "flag": "notice",
+      "note": "BSD-2-Clause, but openh264-sys2 compiles Cisco's C++ rather than using Cisco's prebuilt binary, which is what moves the AVC patent obligation to the distributor. Off by default now -- see the Cisco OpenH264 entry under Bundled native code.",
+      "topic": "h264",
+      "feature": "video"
     },
     {
       "name": "openh264-sys2",
@@ -8272,9 +8663,10 @@
       ],
       "authors": "Ralf Biedert <rb@xr.io>",
       "repository": "https://github.com/ralfbiedert/openh264-rs",
-      "flag": "caution",
+      "flag": "notice",
       "note": "Compiles Cisco's OpenH264 from bundled C++ sources. See the Cisco OpenH264 entry under Bundled native code.",
-      "topic": "h264"
+      "topic": "h264",
+      "feature": "video"
     },
     {
       "name": "openssl",
@@ -8291,7 +8683,8 @@
       "repository": "https://github.com/rust-openssl/rust-openssl",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "openssl-macros",
@@ -8308,7 +8701,8 @@
       "repository": "",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "openssl-probe",
@@ -8325,7 +8719,8 @@
       "repository": "https://github.com/rustls/openssl-probe",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "openssl-sys",
@@ -8342,7 +8737,8 @@
       "repository": "https://github.com/rust-openssl/rust-openssl",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "option-ext",
@@ -8359,7 +8755,8 @@
       "repository": "https://github.com/soc/option-ext.git",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft, pulled in transitively by the directory-lookup crates. Same shape as Symphonia: unmodified use imposes only the notice requirement.",
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ort",
@@ -8376,7 +8773,8 @@
       "repository": "https://github.com/pykeio/ort",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ort-sys",
@@ -8393,7 +8791,8 @@
       "repository": "https://github.com/pykeio/ort",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "pango",
@@ -8410,7 +8809,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "pango-sys",
@@ -8427,7 +8827,8 @@
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "parking_lot",
@@ -8444,7 +8845,8 @@
       "repository": "https://github.com/Amanieu/parking_lot",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "parking_lot_core",
@@ -8461,7 +8863,8 @@
       "repository": "https://github.com/Amanieu/parking_lot",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "paste",
@@ -8478,7 +8881,8 @@
       "repository": "https://github.com/dtolnay/paste",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "pastey",
@@ -8495,7 +8899,8 @@
       "repository": "https://github.com/as1100k/pastey",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "pastey",
@@ -8512,7 +8917,8 @@
       "repository": "https://github.com/as1100k/pastey",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "pem-rfc7468",
@@ -8529,7 +8935,8 @@
       "repository": "https://github.com/RustCrypto/formats",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "peniko",
@@ -8546,7 +8953,8 @@
       "repository": "https://github.com/linebender/peniko",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "percent-encoding",
@@ -8563,7 +8971,8 @@
       "repository": "https://github.com/servo/rust-url/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "phf",
@@ -8580,7 +8989,8 @@
       "repository": "https://github.com/rust-phf/rust-phf",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "phf_shared",
@@ -8597,7 +9007,8 @@
       "repository": "https://github.com/rust-phf/rust-phf",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "pin-project-lite",
@@ -8614,7 +9025,8 @@
       "repository": "https://github.com/taiki-e/pin-project-lite",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "pkg-config",
@@ -8631,7 +9043,8 @@
       "repository": "https://github.com/rust-lang/pkg-config-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "png",
@@ -8648,7 +9061,8 @@
       "repository": "https://github.com/image-rs/image-png",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "polling",
@@ -8665,7 +9079,8 @@
       "repository": "https://github.com/smol-rs/polling",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "pollster",
@@ -8682,7 +9097,8 @@
       "repository": "https://github.com/zesterer/pollster",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "polycool",
@@ -8699,7 +9115,8 @@
       "repository": "https://github.com/linebender/kurbo",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "portable-atomic",
@@ -8716,7 +9133,8 @@
       "repository": "https://github.com/taiki-e/portable-atomic",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "potential_utf",
@@ -8733,7 +9151,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ppv-lite86",
@@ -8750,7 +9169,8 @@
       "repository": "https://github.com/cryptocorrosion/cryptocorrosion",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "prettyplease",
@@ -8767,7 +9187,8 @@
       "repository": "https://github.com/dtolnay/prettyplease",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "primal-check",
@@ -8784,7 +9205,8 @@
       "repository": "https://github.com/huonw/primal",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "proc-macro-crate",
@@ -8801,7 +9223,8 @@
       "repository": "https://github.com/bkchr/proc-macro-crate",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "proc-macro-crate",
@@ -8818,7 +9241,8 @@
       "repository": "https://github.com/bkchr/proc-macro-crate",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "proc-macro-error",
@@ -8835,7 +9259,8 @@
       "repository": "https://gitlab.com/CreepySkeleton/proc-macro-error",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "proc-macro-error-attr",
@@ -8852,7 +9277,8 @@
       "repository": "https://gitlab.com/CreepySkeleton/proc-macro-error",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "proc-macro2",
@@ -8869,7 +9295,8 @@
       "repository": "https://github.com/dtolnay/proc-macro2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "profiling",
@@ -8886,7 +9313,8 @@
       "repository": "https://github.com/aclysma/profiling",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "profiling-procmacros",
@@ -8903,7 +9331,8 @@
       "repository": "https://github.com/aclysma/profiling",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "pulp",
@@ -8920,7 +9349,8 @@
       "repository": "https://github.com/sarah-quinones/pulp/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "pulp-wasm-simd-flag",
@@ -8937,7 +9367,8 @@
       "repository": "https://github.com/sarah-quinones/pulp/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "pxfm",
@@ -8954,7 +9385,8 @@
       "repository": "https://github.com/awxkee/pxfm",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "qoi",
@@ -8972,7 +9404,8 @@
       "repository": "https://github.com/aldanor/qoi-rust",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "quick-error",
@@ -8989,7 +9422,8 @@
       "repository": "http://github.com/tailhook/quick-error",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "quick-xml",
@@ -9006,7 +9440,8 @@
       "repository": "https://github.com/tafia/quick-xml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "quick-xml",
@@ -9023,7 +9458,8 @@
       "repository": "https://github.com/tafia/quick-xml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "quote",
@@ -9040,7 +9476,8 @@
       "repository": "https://github.com/dtolnay/quote",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rand",
@@ -9057,7 +9494,8 @@
       "repository": "https://github.com/rust-random/rand",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rand",
@@ -9074,7 +9512,8 @@
       "repository": "https://github.com/rust-random/rand",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rand_chacha",
@@ -9091,7 +9530,8 @@
       "repository": "https://github.com/rust-random/rand",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rand_chacha",
@@ -9108,7 +9548,8 @@
       "repository": "https://github.com/rust-random/rand",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rand_core",
@@ -9125,7 +9566,8 @@
       "repository": "https://github.com/rust-random/rand",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rand_core",
@@ -9142,7 +9584,8 @@
       "repository": "https://github.com/rust-random/rand",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rav1e",
@@ -9160,7 +9603,8 @@
       "repository": "https://github.com/xiph/rav1e/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ravif",
@@ -9177,7 +9621,8 @@
       "repository": "https://github.com/kornelski/cavif-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "raw-cpuid",
@@ -9194,7 +9639,8 @@
       "repository": "https://github.com/gz/rust-cpuid",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "raw-window-handle",
@@ -9211,7 +9657,8 @@
       "repository": "https://github.com/rust-windowing/raw-window-handle",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rawpointer",
@@ -9228,7 +9675,8 @@
       "repository": "https://github.com/bluss/rawpointer/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rayon",
@@ -9245,7 +9693,8 @@
       "repository": "https://github.com/rayon-rs/rayon",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rayon-cond",
@@ -9262,7 +9711,8 @@
       "repository": "https://github.com/cuviper/rayon-cond",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rayon-core",
@@ -9279,7 +9729,8 @@
       "repository": "https://github.com/rayon-rs/rayon",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "read-fonts",
@@ -9296,7 +9747,8 @@
       "repository": "https://github.com/googlefonts/fontations",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "realfft",
@@ -9313,7 +9765,8 @@
       "repository": "https://github.com/HEnquist/realfft",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "reborrow",
@@ -9330,7 +9783,8 @@
       "repository": "https://github.com/sarah-ek/reborrow/",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "regex",
@@ -9347,7 +9801,8 @@
       "repository": "https://github.com/rust-lang/regex",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "regex-automata",
@@ -9364,7 +9819,8 @@
       "repository": "https://github.com/rust-lang/regex",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "regex-syntax",
@@ -9381,7 +9837,8 @@
       "repository": "https://github.com/rust-lang/regex",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "reqwest",
@@ -9398,7 +9855,8 @@
       "repository": "https://github.com/seanmonstar/reqwest",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rfd",
@@ -9416,7 +9874,8 @@
       "repository": "https://github.com/PolyMeilex/rfd",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rgb",
@@ -9433,7 +9892,8 @@
       "repository": "https://github.com/kornelski/rust-rgb",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ring",
@@ -9468,7 +9928,8 @@
       "repository": "https://github.com/briansmith/ring",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rubato",
@@ -9485,7 +9946,8 @@
       "repository": "https://github.com/HEnquist/rubato",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rusqlite",
@@ -9502,7 +9964,8 @@
       "repository": "https://github.com/rusqlite/rusqlite",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rustc-hash",
@@ -9519,7 +9982,8 @@
       "repository": "https://github.com/rust-lang-nursery/rustc-hash",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rustc-hash",
@@ -9536,7 +10000,8 @@
       "repository": "https://github.com/rust-lang/rustc-hash",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rustc_version",
@@ -9553,7 +10018,8 @@
       "repository": "https://github.com/djc/rustc-version-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rustfft",
@@ -9570,7 +10036,8 @@
       "repository": "https://github.com/ejmahler/RustFFT",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rustix",
@@ -9587,7 +10054,8 @@
       "repository": "https://github.com/bytecodealliance/rustix",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rustix",
@@ -9604,7 +10072,8 @@
       "repository": "https://github.com/bytecodealliance/rustix",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rustls",
@@ -9621,7 +10090,8 @@
       "repository": "https://github.com/rustls/rustls",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rustls-pki-types",
@@ -9638,7 +10108,8 @@
       "repository": "https://github.com/rustls/pki-types",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rustls-webpki",
@@ -9655,7 +10126,8 @@
       "repository": "https://github.com/rustls/webpki",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "rustversion",
@@ -9672,7 +10144,8 @@
       "repository": "https://github.com/dtolnay/rustversion",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ryu",
@@ -9689,7 +10162,8 @@
       "repository": "https://github.com/dtolnay/ryu",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "safe_arch",
@@ -9706,7 +10180,8 @@
       "repository": "https://github.com/Lokathor/safe_arch",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "same-file",
@@ -9723,7 +10198,8 @@
       "repository": "https://github.com/BurntSushi/same-file",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "schannel",
@@ -9740,7 +10216,8 @@
       "repository": "https://github.com/steffengy/schannel-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "scoped-tls",
@@ -9757,7 +10234,8 @@
       "repository": "https://github.com/alexcrichton/scoped-tls",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "scopeguard",
@@ -9774,7 +10252,8 @@
       "repository": "https://github.com/bluss/scopeguard",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "security-framework",
@@ -9791,7 +10270,8 @@
       "repository": "https://github.com/kornelski/rust-security-framework",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "security-framework-sys",
@@ -9808,7 +10288,8 @@
       "repository": "https://github.com/kornelski/rust-security-framework",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "self_cell",
@@ -9825,7 +10306,8 @@
       "repository": "https://github.com/Voultapher/self_cell",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "semver",
@@ -9842,7 +10324,8 @@
       "repository": "https://github.com/dtolnay/semver",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "seq-macro",
@@ -9859,7 +10342,8 @@
       "repository": "https://github.com/dtolnay/seq-macro",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "serde",
@@ -9876,7 +10360,8 @@
       "repository": "https://github.com/serde-rs/serde",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "serde_core",
@@ -9893,7 +10378,8 @@
       "repository": "https://github.com/serde-rs/serde",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "serde_derive",
@@ -9910,7 +10396,8 @@
       "repository": "https://github.com/serde-rs/serde",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "serde_json",
@@ -9927,7 +10414,8 @@
       "repository": "https://github.com/serde-rs/json",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "serde_spanned",
@@ -9944,7 +10432,8 @@
       "repository": "https://github.com/toml-rs/toml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "serde_spanned",
@@ -9961,7 +10450,8 @@
       "repository": "https://github.com/toml-rs/toml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "serde_urlencoded",
@@ -9978,7 +10468,8 @@
       "repository": "https://github.com/nox/serde_urlencoded",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "sha2",
@@ -9995,7 +10486,8 @@
       "repository": "https://github.com/RustCrypto/hashes",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "shlex",
@@ -10012,7 +10504,8 @@
       "repository": "https://github.com/comex/rust-shlex",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "shlex",
@@ -10029,7 +10522,8 @@
       "repository": "https://github.com/comex/rust-shlex",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "signalsmith-stretch",
@@ -10048,7 +10542,8 @@
       "repository": "https://github.com/colinmarc/signalsmith-stretch-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "simd-adler32",
@@ -10065,7 +10560,8 @@
       "repository": "https://github.com/mcountryman/simd-adler32",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "simd_helpers",
@@ -10082,7 +10578,8 @@
       "repository": "https://github.com/lu-zero/simd_helpers",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "siphasher",
@@ -10099,7 +10596,8 @@
       "repository": "https://github.com/jedisct1/rust-siphash",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "skrifa",
@@ -10116,7 +10614,8 @@
       "repository": "https://github.com/googlefonts/fontations",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "slab",
@@ -10133,7 +10632,8 @@
       "repository": "https://github.com/tokio-rs/slab",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "smallvec",
@@ -10150,7 +10650,8 @@
       "repository": "https://github.com/servo/rust-smallvec",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "smithay-client-toolkit",
@@ -10167,7 +10668,8 @@
       "repository": "https://github.com/smithay/client-toolkit",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "smithay-client-toolkit",
@@ -10184,7 +10686,8 @@
       "repository": "https://github.com/smithay/client-toolkit",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "smithay-clipboard",
@@ -10201,7 +10704,8 @@
       "repository": "https://github.com/smithay/smithay-clipboard",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "smol_str",
@@ -10218,7 +10722,8 @@
       "repository": "https://github.com/rust-analyzer/smol_str",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "socket2",
@@ -10235,7 +10740,8 @@
       "repository": "https://github.com/rust-lang/socket2",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "socks",
@@ -10252,7 +10758,8 @@
       "repository": "https://github.com/sfackler/rust-socks",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "spm_precompiled",
@@ -10269,7 +10776,8 @@
       "repository": "https://github.com/huggingface/spm_precompiled",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "stable_deref_trait",
@@ -10286,7 +10794,8 @@
       "repository": "https://github.com/storyyeller/stable_deref_trait",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "static_assertions",
@@ -10303,7 +10812,8 @@
       "repository": "https://github.com/nvzqz/static-assertions-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "strength_reduce",
@@ -10320,7 +10830,8 @@
       "repository": "http://github.com/ejmahler/strength_reduce",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "strsim",
@@ -10337,7 +10848,8 @@
       "repository": "https://github.com/rapidfuzz/strsim-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "subtle",
@@ -10354,7 +10866,8 @@
       "repository": "https://github.com/dalek-cryptography/subtle",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "symphonia",
@@ -10371,7 +10884,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-bundle-flac",
@@ -10388,7 +10902,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-bundle-mp3",
@@ -10405,7 +10920,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-codec-aac",
@@ -10422,7 +10938,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-codec-alac",
@@ -10439,7 +10956,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-codec-pcm",
@@ -10456,7 +10974,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-codec-vorbis",
@@ -10473,7 +10992,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-core",
@@ -10490,7 +11010,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-format-isomp4",
@@ -10507,7 +11028,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-format-ogg",
@@ -10524,7 +11046,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-format-riff",
@@ -10541,7 +11064,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-metadata",
@@ -10558,7 +11082,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "symphonia-utils-xiph",
@@ -10575,7 +11100,8 @@
       "repository": "https://github.com/pdeljanov/Symphonia",
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
-      "topic": "mpl"
+      "topic": "mpl",
+      "feature": null
     },
     {
       "name": "syn",
@@ -10592,7 +11118,8 @@
       "repository": "https://github.com/dtolnay/syn",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "syn",
@@ -10609,7 +11136,8 @@
       "repository": "https://github.com/dtolnay/syn",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "syn",
@@ -10626,7 +11154,8 @@
       "repository": "https://github.com/dtolnay/syn",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "sync_wrapper",
@@ -10643,7 +11172,8 @@
       "repository": "https://github.com/Actyx/sync_wrapper",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "synstructure",
@@ -10660,7 +11190,8 @@
       "repository": "https://github.com/mystor/synstructure",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "system-configuration",
@@ -10677,7 +11208,8 @@
       "repository": "https://github.com/mullvad/system-configuration-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "system-configuration-sys",
@@ -10694,7 +11226,8 @@
       "repository": "https://github.com/mullvad/system-configuration-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "system-deps",
@@ -10711,7 +11244,8 @@
       "repository": "https://github.com/gdesmott/system-deps",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "target-lexicon",
@@ -10728,7 +11262,8 @@
       "repository": "https://github.com/bytecodealliance/target-lexicon",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tempfile",
@@ -10745,7 +11280,8 @@
       "repository": "https://github.com/Stebalien/tempfile",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "terminal_size",
@@ -10762,7 +11298,8 @@
       "repository": "https://github.com/eminence/terminal-size",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "thiserror",
@@ -10779,7 +11316,8 @@
       "repository": "https://github.com/dtolnay/thiserror",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "thiserror",
@@ -10796,7 +11334,8 @@
       "repository": "https://github.com/dtolnay/thiserror",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "thiserror-impl",
@@ -10813,7 +11352,8 @@
       "repository": "https://github.com/dtolnay/thiserror",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "thiserror-impl",
@@ -10830,7 +11370,8 @@
       "repository": "https://github.com/dtolnay/thiserror",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tiff",
@@ -10847,7 +11388,8 @@
       "repository": "https://github.com/image-rs/image-tiff",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tiny_http",
@@ -10864,7 +11406,8 @@
       "repository": "https://github.com/tiny-http/tiny-http",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tinystr",
@@ -10881,7 +11424,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tinyvec",
@@ -10898,7 +11442,8 @@
       "repository": "https://github.com/Lokathor/tinyvec",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tinyvec_macros",
@@ -10915,7 +11460,8 @@
       "repository": "https://github.com/Soveu/tinyvec_macros",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tokenizers",
@@ -10932,7 +11478,8 @@
       "repository": "https://github.com/huggingface/tokenizers",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tokio",
@@ -10949,7 +11496,8 @@
       "repository": "https://github.com/tokio-rs/tokio",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tokio-macros",
@@ -10966,7 +11514,8 @@
       "repository": "https://github.com/tokio-rs/tokio",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tokio-native-tls",
@@ -10983,7 +11532,8 @@
       "repository": "https://github.com/tokio-rs/tls",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tokio-util",
@@ -11000,7 +11550,8 @@
       "repository": "https://github.com/tokio-rs/tokio",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "toml",
@@ -11017,7 +11568,8 @@
       "repository": "https://github.com/toml-rs/toml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "toml",
@@ -11034,7 +11586,8 @@
       "repository": "https://github.com/toml-rs/toml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "toml_datetime",
@@ -11051,7 +11604,8 @@
       "repository": "https://github.com/toml-rs/toml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "toml_datetime",
@@ -11068,7 +11622,8 @@
       "repository": "https://github.com/toml-rs/toml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "toml_edit",
@@ -11085,7 +11640,8 @@
       "repository": "https://github.com/toml-rs/toml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "toml_edit",
@@ -11102,7 +11658,8 @@
       "repository": "https://github.com/toml-rs/toml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "toml_parser",
@@ -11119,7 +11676,8 @@
       "repository": "https://github.com/toml-rs/toml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "toml_writer",
@@ -11136,7 +11694,8 @@
       "repository": "https://github.com/toml-rs/toml",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tower",
@@ -11153,7 +11712,8 @@
       "repository": "https://github.com/tower-rs/tower",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tower-http",
@@ -11170,7 +11730,8 @@
       "repository": "https://github.com/tower-rs/tower-http",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tower-layer",
@@ -11187,7 +11748,8 @@
       "repository": "https://github.com/tower-rs/tower",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tower-service",
@@ -11204,7 +11766,8 @@
       "repository": "https://github.com/tower-rs/tower",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tracing",
@@ -11221,7 +11784,8 @@
       "repository": "https://github.com/tokio-rs/tracing",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "tracing-core",
@@ -11239,7 +11803,8 @@
       "repository": "https://github.com/tokio-rs/tracing",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "transpose",
@@ -11256,7 +11821,8 @@
       "repository": "https://github.com/ejmahler/transpose",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "try-lock",
@@ -11273,7 +11839,8 @@
       "repository": "https://github.com/seanmonstar/try-lock",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "typed-path",
@@ -11290,7 +11857,8 @@
       "repository": "https://github.com/chipsenkbeil/typed-path",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "typenum",
@@ -11307,7 +11875,8 @@
       "repository": "https://github.com/paholg/typenum",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "unicase",
@@ -11324,7 +11893,8 @@
       "repository": "https://github.com/seanmonstar/unicase",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "unicode-ident",
@@ -11343,7 +11913,8 @@
       "repository": "https://github.com/dtolnay/unicode-ident",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "unicode-normalization-alignments",
@@ -11360,7 +11931,8 @@
       "repository": "https://github.com/n1t0/unicode-normalization",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "unicode-segmentation",
@@ -11377,7 +11949,8 @@
       "repository": "https://github.com/unicode-rs/unicode-segmentation",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "unicode-width",
@@ -11394,7 +11967,8 @@
       "repository": "https://github.com/unicode-rs/unicode-width",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "unicode_categories",
@@ -11411,7 +11985,8 @@
       "repository": "https://github.com/swgillespie/unicode-categories",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "untrusted",
@@ -11428,7 +12003,8 @@
       "repository": "https://github.com/briansmith/untrusted",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ureq",
@@ -11446,7 +12022,8 @@
       "repository": "https://github.com/algesten/ureq",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ureq",
@@ -11463,7 +12040,8 @@
       "repository": "https://github.com/algesten/ureq",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "ureq-proto",
@@ -11480,7 +12058,8 @@
       "repository": "https://github.com/algesten/ureq-proto",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "url",
@@ -11497,7 +12076,8 @@
       "repository": "https://github.com/servo/rust-url",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "utf8-zero",
@@ -11514,7 +12094,8 @@
       "repository": "https://github.com/algesten/utf8-zero",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "utf8_iter",
@@ -11531,7 +12112,8 @@
       "repository": "https://github.com/hsivonen/utf8_iter",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "utf8parse",
@@ -11548,7 +12130,8 @@
       "repository": "https://github.com/alacritty/vte",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "uuid",
@@ -11565,7 +12148,8 @@
       "repository": "https://github.com/uuid-rs/uuid",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "v_frame",
@@ -11582,7 +12166,8 @@
       "repository": "https://github.com/rust-av/v_frame",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "vcpkg",
@@ -11599,7 +12184,8 @@
       "repository": "https://github.com/mcgoo/vcpkg-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "vello_common",
@@ -11616,7 +12202,8 @@
       "repository": "https://github.com/linebender/vello",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "vello_cpu",
@@ -11633,7 +12220,8 @@
       "repository": "https://github.com/linebender/vello",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "version-compare",
@@ -11650,7 +12238,8 @@
       "repository": "https://gitlab.com/timvisee/version-compare",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "version_check",
@@ -11667,7 +12256,8 @@
       "repository": "https://github.com/SergioBenitez/version_check",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "visibility",
@@ -11684,7 +12274,8 @@
       "repository": "https://github.com/danielhenrymantilla/visibility.rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "vorbis_rs",
@@ -11701,7 +12292,8 @@
       "repository": "https://github.com/ComunidadAylas/vorbis-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "vst3",
@@ -11716,9 +12308,10 @@
       ],
       "authors": "Micah Johnston <micahrjohnston@gmail.com>",
       "repository": "https://github.com/coupler-rs/vst3-rs",
-      "flag": "caution",
-      "note": "MIT/Apache-2.0 bindings, but the VST 3 interface they describe is Steinberg's and \"VST\" is their trademark. See the Steinberg VST 3 entry.",
-      "topic": "vst3"
+      "flag": "notice",
+      "note": "MIT/Apache-2.0 bindings that ship no Steinberg source. Since VST 3.8 the SDK they describe is itself MIT, so nothing here is copyleft; only the VST trademark still applies.",
+      "topic": "vst3",
+      "feature": "plugin_native_vst3"
     },
     {
       "name": "vswhom",
@@ -11735,7 +12328,8 @@
       "repository": "https://github.com/nabijaczleweli/vswhom.rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "vswhom-sys",
@@ -11752,7 +12346,8 @@
       "repository": "https://github.com/nabijaczleweli/vswhom-sys.rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "walkdir",
@@ -11769,7 +12364,8 @@
       "repository": "https://github.com/BurntSushi/walkdir",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "want",
@@ -11786,7 +12382,8 @@
       "repository": "https://github.com/seanmonstar/want",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wayland-backend",
@@ -11803,7 +12400,8 @@
       "repository": "https://github.com/smithay/wayland-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wayland-client",
@@ -11820,7 +12418,8 @@
       "repository": "https://github.com/smithay/wayland-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wayland-csd-frame",
@@ -11837,7 +12436,8 @@
       "repository": "https://github.com/rust-windowing/wayland-csd-frame",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wayland-cursor",
@@ -11854,7 +12454,8 @@
       "repository": "https://github.com/smithay/wayland-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wayland-protocols",
@@ -11872,7 +12473,8 @@
       "repository": "https://github.com/smithay/wayland-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wayland-protocols-experimental",
@@ -11889,7 +12491,8 @@
       "repository": "https://github.com/smithay/wayland-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wayland-protocols-misc",
@@ -11906,7 +12509,8 @@
       "repository": "https://github.com/smithay/wayland-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wayland-protocols-plasma",
@@ -11924,7 +12528,8 @@
       "repository": "https://github.com/smithay/wayland-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wayland-protocols-wlr",
@@ -11941,7 +12546,8 @@
       "repository": "https://github.com/smithay/wayland-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wayland-scanner",
@@ -11958,7 +12564,8 @@
       "repository": "https://github.com/smithay/wayland-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wayland-sys",
@@ -11975,7 +12582,8 @@
       "repository": "https://github.com/smithay/wayland-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "web-time",
@@ -11992,7 +12600,8 @@
       "repository": "https://github.com/daxpedda/web-time",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "webbrowser",
@@ -12009,7 +12618,8 @@
       "repository": "https://github.com/amodm/webbrowser-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "webpki-root-certs",
@@ -12026,7 +12636,8 @@
       "repository": "https://github.com/rustls/webpki-roots",
       "flag": "notice",
       "note": "Embeds the Mozilla CA root store as data under CDLA-Permissive-2.0. Permissive and commercially usable; the attribution must be preserved.",
-      "topic": "ca-roots"
+      "topic": "ca-roots",
+      "feature": null
     },
     {
       "name": "webpki-roots",
@@ -12043,7 +12654,8 @@
       "repository": "https://github.com/rustls/webpki-roots",
       "flag": "notice",
       "note": "Embeds the Mozilla CA root store as data under CDLA-Permissive-2.0. Permissive and commercially usable; the attribution must be preserved.",
-      "topic": "ca-roots"
+      "topic": "ca-roots",
+      "feature": null
     },
     {
       "name": "webpki-roots",
@@ -12060,7 +12672,8 @@
       "repository": "https://github.com/rustls/webpki-roots",
       "flag": "notice",
       "note": "Embeds the Mozilla CA root store as data under CDLA-Permissive-2.0. Permissive and commercially usable; the attribution must be preserved.",
-      "topic": "ca-roots"
+      "topic": "ca-roots",
+      "feature": null
     },
     {
       "name": "weezl",
@@ -12077,7 +12690,8 @@
       "repository": "https://github.com/image-rs/weezl",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "wide",
@@ -12094,7 +12708,8 @@
       "repository": "https://github.com/Lokathor/wide",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "winapi",
@@ -12111,7 +12726,8 @@
       "repository": "https://github.com/retep998/winapi-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "winapi-util",
@@ -12128,7 +12744,8 @@
       "repository": "https://github.com/BurntSushi/winapi-util",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windowfunctions",
@@ -12145,7 +12762,8 @@
       "repository": "https://github.com/HEnquist/windowfunctions-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows",
@@ -12162,7 +12780,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows",
@@ -12179,7 +12798,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-collections",
@@ -12196,7 +12816,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-core",
@@ -12213,7 +12834,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-core",
@@ -12230,7 +12852,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-core",
@@ -12247,7 +12870,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-future",
@@ -12264,7 +12888,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-implement",
@@ -12281,7 +12906,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-implement",
@@ -12298,7 +12924,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-implement",
@@ -12315,7 +12942,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-interface",
@@ -12332,7 +12960,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-interface",
@@ -12349,7 +12978,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-interface",
@@ -12366,7 +12996,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-link",
@@ -12383,7 +13014,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-numerics",
@@ -12400,7 +13032,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-registry",
@@ -12417,7 +13050,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-result",
@@ -12434,7 +13068,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-result",
@@ -12451,7 +13086,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-strings",
@@ -12468,7 +13104,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-strings",
@@ -12485,7 +13122,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-sys",
@@ -12502,7 +13140,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-sys",
@@ -12519,7 +13158,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-sys",
@@ -12536,7 +13176,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-sys",
@@ -12553,7 +13194,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-targets",
@@ -12570,7 +13212,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-targets",
@@ -12587,7 +13230,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows-threading",
@@ -12604,7 +13248,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows_exe_info",
@@ -12621,7 +13266,8 @@
       "repository": "https://github.com/MasterOfRespawn/windows_exe_info",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows_x86_64_gnu",
@@ -12638,7 +13284,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows_x86_64_gnu",
@@ -12655,7 +13302,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows_x86_64_msvc",
@@ -12672,7 +13320,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "windows_x86_64_msvc",
@@ -12689,7 +13338,8 @@
       "repository": "https://github.com/microsoft/windows-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "winit",
@@ -12706,7 +13356,8 @@
       "repository": "https://github.com/rust-windowing/winit",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "winnow",
@@ -12723,7 +13374,8 @@
       "repository": "https://github.com/winnow-rs/winnow",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "winnow",
@@ -12740,7 +13392,8 @@
       "repository": "https://github.com/winnow-rs/winnow",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "winreg",
@@ -12757,7 +13410,8 @@
       "repository": "https://github.com/gentoo90/winreg-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "writeable",
@@ -12774,7 +13428,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "x11",
@@ -12791,7 +13446,8 @@
       "repository": "https://github.com/AltF02/x11-rs.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "x11-dl",
@@ -12808,7 +13464,8 @@
       "repository": "https://github.com/AltF02/x11-rs.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "x11rb",
@@ -12825,7 +13482,8 @@
       "repository": "https://github.com/psychon/x11rb",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "x11rb-protocol",
@@ -12842,7 +13500,8 @@
       "repository": "https://github.com/psychon/x11rb",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "xcursor",
@@ -12859,7 +13518,8 @@
       "repository": "https://github.com/esposm03/xcursor-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "xkbcommon-dl",
@@ -12876,7 +13536,8 @@
       "repository": "https://github.com/rust-windowing/xkbcommon-dl",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "xkeysym",
@@ -12893,7 +13554,8 @@
       "repository": "https://github.com/notgull/xkeysym",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "xml-rs",
@@ -12910,7 +13572,8 @@
       "repository": "https://github.com/kornelski/xml-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "y4m",
@@ -12927,7 +13590,8 @@
       "repository": "https://github.com/image-rs/y4m.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "yoke",
@@ -12944,7 +13608,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "yoke-derive",
@@ -12961,7 +13626,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zerocopy",
@@ -12978,7 +13644,8 @@
       "repository": "https://github.com/google/zerocopy",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zerocopy-derive",
@@ -12995,7 +13662,8 @@
       "repository": "https://github.com/google/zerocopy",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zerofrom",
@@ -13012,7 +13680,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zerofrom-derive",
@@ -13029,7 +13698,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zeroize",
@@ -13046,7 +13716,8 @@
       "repository": "https://github.com/RustCrypto/utils",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zerotrie",
@@ -13063,7 +13734,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zerovec",
@@ -13080,7 +13752,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zerovec-derive",
@@ -13097,7 +13770,8 @@
       "repository": "https://github.com/unicode-org/icu4x",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zip",
@@ -13114,7 +13788,8 @@
       "repository": "https://github.com/zip-rs/zip2.git",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zlib-rs",
@@ -13131,7 +13806,8 @@
       "repository": "https://github.com/trifectatechfoundation/zlib-rs",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zmij",
@@ -13148,7 +13824,8 @@
       "repository": "https://github.com/dtolnay/zmij",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zopfli",
@@ -13165,7 +13842,8 @@
       "repository": "https://github.com/zopfli-rs/zopfli",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zune-core",
@@ -13182,7 +13860,8 @@
       "repository": "https://github.com/etemesi254/zune-image",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zune-inflate",
@@ -13199,7 +13878,8 @@
       "repository": "",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     },
     {
       "name": "zune-jpeg",
@@ -13216,7 +13896,8 @@
       "repository": "https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg",
       "flag": null,
       "note": null,
-      "topic": null
+      "topic": null,
+      "feature": null
     }
   ]
 }

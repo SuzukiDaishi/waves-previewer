@@ -1,0 +1,75 @@
+What you may do with a NeoWaves build
+
+NeoWaves is published as source and distributed free of charge. Nothing here
+is sold, and every obligation below is met by the project itself rather than
+being passed on to you.
+
+THE SHORT VERSION
+-----------------
+
+  * NeoWaves's own source code is MIT. See LICENSE.
+  * The default binary also links LAME, which is LGPL-3.0. That makes the
+    binary as a whole a "Combined Work" under LGPL-3.0 section 4 — not plain
+    MIT, and not GPL.
+  * No GPL-licensed code is in any NeoWaves build, deliberately. Where a
+    dependency offered a GPL route and a non-GPL route, the non-GPL route was
+    taken.
+  * A build with no copyleft in it at all is one command away (below).
+
+HOW LGPL-3.0 SECTION 4 IS SATISFIED
+-----------------------------------
+
+MP3 export uses LAME through the `mp3lame-encoder` crate, statically linked.
+LGPL-3.0 section 4 lets a Combined Work be conveyed under terms of your choice
+provided that:
+
+  4(a) the work carries prominent notice that the Library is used and covered
+       by the LGPL
+         -> this window, plus README.md.
+
+  4(b) the work is accompanied by copies of the GNU GPL and the LGPL
+         -> both texts are embedded in this binary and listed here as
+            "GNU Lesser General Public License v3.0" and "GNU General Public
+            License v3.0".
+
+  4(c) a Combined Work that displays copyright notices during execution must
+       include the Library's and a reference to the licences
+         -> this window.
+
+  4(d)(0) the Minimal Corresponding Source and the Corresponding Application
+       Code must be conveyed in a form suitable for the user to recombine the
+       application with a modified Library
+         -> the complete source of NeoWaves is published under MIT, and
+            Cargo.lock pins every dependency version. Anyone can substitute a
+            modified LAME and rebuild the identical application. LAME's own
+            source is at https://lame.sourceforge.io/ and is fetched by the
+            build from the pinned `mp3lame-sys` crate.
+
+MP3 patents expired in 2017, so nothing here is a patent question.
+
+A BUILD WITH NO COPYLEFT AT ALL
+-------------------------------
+
+    cargo build --release --no-default-features \
+        --features glow,plugin_native_vst3,plugin_native_clap
+
+That drops LAME (and with it the LGPL) and Fraunhofer's FDK. MP3 and AAC
+*decoding* are unaffected — symphonia handles both in pure Rust under MPL-2.0
+— so such a build still opens the same files. Only MP3 and M4A/AAC export go
+away, and the app hides those formats rather than failing at the end of an
+export.
+
+WHAT IS NOT IN THE DEFAULT BUILD
+--------------------------------
+
+Cisco's OpenH264 is behind the `video` feature and is off by default, so the
+released binaries contain no self-compiled H.264 codec. On Windows the OS
+Media Foundation decoder supplies the video preview instead. See the OpenH264
+entry for why that distinction matters.
+
+ONE RULE FOR FUTURE CHANGES
+---------------------------
+
+Never introduce GPL-licensed code while the `aac_fdk` feature exists. The
+Fraunhofer FDK licence is GPL-incompatible: the two cannot ship in the same
+binary. This is enforced by a unit test in src/app/licenses.rs.

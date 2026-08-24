@@ -50,13 +50,67 @@ impl crate::app::WavesPreviewer {
                     );
                 });
 
-                ui.add_space(8.0);
+                // What a build of NeoWaves may be used for, stated once and up
+                // front. This is the project's own position rather than a
+                // third-party obligation, which is why it is not in the notes
+                // list below with the components.
+                if let Some(terms) = manifest.distribution_terms() {
+                    ui.add_space(8.0);
+                    if let Some(note) = &terms.note {
+                        ui.label(egui::RichText::new(note).small());
+                    }
+                    egui::CollapsingHeader::new("How each obligation is met")
+                        .id_salt("license_distribution_terms")
+                        .show(ui, |ui| {
+                            for key in &terms.license_keys {
+                                if let Some(license) = manifest.license(key) {
+                                    egui::ScrollArea::horizontal()
+                                        .id_salt(("license_terms_text", key))
+                                        .show(ui, |ui| {
+                                            ui.monospace(&license.text);
+                                        });
+                                }
+                            }
+                        });
+                }
+
+                ui.add_space(10.0);
+                // Which optional codecs and plugin backends this particular
+                // binary was built with. The snapshot covers every feature the
+                // project supports, so without this the page would claim
+                // obligations for code that was never linked in.
+                let (included, excluded) = manifest.build_contents();
+                if !included.is_empty() || !excluded.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Optional components in this build")
+                            .strong()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        for component in &included {
+                            ui.label(format!("✔ {}", component.name));
+                        }
+                        for component in &excluded {
+                            ui.label(
+                                egui::RichText::new(format!("✕ {}", component.name))
+                                    .weak()
+                                    .strikethrough(),
+                            )
+                            .on_hover_text(format!(
+                                "Not in this build — rebuild with --features {}",
+                                component.feature.as_deref().unwrap_or("?")
+                            ));
+                        }
+                    });
+                    ui.add_space(10.0);
+                }
+
                 ui.label(
                     egui::RichText::new("Licences in this build")
                         .strong()
                         .color(ui.visuals().weak_text_color()),
                 );
-                // Click a licence to filter the table by it -- the fastest way
+                // Click a licence to filter the table by it — the fastest way
                 // to answer "what is the MPL-2.0 in here?".
                 ui.horizontal_wrapped(|ui| {
                     for (id, count) in manifest.license_id_counts() {
@@ -105,7 +159,7 @@ impl crate::app::WavesPreviewer {
                             .desired_width(240.0),
                     );
                     if response.changed() {
-                        // Nothing to recompute -- the filter is applied below --
+                        // Nothing to recompute — the filter is applied below --
                         // but a repaint keeps the list in step with the caret.
                         ctx.request_repaint();
                     }
@@ -120,7 +174,7 @@ impl crate::app::WavesPreviewer {
                     let rows: Vec<&Component> = manifest
                         .components
                         .iter()
-                        .filter(|c| c.kind == kind && c.matches(&filter))
+                        .filter(|c| c.kind == kind && c.active && c.matches(&filter))
                         .collect();
                     if rows.is_empty() {
                         continue;
@@ -247,7 +301,7 @@ impl crate::app::WavesPreviewer {
                     );
                     // Horizontal only: licence texts are hard wrapped at 80
                     // columns and reflowing them mangles the section headings.
-                    // Vertical scrolling stays with the window -- a nested
+                    // Vertical scrolling stays with the window — a nested
                     // vertical scroll area here would fight it for the wheel.
                     egui::ScrollArea::horizontal()
                         .id_salt(("license_text", &component.name, key))

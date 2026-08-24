@@ -13,10 +13,14 @@ targets = [
     "aarch64-apple-darwin",
 ]
 
-# Walk the graph exactly as the shipped binary is built: the crate's default
-# features (glow + both plugin backends + video). `--all-features` is wrong here
-# because it would drag in the kittest harness and the wgpu backend, neither of
-# which is in a release.
+# Walk the widest set of codecs the project can be built with -- the default
+# features plus `video` -- rather than just the default build. The snapshot then
+# carries every licence text any configuration could need, and the Licenses
+# window resolves each component's `feature` with `cfg!` at runtime to report
+# what the binary in front of the reader actually contains. `--all-features` is
+# still wrong here: it would drag in the kittest harness and the wgpu backend,
+# neither of which is in any release, so `video` is passed on the command line
+# by commands/generate_licenses.ps1 instead.
 workarounds = ["ring"]
 
 # Every licence NeoWaves is prepared to ship. A dependency introducing anything

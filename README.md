@@ -222,14 +222,32 @@ GPL 依存が紛れ込んだらリリースではなくここで止まる、と�
   - `vendor/signalsmith-stretch/LICENSE.md`
   - `vendor/signalsmith-stretch/signalsmith-stretch/LICENSE.txt`
 
-### 商用配布で別途対応が要るもの
+### 配布物のライセンス構成
 
-NeoWaves 本体は MIT ですが、**配布バイナリ全体が MIT というわけではありません**。
-詳細と最新の状態は Help → Licenses の "Commercial distribution notes" を参照してください。
+NeoWaves 本体のソースは MIT ですが、**既定の配布バイナリ全体が MIT というわけではありません**。
+LAME を含むため LGPL-3.0 §4 の Combined Work になります（GPL ではありません）。
+最新の状態は Help → Licenses の冒頭に表示されます。
 
-| 対象 | 内容 |
+| ビルド | 構成 | ライセンス上の位置づけ |
+| --- | --- | --- |
+| 既定 (`cargo build --release`) | MP3/AAC 書き出し・VST3・CLAP あり、OpenH264 なし | MIT ＋ LGPL-3.0 §4 (LAME) |
+| copyleft なし | `--no-default-features --features glow,plugin_native_vst3,plugin_native_clap` | permissive のみ |
+| 映像プレビュー込み | `--features video` | 上記＋自前ビルド OpenH264（下記注意） |
+
+**GPL は採用していません。** 依存に GPL 以外の選択肢がある場合は必ずそちらを採っています。
+
+### 過去の懸念と、その解消
+
+| 対象 | 解消方法 |
 | --- | --- |
-| Cisco OpenH264（feature `video`、既定 ON） | ソースからビルドしているため、Cisco の特許料肩代わり（Cisco 配布バイナリ限定）の対象外。AVC/H.264 の特許義務は配布者側 |
-| Fraunhofer FDK AAC（M4A/AAC 書き出し） | ライセンス第 3 条が特許不許諾を明記。商用の AAC エンコード/デコードには Via LA の別途ライセンスが必要 |
-| LAME / `mp3lame-encoder`（MP3 書き出し） | LGPL-3.0。静的リンクした配布物には再リンク手段の提供と LGPL/GPL 全文の同梱が必要（MP3 特許は 2017 年失効済） |
-| Steinberg VST 3（feature `plugin_native_vst3`） | SDK ソースは非同梱だが、商用 VST 3 ホストは Steinberg のライセンス契約（無償・要署名）か GPLv3 が通例 |
+| **Steinberg VST 3** | VST 3.8 (2025-10-29) で SDK が MIT に再ライセンスされ、旧来の GPLv3/proprietary 二択が消滅。`vst3` crate も Steinberg のソースを同梱していない。残るのは商標表記のみ（VST is a registered trademark of Steinberg Media Technologies GmbH） |
+| **Cisco OpenH264** | `video` を既定 feature から除外。Cisco の特許料肩代わりは Cisco 配布バイナリ限定で、ソースからビルドすると義務が配布者に移るため。リリースする Windows インストーラでは Media Foundation が映像を担うので機能的損失はない。`--features video` でビルドしたバイナリを再配布する場合は AVC の義務が自分に来る点に注意 |
+| **Fraunhofer FDK AAC** | `aac_fdk` feature 化（既定 ON）。Via LA の AAC 条項は "License fees are due on the **sale** of encoders and/or decoders only" であり本ソフトは販売しない。FDK は GPL 非互換なので、**GPL コードを絶対に混ぜない**方針とセットで成立している（ユニットテストで固定） |
+| **LAME (MP3 書き出し)** | `mp3_lame` feature 化（既定 ON）。ソース全公開により LGPL-3.0 §4 を完全に満たす — (a) 告知、(b) LGPL/GPL 全文同梱、(c) アプリ内表示、(d)(0) `Cargo.lock` 固定＋全ソース MIT 公開で再リンク可能。MP3 特許は 2017 年失効済 |
+
+`aac_fdk` / `mp3_lame` を外しても **MP3・AAC の読み込みは symphonia が担当するので影響ありません**。
+失われるのは書き出しだけで、その場合アプリは該当フォーマットを選択肢から隠します。
+
+> **今後の変更で守ること**: `aac_fdk` が存在する限り GPL ライセンスのコードを入れないこと。
+> FDK のライセンスは GPL 非互換で、同一バイナリに同居できません
+> （`src/app/licenses.rs` の `fdk_aac_never_shares_a_binary_with_gpl` が検出します）。

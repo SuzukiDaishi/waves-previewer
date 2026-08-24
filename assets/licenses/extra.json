@@ -10,7 +10,8 @@
     "flag: null | \"notice\" (must be shown / worth knowing) | \"caution\" (needs",
     "action before commercial distribution). Anything flagged is surfaced in the",
     "'Commercial distribution notes' section of the in-app Licenses window.",
-    "topic: entries sharing a topic collapse into one row in the window's summary section, so a single issue spread across a wrapper crate, its -sys crate and the C library it builds is stated once rather than three times."
+    "topic: entries sharing a topic collapse into one row in the window's summary section, so a single issue spread across a wrapper crate, its -sys crate and the C library it builds is stated once rather than three times.",
+    "feature: the cargo feature that gates this component. The window resolves it at runtime with cfg! so the page reports what the binary in front of you actually contains, and obligations for components that are not compiled in are not claimed."
   ],
   "licenses": [
     {
@@ -77,9 +78,26 @@
       "id": "Steinberg-VST3",
       "name": "Steinberg VST 3 SDK / VST trademark",
       "text_file": "Steinberg-VST3.txt"
+    },
+    {
+      "id": "NeoWaves-Compliance",
+      "name": "What you may do with a NeoWaves build",
+      "text_file": "NEOWAVES-COMPLIANCE.txt"
     }
   ],
   "components": [
+    {
+      "name": "NeoWaves distribution terms",
+      "version": "-",
+      "kind": "distribution",
+      "license_ids": [
+        "NeoWaves-Compliance"
+      ],
+      "authors": "zukky",
+      "repository": "https://github.com/SuzukiDaishi/waves-previewer",
+      "flag": null,
+      "note": "NeoWaves's own source is MIT. The default binary also links LAME, making it a Combined Work under LGPL-3.0 section 4 -- not plain MIT, and deliberately not GPL. Open this entry for how each obligation is met and for the one command that builds a NeoWaves with no copyleft in it at all."
+    },
     {
       "name": "Fraunhofer FDK AAC Codec Library",
       "version": "bundled via fdk-aac-sys",
@@ -89,9 +107,10 @@
       ],
       "authors": "Fraunhofer-Gesellschaft zur Förderung der angewandten Forschung e.V.",
       "repository": "https://github.com/mstorsjo/fdk-aac",
-      "flag": "caution",
-      "note": "Compiled from C sources and statically linked; used for M4A/AAC export. The FDK-AAC licence is BSD-shaped for copyright but section 3 states in capitals that NO PATENT LICENCE IS GRANTED. Commercial AAC encoding/decoding needs a separate patent licence from the Via LA AAC pool or the individual patent holders. The Fraunhofer attribution above must be reproduced in the product documentation.",
-      "topic": "aac"
+      "flag": "notice",
+      "note": "Used for the AAC decode fast path and M4A/AAC export; behind the `aac_fdk` feature. Two things to know. (1) Patents: the FDK licence grants no patent rights, but Via LA's AAC terms state that \"License fees are due on the sale of encoders and/or decoders only\" and NeoWaves is not sold. (2) The FDK licence is GPL-incompatible, so this must never share a binary with GPL code -- the reason no GPL route was taken anywhere in this project. Turning the feature off leaves AAC decoding intact via symphonia and removes only the encoder. Fraunhofer's attribution must be reproduced in the product documentation.",
+      "topic": "aac",
+      "feature": "aac_fdk"
     },
     {
       "name": "LAME (libmp3lame)",
@@ -104,9 +123,10 @@
       ],
       "authors": "The LAME project",
       "repository": "https://lame.sourceforge.io/",
-      "flag": "caution",
-      "note": "Used for MP3 export. libmp3lame is LGPL-2.0 and the mp3lame-encoder crate that wraps it is LGPL-3.0, so the linked binary is not simply MIT. LGPL-3.0 section 4 requires either dynamic linking or shipping relinkable object files, plus the LGPL and GPL texts and a visible notice that the work uses the library. MP3 patents expired in 2017, so this is a copyleft-compliance obligation, not a patent one.",
-      "topic": "mp3"
+      "flag": "notice",
+      "note": "MP3 export, behind the `mp3_lame` feature. LGPL-3.0, so the linked binary is a Combined Work under LGPL-3.0 section 4 rather than plain MIT -- but not GPL, and the copyleft does not reach NeoWaves's own code. Every clause of section 4 is satisfied because the full source is published: 4(a) notice here and in README, 4(b) both licence texts embedded below, 4(c) this window, 4(d)(0) all source under MIT with Cargo.lock pinned so anyone can relink against a modified LAME. MP3 patents expired in 2017. See \"What you may do with a NeoWaves build\".",
+      "topic": "mp3",
+      "feature": "mp3_lame"
     },
     {
       "name": "Cisco OpenH264",
@@ -117,9 +137,10 @@
       ],
       "authors": "Cisco Systems, Inc.",
       "repository": "https://github.com/cisco/openh264",
-      "flag": "caution",
-      "note": "Compiled from the bundled C++ sources for the editor's video frame preview (feature `video`, on by default). The code is BSD-2-Clause, but Cisco only pays AVC/H.264 patent royalties on behalf of users of Cisco's own precompiled binaries. A self-compiled OpenH264 puts the AVC patent obligation to Via LA on whoever distributes it. On Windows the Media Foundation backend covers the same formats without this dependency.",
-      "topic": "h264"
+      "flag": "notice",
+      "note": "NOT IN THE DEFAULT BUILD. Cisco pays the AVC/H.264 patent pool only for users of Cisco's own prebuilt binaries; compiling the bundled C++ sources, as this crate does, moves that obligation to whoever ships the result. So `video` was taken out of the default feature set. The only binary this project releases is the Windows installer, where open_video_decoder tries Media Foundation first anyway (H.264, HEVC, VP9, hardware accelerated), so nothing was lost. If you build with --features video and then redistribute that binary, the AVC obligation is yours.",
+      "topic": "h264",
+      "feature": "video"
     },
     {
       "name": "SQLite",
@@ -248,9 +269,10 @@
       ],
       "authors": "Steinberg Media Technologies GmbH",
       "repository": "https://www.steinberg.net/developers/",
-      "flag": "caution",
-      "note": "NeoWaves is a VST 3 host (feature `plugin_native_vst3`). No Steinberg SDK source is redistributed — the vst3 crate provides MIT/Apache-2.0 bindings — but the VST 3 interface is Steinberg's and \"VST\" is their registered trademark. Shipping a VST 3 host commercially normally means accepting Steinberg's VST 3 Licence Agreement (free of charge, but it must be signed) or licensing under GPLv3.",
-      "topic": "vst3"
+      "flag": "notice",
+      "note": "RESOLVED as of VST 3.8 (2025-10-29): Steinberg relicensed the VST 3 SDK to MIT, replacing the old GPLv3-or-proprietary dual licence. No agreement to sign and no GPL to take on. NeoWaves redistributes no Steinberg source in any case -- the `vst3` crate ships its own MIT/Apache-2.0 bindings. What remains is the trademark: VST is a registered trademark of Steinberg Media Technologies GmbH. Note the same round of changes moved ASIO to GPLv3/proprietary; NeoWaves does not use ASIO, and enabling it would make the FDK AAC encoder undistributable.",
+      "topic": "vst3",
+      "feature": "plugin_native_vst3"
     },
     {
       "name": "onnx-community/whisper-large-v3-turbo",
@@ -295,34 +317,40 @@
       "note": "Carries egui's bundled default fonts (Hack, Ubuntu-Light, Noto Emoji), which is why OFL-1.1 and Ubuntu-font-1.0 appear in an otherwise font-free dependency graph. Both permit redistribution inside an application; their texts must ship with it."
     },
     "fdk-aac": {
-      "flag": "caution",
+      "flag": "notice",
       "note": "The Rust crate is MIT, but fdk-aac-sys compiles Fraunhofer's FDK AAC C sources into the binary — see the Fraunhofer entry under Bundled native code for the patent position.",
-      "topic": "aac"
+      "topic": "aac",
+      "feature": "aac_fdk"
     },
     "fdk-aac-sys": {
-      "flag": "caution",
+      "flag": "notice",
       "note": "Builds and statically links the Fraunhofer FDK AAC codec. See the Fraunhofer entry under Bundled native code.",
-      "topic": "aac"
+      "topic": "aac",
+      "feature": "aac_fdk"
     },
     "mp3lame-encoder": {
-      "flag": "caution",
+      "flag": "notice",
       "note": "LGPL-3.0. The Rust wrapper inherits LAME's copyleft, so the statically linked binary cannot simply be described as MIT — see the LAME entry under Bundled native code for the obligations.",
-      "topic": "mp3"
+      "topic": "mp3",
+      "feature": "mp3_lame"
     },
     "mp3lame-sys": {
-      "flag": "caution",
+      "flag": "notice",
       "note": "Builds and statically links libmp3lame. See the LAME entry under Bundled native code for the LGPL obligations this places on the distributed binary.",
-      "topic": "mp3"
+      "topic": "mp3",
+      "feature": "mp3_lame"
     },
     "openh264": {
-      "flag": "caution",
-      "note": "The Rust crate is BSD-2-Clause, but openh264-sys2 compiles Cisco's OpenH264 C++ sources rather than using Cisco's precompiled binary — which is what moves the AVC/H.264 patent obligation onto the distributor. See the Cisco OpenH264 entry under Bundled native code.",
-      "topic": "h264"
+      "flag": "notice",
+      "note": "BSD-2-Clause, but openh264-sys2 compiles Cisco's C++ rather than using Cisco's prebuilt binary, which is what moves the AVC patent obligation to the distributor. Off by default now -- see the Cisco OpenH264 entry under Bundled native code.",
+      "topic": "h264",
+      "feature": "video"
     },
     "openh264-sys2": {
-      "flag": "caution",
+      "flag": "notice",
       "note": "Compiles Cisco's OpenH264 from bundled C++ sources. See the Cisco OpenH264 entry under Bundled native code.",
-      "topic": "h264"
+      "topic": "h264",
+      "feature": "video"
     },
     "option-ext": {
       "flag": "notice",
@@ -334,9 +362,10 @@
       "topic": "mpl"
     },
     "vst3": {
-      "flag": "caution",
-      "note": "MIT/Apache-2.0 bindings, but the VST 3 interface they describe is Steinberg's and \"VST\" is their trademark. See the Steinberg VST 3 entry.",
-      "topic": "vst3"
+      "flag": "notice",
+      "note": "MIT/Apache-2.0 bindings that ship no Steinberg source. Since VST 3.8 the SDK they describe is itself MIT, so nothing here is copyleft; only the VST trademark still applies.",
+      "topic": "vst3",
+      "feature": "plugin_native_vst3"
     },
     "webpki-root-certs": {
       "flag": "notice",

@@ -28,6 +28,9 @@ use serde_json::Value;
 /// Sort order for the `kind` groups, so the window opens on the things a reader
 /// is most likely to be looking for rather than on 600 crates.
 const KIND_ORDER: &[&str] = &[
+    // NeoWaves's own statement about the distribution, not a third-party
+    // component — the window gives it its own block above everything else.
+    "distribution",
     "bundled-native",
     "runtime-dll",
     "spec",
@@ -77,6 +80,10 @@ struct Component {
     note: Option<String>,
     /// Entries sharing a topic collapse into one row in the window's summary.
     topic: Option<String>,
+    /// The cargo feature that gates this component, if any. The app resolves it
+    /// with `cfg!` so the window reports the binary in front of the reader
+    /// rather than every component the project could be built with.
+    feature: Option<String>,
 }
 
 /// The hand-maintained side: `assets/licenses/extra.json`.
@@ -114,6 +121,8 @@ struct ExtraComponent {
     note: Option<String>,
     #[serde(default)]
     topic: Option<String>,
+    #[serde(default)]
+    feature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +133,8 @@ struct Override {
     note: Option<String>,
     #[serde(default)]
     topic: Option<String>,
+    #[serde(default)]
+    feature: Option<String>,
 }
 
 /// Looks up a crate's override, honouring a trailing `*` as a prefix match.
@@ -323,6 +334,7 @@ fn main() -> Result<()> {
             flag: over.and_then(|o| o.flag.clone()),
             note: over.and_then(|o| o.note.clone()),
             topic: over.and_then(|o| o.topic.clone()),
+            feature: over.and_then(|o| o.feature.clone()),
         });
     }
 
@@ -371,6 +383,7 @@ fn main() -> Result<()> {
             flag: component.flag,
             note: component.note,
             topic: component.topic,
+            feature: component.feature,
         });
     }
 

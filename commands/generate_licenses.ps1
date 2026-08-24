@@ -40,8 +40,13 @@ try {
 
         New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot "target") | Out-Null
 
+        # `--features video` on top of the defaults: the snapshot is meant to
+        # carry every licence text any build configuration could need, and the
+        # Licenses window decides at runtime (via cfg!) which ones this binary
+        # actually pulled in. Without it a default build's snapshot would be
+        # missing OpenH264 entirely.
         Write-Host "==> cargo about generate (this walks the whole dependency graph)"
-        cargo about generate --format json -o $rawJson
+        cargo about generate --format json --features video -o $rawJson
         if ($LASTEXITCODE -ne 0) {
             Write-Error "cargo about failed. If it rejected a licence, decide whether to accept it in about.toml or drop the dependency."
         }

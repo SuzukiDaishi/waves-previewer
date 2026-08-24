@@ -49,7 +49,7 @@ Repository Layout
     - `rename_ops.rs`: rename dialogs + path replacement and batch rename.
     - `audio_ops.rs`: output volume + per-file gain application.
     - `video_ops.rs`: one decode worker per open video tab, the read-ahead ring that keeps the picture on the playhead rather than a round trip behind it, and the per-frame drain.
-    - `licenses.rs`: parses the embedded `assets/licenses/third_party.json` once on first open, pools licence texts by key, and groups flagged entries by topic so one issue spread across a wrapper crate, its `-sys` crate and the C library it builds is stated once. `ui/licenses.rs` renders it as Help -> Licenses.
+    - `licenses.rs`: parses the embedded `assets/licenses/third_party.json` once on first open, pools licence texts by key, and groups flagged entries by topic so one issue spread across a wrapper crate, its `-sys` crate and the C library it builds is stated once. The snapshot is generated against the widest feature set, so `feature_active()` resolves each component's cargo feature with `cfg!` and the window reports the binary in front of the reader rather than claiming obligations for code that was never linked in -- add a feature there whenever `extra.json` gains one. `ui/licenses.rs` renders it as Help -> Licenses.
   - `src/bin/`: extra binaries/utilities (if present).
   - `src/main.rs`: native startup entry.
   - `src/cli.rs`: CLI arg parsing and startup config helpers.
@@ -63,6 +63,13 @@ Repository Layout
 - `tools/gen-licenses/`: standalone crate that merges `cargo about generate --format json` with `assets/licenses/extra.json` into the committed snapshot. Deliberately outside the main crate so regenerating licences does not need NeoWaves's native build deps (ALSA, X11/Wayland, a C++ toolchain).
 - `tests/`: integration tests (including kittest harness).
 - `target/`: Cargo build artifacts (generated).
+
+Cargo Features
+- `default = glow + plugin_native_vst3 + plugin_native_clap + aac_fdk + mp3_lame`.
+- `video` (OpenH264 H.264 preview) is deliberately NOT default: the crate compiles Cisco's sources, and Cisco only covers AVC patent fees for users of *their* prebuilt binaries. The released Windows installer gets its video from Media Foundation instead, so nothing is lost. Build with `--features video` for the picture on Linux/macOS.
+- `aac_fdk` gates Fraunhofer's FDK (AAC decode fast path + M4A/AAC export); `mp3_lame` gates LAME (MP3 export). Turning either off leaves *decoding* intact -- symphonia handles both -- and only removes the encoder. `wave::export_format_is_available` is the single predicate every format picker consults, so an unavailable format is hidden rather than failing at the end of an export.
+- Never add GPL-licensed code while `aac_fdk` exists: the FDK licence is GPL-incompatible and the two cannot ship in one binary. `licenses::tests::fdk_aac_never_shares_a_binary_with_gpl` enforces this.
+- A build with no copyleft at all: `cargo build --no-default-features --features glow,plugin_native_vst3,plugin_native_clap`.
 
 Console Quick Start (PowerShell)
 - Build: `cargo build`

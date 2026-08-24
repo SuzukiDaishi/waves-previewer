@@ -36,10 +36,15 @@ fn synth_stereo(sr: u32, secs: f32) -> Vec<Vec<f32>> {
 fn audio_convert_matrix_wav_mp3_m4a_ogg() {
     let dir = make_temp_dir("audio_convert_matrix");
     let chans = synth_stereo(44_100, 0.18);
-    let formats = ["wav", "aiff", "mp3", "m4a", "ogg"];
+    // MP3 and AAC encoding are optional features, so the matrix covers whatever
+    // this build can actually write rather than assuming every encoder is in.
+    let formats: Vec<&str> = ["wav", "aiff", "mp3", "m4a", "ogg"]
+        .into_iter()
+        .filter(|ext| neowaves::wave::export_format_is_available(ext))
+        .collect();
 
     let mut sources: Vec<(String, PathBuf)> = Vec::new();
-    for ext in formats {
+    for ext in formats.iter() {
         let path = dir.join(format!("src_{ext}.{ext}"));
         neowaves::wave::export_channels_audio(&chans, 44_100, &path)
             .unwrap_or_else(|e| panic!("prepare source {ext} failed: {e}"));
@@ -47,7 +52,7 @@ fn audio_convert_matrix_wav_mp3_m4a_ogg() {
     }
 
     for (src_ext, src_path) in &sources {
-        for dst_ext in formats {
+        for dst_ext in formats.iter().copied() {
             if src_ext == dst_ext {
                 continue;
             }
