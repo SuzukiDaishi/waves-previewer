@@ -7747,7 +7747,7 @@
     },
     {
       "name": "neowaves",
-      "version": "0.20260825.0",
+      "version": "0.20260825.1",
       "kind": "crate",
       "license_expr": "MIT",
       "license_ids": [

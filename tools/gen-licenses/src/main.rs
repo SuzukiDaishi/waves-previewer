@@ -196,6 +196,33 @@ impl TextPool {
     }
 }
 
+/// cargo-about's licence array order is not stable across otherwise equivalent
+/// machines. Sort by the fields that define a pooled entry before assigning the
+/// human-readable `MIT`, `MIT-2`, ... keys, so CI and developer machines emit
+/// byte-identical snapshots.
+fn ordered_license_records(licenses: &[Value]) -> Vec<&Value> {
+    let mut ordered: Vec<&Value> = licenses.iter().collect();
+    ordered.sort_by(|a, b| {
+        a["id"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(b["id"].as_str().unwrap_or_default())
+            .then_with(|| {
+                a["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(b["text"].as_str().unwrap_or_default())
+            })
+            .then_with(|| {
+                a["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(b["name"].as_str().unwrap_or_default())
+            })
+    });
+    ordered
+}
+
 /// Pulls the bare SPDX ids out of an expression like
 /// `(MIT OR Apache-2.0) AND OFL-1.1`.
 fn spdx_ids(expr: &str) -> Vec<String> {
@@ -251,7 +278,7 @@ fn main() -> Result<()> {
     let licenses = raw["licenses"]
         .as_array()
         .context("cargo-about output has no `licenses` array")?;
-    for license in licenses {
+    for license in ordered_license_records(licenses) {
         let id = license["id"].as_str().unwrap_or_default();
         let name = license["name"].as_str().unwrap_or(id);
         let text = license["text"].as_str().unwrap_or_default();
@@ -451,8 +478,12 @@ fn preserve_generated_at_if_unchanged(manifest: &mut Manifest, out_path: &std::p
     let Ok(mut current) = serde_json::to_value(&*manifest) else {
         return;
     };
-    previous.as_object_mut().map(|map| map.remove("generated_at"));
-    current.as_object_mut().map(|map| map.remove("generated_at"));
+    previous
+        .as_object_mut()
+        .map(|map| map.remove("generated_at"));
+    current
+        .as_object_mut()
+        .map(|map| map.remove("generated_at"));
     if previous == current {
         if let Some(previous_date) = previous_date {
             manifest.generated_at = previous_date;
@@ -465,8 +496,16 @@ fn render_notices(manifest: &Manifest) -> String {
 
     let mut out = String::new();
     writeln!(out, "NeoWaves THIRD-PARTY NOTICES").ok();
-    writeln!(out, "Generated from Cargo.lock and assets/licenses/extra.json.").ok();
-    writeln!(out, "NeoWaves's own MIT licence is distributed separately as LICENSE.\n").ok();
+    writeln!(
+        out,
+        "Generated from Cargo.lock and assets/licenses/extra.json."
+    )
+    .ok();
+    writeln!(
+        out,
+        "NeoWaves's own MIT licence is distributed separately as LICENSE.\n"
+    )
+    .ok();
     writeln!(out, "COMPONENTS\n==========\n").ok();
     for component in &manifest.components {
         writeln!(out, "{} {}", component.name, component.version).ok();
@@ -502,4 +541,46 @@ fn render_notices(manifest: &Manifest) -> String {
 /// regeneration even when nothing about the dependency graph changed.
 fn build_date() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn pooled_keys(records: &[Value]) -> Vec<(String, String)> {
+        let mut pool = TextPool::default();
+        for license in ordered_license_records(records) {
+            pool.intern(
+                license["id"].as_str().unwrap(),
+                license["name"].as_str().unwrap(),
+                license["text"].as_str().unwrap(),
+            );
+        }
+        pool.entries
+            .into_iter()
+            .map(|entry| (entry.key, entry.text))
+            .collect()
+    }
+
+    #[test]
+    fn pooled_keys_do_not_depend_on_cargo_about_record_order() {
+        let forward = vec![
+            json!({"id": "MIT", "name": "MIT", "text": "z copyright"}),
+            json!({"id": "Apache-2.0", "name": "Apache", "text": "apache"}),
+            json!({"id": "MIT", "name": "MIT", "text": "a copyright"}),
+        ];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+
+        assert_eq!(pooled_keys(&forward), pooled_keys(&reversed));
+        assert_eq!(
+            pooled_keys(&forward),
+            vec![
+                ("Apache-2.0".to_string(), "apache".to_string()),
+                ("MIT".to_string(), "a copyright".to_string()),
+                ("MIT-2".to_string(), "z copyright".to_string()),
+            ]
+        );
+    }
 }
