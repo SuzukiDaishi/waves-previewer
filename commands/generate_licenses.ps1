@@ -1,5 +1,5 @@
-# Regenerates assets/licenses/third_party.json, the snapshot the in-app
-# Licenses window (Help -> Licenses...) embeds at compile time.
+# Regenerates the in-app JSON snapshot and the standalone notice file copied by
+# the Windows installer.
 #
 # Two steps: cargo-about walks Cargo.lock and collects a licence text for every
 # crate in the graph, then tools/gen-licenses merges that with the hand-written
@@ -61,13 +61,14 @@ try {
         --raw $rawJson `
         --extra (Join-Path $repoRoot "assets/licenses/extra.json") `
         --texts (Join-Path $repoRoot "assets/licenses/texts") `
-        --out   (Join-Path $repoRoot "assets/licenses/third_party.json")
+        --out   (Join-Path $repoRoot "assets/licenses/third_party.json") `
+        --notice-out (Join-Path $repoRoot "assets/licenses/THIRD_PARTY_NOTICES.txt")
     if ($LASTEXITCODE -ne 0) {
         Write-Error "gen-licenses failed."
     }
 
     Write-Host ""
-    Write-Host "Wrote assets/licenses/third_party.json. Commit it, then run:"
+    Write-Host "Wrote third_party.json and THIRD_PARTY_NOTICES.txt. Commit both, then run:"
     Write-Host "  cargo test --lib licenses"
 }
 finally {

@@ -68,9 +68,8 @@ A NOTE ON ASIO
 
 The same round of changes moved ASIO in the opposite direction — to GPLv3 /
 proprietary. NeoWaves does not use ASIO: `cpal` is built without its `asio`
-feature and no ASIO crate appears in Cargo.lock. Enabling it would pull GPLv3
-into the binary, which would in turn make the Fraunhofer FDK AAC encoder
-undistributable (see that entry).
+feature and no ASIO crate appears in Cargo.lock. Enabling it would introduce a
+strong-copyleft or separately licensed interface and requires a fresh review.
 
 See https://www.steinberg.net/press/2025/vst-3-8/ and
 https://github.com/steinbergmedia/vst3sdk

@@ -303,6 +303,8 @@ impl WavesPreviewer {
         let bpm_hint = meta.bpm.filter(|v| v.is_finite() && *v > 0.0);
         let sr_hint = (meta.sample_rate > 0).then_some(meta.sample_rate);
         let audio_track_absent = meta.audio_track_absent;
+        let audio_track_unsupported = meta.audio_track_unsupported;
+        let silent_video_timeline = audio_track_absent || audio_track_unsupported;
         let silent_frames = meta
             .duration_secs
             .filter(|secs| secs.is_finite() && *secs > 0.0)
@@ -336,10 +338,11 @@ impl WavesPreviewer {
         if updated {
             self.list_art_textures.remove(path);
         }
-        if audio_track_absent {
+        if silent_video_timeline {
             let out_sr = self.audio.shared.out_sample_rate.max(1);
             for tab in self.tabs.iter_mut().filter(|tab| tab.path == path) {
-                tab.audio_track_absent = true;
+                tab.audio_track_absent = audio_track_absent;
+                tab.audio_track_unsupported = audio_track_unsupported;
                 tab.loading = false;
                 tab.paged_asset = false;
                 tab.buffer_sample_rate = out_sr;

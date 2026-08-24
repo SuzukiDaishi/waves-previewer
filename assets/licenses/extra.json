@@ -15,24 +15,9 @@
   ],
   "licenses": [
     {
-      "id": "FDK-AAC",
-      "name": "Software License for The Fraunhofer FDK AAC Codec Library",
-      "text_file": "FDK-AAC.txt"
-    },
-    {
       "id": "LGPL-2.0",
       "name": "GNU Library General Public License v2.0",
       "text_file": "LGPL-2.0.txt"
-    },
-    {
-      "id": "LGPL-3.0",
-      "name": "GNU Lesser General Public License v3.0",
-      "text_file": "LGPL-3.0.txt"
-    },
-    {
-      "id": "GPL-3.0",
-      "name": "GNU General Public License v3.0 (referenced by LGPL-3.0)",
-      "text_file": "GPL-3.0.txt"
     },
     {
       "id": "BSD-2-Clause-OpenH264",
@@ -91,35 +76,19 @@
       "authors": "zukky",
       "repository": "https://github.com/SuzukiDaishi/waves-previewer",
       "flag": null,
-      "note": "NeoWaves's own source is MIT. The default binary also links LAME, making it a Combined Work under LGPL-3.0 section 4 -- not plain MIT, and deliberately not GPL. Open this entry for how each obligation is met and for the one command that builds a NeoWaves with no copyleft in it at all."
-    },
-    {
-      "name": "Fraunhofer FDK AAC Codec Library",
-      "version": "bundled via fdk-aac-sys",
-      "kind": "bundled-native",
-      "license_ids": [
-        "FDK-AAC"
-      ],
-      "authors": "Fraunhofer-Gesellschaft zur Förderung der angewandten Forschung e.V.",
-      "repository": "https://github.com/mstorsjo/fdk-aac",
-      "flag": "notice",
-      "note": "Used for the AAC decode fast path and M4A/AAC export; behind the `aac_fdk` feature. Two things to know. (1) Patents: the FDK licence grants no patent rights, but Via LA's AAC terms state that \"License fees are due on the sale of encoders and/or decoders only\" and NeoWaves is not sold. (2) The FDK licence is GPL-incompatible, so this must never share a binary with GPL code -- the reason no GPL route was taken anywhere in this project. Turning the feature off leaves AAC decoding intact via symphonia and removes only the encoder. Fraunhofer's attribution must be reproduced in the product documentation.",
-      "topic": "aac",
-      "feature": "aac_fdk"
+      "note": "NeoWaves's own source is MIT. MP3 export loads a separate, user-replaceable LAME shared library using the LGPL-2.0 section 6(b) mechanism; LAME is not incorporated into the executable. AAC encode/decode support is intentionally absent. Open this entry for the redistribution checklist."
     },
     {
       "name": "LAME (libmp3lame)",
-      "version": "bundled via mp3lame-sys",
-      "kind": "bundled-native",
+      "version": "3.100",
+      "kind": "runtime-dll",
       "license_ids": [
-        "LGPL-2.0",
-        "LGPL-3.0",
-        "GPL-3.0"
+        "LGPL-2.0"
       ],
       "authors": "The LAME project",
       "repository": "https://lame.sourceforge.io/",
       "flag": "notice",
-      "note": "MP3 export, behind the `mp3_lame` feature. LGPL-3.0, so the linked binary is a Combined Work under LGPL-3.0 section 4 rather than plain MIT -- but not GPL, and the copyleft does not reach NeoWaves's own code. Every clause of section 4 is satisfied because the full source is published: 4(a) notice here and in README, 4(b) both licence texts embedded below, 4(c) this window, 4(d)(0) all source under MIT with Cargo.lock pinned so anyone can relink against a modified LAME. MP3 patents expired in 2017. See \"What you may do with a NeoWaves build\".",
+      "note": "MP3 export, behind the `mp3_lame` feature. Built from the unmodified LAME 3.100 source under vendor/lame-3.100 and shipped as libmp3lame.dll beside NeoWaves. The executable imports the DLL and users may replace it with an ABI-compatible build, using LGPL-2.0 section 6(b)'s shared-library mechanism. The LAME acknowledgement, project link, copyright and full LGPL-2.0 text are shipped in THIRD_PARTY_NOTICES.txt and shown in Help > Licenses. The exact corresponding LAME source is in the public NeoWaves source tree. The software licence does not itself grant patent rights; distributors must assess other rights in their jurisdictions.",
       "topic": "mp3",
       "feature": "mp3_lame"
     },
@@ -243,13 +212,13 @@
       "authors": "Steinberg Media Technologies GmbH",
       "repository": "https://www.steinberg.net/developers/",
       "flag": "notice",
-      "note": "RESOLVED as of VST 3.8 (2025-10-29): Steinberg relicensed the VST 3 SDK to MIT, replacing the old GPLv3-or-proprietary dual licence. No agreement to sign and no GPL to take on. NeoWaves redistributes no Steinberg source in any case -- the `vst3` crate ships its own MIT/Apache-2.0 bindings. What remains is the trademark: VST is a registered trademark of Steinberg Media Technologies GmbH. Note the same round of changes moved ASIO to GPLv3/proprietary; NeoWaves does not use ASIO, and enabling it would make the FDK AAC encoder undistributable.",
+      "note": "RESOLVED as of VST 3.8 (2025-10-29): Steinberg relicensed the VST 3 SDK to MIT, replacing the old GPLv3-or-proprietary dual licence. No agreement to sign and no GPL to take on. NeoWaves redistributes no Steinberg source in any case -- the `vst3` crate ships its own MIT/Apache-2.0 bindings. What remains is the trademark: VST is a registered trademark of Steinberg Media Technologies GmbH. NeoWaves does not use ASIO, which moved to GPLv3/proprietary terms.",
       "topic": "vst3",
       "feature": "plugin_native_vst3"
     },
     {
       "name": "onnx-community/whisper-large-v3-turbo",
-      "version": "main",
+      "version": "360ebcde2559d60bb474678be3c1de9ef347d01a",
       "kind": "model",
       "license_ids": [
         "MIT"
@@ -257,11 +226,11 @@
       "authors": "OpenAI (upstream weights), onnx-community (ONNX conversion)",
       "repository": "https://huggingface.co/onnx-community/whisper-large-v3-turbo",
       "flag": "notice",
-      "note": "Downloaded at runtime for transcription; not redistributed with NeoWaves. The upstream openai/whisper-large-v3-turbo weights are MIT, but the ONNX conversion repository carries no licence tag of its own. Worth pinning to a specific revision and asking the maintainer to tag the licence."
+      "note": "Downloaded at runtime for transcription; not redistributed with NeoWaves. Pinned to the revision shown above. The upstream openai/whisper-large-v3-turbo weights are MIT, but the ONNX conversion repository carries no licence tag of its own; obtain explicit confirmation before redistributing those converted files."
     },
     {
       "name": "deepghs/silero-vad-onnx",
-      "version": "main",
+      "version": "193243f7d961b15e6de789d3f90cb0ee867e7b62",
       "kind": "model",
       "license_ids": [
         "MIT"
@@ -273,7 +242,7 @@
     },
     {
       "name": "zukky/allinone-DLL-ONNX",
-      "version": "main",
+      "version": "1299c10d828ff1a53c137ed7cb588c0e3852a340",
       "kind": "model",
       "license_ids": [
         "MIT"
@@ -288,30 +257,6 @@
     "epaint_default_fonts": {
       "flag": "notice",
       "note": "Carries egui's bundled default fonts (Hack, Ubuntu-Light, Noto Emoji), which is why OFL-1.1 and Ubuntu-font-1.0 appear in an otherwise font-free dependency graph. Both permit redistribution inside an application; their texts must ship with it."
-    },
-    "fdk-aac": {
-      "flag": "notice",
-      "note": "The Rust crate is MIT, but fdk-aac-sys compiles Fraunhofer's FDK AAC C sources into the binary — see the Fraunhofer entry under Bundled native code for the patent position.",
-      "topic": "aac",
-      "feature": "aac_fdk"
-    },
-    "fdk-aac-sys": {
-      "flag": "notice",
-      "note": "Builds and statically links the Fraunhofer FDK AAC codec. See the Fraunhofer entry under Bundled native code.",
-      "topic": "aac",
-      "feature": "aac_fdk"
-    },
-    "mp3lame-encoder": {
-      "flag": "notice",
-      "note": "LGPL-3.0. The Rust wrapper inherits LAME's copyleft, so the statically linked binary cannot simply be described as MIT — see the LAME entry under Bundled native code for the obligations.",
-      "topic": "mp3",
-      "feature": "mp3_lame"
-    },
-    "mp3lame-sys": {
-      "flag": "notice",
-      "note": "Builds and statically links libmp3lame. See the LAME entry under Bundled native code for the LGPL obligations this places on the distributed binary.",
-      "topic": "mp3",
-      "feature": "mp3_lame"
     },
     "openh264": {
       "flag": "notice",

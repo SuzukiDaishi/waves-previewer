@@ -303,10 +303,22 @@ impl super::WavesPreviewer {
             self.remove_missing_path(path);
             return;
         }
+        // An explicit shell/CLI open can enter the editor before the list has
+        // ever rendered a row for this path. Video duration and the
+        // no-audio/AAC classification come from header metadata, so request it
+        // here as well; otherwise the tab can remain a zero-length shell and
+        // never create a seekable silent timeline.
+        if crate::media_kind::is_video_path(path) && self.meta_for_path(path).is_none() {
+            self.queue_header_meta_for_path(&path.to_path_buf(), true);
+        }
         let decode_failed = self.is_decode_failed_path(path);
         let audio_track_absent = self
             .meta_for_path(path)
             .is_some_and(|meta| meta.audio_track_absent);
+        let audio_track_unsupported = self
+            .meta_for_path(path)
+            .is_some_and(|meta| meta.audio_track_unsupported);
+        let silent_video_timeline = audio_track_absent || audio_track_unsupported;
         // 郢ｧ・ｿ郢晄じ・帝ｫ｢荵晢ｿ･/郢ｧ・｢郢ｧ・ｯ郢昴・縺・ｹ晞摩蝟ｧ邵ｺ蜷ｶ・玖ｭ弱ｅ竊馴ｫｻ・ｳ陞｢・ｰ郢ｧ雋樞酪雎・ｽ｢
         if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
@@ -396,7 +408,7 @@ impl super::WavesPreviewer {
             .and_then(|s| s.to_str())
             .unwrap_or("(invalid)")
             .to_string();
-        let loading = !decode_failed && !audio_track_absent;
+        let loading = !decode_failed && !silent_video_timeline;
         self.debug_mark_editor_open_start(path);
         let estimated_visual_frames = self
             .estimate_editor_total_frames_cached(path, self.audio.shared.out_sample_rate.max(1));
@@ -415,9 +427,10 @@ impl super::WavesPreviewer {
         self.seed_editor_notes_for_tab(&mut tab);
         tab.loading = loading;
         tab.audio_track_absent = audio_track_absent;
+        tab.audio_track_unsupported = audio_track_unsupported;
         tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
         tab.samples_len_visual = estimated_visual_frames.unwrap_or(0);
-        if audio_track_absent {
+        if silent_video_timeline {
             tab.samples_len = tab.samples_len_visual;
         }
         tab.loading_waveform_minmax = initial_loading_overview;
@@ -434,7 +447,7 @@ impl super::WavesPreviewer {
             path.to_path_buf(),
             super::PendingTabActivationKind::InitialOpen,
         );
-        if !decode_failed && !audio_track_absent {
+        if !decode_failed && !silent_video_timeline {
             self.spawn_editor_decode(path.to_path_buf());
         }
     }

@@ -33,11 +33,11 @@ fn synth_stereo(sr: u32, secs: f32) -> Vec<Vec<f32>> {
 }
 
 #[test]
-fn audio_convert_matrix_wav_mp3_m4a_ogg() {
+fn audio_convert_matrix_for_available_formats() {
     let dir = make_temp_dir("audio_convert_matrix");
     let chans = synth_stereo(44_100, 0.18);
-    // MP3 and AAC encoding are optional features, so the matrix covers whatever
-    // this build can actually write rather than assuming every encoder is in.
+    // MP3 is feature-gated and AAC is intentionally unsupported, so the matrix
+    // covers whatever this build can actually write.
     let formats: Vec<&str> = ["wav", "aiff", "mp3", "m4a", "ogg"]
         .into_iter()
         .filter(|ext| neowaves::wave::export_format_is_available(ext))

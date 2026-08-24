@@ -344,10 +344,14 @@ impl crate::app::WavesPreviewer {
                 )
             });
             let status_text = self.meta_for_path(cell.path).and_then(|meta| {
-                meta.decode_error
-                    .as_deref()
-                    .map(|text| (text, true))
-                    .or_else(|| meta.audio_track_absent.then_some(("NO AUDIO", false)))
+                if meta.audio_track_unsupported {
+                    Some(("AAC UNSUPPORTED", false))
+                } else {
+                    meta.decode_error
+                        .as_deref()
+                        .map(|text| (text, text != "AAC UNSUPPORTED"))
+                        .or_else(|| meta.audio_track_absent.then_some(("NO AUDIO", false)))
+                }
             });
             let (wave_rect, error_rect) = if status_text.is_some() {
                 let err_max = (rect2.height() * 0.45).max(8.0);

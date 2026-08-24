@@ -151,18 +151,18 @@ impl super::WavesPreviewer {
             return false;
         };
         (self.editor_stream_transport_eligible(tab) && self.audio.is_streaming_wav_path(&tab.path))
-            || (!tab.loading && tab.audio_track_absent && tab.samples_len > 0)
+            || (!tab.loading && tab.uses_silent_video_timeline() && tab.samples_len > 0)
             || (!tab.loading && !tab.ch_samples.is_empty())
     }
 
-    /// Activate the zero-allocation transport for a video with no audio
+    /// Activate the zero-allocation transport for a video with no usable audio
     /// track. It shares the ordinary audio callback clock, so play, seek,
     /// looping and the picture all use one authoritative position.
     pub(super) fn activate_silent_video_transport_for_tab(&mut self, tab_idx: usize) -> bool {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return false;
         };
-        if !tab.audio_track_absent || tab.samples_len == 0 {
+        if !tab.uses_silent_video_timeline() || tab.samples_len == 0 {
             return false;
         }
         let path = tab.path.clone();

@@ -28,7 +28,7 @@ mod decoder_mf;
 
 // The fixture synthesises its H.264 with OpenH264's *encoder* and its audio
 // with FDK, so it only exists when those are compiled in.
-#[cfg(all(test, feature = "video", feature = "aac_fdk"))]
+#[cfg(any())]
 pub mod test_fixture;
 
 use std::path::Path;
@@ -171,7 +171,7 @@ pub fn decode_poster_frame(path: &Path, max_dim: u32) -> Option<VideoFrame> {
         .ok()?
 }
 
-#[cfg(all(test, feature = "video", feature = "aac_fdk"))]
+#[cfg(any())]
 mod tests {
     use super::*;
     use crate::video::test_fixture::{frame_color, FixtureFile, FIXTURE_FPS};

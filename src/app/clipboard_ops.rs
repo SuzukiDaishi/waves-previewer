@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use super::types::{ClipboardItem, ClipboardPayload, MediaSource, VirtualSourceRef, VirtualState};
 
+const LIST_CLIPBOARD_MARKER: &str = "neowaves://clipboard";
+
 impl super::WavesPreviewer {
     #[cfg(windows)]
     fn set_clipboard_files(&self, paths: &[PathBuf]) -> Result<(), String> {
@@ -293,8 +295,6 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn drain_clipboard_prep(&mut self, ctx: &egui::Context) {
-        #[cfg(windows)]
-        const CLIPBOARD_MARKER: &str = "neowaves://clipboard";
         let done = match &self.clipboard_prep_state {
             Some(state) => match state.rx.try_recv() {
                 Ok(done) => Some(done),
@@ -318,7 +318,8 @@ impl super::WavesPreviewer {
         if !os_paths.is_empty() {
             #[cfg(windows)]
             {
-                if let Err(err) = self.set_clipboard_files_with_marker(&os_paths, CLIPBOARD_MARKER)
+                if let Err(err) =
+                    self.set_clipboard_files_with_marker(&os_paths, LIST_CLIPBOARD_MARKER)
                 {
                     self.debug_log(format!("clipboard error: {err}"));
                 }
@@ -332,7 +333,7 @@ impl super::WavesPreviewer {
         } else {
             #[cfg(windows)]
             {
-                if let Err(err) = self.set_clipboard_marker_text(CLIPBOARD_MARKER) {
+                if let Err(err) = self.set_clipboard_marker_text(LIST_CLIPBOARD_MARKER) {
                     self.debug_log(format!("clipboard error: {err}"));
                 }
             }
@@ -525,20 +526,24 @@ impl super::WavesPreviewer {
         }
         let existing_paths: HashSet<PathBuf> =
             self.items.iter().map(|item| item.path.clone()).collect();
-        // Priority: the OS file list, then whatever the clipboard's text can be
-        // read as. A native file list only exists on some platforms, and even
-        // where it does a foreign copy may only offer text -- but every desktop
-        // file manager puts a `file://` URI list or plain paths on the text
-        // target, so the fallback is what makes this work everywhere.
-        let mut files = self.get_clipboard_files();
-        let mut source = "os";
+        // A paste event is the freshest representation of the clipboard. Use
+        // its URI/path list before asking Windows for CF_HDROP, which can still
+        // hold a stale file list in a synthetic event or after another app
+        // rewrites only the text format. NeoWaves's own marker is the exception:
+        // it intentionally carries the real paths in CF_HDROP.
+        let event_files = pasted_text
+            .filter(|text| text.trim() != LIST_CLIPBOARD_MARKER)
+            .map(parse_pasted_file_paths)
+            .unwrap_or_default();
+        let (mut files, mut source) = if event_files.is_empty() {
+            (self.get_clipboard_files(), "os")
+        } else {
+            (event_files, "event-text")
+        };
         if files.is_empty() {
-            let text = pasted_text
-                .map(str::to_string)
-                .or_else(|| self.get_clipboard_text());
-            if let Some(text) = text {
+            if let Some(text) = self.get_clipboard_text() {
                 files = parse_pasted_file_paths(&text);
-                source = "text";
+                source = "clipboard-text";
             }
         }
         if self.debug.cfg.enabled {
@@ -1115,8 +1120,7 @@ fn percent_decode(input: &str) -> String {
 
 /// Pull file paths out of pasted clipboard text.
 ///
-/// The OS file list is the first choice and this is the fallback, covering the
-/// other three shapes a file manager might hand over: a `text/uri-list` of
+/// This covers the text shapes a file manager might hand over: a `text/uri-list` of
 /// `file://` URIs, several newline-separated paths, or a single path. Every
 /// desktop file manager puts at least one of these on the text target, which is
 /// what makes paste-to-import work where no native file-list reader exists.
@@ -1137,24 +1141,30 @@ pub(super) fn parse_pasted_file_paths(text: &str) -> Vec<PathBuf> {
             .or_else(|| line.strip_prefix("FILE://"))
         {
             let decoded = percent_decode(rest);
+            let looks_like_drive = |value: &str| {
+                value.as_bytes().get(1).is_some_and(|&c| c == b':')
+                    && value
+                        .as_bytes()
+                        .first()
+                        .is_some_and(|c| c.is_ascii_alphabetic())
+            };
             // `file:///c:/x` and `file:///home/x` carry an empty authority;
+            // `file://c:\x` is also emitted by existing Windows integrations.
             // `file://server/share/x` is a UNC host worth keeping.
-            match decoded.strip_prefix('/') {
-                Some(after_slash) => {
-                    // A Windows drive letter arrives as `/C:/...`.
-                    let looks_like_drive =
-                        after_slash.as_bytes().get(1).is_some_and(|&c| c == b':')
-                            && after_slash
-                                .as_bytes()
-                                .first()
-                                .is_some_and(|c| c.is_ascii_alphabetic());
-                    if looks_like_drive {
-                        PathBuf::from(after_slash)
-                    } else {
-                        PathBuf::from(decoded)
+            if looks_like_drive(&decoded) {
+                PathBuf::from(decoded)
+            } else {
+                match decoded.strip_prefix('/') {
+                    Some(after_slash) => {
+                        // A Windows drive letter arrives as `/C:/...`.
+                        if looks_like_drive(after_slash) {
+                            PathBuf::from(after_slash)
+                        } else {
+                            PathBuf::from(decoded)
+                        }
                     }
+                    None => PathBuf::from(format!(r"\\{decoded}")),
                 }
-                None => PathBuf::from(format!(r"\\{decoded}")),
             }
         } else if line.starts_with('/')
             || line.starts_with(r"\\")
@@ -1222,6 +1232,10 @@ mod pasted_path_tests {
         assert_eq!(
             parse("file:///C:/Audio/kick.wav"),
             vec![r"C:/Audio/kick.wav"]
+        );
+        assert_eq!(
+            parse(r"file://C:\Audio\kick.wav"),
+            vec![r"C:\Audio\kick.wav"],
         );
     }
 

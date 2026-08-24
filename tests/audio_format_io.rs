@@ -70,11 +70,11 @@ fn assert_probe_and_decode(path: &std::path::Path) {
 }
 
 #[test]
-fn audio_probe_decode_for_wav_mp3_m4a_ogg() {
+fn audio_probe_decode_for_available_formats() {
     let dir = make_temp_dir("audio_probe_decode");
     let chans = synth_stereo(44_100, 0.20);
-    // MP3 and AAC encoding are optional features, so the matrix covers whatever
-    // this build can actually write rather than assuming every encoder is in.
+    // MP3 is feature-gated and AAC is intentionally unsupported, so the matrix
+    // covers whatever this build can actually write.
     let formats: Vec<&str> = ["wav", "aiff", "mp3", "m4a", "ogg"]
         .into_iter()
         .filter(|ext| neowaves::wave::export_format_is_available(ext))
@@ -86,4 +86,22 @@ fn audio_probe_decode_for_wav_mp3_m4a_ogg() {
         assert_probe_and_decode(&path);
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn aac_is_explicitly_unsupported_for_decode_and_export() {
+    assert!(!neowaves::wave::export_format_is_available("aac"));
+    assert!(!neowaves::wave::export_format_is_available("m4a"));
+
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test_samples")
+        .join("video")
+        .join("video_sync_6s_30fps.mp4");
+    assert!(neowaves::audio_io::probe_isobmff_aac_audio_track(&fixture).expect("probe AAC fixture"));
+    let error = neowaves::audio_io::decode_audio_multi(&fixture)
+        .expect_err("AAC decode must stay disabled");
+    assert!(
+        error.to_string().contains("AAC decoding is not supported"),
+        "unexpected AAC error: {error:#}"
+    );
 }

@@ -65,12 +65,11 @@ Repository Layout
 - `target/`: Cargo build artifacts (generated).
 
 Cargo Features
-- `default = glow + plugin_native_vst3 + plugin_native_clap + aac_fdk + mp3_lame`.
+- `default = glow + plugin_native_vst3 + plugin_native_clap + mp3_lame`.
 - `video` (OpenH264 H.264 preview) is deliberately NOT default: the crate compiles Cisco's sources, and Cisco only covers AVC patent fees for users of *their* prebuilt binaries. The released Windows installer gets its video from Media Foundation instead, so nothing is lost. Build with `--features video` for the picture on Linux/macOS.
-- `aac_fdk` gates Fraunhofer's FDK (AAC decode fast path + M4A/AAC export); `mp3_lame` gates LAME (MP3 export). Turning either off leaves *decoding* intact -- symphonia handles both -- and only removes the encoder. `wave::export_format_is_available` is the single predicate every format picker consults, so an unavailable format is hidden rather than failing at the end of an export.
-- Never add GPL-licensed code while `aac_fdk` exists: the FDK licence is GPL-incompatible and the two cannot ship in one binary. `licenses::tests::fdk_aac_never_shares_a_binary_with_gpl` enforces this.
+- AAC encode/decode is intentionally unsupported: neither FDK nor Symphonia's AAC codec is in the graph. `mp3_lame` gates LAME MP3 export; MP3 decoding remains available through Symphonia. `wave::export_format_is_available` is the single predicate every format picker consults.
 - A build with no copyleft at all: `cargo build --no-default-features --features glow,plugin_native_vst3,plugin_native_clap`.
-- Every native dependency is statically linked -- ONNX Runtime via `ort`, and Oniguruma/LAME/FDK/SQLite via `-sys` crates that compile their C with `cc`. The installer ships no codec or runtime DLL, and `licenses::tests::nothing_claims_to_be_a_redistributed_dll` keeps the licence data honest about that. Do not add DLL-copying installer lines without first checking `target/release` for the file.
+- LAME 3.100 is built as a replaceable `libmp3lame.dll` from `vendor/lame-3.100`; `src/lame.rs` is the MIT FFI and the installer must copy the DLL. ONNX Runtime, Oniguruma and SQLite remain linked into the executable. `licenses::tests::redistributed_runtime_dlls_match_the_installer` keeps the licence data honest.
 
 Console Quick Start (PowerShell)
 - Build: `cargo build`

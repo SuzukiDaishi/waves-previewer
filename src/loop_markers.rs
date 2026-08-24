@@ -147,6 +147,10 @@ fn read_mp3_loop_markers(path: &Path) -> Result<Option<(u64, u64)>> {
 fn write_mp3_loop_markers(path: &Path, loop_opt: Option<(u64, u64)>) -> Result<()> {
     let mut tag = match Tag::read_from_path(path) {
         Ok(t) => t,
+        // Do not prepend an empty ID3v2 tag merely to express "no loop".
+        // Some MP3 probes reject that zero-length tag even though the MPEG
+        // frames behind it are valid.
+        Err(e) if matches!(e.kind, id3::ErrorKind::NoTag) && loop_opt.is_none() => return Ok(()),
         Err(e) if matches!(e.kind, id3::ErrorKind::NoTag) => Tag::new(),
         Err(e) => return Err(e.into()),
     };

@@ -142,12 +142,19 @@ mod workflow_bulk_operations {
         assert!(!decoded.is_empty() && !decoded[0].is_empty());
     }
 
+    fn export_formats() -> Vec<&'static str> {
+        ["wav", "mp3", "m4a", "ogg"]
+            .into_iter()
+            .filter(|ext| neowaves::wave::export_format_is_available(ext))
+            .collect()
+    }
+
     fn seed_sources(dir: &Path) -> Vec<PathBuf> {
         let sr = 44_100;
         let secs = 0.35;
         let chans = synth_stereo(sr, secs, 220.0, 440.0);
         let mut paths = Vec::new();
-        for ext in ["wav", "mp3", "m4a", "ogg"] {
+        for ext in export_formats() {
             let path = dir.join(format!("src_{ext}.{ext}"));
             neowaves::wave::export_channels_audio(&chans, sr, &path)
                 .unwrap_or_else(|e| panic!("seed export {ext} failed: {e}"));
@@ -189,7 +196,7 @@ mod workflow_bulk_operations {
         assert!(harness.state_mut().test_select_paths_multi(&sources));
         harness.run_steps(2);
 
-        for target in ["wav", "mp3", "m4a", "ogg"] {
+        for target in export_formats() {
             assert!(harness.state_mut().test_select_paths_multi(&sources));
             assert!(harness.state_mut().test_convert_format_selected_to(target));
             harness.run_steps(2);
@@ -270,7 +277,7 @@ mod workflow_bulk_operations {
         wait_for_export_finish(&mut harness);
         harness.run_steps(2);
 
-        for ext in ["wav", "mp3", "m4a", "ogg"] {
+        for ext in export_formats() {
             let outputs = collect_outputs(&export_dir, ext, "_wf_sr");
             for path in outputs {
                 let info = neowaves::audio_io::read_audio_info(&path)
@@ -315,7 +322,7 @@ mod workflow_bulk_operations {
             harness.state_mut().test_switch_to_list();
             assert!(harness.state_mut().test_select_path(path));
 
-            for target in ["wav", "mp3", "m4a", "ogg"] {
+            for target in export_formats() {
                 assert!(harness.state_mut().test_select_path(path));
                 harness.state_mut().test_set_export_first_prompt(false);
                 harness
@@ -362,7 +369,7 @@ mod workflow_bulk_operations {
         let stretched = neowaves::wave::process_timestretch_offline(&pitched, sr, sr, 1.1);
         let out = vec![stretched.clone(), stretched.clone()];
 
-        for ext in ["wav", "mp3", "m4a", "ogg"] {
+        for ext in export_formats() {
             let path = dir.join(format!("dsp_fx.{ext}"));
             neowaves::wave::export_channels_audio(&out, sr, &path)
                 .unwrap_or_else(|e| panic!("dsp export {ext} failed: {e}"));

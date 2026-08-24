@@ -2164,24 +2164,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fdk-aac"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bb67e142688083cb9afb63f2424203fc98c4e7afb494bf912b60b55513b177e"
-dependencies = [
- "fdk-aac-sys",
-]
-
-[[package]]
-name = "fdk-aac-sys"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24516d2611506d5cb1833555adc75f6baf9fe2706b9c13e6fc33a6b22c51ca83"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "fearless_simd"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3805,26 +3787,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mp3lame-encoder"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60cb9bdd89806317373e36ff745f264b7ed7ffc5bc5aab02dc7d1b837c16a8d4"
-dependencies = [
- "mp3lame-sys",
-]
-
-[[package]]
-name = "mp3lame-sys"
-version = "0.1.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54e3b1772db47828840702e5a2e05694527f731abadf9b931355d54035f019d8"
-dependencies = [
- "autotools",
- "cc",
- "libc",
-]
-
-[[package]]
 name = "mp4"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3943,14 +3905,16 @@ dependencies = [
 
 [[package]]
 name = "neowaves"
-version = "0.20260824.0"
+version = "0.20260825.0"
 dependencies = [
  "anyhow",
  "arc-swap",
  "atomic_float",
+ "autotools",
  "base64 0.22.1",
  "bytes",
  "calamine",
+ "cc",
  "chrono",
  "clack-extensions",
  "clack-host",
@@ -3965,7 +3929,6 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "encoding_rs",
- "fdk-aac",
  "flacenc",
  "hf-hub",
  "hound",
@@ -3975,7 +3938,6 @@ dependencies = [
  "libloading 0.9.0",
  "md-5",
  "memmap2",
- "mp3lame-encoder",
  "mp4",
  "mp4ameta",
  "ndarray",
@@ -6200,7 +6162,6 @@ dependencies = [
  "lazy_static",
  "symphonia-bundle-flac",
  "symphonia-bundle-mp3",
- "symphonia-codec-aac",
  "symphonia-codec-alac",
  "symphonia-codec-pcm",
  "symphonia-codec-vorbis",
@@ -6233,17 +6194,6 @@ dependencies = [
  "log",
  "symphonia-core",
  "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-codec-aac"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c263845aa86881416849c1729a54c7f55164f8b96111dba59de46849e73a790"
-dependencies = [
- "lazy_static",
- "log",
- "symphonia-core",
 ]
 
 [[package]]

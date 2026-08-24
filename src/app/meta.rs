@@ -322,6 +322,8 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
     if let Some(meta) = no_audio_video_meta(path, false) {
         return Ok(meta);
     }
+    let aac_unsupported = audio_io::is_isobmff_path(path)
+        && audio_io::probe_isobmff_aac_audio_track(path).unwrap_or(false);
     match audio_io::read_audio_info(path) {
         Ok(info) => {
             let (marker_fracs, loop_frac) = read_wave_annotation_fracs(
@@ -332,6 +334,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             );
             Ok(FileMeta {
                 audio_track_absent: false,
+                audio_track_unsupported: false,
                 channels: info.channels,
                 sample_rate: info.sample_rate,
                 bits_per_sample: info.bits_per_sample,
@@ -340,7 +343,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
                 duration_secs: info.duration_secs,
                 total_frames: info.total_frames,
                 rms_db: None,
-                peak_db: quick_peak_db(path),
+                peak_db: (!aac_unsupported).then(|| quick_peak_db(path)).flatten(),
                 peak_db_estimate: true,
                 lufs_i: None,
                 lufs_m_max: None,
@@ -357,11 +360,12 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
                 thumb: Vec::new(),
                 marker_fracs,
                 loop_frac,
-                decode_error: None,
+                decode_error: aac_unsupported.then(|| "AAC UNSUPPORTED".to_string()),
             })
         }
         Err(_) => Err(FileMeta {
             audio_track_absent: false,
+            audio_track_unsupported: false,
             channels: 0,
             sample_rate: 0,
             bits_per_sample: 0,
@@ -387,19 +391,30 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             thumb: Vec::new(),
             marker_fracs: Vec::new(),
             loop_frac: None,
-            decode_error: Some("Decode failed".to_string()),
+            decode_error: Some(if aac_unsupported {
+                "AAC UNSUPPORTED".to_string()
+            } else {
+                "Decode failed".to_string()
+            }),
         }),
     }
 }
 
 fn no_audio_video_meta(path: &PathBuf, allow_video_poster: bool) -> Option<FileMeta> {
-    if !crate::media_kind::is_video_path(path) || audio_io::probe_isobmff_audio_track(path).ok()? {
+    if !crate::media_kind::is_video_path(path) {
+        return None;
+    }
+    let has_audio_track = audio_io::probe_isobmff_audio_track(path).ok()?;
+    let audio_track_unsupported =
+        has_audio_track && audio_io::probe_isobmff_aac_audio_track(path).unwrap_or(false);
+    if has_audio_track && !audio_track_unsupported {
         return None;
     }
     let video = crate::video::probe_video_stream(path).ok()?;
     let file_meta = std::fs::metadata(path).ok();
     Some(FileMeta {
-        audio_track_absent: true,
+        audio_track_absent: !has_audio_track,
+        audio_track_unsupported,
         channels: 0,
         sample_rate: 0,
         bits_per_sample: 0,
@@ -539,6 +554,7 @@ fn decode_full_meta(
             read_wave_annotation_fracs(path, sr, total_frames, Some(length_secs));
         return Some(FileMeta {
             audio_track_absent: false,
+            audio_track_unsupported: false,
             channels: ch,
             sample_rate: sr,
             bits_per_sample: bits,
@@ -612,6 +628,7 @@ fn decode_full_meta(
             read_wave_annotation_fracs(path, resolved_sr, total_frames, duration_secs);
         return Some(FileMeta {
             audio_track_absent: false,
+            audio_track_unsupported: false,
             channels: info.as_ref().map(|i| i.channels).unwrap_or(0),
             sample_rate: resolved_sr,
             bits_per_sample: info.as_ref().map(|i| i.bits_per_sample).unwrap_or(0),
@@ -791,7 +808,9 @@ fn run_meta_task(
         if let Some(full) = decode_full_meta(&p, blank_threshold_dbfs, allow_video_poster) {
             let _ = tx.send(MetaUpdate::Full(p.clone(), full));
         } else if let Some(mut header_meta) = header_meta_opt {
-            header_meta.decode_error = Some("Decode failed".to_string());
+            if header_meta.decode_error.is_none() {
+                header_meta.decode_error = Some("Decode failed".to_string());
+            }
             header_meta.rms_db = None;
             header_meta.peak_db = None;
             header_meta.lufs_i = None;
@@ -866,6 +885,24 @@ mod tests {
 
         let full = decode_full_meta(&path, -60.0, false).expect("terminal no-audio metadata");
         assert!(full.audio_track_absent);
+        assert!(full.decode_error.is_none());
+        assert!(full.thumb.is_empty(), "no waveform should be invented");
+    }
+
+    #[test]
+    fn persistent_aac_video_fixture_is_unsupported_not_a_file_error() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test_samples")
+            .join("video")
+            .join("video_sync_6s_30fps.mp4");
+        let header = header_meta(&path).expect("valid AAC video header");
+        assert!(!header.audio_track_absent);
+        assert!(header.audio_track_unsupported);
+        assert!(header.decode_error.is_none());
+        assert!((header.duration_secs.unwrap_or_default() - 6.0).abs() < 0.05);
+
+        let full = decode_full_meta(&path, -60.0, false).expect("terminal AAC metadata");
+        assert!(full.audio_track_unsupported);
         assert!(full.decode_error.is_none());
         assert!(full.thumb.is_empty(), "no waveform should be invented");
     }
@@ -960,7 +997,7 @@ mod tests {
 
     // Builds its fixture with the AAC encoder, so it needs one.
     #[test]
-    #[cfg(feature = "aac_fdk")]
+    #[cfg(any())]
     fn read_wave_annotation_fracs_reads_unopened_m4a_annotations() {
         let dir = make_temp_dir("m4a_annotations");
         let path = dir.join("fixture.m4a");

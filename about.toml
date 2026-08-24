@@ -50,12 +50,6 @@ accepted = [
     # webpki-roots ships the Mozilla CA root store as data; CDLA-Permissive-2.0
     # is the data licence Mozilla releases it under. Permissive, no copyleft.
     "CDLA-Permissive-2.0",
-    # LGPL-3.0 enters through mp3lame-encoder (MP3 export). It is accepted
-    # deliberately, not by accident — see the LAME entry in
-    # assets/licenses/extra.json for the obligations that come with it.
-    "LGPL-3.0",
-    "LGPL-3.0-only",
-    "LGPL-3.0-or-later",
 ]
 
 # Ignore build-only dev/test crates that never reach a released binary.

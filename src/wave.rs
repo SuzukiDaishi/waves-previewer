@@ -1,17 +1,14 @@
 use anyhow::{Context, Result};
-#[cfg(feature = "aac_fdk")]
+// Retained only as reference for a future, explicitly licensed AAC backend.
+// `cfg(any())` keeps it out of every build while AAC is unsupported.
+#[cfg(any())]
 use bytes::Bytes;
-#[cfg(feature = "aac_fdk")]
+#[cfg(any())]
 use fdk_aac::enc::{
     AudioObjectType as FdkAudioObjectType, BitRate as AacBitRate, ChannelMode as AacChannelMode,
     Encoder as AacEncoder, EncoderParams as AacEncoderParams, Transport as AacTransport,
 };
-#[cfg(feature = "mp3_lame")]
-use mp3lame_encoder::{
-    max_required_buffer_size, Bitrate as Mp3Bitrate, Builder as Mp3Builder, DualPcm, FlushNoGap,
-    MonoPcm, Quality as Mp3Quality,
-};
-#[cfg(feature = "aac_fdk")]
+#[cfg(any())]
 use mp4::{
     AacConfig, AudioObjectType as Mp4AudioObjectType, ChannelConfig, MediaConfig, Mp4Config,
     Mp4Sample, Mp4Writer, SampleFreqIndex, TrackConfig, TrackType,
@@ -2839,15 +2836,13 @@ pub fn codec_export_options() -> CodecExportOptions {
 
 /// Whether this build can actually *write* `ext`.
 ///
-/// MP3 and AAC encoding live behind the `mp3_lame` and `aac_fdk` features, so
-/// a build can legitimately lack them. Everything that offers the user a
-/// format asks here first rather than letting the encoder fail at the end of a
-/// long export — decoding is unaffected either way, so an M4A the app can open
-/// is not necessarily one it can write.
+/// MP3 encoding is optional and AAC is deliberately unavailable. Everything
+/// that offers the user a format asks here first rather than letting an export
+/// fail after doing expensive work.
 pub fn export_format_is_available(ext: &str) -> bool {
     match ext.to_ascii_lowercase().as_str() {
         "mp3" => cfg!(feature = "mp3_lame"),
-        "m4a" | "aac" => cfg!(feature = "aac_fdk"),
+        "m4a" | "aac" => false,
         _ => true,
     }
 }
@@ -2859,20 +2854,20 @@ pub fn export_format_unavailable_reason(ext: &str) -> Option<&'static str> {
     }
     Some(match ext.to_ascii_lowercase().as_str() {
         "mp3" => "This build has no MP3 encoder (rebuild with --features mp3_lame)",
-        _ => "This build has no AAC encoder (rebuild with --features aac_fdk)",
+        _ => "AAC encoding is not supported; export WAV/FLAC/MP3/OGG instead",
     })
 }
 
 #[cfg(feature = "mp3_lame")]
-fn mp3_bitrate_from_kbps(kbps: u32) -> Mp3Bitrate {
+fn mp3_bitrate_from_kbps(kbps: u32) -> u32 {
     match kbps {
-        0..=96 => Mp3Bitrate::Kbps96,
-        97..=128 => Mp3Bitrate::Kbps128,
-        129..=160 => Mp3Bitrate::Kbps160,
-        161..=192 => Mp3Bitrate::Kbps192,
-        193..=224 => Mp3Bitrate::Kbps224,
-        225..=256 => Mp3Bitrate::Kbps256,
-        _ => Mp3Bitrate::Kbps320,
+        0..=96 => 96,
+        97..=128 => 128,
+        129..=160 => 160,
+        161..=192 => 192,
+        193..=224 => 224,
+        225..=256 => 256,
+        _ => 320,
     }
 }
 
@@ -2918,7 +2913,7 @@ fn apply_gain_in_place(chans: &mut [Vec<f32>], gain_db: f32) {
     }
 }
 
-#[cfg(any(feature = "mp3_lame", feature = "aac_fdk"))]
+#[cfg(feature = "mp3_lame")]
 fn resample_channels(chans: &[Vec<f32>], in_sr: u32, out_sr: u32) -> Vec<Vec<f32>> {
     if in_sr == out_sr {
         return chans.to_vec();
@@ -3117,68 +3112,33 @@ fn encode_mp3(chans: &[Vec<f32>], in_sr: u32) -> Result<Vec<u8>> {
         anyhow::bail!("empty channels");
     }
     let mut chans = normalize_channels_for_encode(chans);
-    let mut sr = in_sr;
-    let mut builder = Mp3Builder::new().context("init mp3 encoder")?;
-    builder
-        .set_num_channels(chans.len() as u8)
-        .map_err(|e| anyhow::anyhow!("mp3 channels: {e:?}"))?;
-    if let Err(err) = builder.set_sample_rate(sr) {
-        if matches!(err, mp3lame_encoder::BuildError::BadSampleFreq) {
+    // LAME accepts arbitrary positive input rates and chooses/resamples to a
+    // legal MPEG output rate during `lame_init_params`, matching the previous
+    // wrapper. Keep a defensive fallback for unusual library replacements.
+    let bitrate = mp3_bitrate_from_kbps(codec_export_options().mp3_bitrate_kbps);
+    match crate::lame::encode_planar_f32(&chans, in_sr, bitrate) {
+        Ok(out) => Ok(out),
+        Err(first)
+            if !matches!(
+                in_sr,
+                8_000 | 11_025 | 12_000 | 16_000 | 22_050 | 24_000 | 32_000 | 44_100 | 48_000
+            ) =>
+        {
             let target = 44_100;
             chans = resample_channels(&chans, in_sr, target);
-            sr = target;
-            builder
-                .set_sample_rate(sr)
-                .map_err(|e| anyhow::anyhow!("mp3 sample rate: {e:?}"))?;
-        } else {
-            return Err(anyhow::anyhow!("mp3 sample rate: {err:?}"));
+            crate::lame::encode_planar_f32(&chans, target, bitrate)
+                .with_context(|| format!("MP3 encode failed at {in_sr} Hz ({first:#})"))
         }
+        Err(err) => Err(err).context("MP3 encode through dynamic LAME"),
     }
-    builder
-        .set_brate(mp3_bitrate_from_kbps(
-            codec_export_options().mp3_bitrate_kbps,
-        ))
-        .map_err(|e| anyhow::anyhow!("mp3 bitrate: {e:?}"))?;
-    builder
-        .set_quality(Mp3Quality::Best)
-        .map_err(|e| anyhow::anyhow!("mp3 quality: {e:?}"))?;
-    let mut encoder = builder
-        .build()
-        .map_err(|e| anyhow::anyhow!("mp3 build: {e:?}"))?;
-    let frames = chans[0].len().max(1);
-    let mut out = Vec::with_capacity(max_required_buffer_size(frames));
-    if chans.len() == 1 {
-        let input = MonoPcm(&chans[0]);
-        encoder
-            .encode_to_vec(input, &mut out)
-            .map_err(|e| anyhow::anyhow!("mp3 encode: {e:?}"))?;
-    } else {
-        let frames = chans[0].len().min(chans[1].len());
-        let input = DualPcm {
-            left: &chans[0][..frames],
-            right: &chans[1][..frames],
-        };
-        encoder
-            .encode_to_vec(input, &mut out)
-            .map_err(|e| anyhow::anyhow!("mp3 encode: {e:?}"))?;
-    }
-    encoder
-        .flush_to_vec::<FlushNoGap>(&mut out)
-        .map_err(|e| anyhow::anyhow!("mp3 flush: {e:?}"))?;
-    Ok(out)
 }
 
-/// This build has no AAC encoder. AAC *decoding* is unaffected — symphonia
-/// handles it — so only export is missing.
-#[cfg(not(feature = "aac_fdk"))]
+/// AAC is intentionally unavailable for both decode and encode in this build.
 fn encode_aac_to_mp4(_dst: &Path, _chans: &[Vec<f32>], _in_sr: u32) -> Result<()> {
-    anyhow::bail!(
-        "this build has no AAC encoder (FDK is behind the `aac_fdk` feature); \
-         rebuild with --features aac_fdk, or export WAV/FLAC/OGG instead"
-    )
+    anyhow::bail!("AAC encoding is not supported; export WAV/FLAC/MP3/OGG instead")
 }
 
-#[cfg(feature = "aac_fdk")]
+#[cfg(any())]
 fn encode_aac_to_mp4(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
     use std::fs::File;
     if chans.is_empty() {
@@ -3332,7 +3292,7 @@ fn encode_aac_to_mp4(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "aac_fdk")]
+#[cfg(any())]
 fn encode_aac_to_adts(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
     use std::io::Write;
     if chans.is_empty() {
@@ -3415,7 +3375,7 @@ fn encode_aac_to_adts(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> 
     Ok(())
 }
 
-#[cfg(feature = "aac_fdk")]
+#[cfg(any())]
 fn interleave_i16(chans: &[Vec<f32>]) -> Vec<i16> {
     let channels = chans.len().max(1);
     let frames = chans.iter().map(|c| c.len()).min().unwrap_or(0);
@@ -3429,12 +3389,12 @@ fn interleave_i16(chans: &[Vec<f32>]) -> Vec<i16> {
     out
 }
 
-#[cfg(feature = "aac_fdk")]
+#[cfg(any())]
 fn f32_to_i16(v: f32) -> i16 {
     f32_to_i16_sym(v.clamp(-1.0, 1.0))
 }
 
-#[cfg(feature = "aac_fdk")]
+#[cfg(any())]
 fn aac_freq_index(sr: u32) -> Option<SampleFreqIndex> {
     match sr {
         96_000 => Some(SampleFreqIndex::Freq96000),
@@ -4490,7 +4450,7 @@ mod tests {
             cfg!(feature = "mp3_lame")
         );
         for ext in ["m4a", "aac"] {
-            assert_eq!(export_format_is_available(ext), cfg!(feature = "aac_fdk"));
+            assert!(!export_format_is_available(ext));
         }
 
         // Case-insensitive: extensions arrive from user paths.
@@ -4548,7 +4508,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "aac_fdk")]
+    #[cfg(any())]
     #[ignore = "generated m4a fixtures are not stable for mp4ameta round-trip; verify with real-world m4a files"]
     fn export_gain_m4a_preserves_metadata_and_loop_tags() {
         let dir = make_temp_dir("m4a_metadata_preserve");

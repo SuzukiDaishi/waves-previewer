@@ -19,7 +19,7 @@ use std::sync::Arc;
 use super::types::{MusicAnalysisResult, MusicStemSet};
 
 const MUSIC_MODEL_ID: &str = "zukky/allinone-DLL-ONNX";
-const MUSIC_MODEL_REVISION: &str = "main";
+const MUSIC_MODEL_REVISION: &str = "1299c10d828ff1a53c137ed7cb588c0e3852a340";
 const DEMUCS_SUPPORTED_SAMPLE_RATE: u32 = 44_100;
 const HARMONIX_LABELS: [&str; 10] = [
     "start", "end", "intro", "outro", "break", "bridge", "inst", "solo", "verse", "chorus",

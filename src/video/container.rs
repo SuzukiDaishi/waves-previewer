@@ -1,7 +1,7 @@
 //! ISO-BMFF demux for the video track.
 //!
-//! The audio side of the app has demuxed mp4 through the `mp4` crate for a
-//! while (see `audio_io::decode_m4a_fdk`); this is the same reader pointed at
+//! The audio side also probes mp4 through the `mp4` crate (including the
+//! unsupported-AAC check); this is the same reader pointed at
 //! the other kind of track. It answers three questions and nothing else:
 //! what is in this file, when is each picture shown, and which bytes make up
 //! the picture at a given time.

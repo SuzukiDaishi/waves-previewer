@@ -10,9 +10,9 @@ use super::types::{
 };
 
 const TRANSCRIPT_MODEL_ID: &str = "onnx-community/whisper-large-v3-turbo";
-const TRANSCRIPT_MODEL_REVISION: &str = "main";
+const TRANSCRIPT_MODEL_REVISION: &str = "360ebcde2559d60bb474678be3c1de9ef347d01a";
 const VAD_MODEL_ID: &str = "deepghs/silero-vad-onnx";
-const VAD_MODEL_REVISION: &str = "main";
+const VAD_MODEL_REVISION: &str = "193243f7d961b15e6de789d3f90cb0ee867e7b62";
 const WHISPER_ALLOWED_LANGUAGES: &[&str] = &[
     "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy", "da",
     "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw", "he",

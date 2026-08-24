@@ -31,8 +31,33 @@ jobs:
       - name: Cache cargo and build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Verify third-party licence snapshot
+        shell: pwsh
+        run: |
+          cargo install cargo-about --version 0.9.2 --locked --features cli
+          .\commands\generate_licenses.ps1
+          cargo test --locked --lib licenses
+          git diff --exit-code -- assets/licenses/third_party.json assets/licenses/THIRD_PARTY_NOTICES.txt
+
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
+
+      - name: Configure Inno Setup commercial licence
+        shell: pwsh
+        env:
+          INNO_SETUP_LICENSE_KEY: ${{ secrets.INNO_SETUP_LICENSE_KEY }}
+        run: |
+          $key = ($env:INNO_SETUP_LICENSE_KEY -replace '\s', '')
+          if ([string]::IsNullOrWhiteSpace($key)) {
+            Write-Warning "INNO_SETUP_LICENSE_KEY is not configured. This installer build is for non-commercial/test release use only."
+            return
+          }
+          if ($key.Length -lt 108 -or -not $key.StartsWith('in') -or -not $key.EndsWith('no')) {
+            throw "INNO_SETUP_LICENSE_KEY does not have the expected Inno Setup key format."
+          }
+          $path = 'HKCU:\Software\Jordan Russell\Inno Setup\License'
+          New-Item -Path $path -Force | Out-Null
+          New-ItemProperty -Path $path -Name LicenseKey -Value $key -PropertyType String -Force | Out-Null
 
       - name: Determine version
         id: version

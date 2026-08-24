@@ -3,12 +3,13 @@
 NeoWaves は大量の音声ファイルを素早く一覧表示し、即試聴・編集できる軽量オーディオリストエディタです。UI は `eframe/egui`、オーディオ出力は `cpal` を使用しています。
 
 対応フォーマット（デコード）:
-- WAV / AIFF / FLAC / MP3 / M4A (isomp4) / AAC / ALAC / OGG (Vorbis)
-- 動画コンテナ MP4 / MOV / M4V / 3GP / 3G2 — **音声トラックのみ再生**。
+- WAV / AIFF / FLAC / MP3 / M4A (ALAC) / OGG (Vorbis)。AAC は一旦非対応
+- 動画コンテナ MP4 / MOV / M4V / 3GP / 3G2 — **対応音声トラックを再生**。
+  AAC 音声は `AAC UNSUPPORTED` と表示し、映像は無音タイムラインで動作する。
   エディタでは Mini Meter に再生位置の映像フレームを表示する（読み込み専用）
 
 対応フォーマット（エンコード / 書き出し）:
-- WAV / AIFF / FLAC / MP3 / M4A (AAC) / OGG (Vorbis)
+- WAV / AIFF / FLAC / MP3 / OGG (Vorbis)
 
 フォーマットごとのメタ情報（loop marker / marker / BPM / artwork など）の対応状況は `docs/FORMAT_SUPPORT.md` を参照してください。
 
@@ -224,17 +225,19 @@ GPL 依存が紛れ込んだらリリースではなくここで止まる、と�
 
 ### 配布物のライセンス構成
 
-NeoWaves 本体のソースは MIT ですが、**既定の配布バイナリ全体が MIT というわけではありません**。
-LAME を含むため LGPL-3.0 §4 の Combined Work になります（GPL ではありません）。
-最新の状態は Help → Licenses の冒頭に表示されます。
+NeoWaves 本体のソースは MIT です。MP3 書き出しに使う LAME 3.100 は
+`libmp3lame.dll` として分離し、利用者が ABI 互換版へ差し替えられる動的リンク構成です。
+最新の構成と全文ライセンスは Help → Licenses と、インストール先の
+`THIRD_PARTY_NOTICES.txt` に表示されます。
 
 | ビルド | 構成 | ライセンス上の位置づけ |
 | --- | --- | --- |
-| 既定 (`cargo build --release`) | MP3/AAC 書き出し・VST3・CLAP あり、OpenH264 なし | MIT ＋ LGPL-3.0 §4 (LAME) |
-| copyleft なし | `--no-default-features --features glow,plugin_native_vst3,plugin_native_clap` | permissive のみ |
+| 既定 (`cargo build --release`) | MP3 書き出し・VST3・CLAP あり、AAC/OpenH264 なし | MIT アプリ＋動的 LGPL LAME。MPL-2.0 依存あり |
+| LAME なし | `--no-default-features --features glow,plugin_native_vst3,plugin_native_clap` | MP3 書き出しなし。MPL-2.0 依存は残る |
 | 映像プレビュー込み | `--features video` | 上記＋自前ビルド OpenH264（下記注意） |
 
-**GPL は採用していません。** 依存に GPL 以外の選択肢がある場合は必ずそちらを採っています。
+**強い copyleft の GPL/AGPL アプリ依存は採用していません。** LGPL と MPL は
+商用利用できますが、通知・差し替え・変更ファイル公開など、それぞれの条件は残ります。
 
 ### 過去の懸念と、その解消
 
@@ -242,8 +245,8 @@ LAME を含むため LGPL-3.0 §4 の Combined Work になります（GPL では
 | --- | --- |
 | **Steinberg VST 3** | VST 3.8 (2025-10-29) で SDK が MIT に再ライセンスされ、旧来の GPLv3/proprietary 二択が消滅。`vst3` crate も Steinberg のソースを同梱していない。残るのは商標表記のみ（VST is a registered trademark of Steinberg Media Technologies GmbH） |
 | **Cisco OpenH264** | `video` を既定 feature から除外。Cisco の特許料肩代わりは Cisco 配布バイナリ限定で、ソースからビルドすると義務が配布者に移るため。リリースする Windows インストーラでは Media Foundation が映像を担うので機能的損失はない。`--features video` でビルドしたバイナリを再配布する場合は AVC の義務が自分に来る点に注意 |
-| **Fraunhofer FDK AAC** | `aac_fdk` feature 化（既定 ON）。Via LA の AAC 条項は "License fees are due on the **sale** of encoders and/or decoders only" であり本ソフトは販売しない。FDK は GPL 非互換なので、**GPL コードを絶対に混ぜない**方針とセットで成立している（ユニットテストで固定） |
-| **LAME (MP3 書き出し)** | `mp3_lame` feature 化（既定 ON）。ソース全公開により LGPL-3.0 §4 を完全に満たす — (a) 告知、(b) LGPL/GPL 全文同梱、(c) アプリ内表示、(d)(0) `Cargo.lock` 固定＋全ソース MIT 公開で再リンク可能。MP3 特許は 2017 年失効済 |
+| **AAC** | FDK AAC 依存と Symphonia AAC decoder を削除し、読み書きとも一旦非対応。AAC 音声付き動画は `AAC UNSUPPORTED` と表示し、映像は無音タイムラインで再生・シーク可能 |
+| **LAME (MP3 書き出し)** | `mp3_lame` feature は既定 ON。LAME を `libmp3lame.dll` として同梱し、EXE は import table 経由で動的リンク。LAME 3.100 同梱原文の LGPL-2.0 §6(b) に沿う共有ライブラリ構成。正確な 3.100 ソースは `vendor/lame-3.100` に固定 |
 
 #### LGPL と商用販売について
 
@@ -251,30 +254,28 @@ LAME を含むため LGPL-3.0 §4 の Combined Work になります（GPL では
 そこが GPL との決定的な差で、LGPL はアプリ本体に感染しません。義務の対象は
 「ライブラリ」と「利用者がそれを差し替えられること」だけです。
 
-NeoWaves がソースを公開しているのは無料・オープンなプロジェクトだからであって、
-LGPL に強制されているからではありません。仮にクローズドソースで販売するなら:
+現在の構成でクローズドソース製品として販売する場合も、アプリ本体のソース公開は不要です。
+ただし配布者は次を維持する必要があります:
 
-1. **LAME を動的リンクに変える** → §4(d)(1) が適用され、静的リンクが要求する
-   §4(d)(0)（再リンク可能なオブジェクト提供）が丸ごと不要になる
-2. §4(a)/(b)/(c)（告知・両ライセンス全文・著作権表示）は継続 — すでに実装済み
-3. LAME 自身のソースを公開 — 無改変なら上流を指すだけでよい
+1. `libmp3lame.dll` を EXE に取り込まず、差し替え可能な別ファイルで配る
+2. LAME の利用告知・著作権表示・LGPL-2.0 全文と LAME 公式サイトへの案内を残す
+3. 配布した DLL と一致する LAME ソース（変更分を含む）を必要期間提供する
+4. LAME の差し替えをデバッグするための reverse engineering を禁止しない
 
-自分のコードは一切開示不要です。現在は静的リンク（`static=mp3lame`）なので
-§4(d)(0) の経路を採っています。
+NeoWaves の MIT 条項は 4 を妨げません。なお、ソフトウェアライセンスの遵守だけで
+各国の特許その他の権利まで自動的に許諾されるわけではありません。これは技術的な
+配布チェックであり、法的助言ではありません。
 
 #### 同梱バイナリについて
 
-**ネイティブ依存はすべて静的リンクされており、コーデックやランタイムの DLL は
-一切同梱していません。** ONNX Runtime は `ort` が静的ライブラリとしてリンクし、
-Oniguruma / LAME / FDK / SQLite はいずれも `-sys` crate が C を `cc` でコンパイルします。
-DirectML は Windows の OS コンポーネントを呼ぶだけで再頒布していません。
+Windows インストーラーが配るコーデック DLL は `libmp3lame.dll` です。ONNX Runtime、
+Oniguruma、SQLite は従来どおり EXE 側にリンクされ、DirectML は Windows の
+OS コンポーネントを呼ぶだけで再頒布しません。`LICENSE` と
+`THIRD_PARTY_NOTICES.txt` もインストール先へコピーします。
 
-なお静的リンクでも**表示義務は消えません**（むしろバイナリに焼き込まれています）。
-そのため上記はすべて Help → Licenses に全文付きで掲載しています。
-
-`aac_fdk` / `mp3_lame` を外しても **MP3・AAC の読み込みは symphonia が担当するので影響ありません**。
-失われるのは書き出しだけで、その場合アプリは該当フォーマットを選択肢から隠します。
-
-> **今後の変更で守ること**: `aac_fdk` が存在する限り GPL ライセンスのコードを入れないこと。
-> FDK のライセンスは GPL 非互換で、同一バイナリに同居できません
-> （`src/app/licenses.rs` の `fdk_aac_never_shares_a_binary_with_gpl` が検出します）。
+インストーラー生成には Inno Setup を使用します。Inno Setup 本体は配布物へ同梱されず、
+公式はすべての商用ユーザーに商用ライセンス購入を要請しています。商用の production
+release 前に [Inno Setup Commercial Licenses](https://jrsoftware.org/isorder.php) を確認し、
+GitHub Actions の repository secret `INNO_SETUP_LICENSE_KEY` に購入済みキーを登録して
+ください。キー未設定でもテスト用インストーラーは生成できますが、商用 production 用の
+成果物としては扱いません。

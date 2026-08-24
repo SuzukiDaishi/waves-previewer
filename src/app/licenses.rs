@@ -169,11 +169,9 @@ impl Manifest {
 
     /// The flagged components collapsed by topic, for the summary section.
     ///
-    /// One AAC problem spread across `fdk-aac`, `fdk-aac-sys` and the
-    /// Fraunhofer sources they compile is one thing to know, not three. The
-    /// authoritative entry leads — components are stored kind-first, so the
-    /// bundled C library outranks the crates wrapping it — and the rest are
-    /// named alongside it. Untopiced entries stand alone.
+    /// One native-library topic spread across a wrapper and its source library
+    /// is one thing to know, not several. The authoritative entry leads and
+    /// related entries are named alongside it. Untopiced entries stand alone.
     pub fn flagged_topics(&self) -> Vec<FlaggedTopic<'_>> {
         let mut topics: Vec<FlaggedTopic<'_>> = Vec::new();
         for component in self
@@ -257,7 +255,6 @@ impl Manifest {
 pub fn feature_active(name: &str) -> Option<bool> {
     match name {
         "video" => Some(cfg!(feature = "video")),
-        "aac_fdk" => Some(cfg!(feature = "aac_fdk")),
         "mp3_lame" => Some(cfg!(feature = "mp3_lame")),
         "plugin_native_vst3" => Some(cfg!(feature = "plugin_native_vst3")),
         "plugin_native_clap" => Some(cfg!(feature = "plugin_native_clap")),
@@ -478,14 +475,11 @@ mod tests {
         );
     }
 
-    /// Every native dependency is statically linked -- ONNX Runtime through
-    /// `ort`, and Oniguruma, LAME, the FDK and SQLite through `-sys` crates
-    /// that compile their C with `cc`. The installer copies no codec or
-    /// runtime DLL, so nothing may claim to be a redistributed one: saying so
-    /// would describe an obligation that does not exist and hide the real one,
-    /// which is that the code is inside the executable.
+    /// LAME is the one intentionally redistributed runtime DLL. Keeping this
+    /// declaration aligned with the installer is what makes its LGPL dynamic
+    /// linking claim auditable.
     #[test]
-    fn nothing_claims_to_be_a_redistributed_dll() {
+    fn redistributed_runtime_dlls_match_the_installer() {
         let manifest = manifest();
         let claimed: Vec<&str> = manifest
             .components
@@ -493,13 +487,17 @@ mod tests {
             .filter(|c| c.kind == "runtime-dll")
             .map(|c| c.name.as_str())
             .collect();
-        assert!(
-            claimed.is_empty(),
-            "these claim to be shipped as separate DLLs, but everything is \
-             statically linked: {claimed:?}"
-        );
-        // The two that used to be filed that way must still be listed, just in
-        // the category that matches how they actually reach the binary.
+        assert_eq!(claimed, ["LAME (libmp3lame)"]);
+        let lame = manifest
+            .components
+            .iter()
+            .find(|c| c.name == "LAME (libmp3lame)")
+            .expect("LAME runtime entry");
+        assert_eq!(lame.license_ids, ["LGPL-2.0"]);
+        let upstream_copying = include_str!("../../vendor/lame-3.100/COPYING");
+        assert!(upstream_copying.contains("GNU LIBRARY GENERAL PUBLIC LICENSE"));
+        assert!(upstream_copying.contains("Version 2, June 1991"));
+        // These two remain linked into the executable, not copied beside it.
         for name in ["ONNX Runtime", "Oniguruma"] {
             let component = manifest
                 .components
@@ -520,10 +518,7 @@ mod tests {
             "eframe",
             "symphonia",
             "openh264",
-            "mp3lame-encoder",
-            "fdk-aac",
             "Cisco OpenH264",
-            "Fraunhofer FDK AAC Codec Library",
             "LAME (libmp3lame)",
             "Noto Sans JP",
         ] {
@@ -547,7 +542,7 @@ mod tests {
         }
     }
 
-    /// The four entries that used to need action before distribution are now
+    /// The entries that need attention before distribution each still explain
     /// resolved, and each still says so. If a future edit drops one of these
     /// notes the window silently stops explaining a real obligation.
     #[test]
@@ -555,10 +550,9 @@ mod tests {
         let manifest = manifest();
         for (name, must_mention) in [
             ("Cisco OpenH264", "NOT IN THE DEFAULT BUILD"),
-            ("Fraunhofer FDK AAC Codec Library", "GPL-incompatible"),
-            ("LAME (libmp3lame)", "section 4"),
+            ("LAME (libmp3lame)", "section 6(b)"),
             ("Steinberg VST 3 interface", "MIT"),
-            ("NeoWaves distribution terms", "LGPL-3.0"),
+            ("NeoWaves distribution terms", "LGPL-2.0"),
         ] {
             let component = manifest
                 .components
@@ -601,34 +595,17 @@ mod tests {
         assert!(plain_text().contains("About this distribution"));
     }
 
-    /// The FDK AAC licence is GPL-incompatible: FFmpeg has to gate it behind
-    /// `--enable-nonfree` for exactly this reason. Every GPL-or-not decision in
-    /// this project was made to keep the two apart, so pin it here — adding a
-    /// GPL dependency later would quietly make the AAC-enabled binary
-    /// undistributable.
+    /// AAC support was removed to keep the release clear of its codec and
+    /// patent terms. A stale FDK entry would make the in-app report disagree
+    /// with the executable, so keep the graph and snapshot pinned here.
     #[test]
-    fn fdk_aac_never_shares_a_binary_with_gpl() {
+    fn aac_codec_components_are_absent() {
         let manifest = manifest();
-        let has_fdk = manifest
-            .components
-            .iter()
-            .any(|c| c.license_ids.iter().any(|id| id == "FDK-AAC"));
-        if !has_fdk {
-            return;
-        }
-        for component in &manifest.components {
-            for id in &component.license_ids {
-                // LGPL is fine, and GPL-3.0 is pooled only because LGPL-3.0 is
-                // written as additional permissions on top of it.
-                let is_gpl = (id.starts_with("GPL-") || id.starts_with("AGPL-"))
-                    && component.name != "LAME (libmp3lame)";
-                assert!(
-                    !is_gpl,
-                    "{} is {id}, which cannot share a binary with the FDK AAC codec",
-                    component.name
-                );
-            }
-        }
+        assert!(!manifest.components.iter().any(|component| {
+            component.name.contains("fdk-aac")
+                || component.name.contains("Fraunhofer FDK")
+                || component.license_ids.iter().any(|id| id == "FDK-AAC")
+        }));
     }
 
     /// A `feature` in the snapshot that `feature_active` does not know would be
@@ -650,8 +627,8 @@ mod tests {
             );
         }
         assert!(
-            seen >= 4,
-            "expected the optional codecs to declare features"
+            seen >= 3,
+            "expected optional components to declare features"
         );
     }
 
@@ -699,18 +676,14 @@ mod tests {
     }
 
     /// Nothing in the graph may be strong copyleft. LGPL is present on purpose
-    /// (LAME), and MPL is file-level, but a plain GPL or AGPL crate would make
+    /// (LAME), and MPL is file-level, but a plain GPL or AGPL component would make
     /// the whole binary undistributable under its current terms.
     #[test]
     fn no_strong_copyleft_crept_in() {
         let manifest = manifest();
         for component in &manifest.components {
             for id in &component.license_ids {
-                let strong = (id.starts_with("GPL-") || id.starts_with("AGPL-"))
-                    // GPL-3.0 is pooled only because LGPL-3.0 is written as a
-                    // set of additional permissions on top of it, and the LAME
-                    // entry cites both.
-                    && component.name != "LAME (libmp3lame)";
+                let strong = id.starts_with("GPL-") || id.starts_with("AGPL-");
                 assert!(
                     !strong,
                     "{} is {id}: strong copyleft would relicense the whole binary",
@@ -736,14 +709,8 @@ mod tests {
         // the expectations follow the features rather than assuming a default
         // build.
         let mut expectations = Vec::new();
-        if cfg!(feature = "aac_fdk") {
-            expectations.push((
-                "Fraunhofer FDK AAC Codec Library",
-                vec!["fdk-aac", "fdk-aac-sys"],
-            ));
-        }
         if cfg!(feature = "mp3_lame") {
-            expectations.push(("LAME (libmp3lame)", vec!["mp3lame-encoder", "mp3lame-sys"]));
+            expectations.push(("LAME (libmp3lame)", Vec::new()));
         }
         if cfg!(feature = "video") {
             expectations.push(("Cisco OpenH264", vec!["openh264", "openh264-sys2"]));
@@ -805,7 +772,8 @@ mod tests {
     fn plain_text_carries_the_texts() {
         let text = plain_text();
         assert!(text.contains("Commercial distribution notes"));
-        assert!(text.contains("NO PATENT LICENSE") || text.contains("NO EXPRESS OR IMPLIED"));
-        assert!(text.contains("GNU LESSER GENERAL PUBLIC LICENSE"));
+        assert!(text.contains("libmp3lame.dll"));
+        assert!(text.contains("GNU LIBRARY GENERAL PUBLIC LICENSE"));
+        assert!(text.to_ascii_uppercase().contains("MOZILLA PUBLIC LICENSE"));
     }
 }

@@ -8,6 +8,8 @@ pub mod cli;
 pub mod crash_report;
 pub mod flac_meta;
 pub mod ipc;
+#[cfg(feature = "mp3_lame")]
+pub mod lame;
 pub mod loop_markers;
 pub mod markers;
 pub mod media_kind;

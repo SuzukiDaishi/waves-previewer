@@ -4,6 +4,9 @@ param(
     [string]$OutputDir = "",
     [string]$AppVersion = "",
     [string]$BuildId = "",
+    [string]$InstallerAppId = "",
+    [ValidateSet("", "admin", "lowest", "poweruser")]
+    [string]$PrivilegesRequired = "",
     [switch]$SkipCargoBuild,
     [switch]$NoAutoVersion,
     [switch]$Quiet
@@ -165,6 +168,7 @@ function Sync-RuntimeDlls {
         return
     }
     $patterns = @(
+        "libmp3lame.dll",
         "onnxruntime*.dll",
         "onnxruntime_providers*.dll",
         "dnnl*.dll",
@@ -213,6 +217,8 @@ function Build-Args {
     if ($Quiet) { $localArgs += "/Q" }
     if ($Id) { $localArgs += "/DMyAppBuildId=$Id" }
     $localArgs += "/DMyAppVersion=$Ver"
+    if ($InstallerAppId) { $localArgs += "/DMyAppId=$InstallerAppId" }
+    if ($PrivilegesRequired) { $localArgs += "/DMyPrivilegesRequired=$PrivilegesRequired" }
     $localArgs += $issFull
     return $localArgs
 }
@@ -276,9 +282,11 @@ function Show-UpdateSmokeGuidance {
 if (-not $BuildId) {
     $BuildId = New-BuildId
 }
+$hasExplicitOutputDir = -not [string]::IsNullOrWhiteSpace($OutputDir)
 if (-not $OutputDir) {
     $OutputDir = Join-Path $root ("out\\installer_" + $BuildId)
 }
+$requestedOutputDir = $OutputDir
 
 if (-not $SkipCargoBuild) {
     Write-Host "Building release binaries (cargo build --release --bins)..."
@@ -301,6 +309,7 @@ Write-Host "Building: $issFull"
 Write-Host "AppVersion: $version"
 Write-Host "BuildId: $BuildId"
 Write-Host "OutputDir: $OutputDir"
+Write-Warning "For commercial production releases, review Inno Setup's commercial-licence request: https://jrsoftware.org/isorder.php"
 
 $attempts = 0
 $maxAttempts = 5
@@ -334,7 +343,11 @@ while ($true) {
     Start-Sleep -Milliseconds ([int]$delayMs)
     $BuildId = New-BuildId
     if (-not $usedTempOutputFallback) {
-        $OutputDir = Join-Path $root ("out\\installer_" + $BuildId)
+        $OutputDir = if ($hasExplicitOutputDir) {
+            $requestedOutputDir
+        } else {
+            Join-Path $root ("out\\installer_" + $BuildId)
+        }
     } else {
         $OutputDir = Join-Path $env:TEMP ("neowaves_installer_" + $BuildId)
     }

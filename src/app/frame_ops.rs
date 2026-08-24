@@ -487,7 +487,7 @@ impl WavesPreviewer {
                         if self
                             .tabs
                             .get(idx)
-                            .is_some_and(|tab| tab.path == p && tab.audio_track_absent)
+                            .is_some_and(|tab| tab.path == p && tab.uses_silent_video_timeline())
                         {
                             used_tab_transport = self.activate_silent_video_transport_for_tab(idx);
                             if let Some(source_time_sec) = source_time_sec {
@@ -561,7 +561,10 @@ impl WavesPreviewer {
                     if !used_tab_transport {
                         if let Some(idx) = self.active_tab {
                             if let Some(tab) = self.tabs.get_mut(idx) {
-                                if tab.path == p && !tab.loading && !tab.audio_track_absent {
+                                if tab.path == p
+                                    && !tab.loading
+                                    && !tab.uses_silent_video_timeline()
+                                {
                                     tab.loading = true;
                                     self.spawn_editor_decode(p.clone());
                                 }
@@ -1136,6 +1139,11 @@ impl WavesPreviewer {
         // happened to move the mouse.
         let background_work = self.frame_budget.has_deferred_work()
             || self.audio_bootstrap_rx.is_some()
+            // Startup automation counts frames before capturing evidence.
+            // Keep that countdown moving even when the otherwise-idle UI has
+            // no audio or worker activity to wake it.
+            || self.startup.screenshot_pending
+            || self.startup.debug_summary_pending
             || !self.startup_maintenance_finished()
             || self.meta_pool_has_pending_work()
             || self.path_status.has_pending()

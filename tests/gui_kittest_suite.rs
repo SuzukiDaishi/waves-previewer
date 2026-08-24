@@ -13,6 +13,8 @@ mod kittest_suite {
     };
     use neowaves::app::{ColumnId, ColumnKey};
     use neowaves::app::{EditorNote, EditorNotePositionMode, ToolKind};
+    #[cfg(feature = "kittest_render")]
+    use neowaves::kittest::harness_with_startup_size;
     use neowaves::kittest::{harness_default, harness_with_startup};
     use neowaves::{StartupConfig, WavesPreviewer};
     use walkdir::WalkDir;
@@ -168,6 +170,9 @@ mod kittest_suite {
             return;
         };
         for ext in ["mp3", "m4a", "ogg"] {
+            if !neowaves::wave::export_format_is_available(ext) {
+                continue;
+            }
             if has_file_ext(dir, ext) {
                 continue;
             }
@@ -275,7 +280,10 @@ mod kittest_suite {
         let sr = 44_100;
         let chans = synth_stereo(sr, secs);
         let mut out = Vec::new();
-        for ext in ["wav", "mp3", "m4a", "ogg"] {
+        for ext in ["wav", "mp3", "m4a", "ogg"]
+            .into_iter()
+            .filter(|ext| neowaves::wave::export_format_is_available(ext))
+        {
             let path = dir.join(format!("fixture_{ext}.{ext}"));
             neowaves::wave::export_channels_audio(&chans, sr, &path)
                 .unwrap_or_else(|e| panic!("export {ext} failed: {e}"));
@@ -5200,7 +5208,7 @@ mod kittest_suite {
     }
 
     #[test]
-    fn editor_high_zoom_ctrl_arrow_reaches_edges_for_wav_mp3_m4a() {
+    fn editor_high_zoom_ctrl_arrow_reaches_edges_for_available_formats() {
         let dir = make_temp_dir("editor_step_formats");
         let fixtures = build_format_fixtures(&dir, 0.75);
         let mut harness = harness_with_folder(dir);
@@ -11227,7 +11235,40 @@ mod kittest_suite {
     }
 
     #[test]
-    fn video_with_audio_seeks_to_the_frame_on_the_shared_playhead() {
+    fn explicit_video_open_resolves_a_silent_timeline_without_visiting_the_list() {
+        for (name, expect_absent, expect_unsupported) in [
+            ("video_sync_6s_30fps.mp4", false, true),
+            ("video_no_audio_6s_30fps.mp4", true, false),
+        ] {
+            let path = video_fixture_path(name);
+            let mut cfg = StartupConfig::default();
+            cfg.open_files = vec![path.clone()];
+            let mut harness = harness_with_startup(cfg);
+
+            wait_for_scan(&mut harness);
+            wait_for_tab(&mut harness);
+            wait_for_video_metadata(&mut harness, &path);
+            wait_for_tab_ready(&mut harness);
+
+            assert_eq!(
+                harness.state().test_path_audio_track_absent(&path),
+                Some(expect_absent),
+                "wrong no-audio classification for {name}"
+            );
+            assert_eq!(
+                harness.state().test_path_audio_track_unsupported(&path),
+                Some(expect_unsupported),
+                "wrong unsupported-audio classification for {name}"
+            );
+            assert!(
+                harness.state().test_audio_is_silent_timeline(),
+                "direct-open video did not install a silent timeline for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn video_with_unsupported_aac_still_seeks_picture_on_a_silent_playhead() {
         let video_dir = wav_dir().join("video");
         let path = video_fixture_path("video_sync_6s_30fps.mp4");
         let mut harness = harness_with_folder(video_dir);
@@ -11237,9 +11278,16 @@ mod kittest_suite {
             harness.state().test_path_audio_track_absent(&path),
             Some(false)
         );
+        assert_eq!(
+            harness.state().test_path_audio_track_unsupported(&path),
+            Some(true)
+        );
         assert!(harness.state().test_path_decode_error(&path).is_none());
         assert!(harness.state_mut().test_open_tab_for_path(&path));
         wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+        assert!(harness.state().test_active_tab_audio_track_unsupported());
+        assert!(harness.state().test_audio_is_silent_timeline());
 
         for target_secs in [0.50_f64, 4.40, 1.10, 5.20, 2.25] {
             let sr = harness
@@ -11338,7 +11386,9 @@ mod kittest_suite {
         std::fs::create_dir_all(&out_dir).expect("create video screenshot directory");
         let video_dir = wav_dir().join("video");
         let path = video_fixture_path("video_no_audio_6s_30fps.mp4");
-        let mut harness = harness_with_folder(video_dir);
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(video_dir);
+        let mut harness = harness_with_startup_size(cfg, egui::vec2(1920.0, 1080.0));
         wait_for_scan(&mut harness);
         wait_for_video_metadata(&mut harness, &path);
         harness.run_steps(3);
@@ -11381,11 +11431,14 @@ mod kittest_suite {
             .save(out_dir.join("03_editor_3_25s.png"))
             .expect("save seeked video frame");
 
-        // The requested layout is most crowded when the video has audio:
+        // The requested layout is most crowded when the video has an audio
+        // track, even though AAC is intentionally unavailable:
         // VIDEO must remain immediately below Time at the left edge while
         // SCOPE / SPECTRUM / STEREO / PEAK share the rest of the strip.
         let sync_path = video_fixture_path("video_sync_6s_30fps.mp4");
-        let mut sync_harness = harness_with_folder(wav_dir().join("video"));
+        let mut sync_cfg = StartupConfig::default();
+        sync_cfg.open_folder = Some(wav_dir().join("video"));
+        let mut sync_harness = harness_with_startup_size(sync_cfg, egui::vec2(1920.0, 1080.0));
         wait_for_scan(&mut sync_harness);
         wait_for_video_metadata(&mut sync_harness, &sync_path);
         assert_eq!(
@@ -11393,6 +11446,12 @@ mod kittest_suite {
                 .state()
                 .test_path_audio_track_absent(&sync_path),
             Some(false)
+        );
+        assert_eq!(
+            sync_harness
+                .state()
+                .test_path_audio_track_unsupported(&sync_path),
+            Some(true)
         );
         assert!(sync_harness.state_mut().test_open_tab_for_path(&sync_path));
         wait_for_tab_ready(&mut sync_harness);
@@ -11409,14 +11468,14 @@ mod kittest_suite {
         sync_harness
             .render()
             .expect("render video frame with audio meters")
-            .save(out_dir.join("04_editor_with_audio_3_25s.png"))
-            .expect("save video frame with audio meters");
+            .save(out_dir.join("04_editor_aac_unsupported_3_25s.png"))
+            .expect("save video frame with unsupported AAC label");
 
         for name in [
             "01_list_no_audio.png",
             "02_editor_0_50s.png",
             "03_editor_3_25s.png",
-            "04_editor_with_audio_3_25s.png",
+            "04_editor_aac_unsupported_3_25s.png",
         ] {
             eprintln!("[shot] wrote {}", out_dir.join(name).display());
         }

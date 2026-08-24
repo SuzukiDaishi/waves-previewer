@@ -3217,25 +3217,33 @@ impl crate::app::WavesPreviewer {
                     )
                     .sense(egui::Sense::hover()),
                 )
-                .on_hover_text(if tab.audio_track_absent {
+                .on_hover_text(if tab.audio_track_unsupported {
+                    "This video has an AAC audio track, which this build intentionally does not decode. The picture remains playable and seekable on a silent timeline, but NeoWaves has no video encoder to write changes back out."
+                } else if tab.audio_track_absent {
                     "This is a video file with no audio track. It remains playable and seekable on a silent timeline, but NeoWaves has no video encoder — so it cannot be edited or written back out."
                 } else {
                     "This is a video file. Its audio track plays, measures and previews like any other source, but NeoWaves has no video encoder — so it cannot be edited or written back out."
                 });
             }
-            if tab.audio_track_absent {
+            if tab.uses_silent_video_timeline() {
                 ui.add(
                     egui::Label::new(
-                        RichText::new("NO AUDIO")
+                        RichText::new(if tab.audio_track_unsupported {
+                            "AAC UNSUPPORTED"
+                        } else {
+                            "NO AUDIO"
+                        })
                             .small()
                             .monospace()
                             .color(Color32::from_rgb(220, 180, 110)),
                     )
                     .sense(egui::Sense::hover()),
                 )
-                .on_hover_text(
-                    "This video has no audio track. Playback and seeking use a silent timeline so the picture remains fully previewable.",
-                );
+                .on_hover_text(if tab.audio_track_unsupported {
+                    "AAC decoding is intentionally disabled. Playback and seeking use a silent timeline so the picture remains fully previewable."
+                } else {
+                    "This video has no audio track. Playback and seeking use a silent timeline so the picture remains fully previewable."
+                });
             }
         });
         let mut discard_preview_for_view_change = false;
@@ -8803,7 +8811,9 @@ impl crate::app::WavesPreviewer {
                                 .color(Color32::from_rgb(220, 180, 110)),
                         );
                         ui.label(
-                            RichText::new(if tab.audio_track_absent {
+                            RichText::new(if tab.audio_track_unsupported {
+                                "AAC audio is unsupported. The video remains playable and seekable on a silent timeline, but cannot be edited or written back out."
+                            } else if tab.audio_track_absent {
                                 "No audio track. The video remains playable and seekable on a silent timeline, but cannot be edited or written back out."
                             } else {
                                 "A video's audio can be played, measured and previewed, but not edited or written back out."

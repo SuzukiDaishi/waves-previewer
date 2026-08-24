@@ -2811,7 +2811,41 @@ fn render_list(args: RenderListArgs) -> Result<CliCommandOutput> {
     })
 }
 
+fn normalized_cli_export_format(raw: &str) -> Result<String> {
+    let ext = raw.trim().trim_start_matches('.').to_ascii_lowercase();
+    let ext = match ext.as_str() {
+        "aif" => "aiff".to_string(),
+        "wav" | "aiff" | "flac" | "mp3" | "m4a" | "ogg" => ext,
+        _ => bail!("unsupported export format: {raw}"),
+    };
+    if !wave::export_format_is_available(&ext) {
+        bail!(
+            "{}",
+            wave::export_format_unavailable_reason(&ext)
+                .unwrap_or("the requested export format is unavailable")
+        );
+    }
+    Ok(ext)
+}
+
+fn output_path_with_cli_format(output: &Path, format: Option<&str>) -> Result<PathBuf> {
+    let mut output = output.to_path_buf();
+    if let Some(format) = format {
+        output.set_extension(normalized_cli_export_format(format)?);
+    }
+    Ok(output)
+}
+
+fn lowercase_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+}
+
 fn export_file(args: ExportFileArgs) -> Result<CliCommandOutput> {
+    if args.overwrite && args.format.is_some() {
+        bail!("--format cannot be used with --overwrite");
+    }
     match (args.input.as_deref(), args.session.as_deref()) {
         (Some(input), None) => export_file_from_input(input, &args),
         (None, Some(session_path)) => export_file_from_session(session_path, &args),
@@ -2847,7 +2881,8 @@ fn export_file_from_input(input: &Path, args: &ExportFileArgs) -> Result<CliComm
         .as_deref()
         .context("direct export requires --output")?;
     let input = absolute_existing_path(input)?;
-    let output = absolute_output_path(output)?;
+    let output = output_path_with_cli_format(output, args.format.as_deref())?;
+    let output = absolute_output_path(&output)?;
     ensure_parent_dir(&output)?;
     if let Some(gain_db) = args.gain_db {
         wave::export_gain_audio(&input, &output, gain_db).with_context(|| {
@@ -2857,10 +2892,28 @@ fn export_file_from_input(input: &Path, args: &ExportFileArgs) -> Result<CliComm
                 output.display()
             )
         })?;
-    } else {
+    } else if lowercase_extension(&input) == lowercase_extension(&output) {
         std::fs::copy(&input, &output).with_context(|| {
             format!(
                 "copy source audio: {} -> {}",
+                input.display(),
+                output.display()
+            )
+        })?;
+    } else {
+        let target_ext = lowercase_extension(&output).unwrap_or_default();
+        if !wave::export_format_is_available(&target_ext) {
+            bail!(
+                "{}",
+                wave::export_format_unavailable_reason(&target_ext)
+                    .unwrap_or("unsupported export destination format")
+            );
+        }
+        let (channels, sample_rate) = decode_audio_multi(&input)
+            .with_context(|| format!("decode source audio: {}", input.display()))?;
+        wave::export_channels_audio(&channels, sample_rate, &output).with_context(|| {
+            format!(
+                "transcode source audio: {} -> {}",
                 input.display(),
                 output.display()
             )
@@ -2916,10 +2969,15 @@ fn export_file_from_session(
         Some(parse_marker_specs(&args.markers)?)
     };
     let loop_override = parse_loop_override(args.loop_start_sample, args.loop_end_sample)?;
+    let output = args
+        .output
+        .as_deref()
+        .map(|output| output_path_with_cli_format(output, args.format.as_deref()))
+        .transpose()?;
     let mut workspace = CliWorkspace::load(session_path)?;
     let (src, dst, markers, loop_region) = workspace.export_target(
         args.path.as_deref(),
-        args.output.as_deref(),
+        output.as_deref(),
         args.overwrite,
         args.gain_db,
         marker_override,

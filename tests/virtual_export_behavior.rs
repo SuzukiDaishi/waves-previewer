@@ -123,8 +123,11 @@ mod virtual_export_behavior {
     }
 
     #[test]
-    fn virtual_export_works_for_wav_mp3_m4a_ogg() {
-        for ext in ["wav", "mp3", "m4a", "ogg"] {
+    fn virtual_export_works_for_available_formats() {
+        for ext in ["wav", "mp3", "m4a", "ogg"]
+            .into_iter()
+            .filter(|ext| neowaves::wave::export_format_is_available(ext))
+        {
             let dir = make_temp_dir(&format!("virtual_formats_{ext}"));
             let src = dir.join("a_source.wav");
             let chans = synth_stereo(48_000, 4.0, 220.0, 440.0);
@@ -179,7 +182,10 @@ mod virtual_export_behavior {
 
     #[test]
     fn virtual_export_from_compressed_sources() {
-        for ext in ["mp3", "m4a", "ogg"] {
+        for ext in ["mp3", "m4a", "ogg"]
+            .into_iter()
+            .filter(|ext| neowaves::wave::export_format_is_available(ext))
+        {
             let dir = make_temp_dir(&format!("virtual_from_{ext}"));
             let src = dir.join(format!("source.{ext}"));
             let chans = synth_stereo(44_100, 3.0, 220.0, 440.0);

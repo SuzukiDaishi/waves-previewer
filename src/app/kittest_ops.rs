@@ -2726,6 +2726,11 @@ impl super::WavesPreviewer {
         self.meta_for_path(path).map(|meta| meta.audio_track_absent)
     }
 
+    pub fn test_path_audio_track_unsupported(&self, path: &Path) -> Option<bool> {
+        self.meta_for_path(path)
+            .map(|meta| meta.audio_track_unsupported)
+    }
+
     pub fn test_path_decode_error(&self, path: &Path) -> Option<String> {
         self.meta_for_path(path)
             .and_then(|meta| meta.decode_error.clone())
@@ -2735,6 +2740,12 @@ impl super::WavesPreviewer {
         self.active_tab
             .and_then(|idx| self.tabs.get(idx))
             .is_some_and(|tab| tab.audio_track_absent)
+    }
+
+    pub fn test_active_tab_audio_track_unsupported(&self) -> bool {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .is_some_and(|tab| tab.audio_track_unsupported)
     }
 
     pub fn test_audio_is_silent_timeline(&self) -> bool {
@@ -2897,6 +2908,7 @@ impl super::WavesPreviewer {
         };
         let mut meta = item.meta.as_deref().cloned().unwrap_or(FileMeta {
             audio_track_absent: false,
+            audio_track_unsupported: false,
             channels: 1,
             sample_rate: 44_100,
             bits_per_sample: 16,

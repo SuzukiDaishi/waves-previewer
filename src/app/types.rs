@@ -2319,6 +2319,9 @@ pub struct EditorTab {
     /// video uses a zero-allocation silent transport instead of being treated
     /// as a decode failure.
     pub audio_track_absent: bool,
+    /// The video has an audio track, but its codec is intentionally disabled.
+    /// It uses the same silent transport while the UI labels the distinction.
+    pub audio_track_unsupported: bool,
     /// Large file-backed asset: overview is resident, PCM stays paged/mapped.
     pub paged_asset: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
@@ -2616,6 +2619,10 @@ pub struct SpectralBrushStamp {
 }
 
 impl EditorTab {
+    pub fn uses_silent_video_timeline(&self) -> bool {
+        self.audio_track_absent || self.audio_track_unsupported
+    }
+
     /// Every selected range as sorted, merged, non-empty `[start, end)` spans:
     /// `extra_selections` plus the primary `selection`.
     ///
@@ -2665,6 +2672,7 @@ impl EditorTab {
             loading: true,
             read_only,
             audio_track_absent: false,
+            audio_track_unsupported: false,
             paged_asset: false,
             ch_samples: Vec::new(),
             pencil_draft: None,
@@ -2878,6 +2886,9 @@ pub struct FileMeta {
     /// Valid video container with no audio track. This is terminal metadata,
     /// not a decode error and not a reason to requeue audio analysis.
     pub audio_track_absent: bool,
+    /// Valid video container whose audio codec is deliberately unsupported.
+    /// This is also terminal metadata, not a damaged-file error.
+    pub audio_track_unsupported: bool,
     pub channels: u16,
     pub sample_rate: u32,
     pub bits_per_sample: u16,

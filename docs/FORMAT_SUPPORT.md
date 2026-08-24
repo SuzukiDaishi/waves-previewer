@@ -1,6 +1,6 @@
 # フォーマット別対応マトリクス (FORMAT_SUPPORT)
 
-最終更新: 2026-08-23 (動画コンテナ対応追加時)
+最終更新: 2026-08-24 (AAC 無効化・LAME 動的リンク化)
 
 NeoWaves が扱う音声フォーマットごとの、デコード / エンコード / メタ情報
 (loop marker・marker・BPM・artwork 等) の対応状況と、
@@ -30,14 +30,14 @@ NeoWaves が扱う音声フォーマットごとの、デコード / エンコ�
 | feature | 既定 | 外すと失われるもの | 読み込みへの影響 |
 | --- | --- | --- | --- |
 | `mp3_lame` (LAME) | ON | MP3 **書き出し** | なし。MP3 読み込みは symphonia |
-| `aac_fdk` (Fraunhofer FDK) | ON | M4A/AAC **書き出し**、AAC デコード高速パス | なし。AAC 読み込みは symphonia にフォールバック |
-| `video` (OpenH264) | **OFF** | 非 Windows での映像プレビュー / サムネイル | なし。音声トラックは常に再生できる。Windows は Media Foundation が担当 |
+| `video` (OpenH264) | **OFF** | 非 Windows での映像プレビュー / サムネイル | なし。対応音声トラックは再生できる。Windows は Media Foundation が担当 |
 
 書き出せるかどうかの唯一の判定は `wave::export_format_is_available()`。
 UI の「Convert Format」はこれを見て、含まれていないフォーマットを
 無効化して理由をツールチップに出す（書き出しの最後で失敗させない）。
-`isobmff_audio_is_aac()` は `aac_fdk` 無しでは常に `false` を返し、
-全 ISO-BMFF ファイルが symphonia 経路に落ちる。
+AAC は feature ではなく全ビルドで読み書き非対応。FDK と Symphonia AAC codec は
+依存グラフに含めない。AAC 音声付き動画は壊れたファイル扱いにせず、
+`AAC UNSUPPORTED` と表示して無音タイムラインで映像を再生・シークする。
 
 ## 1. オーディオ本体
 
@@ -46,16 +46,17 @@ UI の「Convert Format」はこれを見て、含まれていないフォーマ
 | WAV | hound + symphonia (`pcm`) | hound: 16/24-bit PCM, 32-bit float | 唯一 exact-stream 再生・sparse proxy 読みに対応 |
 | AIFF / AIF | symphonia (`aiff`) | 自前 writer: 16/24-bit PCM (AIFF), 32-bit float (AIFC `fl32`) | |
 | FLAC | symphonia (`flac`) | flacenc: 16-bit / 24-bit 整数 | FLAC は float 非対応のため 32f 指定・未指定は 24-bit に量子化。9ch 以上は非対応 (仕様上限 8ch) |
-| MP3 | symphonia (`mp3`) | mp3lame CBR (96–320 kbps, 設定値) | ステレオまで (3ch 以上は先頭 2ch) |
-| M4A (AAC) | fdk-aac (mp4 demux) → symphonia fallback (`isomp4`/`aac`/`alac`) | fdk-aac AAC-LC CBR | ステレオまで。ALAC はデコードのみ |
+| MP3 | symphonia (`mp3`) | 動的 `libmp3lame` 3.100 CBR (96–320 kbps, 設定値) | ステレオまで (3ch 以上は先頭 2ch) |
+| M4A (AAC) | **非対応** | **非対応** | FDK / Symphonia AAC codec とも不使用 |
+| M4A (ALAC) | symphonia (`isomp4`/`alac`) | 非対応 | 読み込み専用 |
 | OGG (Vorbis) | symphonia (`ogg`/`vorbis`) | vorbis_rs quality-VBR | ステレオまで |
-| MP4 / MOV / M4V / 3GP / 3G2 (音声) | m4a と同じ経路 (fdk-aac → symphonia fallback) | **非対応 (読み込み専用)** | 音声トラックのみ再生。AAC 以外 (ALAC / QuickTime の PCM `sowt`/`twos`/`in24`/`lpcm`) は symphonia へフォールバック |
+| MP4 / MOV / M4V / 3GP / 3G2 (音声) | AAC 以外を symphonia でデコード | **非対応 (読み込み専用)** | AAC は `AAC UNSUPPORTED`＋無音タイムライン。ALAC / QuickTime PCM は対応 codec があれば再生 |
 | MP4 / MOV / M4V / 3GP / 3G2 (映像) | Windows: Media Foundation / 全 OS: openh264 (H.264 のみ) | 非対応 | エディタの Mini Meter にプレビュー表示するためだけにデコードする |
 
 ### 動画コンテナの扱い
 
-- 音声トラックは**音声ファイルと完全に同じ経路**で読む。リスト再生・波形・
-  ラウドネス測定・トランスクリプトはすべてそのまま動く。
+- 対応する音声トラックは音声ファイルと同じ経路で読む。AAC トラックはデコードせず、
+  映像プレビュー用の無音タイムラインへ切り替える。
 - 映像は**プレビュー専用**。エディタの Mini Meter に再生位置のフレームを出し、
   リストのサムネイルに使う以外の用途では一切デコードしない。
 - **書き出しと破壊的編集は不可** (映像エンコーダを持たないため)。

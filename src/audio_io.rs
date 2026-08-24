@@ -5,7 +5,8 @@ use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-#[cfg(feature = "aac_fdk")]
+// Kept as dormant reference for a future explicitly licensed AAC backend.
+#[cfg(any())]
 use fdk_aac::dec::{
     Decoder as AacDecoder, DecoderError as AacDecoderError, Transport as AacTransport,
 };
@@ -173,30 +174,28 @@ pub(crate) fn is_isobmff_path(path: &Path) -> bool {
 /// The streaming and progressive decoders emit chunks as they go, so they cannot
 /// discover the mismatch halfway and start over — they ask this first.
 ///
-/// This is the single gate in front of every fdk-aac entry point, which is why
-/// the `aac_fdk`-less build only has to answer `false` here: each caller then
-/// takes the symphonia branch it already had for ALAC and PCM.
-#[cfg(feature = "aac_fdk")]
-fn isobmff_audio_is_aac(path: &Path) -> bool {
+/// Whether an ISO-BMFF container has an AAC (`mp4a`) audio track.
+///
+/// This remains available even though decoding is disabled: video metadata
+/// uses it to present AAC as an unsupported audio track and keep the picture
+/// playable on a silent timeline instead of reporting a damaged file.
+pub fn probe_isobmff_aac_audio_track(path: &Path) -> Result<bool> {
     let Ok(file) = File::open(path) else {
-        return false;
+        anyhow::bail!("open mp4: {}", path.display());
     };
     let Ok(size) = file.metadata().map(|m| m.len()) else {
-        return false;
+        anyhow::bail!("read mp4 size: {}", path.display());
     };
-    let Ok(reader) = Mp4Reader::read_header(file, size) else {
-        return false;
-    };
-    reader.tracks().values().any(|track| {
+    let reader =
+        Mp4Reader::read_header(file, size).map_err(|e| anyhow::anyhow!("mp4 header: {e:?}"))?;
+    Ok(reader.tracks().values().any(|track| {
         matches!(track.track_type(), Ok(TrackType::Audio))
             && track.trak.mdia.minf.stbl.stsd.mp4a.is_some()
-    })
+    }))
 }
 
-/// Without `aac_fdk` there is no fdk fast path to route anything to, so every
-/// ISO-BMFF file — AAC included — goes to symphonia. Saying `false` here is
-/// the whole switch: no call site changes.
-#[cfg(not(feature = "aac_fdk"))]
+/// There is no AAC path. ISO-BMFF files still go through Symphonia so ALAC and
+/// supported PCM remain usable; AAC tracks produce an explicit codec error.
 fn isobmff_audio_is_aac(_path: &Path) -> bool {
     false
 }
@@ -951,24 +950,23 @@ pub fn build_wav_proxy_preview(
     }))
 }
 
-#[cfg(feature = "aac_fdk")]
+#[cfg(any())]
 fn audio_specific_config_bytes(profile: u8, freq_index: u8, chan_conf: u8) -> [u8; 2] {
     let byte_a = (profile << 3) | (freq_index >> 1);
     let byte_b = (freq_index << 7) | (chan_conf << 3);
     [byte_a, byte_b]
 }
 
-/// Stand-in for the fdk fast path in a build without `aac_fdk`.
+/// Stand-in for the removed FDK fast path.
 ///
 /// Every caller already treats an `Err` here as "not AAC, let symphonia have
 /// it" — that is how ALAC and the PCM flavours in a `.mov` are handled — so
 /// failing is exactly the right answer and no call site needs to change.
-#[cfg(not(feature = "aac_fdk"))]
 fn decode_m4a_fdk(_path: &Path, _max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, u32, bool)> {
-    anyhow::bail!("built without the aac_fdk feature; decoding via symphonia")
+    anyhow::bail!("AAC decoding is not supported; trying another ISO-BMFF codec")
 }
 
-#[cfg(feature = "aac_fdk")]
+#[cfg(any())]
 fn decode_m4a_fdk(path: &Path, max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, u32, bool)> {
     let file = File::open(path).with_context(|| format!("open m4a: {}", path.display()))?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -1182,12 +1180,11 @@ fn enforce_stable_channel_count(
     Ok(())
 }
 
-/// Stand-in for the progressive fdk fast path in a build without `aac_fdk`.
+/// Stand-in for the removed progressive FDK fast path.
 ///
 /// Unreachable in practice: `isobmff_audio_is_aac` answers `false` there, so
 /// both call sites take their symphonia branch. It exists so those branches
 /// still type-check.
-#[cfg(not(feature = "aac_fdk"))]
 pub fn decode_m4a_fdk_progressive_chunks<C, F>(
     _path: &Path,
     _emit_every_secs: f32,
@@ -1198,10 +1195,10 @@ where
     C: FnMut() -> bool,
     F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
 {
-    anyhow::bail!("built without the aac_fdk feature; decoding via symphonia")
+    anyhow::bail!("AAC decoding is not supported; trying another ISO-BMFF codec")
 }
 
-#[cfg(feature = "aac_fdk")]
+#[cfg(any())]
 pub fn decode_m4a_fdk_progressive_chunks<C, F>(
     path: &Path,
     emit_every_secs: f32,
@@ -1371,6 +1368,7 @@ where
     C: FnMut() -> bool,
     F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
 {
+    reject_aac_decode(path)?;
     let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
     let mut pending: Vec<Vec<f32>> = Vec::new();
     let mut expected_channels: Option<usize> = None;
@@ -1841,6 +1839,7 @@ fn open_decoder(
     u32,
     u32,
 )> {
+    reject_aac_decode(path)?;
     let ext_hint = path.extension().and_then(|s| s.to_str());
     let probe_once = |hint_ext: Option<&str>| -> Result<_> {
         let file = File::open(path).with_context(|| format!("open audio: {}", path.display()))?;
@@ -1880,6 +1879,13 @@ fn open_decoder(
     let decoder = get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
     let sample_rate_hint = track.codec_params.sample_rate.unwrap_or(0);
     Ok((format, decoder, track.id, sample_rate_hint))
+}
+
+fn reject_aac_decode(path: &Path) -> Result<()> {
+    if is_isobmff_path(path) && probe_isobmff_aac_audio_track(path).unwrap_or(false) {
+        anyhow::bail!("AAC decoding is not supported: {}", path.display());
+    }
+    Ok(())
 }
 
 pub fn decode_audio_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
@@ -2891,7 +2897,7 @@ mod tests {
     /// with an empty `CodecParameters`. A normal mp4 puts the video track
     /// first, so taking the default track handed the decoder a
     /// `CODEC_TYPE_NULL` track and the file failed to decode at all.
-    #[cfg(all(feature = "video", feature = "aac_fdk"))]
+    #[cfg(any())]
     mod video_container_audio {
         use crate::video::test_fixture::FixtureFile;
 

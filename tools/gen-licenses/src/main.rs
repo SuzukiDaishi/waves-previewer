@@ -224,6 +224,11 @@ fn main() -> Result<()> {
     let extra_path = arg_value(&args, "--extra", "assets/licenses/extra.json");
     let texts_dir = arg_value(&args, "--texts", "assets/licenses/texts");
     let out_path = arg_value(&args, "--out", "assets/licenses/third_party.json");
+    let notice_out_path = arg_value(
+        &args,
+        "--notice-out",
+        "assets/licenses/THIRD_PARTY_NOTICES.txt",
+    );
 
     let raw: Value = serde_json::from_str(
         &std::fs::read_to_string(&raw_path)
@@ -338,8 +343,8 @@ fn main() -> Result<()> {
         });
     }
 
-    // The hand-maintained texts join the same pool, keyed by their own id so a
-    // reader sees `FDK-AAC` rather than `MIT-7`.
+    // The hand-maintained texts join the same pool, keyed by their own id so
+    // names such as `NeoWaves-Compliance` stay readable.
     let mut extra_keys: BTreeMap<String, String> = BTreeMap::new();
     for license in &extra.licenses {
         let path = texts_dir.join(&license.text_file);
@@ -397,12 +402,20 @@ fn main() -> Result<()> {
     let mut licenses = pool.entries;
     licenses.sort_by(|a, b| a.key.cmp(&b.key));
 
-    let manifest = Manifest {
+    let mut manifest = Manifest {
         generated_at: build_date(),
         generator: format!("cargo-about + {}", env!("CARGO_BIN_NAME")),
         licenses,
         components,
     };
+    preserve_generated_at_if_unchanged(&mut manifest, &out_path);
+
+    if let Some(parent) = notice_out_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let notices = render_notices(&manifest);
+    std::fs::write(&notice_out_path, &notices)
+        .with_context(|| format!("writing {}", notice_out_path.display()))?;
 
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -412,13 +425,75 @@ fn main() -> Result<()> {
     std::fs::write(&out_path, &json).with_context(|| format!("writing {}", out_path.display()))?;
 
     eprintln!(
-        "{}: {} components, {} pooled licence texts, {} KiB",
+        "{}: {} components, {} pooled licence texts, {} KiB; notices: {} KiB",
         out_path.display(),
         manifest.components.len(),
         manifest.licenses.len(),
-        json.len() / 1024
+        json.len() / 1024,
+        notices.len() / 1024,
     );
     Ok(())
+}
+
+/// A release check should not fail just because it runs on another date. Keep
+/// the previous date when every substantive field is byte-for-byte equivalent.
+fn preserve_generated_at_if_unchanged(manifest: &mut Manifest, out_path: &std::path::Path) {
+    let Ok(previous_text) = std::fs::read_to_string(out_path) else {
+        return;
+    };
+    let Ok(mut previous) = serde_json::from_str::<Value>(&previous_text) else {
+        return;
+    };
+    let previous_date = previous
+        .get("generated_at")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let Ok(mut current) = serde_json::to_value(&*manifest) else {
+        return;
+    };
+    previous.as_object_mut().map(|map| map.remove("generated_at"));
+    current.as_object_mut().map(|map| map.remove("generated_at"));
+    if previous == current {
+        if let Some(previous_date) = previous_date {
+            manifest.generated_at = previous_date;
+        }
+    }
+}
+
+fn render_notices(manifest: &Manifest) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    writeln!(out, "NeoWaves THIRD-PARTY NOTICES").ok();
+    writeln!(out, "Generated from Cargo.lock and assets/licenses/extra.json.").ok();
+    writeln!(out, "NeoWaves's own MIT licence is distributed separately as LICENSE.\n").ok();
+    writeln!(out, "COMPONENTS\n==========\n").ok();
+    for component in &manifest.components {
+        writeln!(out, "{} {}", component.name, component.version).ok();
+        writeln!(out, "  Kind: {}", component.kind).ok();
+        writeln!(out, "  Licence: {}", component.license_expr).ok();
+        if !component.authors.is_empty() {
+            writeln!(out, "  Authors: {}", component.authors).ok();
+        }
+        if !component.repository.is_empty() {
+            writeln!(out, "  Source: {}", component.repository).ok();
+        }
+        if let Some(feature) = &component.feature {
+            writeln!(out, "  Optional feature: {feature}").ok();
+        }
+        if let Some(note) = &component.note {
+            writeln!(out, "  Note: {note}").ok();
+        }
+        out.push('\n');
+    }
+
+    writeln!(out, "FULL LICENCE TEXTS\n==================\n").ok();
+    for license in &manifest.licenses {
+        writeln!(out, "{} ({})\n{}", license.name, license.id, "-".repeat(72)).ok();
+        out.push_str(license.text.trim_end());
+        out.push_str("\n\n");
+    }
+    out
 }
 
 /// `YYYY-MM-DD` for the snapshot header.

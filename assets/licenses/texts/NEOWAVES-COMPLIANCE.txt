@@ -1,111 +1,102 @@
 What you may do with a NeoWaves build
 
-NeoWaves is published as source and distributed free of charge. Nothing here
-is sold, and every obligation below is met by the project itself rather than
-being passed on to you.
+NeoWaves's own source code is MIT licensed and may be used commercially.
+Third-party components retain their own terms; this notice records how the
+released Windows build satisfies the terms that require action.
 
 THE SHORT VERSION
 -----------------
 
-  * NeoWaves's own source code is MIT. See LICENSE.
-  * The default binary also links LAME, which is LGPL-3.0. That makes the
-    binary as a whole a "Combined Work" under LGPL-3.0 section 4 — not plain
-    MIT, and not GPL.
-  * No GPL-licensed code is in any NeoWaves build, deliberately. Where a
-    dependency offered a GPL route and a non-GPL route, the non-GPL route was
-    taken.
-  * A build with no copyleft in it at all is one command away (below).
+  * NeoWaves's own code is MIT. See LICENSE.
+  * MP3 export uses LAME 3.100 as a separate, user-replaceable shared library.
+    LAME is covered by the LGPL; it is not incorporated into neowaves.exe.
+  * AAC encoding and decoding are intentionally absent. No Fraunhofer FDK AAC
+    code and no Symphonia AAC decoder are in the dependency graph.
+  * MPL-2.0 dependencies such as Symphonia and option-ext are commercially
+    usable file-level copyleft. If their source files are modified, those
+    modified files must remain available under MPL-2.0.
+  * No strong-copyleft GPL/AGPL application dependency is shipped.
 
-HOW LGPL-3.0 SECTION 4 IS SATISFIED
+HOW LGPL-2.0 SECTION 6 IS SATISFIED
 -----------------------------------
 
-MP3 export uses LAME through the `mp3lame-encoder` crate, statically linked.
-LGPL-3.0 section 4 lets a Combined Work be conveyed under terms of your choice
-provided that:
+MP3 export calls libmp3lame through NeoWaves's own small MIT-licensed FFI.
+`build.rs` compiles the unmodified LAME 3.100 source under
+`vendor/lame-3.100` into libmp3lame.dll, and the installer places that DLL next
+to neowaves.exe.
 
-  4(a) the work carries prominent notice that the Library is used and covered
-       by the LGPL
-         -> this window, plus README.md.
+  Section 6(b) permits a suitable shared-library mechanism that uses a copy of
+  the Library already present on the system and operates properly with a
+  compatible modified version. neowaves.exe imports libmp3lame.DLL, which
+  remains a separate file in the installation directory. No signature or
+  version lock stops an ABI-compatible replacement.
 
-  4(b) the work is accompanied by copies of the GNU GPL and the LGPL
-         -> both texts are embedded in this binary and listed here as
-            "GNU Lesser General Public License v3.0" and "GNU General Public
-            License v3.0".
+The LAME use acknowledgement, project link, copyright and full LGPL-2.0 text
+are in README.md, THIRD_PARTY_NOTICES.txt and Help > Licenses.
 
-  4(c) a Combined Work that displays copyright notices during execution must
-       include the Library's and a reference to the licences
-         -> this window.
+NeoWaves is MIT licensed and therefore imposes no restriction on reverse
+engineering changes needed to debug such a replacement. The exact
+corresponding LAME source shipped in the DLL is committed under
+`vendor/lame-3.100` in the public NeoWaves source repository. Keep that source
+available for every distributed binary for at least the period required by
+the LGPL offer you make to recipients.
 
-  4(d)(0) the Minimal Corresponding Source and the Corresponding Application
-       Code must be conveyed in a form suitable for the user to recombine the
-       application with a modified Library
-         -> the complete source of NeoWaves is published under MIT, and
-            Cargo.lock pins every dependency version. Anyone can substitute a
-            modified LAME and rebuild the identical application. LAME's own
-            source is at https://lame.sourceforge.io/ and is fetched by the
-            build from the pinned `mp3lame-sys` crate.
+COMMERCIAL OR CLOSED-SOURCE DISTRIBUTION
+----------------------------------------
 
-MP3 patents expired in 2017, so nothing here is a patent question.
+The LGPL does not require an application using a replaceable shared library to
+publish the application's own source. A commercial distributor must still:
 
-SELLING A CLOSED-SOURCE BUILD
------------------------------
+  * ship libmp3lame.dll as a replaceable file rather than folding it into the
+    executable;
+  * preserve the LAME/LGPL notices and full licence texts;
+  * provide the exact corresponding LAME source (including any modifications);
+  * not prohibit reverse engineering for debugging modifications to LAME.
 
-A common misreading: the LGPL does *not* require you to publish your own source
-code, even when selling commercially. That is the difference between the GPL
-and the Lesser GPL, and it is the whole reason the LAME authors chose the
-latter. The obligation is about the *library* and about the user's ability to
-replace it -- not about your application.
+This repository already supplies the technical pieces, but a distributor is
+responsible for its own product terms and source-offer retention. This is a
+technical compliance record, not legal advice. The software licence does not
+itself grant patent or other third-party rights; distributors must assess
+those rights in the jurisdictions where they distribute the product.
 
-NeoWaves publishes its source because it is a free and open project, not
-because the LGPL forces it to. If this were ever sold as a closed-source
-product, the route would be:
+INSTALLER BUILD TOOL
+--------------------
 
-  * Link LAME dynamically instead of statically. That satisfies section
-    4(d)(1), and 4(d)(0) -- the relinkable-object requirement that static
-    linking triggers -- stops applying entirely.
-  * Keep doing 4(a), 4(b) and 4(c): the notice, the two licence texts, and the
-    copyright display. Those are cheap and are already in place here.
-  * Publish LAME's own source. Unmodified, that is satisfied by pointing at
-    https://lame.sourceforge.io/ .
+Inno Setup is used to build the Windows installer but is not included in the
+installed product. Its publisher requests that all commercial users purchase a
+commercial licence. Before a commercial production release, purchase a licence
+and configure its key as the INNO_SETUP_LICENSE_KEY repository secret; the
+release workflow installs that key without printing it. A build made without
+that secret is for non-commercial or test release use only. Review the current
+policy here:
 
-Nothing of the application's own code would have to be disclosed. Today LAME is
-linked statically (`cargo:rustc-link-lib=static=mp3lame`), which is why the
-4(d)(0) route is the one described above.
+    https://jrsoftware.org/isorder.php
 
-NOTHING IS SHIPPED AS A SEPARATE BINARY
----------------------------------------
+REDISTRIBUTED AND OPTIONAL NATIVE CODE
+--------------------------------------
 
-Every native dependency in NeoWaves is statically linked into the executable:
-ONNX Runtime, Oniguruma, LAME, the Fraunhofer FDK and SQLite all end up inside
-it, and the Windows installer copies no codec or runtime DLL of its own.
+libmp3lame.dll is the codec DLL copied by the Windows installer. ONNX Runtime,
+Oniguruma and SQLite remain linked into the executable and their notices are
+also reproduced. DirectML is called from Windows and is not redistributed.
 
-That does not weaken any obligation -- if anything the opposite, since the code
-really is inside the binary being distributed. Every one of those components is
-listed here with its full licence text for exactly that reason.
+Cisco OpenH264 is behind the `video` feature and is off by default. The Windows
+release uses Media Foundation for video pictures instead. Anyone enabling
+`video` and redistributing that build must review Cisco's binary/patent terms
+for their own distribution.
 
-A BUILD WITH NO COPYLEFT AT ALL
--------------------------------
+BUILD WITHOUT MP3 EXPORT
+------------------------
 
     cargo build --release --no-default-features \
         --features glow,plugin_native_vst3,plugin_native_clap
 
-That drops LAME (and with it the LGPL) and Fraunhofer's FDK. MP3 and AAC
-*decoding* are unaffected — symphonia handles both in pure Rust under MPL-2.0
-— so such a build still opens the same files. Only MP3 and M4A/AAC export go
-away, and the app hides those formats rather than failing at the end of an
-export.
+This removes LAME and MP3 export. MP3 decoding remains available through
+Symphonia. AAC remains unsupported in every build. This is an LGPL-free build,
+not a claim that every dependency is permissive: MPL-2.0 components remain.
 
-WHAT IS NOT IN THE DEFAULT BUILD
---------------------------------
+RELEASE CHECKLIST
+-----------------
 
-Cisco's OpenH264 is behind the `video` feature and is off by default, so the
-released binaries contain no self-compiled H.264 codec. On Windows the OS
-Media Foundation decoder supplies the video preview instead. See the OpenH264
-entry for why that distinction matters.
-
-ONE RULE FOR FUTURE CHANGES
----------------------------
-
-Never introduce GPL-licensed code while the `aac_fdk` feature exists. The
-Fraunhofer FDK licence is GPL-incompatible: the two cannot ship in the same
-binary. This is enforced by a unit test in src/app/licenses.rs.
+For every release, verify that libmp3lame.dll is beside neowaves.exe, the EXE's
+import table names libmp3lame.DLL, LICENSE and THIRD_PARTY_NOTICES.txt are in
+the installer, and the committed licence snapshot matches Cargo.lock.

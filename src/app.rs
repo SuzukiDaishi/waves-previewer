@@ -1964,6 +1964,7 @@ impl WavesPreviewer {
         };
         FileMeta {
             audio_track_absent: false,
+            audio_track_unsupported: false,
             channels: channels.len().max(1) as u16,
             sample_rate,
             bits_per_sample,

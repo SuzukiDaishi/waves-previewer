@@ -1,6 +1,6 @@
 ﻿[package]
 name = "neowaves"
-version = "0.20260824.0"
+version = "0.20260825.0"
 edition = "2021"
 default-run = "neowaves"
 build = "build.rs"
@@ -29,15 +29,13 @@ encoding_rs = "0.8"
 rustc-hash = "2"
 ndarray = "0.17"
 rand = "0.9"
-symphonia = { version = "0.5.5", default-features = false, features = ["wav", "aiff", "pcm", "mp3", "isomp4", "aac", "alac", "ogg", "vorbis", "flac"] }
+symphonia = { version = "0.5.5", default-features = false, features = ["wav", "aiff", "pcm", "mp3", "isomp4", "alac", "ogg", "vorbis", "flac"] }
 flacenc = { version = "0.4", default-features = false }
 md-5 = "0.10"
 sha2 = "0.10"
 same-file = "1.0"
 id3 = "1.17.0"
 mp4ameta = "0.13"
-mp3lame-encoder = { version = "0.2.4", optional = true }
-fdk-aac = { version = "0.8", optional = true }
 mp4 = "0.14"
 vorbis_rs = "0.5.5"
 bytes = "1.11.1"
@@ -76,7 +74,7 @@ libloading = { version = "0.9.0", optional = true }
 # Media Foundation first there (H.264, HEVC, VP9, hardware accelerated), so
 # leaving it out costs the release nothing. Build with `--features video` to get
 # the picture back on Linux/macOS.
-default = ["glow", "plugin_native_vst3", "plugin_native_clap", "aac_fdk", "mp3_lame"]
+default = ["glow", "plugin_native_vst3", "plugin_native_clap", "mp3_lame"]
 glow = ["eframe/glow", "eframe/x11", "eframe/wayland"]
 wgpu = ["eframe/wgpu", "eframe/x11", "eframe/wayland"]
 kittest = ["egui_kittest"]
@@ -88,17 +86,15 @@ plugin_native_clap = ["clack-host", "clack-extensions"]
 # and the first-frame thumbnail go away (on Windows, Media Foundation still
 # supplies both). Off by default -- see the note on `default` above.
 video = ["openh264"]
-# AAC decode fast path and M4A/AAC export via Fraunhofer's FDK. Dropping it
-# leaves AAC *decoding* intact -- `audio_io` falls through to symphonia's
-# pure-Rust decoder -- and removes only the encoder. The FDK licence grants no
-# patent rights, and it is GPL-incompatible, so a build that ever needs to
-# combine with GPL code has to turn this off.
-aac_fdk = ["fdk-aac"]
-# MP3 export via LAME. The crate is LGPL-3.0, so the linked binary is a
-# Combined Work under LGPL-3.0 section 4 rather than plain MIT; NeoWaves
-# satisfies that by publishing all of its own source. Turn it off for a build
-# with no copyleft in it at all (MP3 *decoding* is symphonia's and stays).
-mp3_lame = ["mp3lame-encoder"]
+# AAC is deliberately unsupported for now. Symphonia's AAC decoder and the
+# Fraunhofer FDK encoder are both absent from the dependency graph; ISO-BMFF
+# remains enabled for ALAC metadata and for video-container inspection.
+#
+# MP3 export via LAME. The root build script builds libmp3lame as a replaceable
+# shared library, and src/lame.rs provides NeoWaves's own MIT FFI instead of an
+# LGPL Rust wrapper. This uses LGPL-2.0 section 6(b)'s shared-library route. MP3 decoding
+# remains pure Rust.
+mp3_lame = []
 
 [profile.release]
 # Thin LTO gives a measurable frame-time win for the per-sample render loops
@@ -112,10 +108,6 @@ lto = "thin"
 opt-level = 1
 
 # Hot DSP dependencies get full optimization even in dev builds.
-# (fdk-aac-sys additionally fails to compile at -O1: its force-inlined
-# fixed-point FFT needs the optimizer to devirtualize indirect calls.)
-[profile.dev.package.fdk-aac-sys]
-opt-level = 3
 [profile.dev.package.rustfft]
 opt-level = 3
 [profile.dev.package.realfft]
@@ -133,6 +125,10 @@ opt-level = 3
 
 [build-dependencies]
 windows_exe_info = "0.5.2"
+cc = "1"
+
+[target.'cfg(unix)'.build-dependencies]
+autotools = "0.2.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

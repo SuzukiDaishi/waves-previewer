@@ -411,6 +411,7 @@ impl super::WavesPreviewer {
                                 || m.lufs_i.is_some()
                                 || m.decode_error.is_some()
                                 || m.audio_track_absent
+                                || m.audio_track_unsupported
                                 || !m.thumb.is_empty()
                         })
                         .unwrap_or(false);
@@ -433,6 +434,7 @@ impl super::WavesPreviewer {
                         m.duration_secs.is_none()
                             && m.decode_error.is_none()
                             && !m.audio_track_absent
+                            && !m.audio_track_unsupported
                             && m.rms_db.is_none()
                             && m.thumb.is_empty()
                     })

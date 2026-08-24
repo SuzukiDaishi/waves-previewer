@@ -3,11 +3,17 @@
 
 #define MyAppName "NeoWaves Audio List Editor"
 #define MyAppShort "NeoWaves"
+#ifndef MyAppId
+#define MyAppId "{{8E0A3D0A-6A1B-4E2E-8C5A-2D6D9A6A0A11}}"
+#endif
 #ifndef MyAppVersion
 #define MyAppVersion "0.0.0"
 #endif
 #ifndef MyAppBuildId
 #define MyAppBuildId ""
+#endif
+#ifndef MyPrivilegesRequired
+#define MyPrivilegesRequired "admin"
 #endif
 #define MyAppExeName "neowaves.exe"
 #define MyAppAssoc "NeoWaves.Audio"
@@ -19,7 +25,7 @@
 #endif
 
 [Setup]
-AppId={{8E0A3D0A-6A1B-4E2E-8C5A-2D6D9A6A0A11}}
+AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher=NeoWaves
@@ -30,7 +36,7 @@ OutputBaseFilename={#MyAppShort}-Setup-{#MyAppVersion}{#MyAppBuildSuffix}
 Compression=lzma2
 SolidCompression=yes
 Uninstallable=yes
-PrivilegesRequired=admin
+PrivilegesRequired={#MyPrivilegesRequired}
 ChangesAssociations=yes
 UsePreviousAppDir=yes
 UsePreviousGroup=yes
@@ -40,6 +46,7 @@ CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName},neowaves_plugin_worker.exe,neowaves_plugin_gui_worker.exe
 RestartApplications=no
 SetupLogging=yes
+LicenseFile=..\LICENSE
 
 ; Setup icon
 SetupIconFile=..\icons\icon.ico
@@ -51,16 +58,14 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\neowaves_plugin_worker.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\neowaves_plugin_gui_worker.exe"; DestDir: "{app}"; Flags: ignoreversion
-; Every native dependency is statically linked, so no codec or runtime DLL is
-; expected here: the ort crate links ONNX Runtime as a static library, and
-; onig-sys, mp3lame-sys, fdk-aac-sys and libsqlite3-sys all compile their C
-; with cc. Lines for dnnl, mklml and onig were removed because they can never
-; match -- MKL-ML was dropped from ONNX Runtime after v1.6.0 and the DNNL
-; provider is not enabled. The two below are kept as a safety net only until a
-; Windows release run confirms nothing lands in target\release; check that and
-; drop them too.
+; LAME is deliberately a separate, replaceable DLL (LGPL-2.0 section 6(b)).
+Source: "..\target\release\libmp3lame.dll"; DestDir: "{app}"; Flags: ignoreversion
+; ONNX Runtime is normally static. Keep these as a safety net if its packaging
+; changes in a future ort release.
 Source: "..\target\release\onnxruntime*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\target\release\onnxruntime_providers*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\assets\licenses\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\commands\*"; DestDir: "{app}\commands"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\icons\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
