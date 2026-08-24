@@ -175,7 +175,8 @@ impl TextPool {
     /// regenerated snapshot diffs readably when one crate's copyright line
     /// changes.
     fn intern(&mut self, id: &str, name: &str, text: &str) -> String {
-        if let Some(key) = self.by_text.get(text) {
+        let text = normalize_license_text(text);
+        if let Some(key) = self.by_text.get(&text) {
             return key.clone();
         }
         let counter = self.counters.entry(id.to_string()).or_insert(0);
@@ -185,15 +186,30 @@ impl TextPool {
         } else {
             format!("{id}-{counter}")
         };
-        self.by_text.insert(text.to_string(), key.clone());
+        self.by_text.insert(text.clone(), key.clone());
         self.entries.push(PooledLicense {
             key: key.clone(),
             id: id.to_string(),
             name: name.to_string(),
-            text: text.to_string(),
+            text,
         });
         key
     }
+}
+
+/// Git may check out repository-owned licence files as CRLF on a Windows
+/// runner and LF on a developer machine. Cargo-about embeds those bytes in its
+/// JSON, so canonicalise line endings and insignificant line-tail whitespace
+/// before comparing, sorting, or serialising licence texts.
+fn normalize_license_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split('\n')
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
 }
 
 /// cargo-about's licence array order is not stable across otherwise equivalent
@@ -208,10 +224,9 @@ fn ordered_license_records(licenses: &[Value]) -> Vec<&Value> {
             .unwrap_or_default()
             .cmp(b["id"].as_str().unwrap_or_default())
             .then_with(|| {
-                a["text"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(b["text"].as_str().unwrap_or_default())
+                normalize_license_text(a["text"].as_str().unwrap_or_default()).cmp(
+                    &normalize_license_text(b["text"].as_str().unwrap_or_default()),
+                )
             })
             .then_with(|| {
                 a["name"]
@@ -581,6 +596,19 @@ mod tests {
                 ("MIT".to_string(), "a copyright".to_string()),
                 ("MIT-2".to_string(), "z copyright".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn pooled_texts_ignore_checkout_line_endings_and_line_tail_whitespace() {
+        let variants = vec![
+            json!({"id": "MIT", "name": "MIT", "text": "first  \r\n\r\nsecond\r\n"}),
+            json!({"id": "MIT", "name": "MIT", "text": "first\n\nsecond\n"}),
+        ];
+
+        assert_eq!(
+            pooled_keys(&variants),
+            vec![("MIT".to_string(), "first\n\nsecond".to_string())]
         );
     }
 }

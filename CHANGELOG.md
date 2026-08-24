@@ -4,7 +4,7 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
-## 0.20260825.1 - 2026-08-25
+## 0.20260825.2 - 2026-08-25
 
 ### コーデックと商用配布
 
@@ -12,7 +12,7 @@ All notable changes in this repository (hand-written).
 - **LAME を動的リンクへ変更**: LAME 3.100 を `libmp3lame.dll` として EXE から分離し、利用者が ABI 互換版へ差し替え可能にした。静的 LGPL の Rust wrapper も外し、NeoWaves の MIT FFI に置換。MP3 の CBR 設定・チャンネル処理・書き出し経路は維持。
 - **配布ライセンスをインストーラーへ同梱**: `LICENSE` と自動生成 `THIRD_PARTY_NOTICES.txt` を追加し、Help → Licenses と同じ根拠をオフラインでも確認可能にした。リリース CI は Cargo.lock からライセンス一覧を再生成し、差分や拒否ライセンスがあれば停止する。
 - **実行時モデルを commit 固定**: Whisper / Silero VAD / music ONNX の `main` 追従をやめ、監査済み revision を指定。
-- **ライセンススナップショットを再現可能化**: `cargo-about` が環境ごとに異なる順序で返す同一ライセンス本文を先に安定ソートし、CI と開発機で `MIT-N` の内部キーが変わらないようにした。
+- **ライセンススナップショットを再現可能化**: `cargo-about` が環境ごとに異なる順序で返す本文を安定ソートし、Windows checkout の CRLF/LF と行末空白もプール前に正規化。CI と開発機で `MIT-N` の内部キーや通知文書が変わらないようにした。
 
 ### 波形・ループ・ショートカットの UX 改善
 
