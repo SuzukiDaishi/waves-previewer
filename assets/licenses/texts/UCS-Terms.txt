@@ -1,0 +1,14 @@
+Universal Category System (UCS)
+
+The Universal Category System is a public, community-driven category list for
+sound effects libraries, published at https://universalcategorysystem.com/ .
+
+The UCS initiative publishes the category list free of charge for everyone to
+use, in both commercial and non-commercial contexts, and asks only that the
+system be used as published rather than forked into incompatible variants.
+
+NeoWaves embeds the UCS v8.2.1 category list (CatID / Category /
+SubCategory / Explanations / Synonyms) as offline lookup data in
+`src/metadata/data/ucs_8_2_1.tsv`. No UCS audio content is redistributed.
+
+Source workbook: "UCS v8.2.1 Full List.xlsx"

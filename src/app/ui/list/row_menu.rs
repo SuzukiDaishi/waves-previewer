@@ -94,7 +94,7 @@ impl WavesPreviewer {
         });
         // The menu re-runs this every frame it is open, over the whole
         // selection. Statting here would be one blocking syscall per
-        // selected file per frame -- on a share, a hung menu. Resolve
+        // selected file per frame — on a share, a hung menu. Resolve
         // existence through the background service instead.
         let mut transcript_targets: Vec<std::path::PathBuf> = Vec::new();
         for path in selected.iter() {
@@ -215,65 +215,29 @@ impl WavesPreviewer {
         let convert_format_disabled_reason =
             "Video sources are read-only in this version — their audio can be played and previewed, but not written back out.";
         ui.menu_button("Convert Format", |ui| {
-            let button = ui.add_enabled(can_convert_format, egui::Button::new("To WAV"));
-            let button = if can_convert_format {
-                button
-            } else {
-                button.on_disabled_hover_text(convert_format_disabled_reason)
-            };
-            if button.clicked() {
-                self.spawn_convert_format_selected(selected.clone(), "wav");
-                ui.close();
-            }
-            let button = ui.add_enabled(can_convert_format, egui::Button::new("To AIFF"));
-            let button = if can_convert_format {
-                button
-            } else {
-                button.on_disabled_hover_text(convert_format_disabled_reason)
-            };
-            if button.clicked() {
-                self.spawn_convert_format_selected(selected.clone(), "aiff");
-                ui.close();
-            }
-            let button = ui.add_enabled(can_convert_format, egui::Button::new("To FLAC"));
-            let button = if can_convert_format {
-                button
-            } else {
-                button.on_disabled_hover_text(convert_format_disabled_reason)
-            };
-            if button.clicked() {
-                self.spawn_convert_format_selected(selected.clone(), "flac");
-                ui.close();
-            }
-            let button = ui.add_enabled(can_convert_format, egui::Button::new("To MP3"));
-            let button = if can_convert_format {
-                button
-            } else {
-                button.on_disabled_hover_text(convert_format_disabled_reason)
-            };
-            if button.clicked() {
-                self.spawn_convert_format_selected(selected.clone(), "mp3");
-                ui.close();
-            }
-            let button = ui.add_enabled(can_convert_format, egui::Button::new("To M4A"));
-            let button = if can_convert_format {
-                button
-            } else {
-                button.on_disabled_hover_text(convert_format_disabled_reason)
-            };
-            if button.clicked() {
-                self.spawn_convert_format_selected(selected.clone(), "m4a");
-                ui.close();
-            }
-            let button = ui.add_enabled(can_convert_format, egui::Button::new("To OGG"));
-            let button = if can_convert_format {
-                button
-            } else {
-                button.on_disabled_hover_text(convert_format_disabled_reason)
-            };
-            if button.clicked() {
-                self.spawn_convert_format_selected(selected.clone(), "ogg");
-                ui.close();
+            // MP3 and AAC encoding are optional features, so a build can be
+            // missing them; offering a format the encoder cannot write would
+            // only fail at the end of the export.
+            for (label, ext) in [
+                ("To WAV", "wav"),
+                ("To AIFF", "aiff"),
+                ("To FLAC", "flac"),
+                ("To MP3", "mp3"),
+                ("To M4A", "m4a"),
+                ("To OGG", "ogg"),
+            ] {
+                let missing_encoder = crate::wave::export_format_unavailable_reason(ext);
+                let enabled = can_convert_format && missing_encoder.is_none();
+                let button = ui.add_enabled(enabled, egui::Button::new(label));
+                let button = match (enabled, missing_encoder) {
+                    (true, _) => button,
+                    (false, Some(reason)) => button.on_disabled_hover_text(reason),
+                    (false, None) => button.on_disabled_hover_text(convert_format_disabled_reason),
+                };
+                if button.clicked() {
+                    self.spawn_convert_format_selected(selected.clone(), ext);
+                    ui.close();
+                }
             }
         });
         if ui

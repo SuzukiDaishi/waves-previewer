@@ -938,7 +938,9 @@ mod tests {
         assert!(approx_eq(loop_frac.1, 0.65));
     }
 
+    // Builds its fixture with the MP3 encoder, so it needs one.
     #[test]
+    #[cfg(feature = "mp3_lame")]
     fn read_wave_annotation_fracs_reads_unopened_mp3_annotations() {
         let dir = make_temp_dir("mp3_annotations");
         let path = dir.join("fixture.mp3");
@@ -956,7 +958,9 @@ mod tests {
         assert!(approx_eq(loop_frac.1, 0.65));
     }
 
+    // Builds its fixture with the AAC encoder, so it needs one.
     #[test]
+    #[cfg(feature = "aac_fdk")]
     fn read_wave_annotation_fracs_reads_unopened_m4a_annotations() {
         let dir = make_temp_dir("m4a_annotations");
         let path = dir.join("fixture.m4a");

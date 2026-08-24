@@ -1,0 +1,15 @@
+# Standalone on purpose: this tool only reshapes JSON, and keeping it out of the
+# main crate means regenerating the licence snapshot does not need NeoWaves's
+# native build dependencies (ALSA, X11/Wayland, a C++ toolchain for OpenH264).
+[package]
+name = "gen-licenses"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Builds assets/licenses/third_party.json for the NeoWaves Licenses window"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

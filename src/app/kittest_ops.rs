@@ -66,6 +66,18 @@ impl super::WavesPreviewer {
         self.show_shortcuts_window
     }
 
+    pub fn test_set_licenses_window_open(&mut self, open: bool) {
+        self.show_licenses_window = open;
+    }
+
+    pub fn test_licenses_window_open(&self) -> bool {
+        self.show_licenses_window
+    }
+
+    pub fn test_set_licenses_filter(&mut self, filter: &str) {
+        self.licenses_filter = filter.to_string();
+    }
+
     pub fn test_set_plugin_manager_open(&mut self, open: bool) {
         self.show_plugin_manager = open;
     }

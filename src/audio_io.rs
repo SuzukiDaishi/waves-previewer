@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+#[cfg(feature = "aac_fdk")]
 use fdk_aac::dec::{
     Decoder as AacDecoder, DecoderError as AacDecoderError, Transport as AacTransport,
 };
@@ -171,6 +172,11 @@ pub(crate) fn is_isobmff_path(path: &Path) -> bool {
 /// `in24` / `lpcm`), parses as ISO-BMFF but has to go through symphonia instead.
 /// The streaming and progressive decoders emit chunks as they go, so they cannot
 /// discover the mismatch halfway and start over — they ask this first.
+///
+/// This is the single gate in front of every fdk-aac entry point, which is why
+/// the `aac_fdk`-less build only has to answer `false` here: each caller then
+/// takes the symphonia branch it already had for ALAC and PCM.
+#[cfg(feature = "aac_fdk")]
 fn isobmff_audio_is_aac(path: &Path) -> bool {
     let Ok(file) = File::open(path) else {
         return false;
@@ -185,6 +191,14 @@ fn isobmff_audio_is_aac(path: &Path) -> bool {
         matches!(track.track_type(), Ok(TrackType::Audio))
             && track.trak.mdia.minf.stbl.stsd.mp4a.is_some()
     })
+}
+
+/// Without `aac_fdk` there is no fdk fast path to route anything to, so every
+/// ISO-BMFF file — AAC included — goes to symphonia. Saying `false` here is
+/// the whole switch: no call site changes.
+#[cfg(not(feature = "aac_fdk"))]
+fn isobmff_audio_is_aac(_path: &Path) -> bool {
+    false
 }
 
 /// The first track symphonia can actually decode as audio.
@@ -937,12 +951,24 @@ pub fn build_wav_proxy_preview(
     }))
 }
 
+#[cfg(feature = "aac_fdk")]
 fn audio_specific_config_bytes(profile: u8, freq_index: u8, chan_conf: u8) -> [u8; 2] {
     let byte_a = (profile << 3) | (freq_index >> 1);
     let byte_b = (freq_index << 7) | (chan_conf << 3);
     [byte_a, byte_b]
 }
 
+/// Stand-in for the fdk fast path in a build without `aac_fdk`.
+///
+/// Every caller already treats an `Err` here as "not AAC, let symphonia have
+/// it" — that is how ALAC and the PCM flavours in a `.mov` are handled — so
+/// failing is exactly the right answer and no call site needs to change.
+#[cfg(not(feature = "aac_fdk"))]
+fn decode_m4a_fdk(_path: &Path, _max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, u32, bool)> {
+    anyhow::bail!("built without the aac_fdk feature; decoding via symphonia")
+}
+
+#[cfg(feature = "aac_fdk")]
 fn decode_m4a_fdk(path: &Path, max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, u32, bool)> {
     let file = File::open(path).with_context(|| format!("open m4a: {}", path.display()))?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -1156,6 +1182,26 @@ fn enforce_stable_channel_count(
     Ok(())
 }
 
+/// Stand-in for the progressive fdk fast path in a build without `aac_fdk`.
+///
+/// Unreachable in practice: `isobmff_audio_is_aac` answers `false` there, so
+/// both call sites take their symphonia branch. It exists so those branches
+/// still type-check.
+#[cfg(not(feature = "aac_fdk"))]
+pub fn decode_m4a_fdk_progressive_chunks<C, F>(
+    _path: &Path,
+    _emit_every_secs: f32,
+    _should_cancel: C,
+    _on_chunk: F,
+) -> Result<()>
+where
+    C: FnMut() -> bool,
+    F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
+{
+    anyhow::bail!("built without the aac_fdk feature; decoding via symphonia")
+}
+
+#[cfg(feature = "aac_fdk")]
 pub fn decode_m4a_fdk_progressive_chunks<C, F>(
     path: &Path,
     emit_every_secs: f32,
@@ -2845,6 +2891,7 @@ mod tests {
     /// with an empty `CodecParameters`. A normal mp4 puts the video track
     /// first, so taking the default track handed the decoder a
     /// `CODEC_TYPE_NULL` track and the file failed to decode at all.
+    #[cfg(all(feature = "video", feature = "aac_fdk"))]
     mod video_container_audio {
         use crate::video::test_fixture::FixtureFile;
 

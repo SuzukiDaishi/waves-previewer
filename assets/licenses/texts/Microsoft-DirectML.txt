@@ -1,0 +1,27 @@
+Microsoft DirectML — called, not redistributed
+
+Copyright (c) Microsoft Corporation.
+
+On Windows, NeoWaves asks ONNX Runtime for the DirectML execution provider so
+that transcription and music analysis can run on the GPU, and falls back to the
+CPU provider silently when it is not available (see `music_onnx.rs`, where the
+provider is built with `.fail_silently()`).
+
+NeoWaves does not ship DirectML. `DirectML.dll` is a Windows component that has
+been part of the operating system since Windows 10 version 1903, and the
+installer does not copy it. ONNX Runtime itself is statically linked into the
+executable through the `ort` crate, so there is no `onnxruntime.dll` or
+provider DLL alongside it either.
+
+Because nothing is redistributed, the Microsoft.AI.DirectML redistribution
+terms do not attach to a NeoWaves build. This entry exists so the dependency is
+visible rather than because an obligation follows from it.
+
+If a future build ever bundles a specific DirectML redistributable instead of
+using the OS copy, that changes: the Microsoft Software License Terms shipped
+with the Microsoft.AI.DirectML package would then apply, permitting
+redistribution as part of an application while prohibiting reverse engineering
+and standalone distribution.
+
+https://learn.microsoft.com/windows/ai/directml/dml
+https://www.nuget.org/packages/Microsoft.AI.DirectML/License

@@ -9,7 +9,8 @@ Terminology
 - Legacy code/file naming still uses `project*` to mean session persistence.
 
 Repository Layout
-- `commands/`: PowerShell helper scripts (e.g., Whisper model download, SRT generation, installer build).
+- `assets/licenses/`: data behind the in-app Licenses window. `third_party.json` is the generated, committed snapshot the binary embeds; `extra.json` is the hand-maintained half (bundled C/C++ sources, installer DLLs, fonts, embedded data, runtime-downloaded models, Steinberg VST 3) plus the per-crate flags and notes; `texts/` holds licence texts cargo-about cannot find. Regenerate with `commands/generate_licenses.ps1` after any dependency change -- never hand-edit `third_party.json`.
+- `commands/`: PowerShell helper scripts (e.g., Whisper model download, SRT generation, installer build, licence snapshot regeneration).
 - `debug/`: Debug fixtures and automation outputs (e.g., gui_test audio, summary text).
 - `docs/`: Design/refactor plans and specs.
   - `REFACTOR_PLAN.md`: app.rs / logic.rs refactor plan and progress map.
@@ -48,6 +49,7 @@ Repository Layout
     - `rename_ops.rs`: rename dialogs + path replacement and batch rename.
     - `audio_ops.rs`: output volume + per-file gain application.
     - `video_ops.rs`: one decode worker per open video tab, the read-ahead ring that keeps the picture on the playhead rather than a round trip behind it, and the per-frame drain.
+    - `licenses.rs`: parses the embedded `assets/licenses/third_party.json` once on first open, pools licence texts by key, and groups flagged entries by topic so one issue spread across a wrapper crate, its `-sys` crate and the C library it builds is stated once. The snapshot is generated against the widest feature set, so `feature_active()` resolves each component's cargo feature with `cfg!` and the window reports the binary in front of the reader rather than claiming obligations for code that was never linked in -- add a feature there whenever `extra.json` gains one. `ui/licenses.rs` renders it as Help -> Licenses.
   - `src/bin/`: extra binaries/utilities (if present).
   - `src/main.rs`: native startup entry.
   - `src/cli.rs`: CLI arg parsing and startup config helpers.
@@ -58,8 +60,17 @@ Repository Layout
   - `src/ipc.rs`: IPC message definitions.
   - `src/ui_wake.rs`: process-wide handle for waking the UI thread from a background thread (the frame loop sleeps when idle, so a thread pushing into a channel the UI polls must ask for a frame).
   - `src/kittest.rs`: kittest feature helpers.
+- `tools/gen-licenses/`: standalone crate that merges `cargo about generate --format json` with `assets/licenses/extra.json` into the committed snapshot. Deliberately outside the main crate so regenerating licences does not need NeoWaves's native build deps (ALSA, X11/Wayland, a C++ toolchain).
 - `tests/`: integration tests (including kittest harness).
 - `target/`: Cargo build artifacts (generated).
+
+Cargo Features
+- `default = glow + plugin_native_vst3 + plugin_native_clap + aac_fdk + mp3_lame`.
+- `video` (OpenH264 H.264 preview) is deliberately NOT default: the crate compiles Cisco's sources, and Cisco only covers AVC patent fees for users of *their* prebuilt binaries. The released Windows installer gets its video from Media Foundation instead, so nothing is lost. Build with `--features video` for the picture on Linux/macOS.
+- `aac_fdk` gates Fraunhofer's FDK (AAC decode fast path + M4A/AAC export); `mp3_lame` gates LAME (MP3 export). Turning either off leaves *decoding* intact -- symphonia handles both -- and only removes the encoder. `wave::export_format_is_available` is the single predicate every format picker consults, so an unavailable format is hidden rather than failing at the end of an export.
+- Never add GPL-licensed code while `aac_fdk` exists: the FDK licence is GPL-incompatible and the two cannot ship in one binary. `licenses::tests::fdk_aac_never_shares_a_binary_with_gpl` enforces this.
+- A build with no copyleft at all: `cargo build --no-default-features --features glow,plugin_native_vst3,plugin_native_clap`.
+- Every native dependency is statically linked -- ONNX Runtime via `ort`, and Oniguruma/LAME/FDK/SQLite via `-sys` crates that compile their C with `cc`. The installer ships no codec or runtime DLL, and `licenses::tests::nothing_claims_to_be_a_redistributed_dll` keeps the licence data honest about that. Do not add DLL-copying installer lines without first checking `target/release` for the file.
 
 Console Quick Start (PowerShell)
 - Build: `cargo build`

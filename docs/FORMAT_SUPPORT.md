@@ -22,6 +22,23 @@ NeoWaves が扱う音声フォーマットごとの、デコード / エンコ�
 `badges.rs` / `row_menu.rs` の UI を更新する。動画を編集可能にするときは
 `src/media_kind.rs` の capability を 1 箇所変えるだけで、ゲートは全て追従する。
 
+## 0. feature による差分（ライセンス由来）
+
+一部のコーデックは cargo feature で切り離せる。ライセンス上の理由で
+「そのコーデックを含まないビルド」を作れるようにしてあるため（詳細は README）。
+
+| feature | 既定 | 外すと失われるもの | 読み込みへの影響 |
+| --- | --- | --- | --- |
+| `mp3_lame` (LAME) | ON | MP3 **書き出し** | なし。MP3 読み込みは symphonia |
+| `aac_fdk` (Fraunhofer FDK) | ON | M4A/AAC **書き出し**、AAC デコード高速パス | なし。AAC 読み込みは symphonia にフォールバック |
+| `video` (OpenH264) | **OFF** | 非 Windows での映像プレビュー / サムネイル | なし。音声トラックは常に再生できる。Windows は Media Foundation が担当 |
+
+書き出せるかどうかの唯一の判定は `wave::export_format_is_available()`。
+UI の「Convert Format」はこれを見て、含まれていないフォーマットを
+無効化して理由をツールチップに出す（書き出しの最後で失敗させない）。
+`isobmff_audio_is_aac()` は `aac_fdk` 無しでは常に `false` を返し、
+全 ISO-BMFF ファイルが symphonia 経路に落ちる。
+
 ## 1. オーディオ本体
 
 | フォーマット | デコード | エンコード (書き出し) | 備考 |

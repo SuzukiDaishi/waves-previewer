@@ -198,7 +198,83 @@ If this software was useful to you, you have the right to buy the author a drink
 ---
 
 ## ライセンス補足（Third-party）
+
+アプリ内の **Help → Licenses...** に、依存している全 657 コンポーネントのライセンス全文と、
+商用配布時に別途対応が要る項目の一覧を表示します。表示データは
+`assets/licenses/third_party.json` にコミット済みのスナップショットで、ビルド時に
+`include_str!` で埋め込まれます（ビルド時・実行時ともネットワーク不要）。
+
+依存を追加・更新したら再生成してコミットしてください:
+
+```powershell
+git submodule update --init --recursive   # 初回のみ
+cargo install cargo-about --locked --features cli
+pwsh ./commands/generate_licenses.ps1
+```
+
+`cargo-about` は `about.toml` の `accepted` に無いライセンスを見つけると失敗します。
+GPL 依存が紛れ込んだらリリースではなくここで止まる、という設計です。
+
+- 生成対象外（crate ではないもの）は `assets/licenses/extra.json` に手書きで管理します。
+  `-sys` crate が同梱ビルドする C/C++ ソース、インストーラが配る DLL、フォント、
+  埋め込みデータ、実行時ダウンロードするモデル、Steinberg VST 3 の扱いなど。
 - `signalsmith-stretch` は submodule で取り込み、上流ライセンスをそのまま保持しています。
-- 参照先:
   - `vendor/signalsmith-stretch/LICENSE.md`
   - `vendor/signalsmith-stretch/signalsmith-stretch/LICENSE.txt`
+
+### 配布物のライセンス構成
+
+NeoWaves 本体のソースは MIT ですが、**既定の配布バイナリ全体が MIT というわけではありません**。
+LAME を含むため LGPL-3.0 §4 の Combined Work になります（GPL ではありません）。
+最新の状態は Help → Licenses の冒頭に表示されます。
+
+| ビルド | 構成 | ライセンス上の位置づけ |
+| --- | --- | --- |
+| 既定 (`cargo build --release`) | MP3/AAC 書き出し・VST3・CLAP あり、OpenH264 なし | MIT ＋ LGPL-3.0 §4 (LAME) |
+| copyleft なし | `--no-default-features --features glow,plugin_native_vst3,plugin_native_clap` | permissive のみ |
+| 映像プレビュー込み | `--features video` | 上記＋自前ビルド OpenH264（下記注意） |
+
+**GPL は採用していません。** 依存に GPL 以外の選択肢がある場合は必ずそちらを採っています。
+
+### 過去の懸念と、その解消
+
+| 対象 | 解消方法 |
+| --- | --- |
+| **Steinberg VST 3** | VST 3.8 (2025-10-29) で SDK が MIT に再ライセンスされ、旧来の GPLv3/proprietary 二択が消滅。`vst3` crate も Steinberg のソースを同梱していない。残るのは商標表記のみ（VST is a registered trademark of Steinberg Media Technologies GmbH） |
+| **Cisco OpenH264** | `video` を既定 feature から除外。Cisco の特許料肩代わりは Cisco 配布バイナリ限定で、ソースからビルドすると義務が配布者に移るため。リリースする Windows インストーラでは Media Foundation が映像を担うので機能的損失はない。`--features video` でビルドしたバイナリを再配布する場合は AVC の義務が自分に来る点に注意 |
+| **Fraunhofer FDK AAC** | `aac_fdk` feature 化（既定 ON）。Via LA の AAC 条項は "License fees are due on the **sale** of encoders and/or decoders only" であり本ソフトは販売しない。FDK は GPL 非互換なので、**GPL コードを絶対に混ぜない**方針とセットで成立している（ユニットテストで固定） |
+| **LAME (MP3 書き出し)** | `mp3_lame` feature 化（既定 ON）。ソース全公開により LGPL-3.0 §4 を完全に満たす — (a) 告知、(b) LGPL/GPL 全文同梱、(c) アプリ内表示、(d)(0) `Cargo.lock` 固定＋全ソース MIT 公開で再リンク可能。MP3 特許は 2017 年失効済 |
+
+#### LGPL と商用販売について
+
+よくある誤解ですが、**LGPL は商用販売時にも自分のソース公開を要求しません**。
+そこが GPL との決定的な差で、LGPL はアプリ本体に感染しません。義務の対象は
+「ライブラリ」と「利用者がそれを差し替えられること」だけです。
+
+NeoWaves がソースを公開しているのは無料・オープンなプロジェクトだからであって、
+LGPL に強制されているからではありません。仮にクローズドソースで販売するなら:
+
+1. **LAME を動的リンクに変える** → §4(d)(1) が適用され、静的リンクが要求する
+   §4(d)(0)（再リンク可能なオブジェクト提供）が丸ごと不要になる
+2. §4(a)/(b)/(c)（告知・両ライセンス全文・著作権表示）は継続 — すでに実装済み
+3. LAME 自身のソースを公開 — 無改変なら上流を指すだけでよい
+
+自分のコードは一切開示不要です。現在は静的リンク（`static=mp3lame`）なので
+§4(d)(0) の経路を採っています。
+
+#### 同梱バイナリについて
+
+**ネイティブ依存はすべて静的リンクされており、コーデックやランタイムの DLL は
+一切同梱していません。** ONNX Runtime は `ort` が静的ライブラリとしてリンクし、
+Oniguruma / LAME / FDK / SQLite はいずれも `-sys` crate が C を `cc` でコンパイルします。
+DirectML は Windows の OS コンポーネントを呼ぶだけで再頒布していません。
+
+なお静的リンクでも**表示義務は消えません**（むしろバイナリに焼き込まれています）。
+そのため上記はすべて Help → Licenses に全文付きで掲載しています。
+
+`aac_fdk` / `mp3_lame` を外しても **MP3・AAC の読み込みは symphonia が担当するので影響ありません**。
+失われるのは書き出しだけで、その場合アプリは該当フォーマットを選択肢から隠します。
+
+> **今後の変更で守ること**: `aac_fdk` が存在する限り GPL ライセンスのコードを入れないこと。
+> FDK のライセンスは GPL 非互換で、同一バイナリに同居できません
+> （`src/app/licenses.rs` の `fdk_aac_never_shares_a_binary_with_gpl` が検出します）。

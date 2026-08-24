@@ -79,6 +79,15 @@ impl WavesPreviewer {
                 self.show_keymap_window = true;
                 ui.close();
             }
+            ui.separator();
+            if ui
+                .button("Licenses...")
+                .on_hover_text("Third-party licences and commercial distribution notes")
+                .clicked()
+            {
+                self.show_licenses_window = true;
+                ui.close();
+            }
         });
     }
 

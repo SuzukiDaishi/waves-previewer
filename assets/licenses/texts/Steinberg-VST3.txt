@@ -1,0 +1,76 @@
+Steinberg VST 3 — SDK licence and trademark
+
+LICENCE
+-------
+
+Since VST 3.8 (announced 2025-10-29) the VST 3 SDK is released under the MIT
+License:
+
+    MIT License
+    Copyright (c) 2026, Steinberg Media Technologies GmbH
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT ANY WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+    NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+    DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+    OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+    USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Before that release the SDK was dual-licensed GPLv3 / proprietary, and a
+commercial VST 3 host had to either accept GPLv3 for its binaries or sign
+Steinberg's own agreement. Neither applies any more.
+
+NeoWaves in any case redistributes no Steinberg source. It reaches VST 3
+through the `vst3` Rust crate, which supplies its own MIT OR Apache-2.0
+bindings to the VST 3 C interface and ships no SDK files.
+
+TRADEMARK
+---------
+
+The licence change covers copyright only. "VST" remains a registered trademark
+of Steinberg Media Technologies GmbH.
+
+    VST is a registered trademark of Steinberg Media Technologies GmbH.
+
+Under the MIT licence, *using the trademark at all is optional*: nothing
+obliges a project to display the VST name or the VST Compatible logo, and
+declining to use them carries no obligation whatsoever. Steinberg's usage
+guidelines attach only if you choose to brand with it, and then they ask for
+the ® symbol on first use, the attribution line above in product credits and
+documentation, and the VST Compatible logo on packaging and on every web page
+promoting the product. Not following them is a trademark matter and does not
+affect the MIT rights to the SDK.
+
+NeoWaves does not brand itself with VST. Where "VST3" appears it names a plug-in
+format, a file extension or the operating system's own plug-in folder -- the
+descriptive use every DAW makes of it -- in three user-visible strings: the
+plug-in file-picker filter and two "not a recognized VST3/CLAP plugin" errors.
+The attribution above is reproduced here regardless, because it costs nothing
+and is the courteous thing to do.
+
+If the product name, icon or marketing ever adopts the VST name or logo, the
+guidelines above start to apply and should be read in full:
+https://steinbergmedia.github.io/vst3_dev_portal/pages/VST+3+Licensing/Usage+guidelines.html
+
+A NOTE ON ASIO
+--------------
+
+The same round of changes moved ASIO in the opposite direction — to GPLv3 /
+proprietary. NeoWaves does not use ASIO: `cpal` is built without its `asio`
+feature and no ASIO crate appears in Cargo.lock. Enabling it would pull GPLv3
+into the binary, which would in turn make the Fraunhofer FDK AAC encoder
+undistributable (see that entry).
+
+See https://www.steinberg.net/press/2025/vst-3-8/ and
+https://github.com/steinbergmedia/vst3sdk
