@@ -64,6 +64,7 @@ pub mod inspection;
 pub mod keymap;
 #[cfg(feature = "kittest")]
 mod kittest_ops;
+mod licenses;
 mod list_ops;
 mod list_preview_ops;
 mod list_seek_ops;
@@ -954,6 +955,9 @@ pub struct WavesPreviewer {
     show_export_settings: bool,
     show_list_columns_window: bool,
     show_shortcuts_window: bool,
+    show_licenses_window: bool,
+    /// Search box contents for the Licenses window, kept across opens.
+    licenses_filter: String,
     show_keymap_window: bool,
     show_undo_history_window: bool,
     show_regions_window: bool,

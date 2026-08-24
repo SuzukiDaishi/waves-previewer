@@ -1,0 +1,39 @@
+Intel Simplified Software License
+
+Copyright (c) Intel Corporation.
+
+Use and Redistribution. You are granted the right to use, copy, and
+redistribute the Materials, in binary form only, subject to the following
+terms and conditions:
+
+  * Redistributions must reproduce the above copyright notice and these terms
+    of use in the Software and in the documentation and/or other materials
+    provided with the distribution.
+  * Neither the name of Intel nor the names of its suppliers may be used to
+    endorse or promote products derived from this Software without specific
+    prior written permission.
+  * No reverse engineering, decompilation, or disassembly of the Materials is
+    permitted.
+
+No other licenses. Except as provided in the preceding section, Intel grants
+no licenses or other rights, express or implied, by estoppel or otherwise, to,
+or under, any patents, copyrights, trademarks, trade names, trade secrets, or
+other intellectual property owned or controlled by Intel.
+
+Third party software. The Materials may include third party software that is
+subject to separate license terms.
+
+DISCLAIMER. THE MATERIALS ARE PROVIDED "AS IS" WITHOUT ANY EXPRESS OR IMPLIED
+WARRANTY OF ANY KIND INCLUDING WARRANTIES OF MERCHANTABILITY, NONINFRINGEMENT
+OF INTELLECTUAL PROPERTY RIGHTS, OR FITNESS FOR ANY PARTICULAR PURPOSE.
+
+LIMITATION OF LIABILITY. IN NO EVENT WILL INTEL BE LIABLE FOR ANY DIRECT,
+INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE
+OR INABILITY TO USE THE MATERIALS.
+
+This is the licence that applies to the Intel MKL-ML runtime redistributables
+(`mklml*.dll`) that the ONNX Runtime build may pull in and that the NeoWaves
+installer copies alongside the executable. Confirm the exact text shipped with
+the ONNX Runtime release you build against.
+
+Source: https://www.intel.com/content/www/us/en/developer/articles/license/

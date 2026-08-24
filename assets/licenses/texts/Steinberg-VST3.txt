@@ -1,0 +1,20 @@
+Steinberg VST 3 Plug-In SDK / VST trademark
+
+NeoWaves acts as a VST 3 *host*: it loads third-party VST 3 plug-ins through
+the `vst3` Rust crate (MIT OR Apache-2.0 bindings to the VST 3 C interface).
+No Steinberg VST 3 SDK source code is redistributed with NeoWaves.
+
+However, the VST 3 interface itself is a Steinberg Media Technologies GmbH
+specification, and "VST" is a registered trademark of Steinberg Media
+Technologies GmbH. Steinberg distributes the VST 3 SDK under a dual licence:
+
+  * GPLv3, or
+  * the proprietary Steinberg VST 3 Licence Agreement (offered free of charge,
+    but it must be signed and registered with Steinberg).
+
+Anyone shipping a VST 3 host or plug-in commercially is expected to have
+accepted one of those two, and to follow Steinberg's VST usage guidelines for
+naming and logo use.
+
+VST is a registered trademark of Steinberg Media Technologies GmbH.
+See https://www.steinberg.net/developers/ for the current agreement.

@@ -2324,6 +2324,61 @@ mod kittest_suite {
         top_menu_button(&harness, "List");
     }
 
+    /// The Licenses window is the only place the binary discharges its
+    /// attribution obligations, so "does it actually render" is worth a test
+    /// rather than a manual check that stops happening.
+    #[test]
+    fn licenses_window_renders_and_filters() {
+        let mut harness = harness_empty();
+        harness.state_mut().test_set_licenses_window_open(true);
+        harness.run_steps(2);
+
+        assert!(
+            harness.state().test_licenses_window_open(),
+            "Licenses window closed itself"
+        );
+        for label in [
+            "Licenses",
+            "Commercial distribution notes",
+            "All components",
+        ] {
+            assert!(
+                harness.query_all_by_label(label).next().is_some(),
+                "{label} not found in the Licenses window"
+            );
+        }
+
+        // The three entries that need a decision before commercial
+        // distribution must be visible without scrolling past 600 crates.
+        assert!(
+            harness.query_all_by_label("CAUTION").next().is_some(),
+            "no caution rows rendered"
+        );
+
+        // Filtering narrows the table rather than emptying it.
+        harness.state_mut().test_set_licenses_filter("mpl-2.0");
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_all_by_label("Nothing matches \"mpl-2.0\".")
+                .next()
+                .is_none(),
+            "MPL-2.0 filter matched nothing, but symphonia is MPL-2.0"
+        );
+
+        harness
+            .state_mut()
+            .test_set_licenses_filter("zzz-no-such-crate");
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_all_by_label("Nothing matches \"zzz-no-such-crate\".")
+                .next()
+                .is_some(),
+            "an unmatched filter should say so"
+        );
+    }
+
     #[test]
     fn inspector_panel_visible_when_editor_open() {
         let mut harness = harness_with_wavs(true);

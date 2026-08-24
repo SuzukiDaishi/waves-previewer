@@ -198,7 +198,38 @@ If this software was useful to you, you have the right to buy the author a drink
 ---
 
 ## ライセンス補足（Third-party）
+
+アプリ内の **Help → Licenses...** に、依存している全 657 コンポーネントのライセンス全文と、
+商用配布時に別途対応が要る項目の一覧を表示します。表示データは
+`assets/licenses/third_party.json` にコミット済みのスナップショットで、ビルド時に
+`include_str!` で埋め込まれます（ビルド時・実行時ともネットワーク不要）。
+
+依存を追加・更新したら再生成してコミットしてください:
+
+```powershell
+git submodule update --init --recursive   # 初回のみ
+cargo install cargo-about --locked --features cli
+pwsh ./commands/generate_licenses.ps1
+```
+
+`cargo-about` は `about.toml` の `accepted` に無いライセンスを見つけると失敗します。
+GPL 依存が紛れ込んだらリリースではなくここで止まる、という設計です。
+
+- 生成対象外（crate ではないもの）は `assets/licenses/extra.json` に手書きで管理します。
+  `-sys` crate が同梱ビルドする C/C++ ソース、インストーラが配る DLL、フォント、
+  埋め込みデータ、実行時ダウンロードするモデル、Steinberg VST 3 の扱いなど。
 - `signalsmith-stretch` は submodule で取り込み、上流ライセンスをそのまま保持しています。
-- 参照先:
   - `vendor/signalsmith-stretch/LICENSE.md`
   - `vendor/signalsmith-stretch/signalsmith-stretch/LICENSE.txt`
+
+### 商用配布で別途対応が要るもの
+
+NeoWaves 本体は MIT ですが、**配布バイナリ全体が MIT というわけではありません**。
+詳細と最新の状態は Help → Licenses の "Commercial distribution notes" を参照してください。
+
+| 対象 | 内容 |
+| --- | --- |
+| Cisco OpenH264（feature `video`、既定 ON） | ソースからビルドしているため、Cisco の特許料肩代わり（Cisco 配布バイナリ限定）の対象外。AVC/H.264 の特許義務は配布者側 |
+| Fraunhofer FDK AAC（M4A/AAC 書き出し） | ライセンス第 3 条が特許不許諾を明記。商用の AAC エンコード/デコードには Via LA の別途ライセンスが必要 |
+| LAME / `mp3lame-encoder`（MP3 書き出し） | LGPL-3.0。静的リンクした配布物には再リンク手段の提供と LGPL/GPL 全文の同梱が必要（MP3 特許は 2017 年失効済） |
+| Steinberg VST 3（feature `plugin_native_vst3`） | SDK ソースは非同梱だが、商用 VST 3 ホストは Steinberg のライセンス契約（無償・要署名）か GPLv3 が通例 |

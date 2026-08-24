@@ -9,7 +9,8 @@ Terminology
 - Legacy code/file naming still uses `project*` to mean session persistence.
 
 Repository Layout
-- `commands/`: PowerShell helper scripts (e.g., Whisper model download, SRT generation, installer build).
+- `assets/licenses/`: data behind the in-app Licenses window. `third_party.json` is the generated, committed snapshot the binary embeds; `extra.json` is the hand-maintained half (bundled C/C++ sources, installer DLLs, fonts, embedded data, runtime-downloaded models, Steinberg VST 3) plus the per-crate flags and notes; `texts/` holds licence texts cargo-about cannot find. Regenerate with `commands/generate_licenses.ps1` after any dependency change -- never hand-edit `third_party.json`.
+- `commands/`: PowerShell helper scripts (e.g., Whisper model download, SRT generation, installer build, licence snapshot regeneration).
 - `debug/`: Debug fixtures and automation outputs (e.g., gui_test audio, summary text).
 - `docs/`: Design/refactor plans and specs.
   - `REFACTOR_PLAN.md`: app.rs / logic.rs refactor plan and progress map.
@@ -48,6 +49,7 @@ Repository Layout
     - `rename_ops.rs`: rename dialogs + path replacement and batch rename.
     - `audio_ops.rs`: output volume + per-file gain application.
     - `video_ops.rs`: one decode worker per open video tab, the read-ahead ring that keeps the picture on the playhead rather than a round trip behind it, and the per-frame drain.
+    - `licenses.rs`: parses the embedded `assets/licenses/third_party.json` once on first open, pools licence texts by key, and groups flagged entries by topic so one issue spread across a wrapper crate, its `-sys` crate and the C library it builds is stated once. `ui/licenses.rs` renders it as Help -> Licenses.
   - `src/bin/`: extra binaries/utilities (if present).
   - `src/main.rs`: native startup entry.
   - `src/cli.rs`: CLI arg parsing and startup config helpers.
@@ -58,6 +60,7 @@ Repository Layout
   - `src/ipc.rs`: IPC message definitions.
   - `src/ui_wake.rs`: process-wide handle for waking the UI thread from a background thread (the frame loop sleeps when idle, so a thread pushing into a channel the UI polls must ask for a frame).
   - `src/kittest.rs`: kittest feature helpers.
+- `tools/gen-licenses/`: standalone crate that merges `cargo about generate --format json` with `assets/licenses/extra.json` into the committed snapshot. Deliberately outside the main crate so regenerating licences does not need NeoWaves's native build deps (ALSA, X11/Wayland, a C++ toolchain).
 - `tests/`: integration tests (including kittest harness).
 - `target/`: Cargo build artifacts (generated).
 

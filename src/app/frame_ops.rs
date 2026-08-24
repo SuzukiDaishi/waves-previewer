@@ -657,6 +657,7 @@ impl WavesPreviewer {
         self.ui_list_columns_window(ctx);
         self.ui_shortcuts_window(ctx);
         self.ui_keymap_window(ctx);
+        self.ui_licenses_window(ctx);
         self.ui_undo_history_window(ctx);
         self.ui_regions_window(ctx);
         self.ui_harmonic_window(ctx);

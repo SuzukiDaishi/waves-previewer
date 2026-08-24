@@ -1,0 +1,60 @@
+# cargo-about configuration for the in-app Licenses window.
+#
+# `commands/generate_licenses.ps1` runs cargo-about with this config and
+# about.hbs, merges the result with assets/licenses/extra.json, and writes
+# assets/licenses/third_party.json — which the binary embeds with include_str!.
+#
+# Targets are listed explicitly so cfg-gated dependencies (the `windows` and
+# `clipboard-win` crates on Windows, `libc` on unix, the x11/wayland stack on
+# Linux) all show up in a single snapshot no matter which OS generated it.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+
+# Walk the graph exactly as the shipped binary is built: the crate's default
+# features (glow + both plugin backends + video). `--all-features` is wrong here
+# because it would drag in the kittest harness and the wgpu backend, neither of
+# which is in a release.
+workarounds = ["ring"]
+
+# Every licence NeoWaves is prepared to ship. A dependency introducing anything
+# outside this list makes `cargo about generate` fail, which is the point: an
+# accidental GPL dependency should stop the build, not reach a release.
+accepted = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "Zlib",
+    # egui bundles its default fonts (Hack, Ubuntu-Light, Noto Emoji) inside
+    # epaint_default_fonts, which is why two font licences show up in a
+    # dependency graph that otherwise has none.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    # webpki-roots ships the Mozilla CA root store as data; CDLA-Permissive-2.0
+    # is the data licence Mozilla releases it under. Permissive, no copyleft.
+    "CDLA-Permissive-2.0",
+    # LGPL-3.0 enters through mp3lame-encoder (MP3 export). It is accepted
+    # deliberately, not by accident — see the LAME entry in
+    # assets/licenses/extra.json for the obligations that come with it.
+    "LGPL-3.0",
+    "LGPL-3.0-only",
+    "LGPL-3.0-or-later",
+]
+
+# Ignore build-only dev/test crates that never reach a released binary.
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false

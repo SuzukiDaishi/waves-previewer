@@ -392,6 +392,8 @@ impl WavesPreviewer {
             show_export_settings: false,
             show_list_columns_window: false,
             show_shortcuts_window: false,
+            show_licenses_window: false,
+            licenses_filter: String::new(),
             show_keymap_window: false,
             show_undo_history_window: false,
             show_regions_window: false,

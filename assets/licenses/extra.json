@@ -1,0 +1,352 @@
+{
+  "_comment": [
+    "Hand-maintained companion to the cargo-about output.",
+    "Everything here is something cargo-about cannot see: C/C++ sources compiled",
+    "into the binary by a -sys crate, prebuilt DLLs the Windows installer copies,",
+    "fonts and data files under assets/, ML models fetched at runtime, and the",
+    "Steinberg VST 3 interface obligation.",
+    "commands/generate_licenses.ps1 merges this with the cargo-about output into",
+    "assets/licenses/third_party.json, resolving text_file against texts/.",
+    "flag: null | \"notice\" (must be shown / worth knowing) | \"caution\" (needs",
+    "action before commercial distribution). Anything flagged is surfaced in the",
+    "'Commercial distribution notes' section of the in-app Licenses window.",
+    "topic: entries sharing a topic collapse into one row in the window's summary section, so a single issue spread across a wrapper crate, its -sys crate and the C library it builds is stated once rather than three times."
+  ],
+  "licenses": [
+    {
+      "id": "FDK-AAC",
+      "name": "Software License for The Fraunhofer FDK AAC Codec Library",
+      "text_file": "FDK-AAC.txt"
+    },
+    {
+      "id": "LGPL-2.0",
+      "name": "GNU Library General Public License v2.0",
+      "text_file": "LGPL-2.0.txt"
+    },
+    {
+      "id": "LGPL-3.0",
+      "name": "GNU Lesser General Public License v3.0",
+      "text_file": "LGPL-3.0.txt"
+    },
+    {
+      "id": "GPL-3.0",
+      "name": "GNU General Public License v3.0 (referenced by LGPL-3.0)",
+      "text_file": "GPL-3.0.txt"
+    },
+    {
+      "id": "BSD-2-Clause-OpenH264",
+      "name": "BSD 2-Clause License (Cisco OpenH264)",
+      "text_file": "BSD-2-Clause-OpenH264.txt"
+    },
+    {
+      "id": "BSD-2-Clause-Oniguruma",
+      "name": "BSD 2-Clause License (Oniguruma)",
+      "text_file": "BSD-2-Clause-Oniguruma.txt"
+    },
+    {
+      "id": "MIT-onnxruntime",
+      "name": "MIT License (Microsoft ONNX Runtime)",
+      "text_file": "MIT-onnxruntime.txt"
+    },
+    {
+      "id": "Microsoft-DirectML",
+      "name": "Microsoft DirectML redistribution terms",
+      "text_file": "Microsoft-DirectML.txt"
+    },
+    {
+      "id": "Intel-Simplified-Software-License",
+      "name": "Intel Simplified Software License",
+      "text_file": "Intel-Simplified-Software-License.txt"
+    },
+    {
+      "id": "SQLite-PublicDomain",
+      "name": "SQLite public domain dedication",
+      "text_file": "SQLite-PublicDomain.txt"
+    },
+    {
+      "id": "OFL-1.1",
+      "name": "SIL Open Font License 1.1",
+      "text_file": "OFL-1.1.txt"
+    },
+    {
+      "id": "UCS-Terms",
+      "name": "Universal Category System terms of use",
+      "text_file": "UCS-Terms.txt"
+    },
+    {
+      "id": "Steinberg-VST3",
+      "name": "Steinberg VST 3 SDK / VST trademark",
+      "text_file": "Steinberg-VST3.txt"
+    }
+  ],
+  "components": [
+    {
+      "name": "Fraunhofer FDK AAC Codec Library",
+      "version": "bundled via fdk-aac-sys",
+      "kind": "bundled-native",
+      "license_ids": [
+        "FDK-AAC"
+      ],
+      "authors": "Fraunhofer-Gesellschaft zur Förderung der angewandten Forschung e.V.",
+      "repository": "https://github.com/mstorsjo/fdk-aac",
+      "flag": "caution",
+      "note": "Compiled from C sources and statically linked; used for M4A/AAC export. The FDK-AAC licence is BSD-shaped for copyright but section 3 states in capitals that NO PATENT LICENCE IS GRANTED. Commercial AAC encoding/decoding needs a separate patent licence from the Via LA AAC pool or the individual patent holders. The Fraunhofer attribution above must be reproduced in the product documentation.",
+      "topic": "aac"
+    },
+    {
+      "name": "LAME (libmp3lame)",
+      "version": "bundled via mp3lame-sys",
+      "kind": "bundled-native",
+      "license_ids": [
+        "LGPL-2.0",
+        "LGPL-3.0",
+        "GPL-3.0"
+      ],
+      "authors": "The LAME project",
+      "repository": "https://lame.sourceforge.io/",
+      "flag": "caution",
+      "note": "Used for MP3 export. libmp3lame is LGPL-2.0 and the mp3lame-encoder crate that wraps it is LGPL-3.0, so the linked binary is not simply MIT. LGPL-3.0 section 4 requires either dynamic linking or shipping relinkable object files, plus the LGPL and GPL texts and a visible notice that the work uses the library. MP3 patents expired in 2017, so this is a copyleft-compliance obligation, not a patent one.",
+      "topic": "mp3"
+    },
+    {
+      "name": "Cisco OpenH264",
+      "version": "bundled via openh264-sys2",
+      "kind": "bundled-native",
+      "license_ids": [
+        "BSD-2-Clause-OpenH264"
+      ],
+      "authors": "Cisco Systems, Inc.",
+      "repository": "https://github.com/cisco/openh264",
+      "flag": "caution",
+      "note": "Compiled from the bundled C++ sources for the editor's video frame preview (feature `video`, on by default). The code is BSD-2-Clause, but Cisco only pays AVC/H.264 patent royalties on behalf of users of Cisco's own precompiled binaries. A self-compiled OpenH264 puts the AVC patent obligation to Via LA on whoever distributes it. On Windows the Media Foundation backend covers the same formats without this dependency.",
+      "topic": "h264"
+    },
+    {
+      "name": "SQLite",
+      "version": "bundled via rusqlite",
+      "kind": "bundled-native",
+      "license_ids": [
+        "SQLite-PublicDomain"
+      ],
+      "authors": "D. Richard Hipp and the SQLite authors",
+      "repository": "https://www.sqlite.org/",
+      "flag": null,
+      "note": "Amalgamation compiled in through the rusqlite `bundled` feature. Public domain; no obligations."
+    },
+    {
+      "name": "Signalsmith Stretch (C++)",
+      "version": "bundled via vendor/signalsmith-stretch",
+      "kind": "bundled-native",
+      "license_ids": [
+        "MIT"
+      ],
+      "authors": "Geraint Luff / Signalsmith Audio Ltd.",
+      "repository": "https://github.com/Signalsmith-Audio/signalsmith-stretch",
+      "flag": null,
+      "note": "The pitch-shift / time-stretch engine, compiled from the git submodule under vendor/. The Rust wrapper crate (Colin Marc) is MIT as well and is listed separately with the crates."
+    },
+    {
+      "name": "ONNX Runtime",
+      "version": "shipped as onnxruntime*.dll",
+      "kind": "runtime-dll",
+      "license_ids": [
+        "MIT-onnxruntime"
+      ],
+      "authors": "Microsoft Corporation",
+      "repository": "https://github.com/microsoft/onnxruntime",
+      "flag": null,
+      "note": "Prebuilt binaries fetched by the `ort` crate's download-binaries feature and copied next to the executable by installer/NeoWaves.iss. MIT; only the notice below is required."
+    },
+    {
+      "name": "DirectML execution provider",
+      "version": "shipped as onnxruntime_providers_*.dll / DirectML.dll",
+      "kind": "runtime-dll",
+      "license_ids": [
+        "Microsoft-DirectML"
+      ],
+      "authors": "Microsoft Corporation",
+      "repository": "https://www.nuget.org/packages/Microsoft.AI.DirectML/",
+      "flag": "notice",
+      "note": "Redistributed by the Windows installer for GPU inference. Governed by the Microsoft.AI.DirectML licence terms rather than ONNX Runtime's MIT. Redistribution as part of an application is permitted; reverse engineering and standalone distribution are not."
+    },
+    {
+      "name": "oneDNN (DNNL)",
+      "version": "shipped as dnnl*.dll",
+      "kind": "runtime-dll",
+      "license_ids": [
+        "Apache-2.0"
+      ],
+      "authors": "Intel Corporation and oneDNN contributors",
+      "repository": "https://github.com/oneapi-src/oneDNN",
+      "flag": null,
+      "note": "Optional ONNX Runtime CPU acceleration library copied by the installer. Apache-2.0: the licence text and the upstream NOTICE file must travel with the binary."
+    },
+    {
+      "name": "Intel MKL-ML",
+      "version": "shipped as mklml*.dll",
+      "kind": "runtime-dll",
+      "license_ids": [
+        "Intel-Simplified-Software-License"
+      ],
+      "authors": "Intel Corporation",
+      "repository": "https://www.intel.com/",
+      "flag": "notice",
+      "note": "Proprietary Intel binary that some ONNX Runtime builds pull in; the installer copies it if present. Binary redistribution is allowed but the Intel copyright notice and terms must be reproduced, and reverse engineering is prohibited. If the ONNX Runtime build in use does not actually produce this DLL, drop the installer line and this entry."
+    },
+    {
+      "name": "Oniguruma",
+      "version": "shipped as onig*.dll",
+      "kind": "runtime-dll",
+      "license_ids": [
+        "BSD-2-Clause-Oniguruma"
+      ],
+      "authors": "K. Kosako and contributors",
+      "repository": "https://github.com/kkos/oniguruma",
+      "flag": null,
+      "note": "Regex engine behind the tokenizers crate's `onig` feature, used by the transcription model's tokenizer."
+    },
+    {
+      "name": "Noto Sans JP",
+      "version": "Regular",
+      "kind": "font",
+      "license_ids": [
+        "OFL-1.1"
+      ],
+      "authors": "The Noto Project Authors",
+      "repository": "https://github.com/notofonts",
+      "flag": null,
+      "note": "Embedded as assets/fonts/NotoSansJP-Regular.otf for Japanese UI text. SIL OFL 1.1: the font may ship with the application, but the licence must travel with it and the font itself may not be sold on its own."
+    },
+    {
+      "name": "Universal Category System 8.2.1 category data",
+      "version": "8.2.1",
+      "kind": "data",
+      "license_ids": [
+        "UCS-Terms"
+      ],
+      "authors": "The UCS community",
+      "repository": "https://universalcategorysystem.com/",
+      "flag": null,
+      "note": "Embedded as src/metadata/data/ucs_8_2_1.tsv for offline CatID lookup. Published as a public-domain initiative, free for commercial use."
+    },
+    {
+      "name": "Zoo default assets (default.gif / default.wav)",
+      "version": "-",
+      "kind": "data",
+      "license_ids": [],
+      "authors": "unconfirmed",
+      "repository": "",
+      "flag": "notice",
+      "note": "PROVENANCE UNCONFIRMED. assets/zoo/default.gif and assets/zoo/default.wav are embedded in the binary (src/app/zoo_assets.rs) but no origin or licence is recorded for them. Confirm who made them and under what terms, then fill this entry in — or replace the files with something of known origin before distributing commercially."
+    },
+    {
+      "name": "Steinberg VST 3 interface",
+      "version": "-",
+      "kind": "spec",
+      "license_ids": [
+        "Steinberg-VST3"
+      ],
+      "authors": "Steinberg Media Technologies GmbH",
+      "repository": "https://www.steinberg.net/developers/",
+      "flag": "caution",
+      "note": "NeoWaves is a VST 3 host (feature `plugin_native_vst3`). No Steinberg SDK source is redistributed — the vst3 crate provides MIT/Apache-2.0 bindings — but the VST 3 interface is Steinberg's and \"VST\" is their registered trademark. Shipping a VST 3 host commercially normally means accepting Steinberg's VST 3 Licence Agreement (free of charge, but it must be signed) or licensing under GPLv3.",
+      "topic": "vst3"
+    },
+    {
+      "name": "onnx-community/whisper-large-v3-turbo",
+      "version": "main",
+      "kind": "model",
+      "license_ids": [
+        "MIT"
+      ],
+      "authors": "OpenAI (upstream weights), onnx-community (ONNX conversion)",
+      "repository": "https://huggingface.co/onnx-community/whisper-large-v3-turbo",
+      "flag": "notice",
+      "note": "Downloaded at runtime for transcription; not redistributed with NeoWaves. The upstream openai/whisper-large-v3-turbo weights are MIT, but the ONNX conversion repository carries no licence tag of its own. Worth pinning to a specific revision and asking the maintainer to tag the licence."
+    },
+    {
+      "name": "deepghs/silero-vad-onnx",
+      "version": "main",
+      "kind": "model",
+      "license_ids": [
+        "MIT"
+      ],
+      "authors": "Silero Team",
+      "repository": "https://huggingface.co/deepghs/silero-vad-onnx",
+      "flag": null,
+      "note": "Voice activity detection for transcription segmentation. Downloaded at runtime; not redistributed."
+    },
+    {
+      "name": "zukky/allinone-DLL-ONNX",
+      "version": "main",
+      "kind": "model",
+      "license_ids": [
+        "MIT"
+      ],
+      "authors": "Taejun Kim (All-In-One Music Structure Analyzer), Meta AI (Demucs v4)",
+      "repository": "https://huggingface.co/zukky/allinone-DLL-ONNX",
+      "flag": null,
+      "note": "Beat/downbeat/section models (harmonix-*) from mir-aidj/all-in-one and stem separation (htdemucs) from facebookresearch/demucs, both MIT upstream. Downloaded at runtime; not redistributed. See THIRD_PARTY_NOTICES.md in that repository."
+    }
+  ],
+  "crate_overrides": {
+    "epaint_default_fonts": {
+      "flag": "notice",
+      "note": "Carries egui's bundled default fonts (Hack, Ubuntu-Light, Noto Emoji), which is why OFL-1.1 and Ubuntu-font-1.0 appear in an otherwise font-free dependency graph. Both permit redistribution inside an application; their texts must ship with it."
+    },
+    "fdk-aac": {
+      "flag": "caution",
+      "note": "The Rust crate is MIT, but fdk-aac-sys compiles Fraunhofer's FDK AAC C sources into the binary — see the Fraunhofer entry under Bundled native code for the patent position.",
+      "topic": "aac"
+    },
+    "fdk-aac-sys": {
+      "flag": "caution",
+      "note": "Builds and statically links the Fraunhofer FDK AAC codec. See the Fraunhofer entry under Bundled native code.",
+      "topic": "aac"
+    },
+    "mp3lame-encoder": {
+      "flag": "caution",
+      "note": "LGPL-3.0. The Rust wrapper inherits LAME's copyleft, so the statically linked binary cannot simply be described as MIT — see the LAME entry under Bundled native code for the obligations.",
+      "topic": "mp3"
+    },
+    "mp3lame-sys": {
+      "flag": "caution",
+      "note": "Builds and statically links libmp3lame. See the LAME entry under Bundled native code for the LGPL obligations this places on the distributed binary.",
+      "topic": "mp3"
+    },
+    "openh264": {
+      "flag": "caution",
+      "note": "The Rust crate is BSD-2-Clause, but openh264-sys2 compiles Cisco's OpenH264 C++ sources rather than using Cisco's precompiled binary — which is what moves the AVC/H.264 patent obligation onto the distributor. See the Cisco OpenH264 entry under Bundled native code.",
+      "topic": "h264"
+    },
+    "openh264-sys2": {
+      "flag": "caution",
+      "note": "Compiles Cisco's OpenH264 from bundled C++ sources. See the Cisco OpenH264 entry under Bundled native code.",
+      "topic": "h264"
+    },
+    "option-ext": {
+      "flag": "notice",
+      "note": "MPL-2.0, file-level copyleft, pulled in transitively by the directory-lookup crates. Same shape as Symphonia: unmodified use imposes only the notice requirement."
+    },
+    "symphonia*": {
+      "flag": "notice",
+      "note": "MPL-2.0, file-level copyleft. Fine to ship in a commercial product — it does not reach the rest of the binary — but any modified Symphonia source file must be published, and the MPL notice must accompany the distribution. Every symphonia-* subcrate carries the same terms.",
+      "topic": "mpl"
+    },
+    "vst3": {
+      "flag": "caution",
+      "note": "MIT/Apache-2.0 bindings, but the VST 3 interface they describe is Steinberg's and \"VST\" is their trademark. See the Steinberg VST 3 entry.",
+      "topic": "vst3"
+    },
+    "webpki-root-certs": {
+      "flag": "notice",
+      "note": "Embeds the Mozilla CA root store as data under CDLA-Permissive-2.0. Permissive and commercially usable; the attribution must be preserved.",
+      "topic": "ca-roots"
+    },
+    "webpki-roots": {
+      "flag": "notice",
+      "note": "Embeds the Mozilla CA root store as data under CDLA-Permissive-2.0. Permissive and commercially usable; the attribution must be preserved.",
+      "topic": "ca-roots"
+    }
+  }
+}

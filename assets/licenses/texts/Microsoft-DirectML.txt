@@ -1,0 +1,19 @@
+Microsoft DirectML / ONNX Runtime DirectML Execution Provider
+
+Copyright (c) Microsoft Corporation.
+
+`DirectML.dll` and the ONNX Runtime DirectML execution provider
+(`onnxruntime_providers_*.dll`) are Microsoft redistributables. The ONNX
+Runtime code itself is MIT licensed, but the DirectML binary component is
+governed by the Microsoft Software License Terms that accompany the
+Microsoft.AI.DirectML NuGet package, which grant a right to redistribute the
+binary as part of an application while prohibiting reverse engineering and
+separate distribution.
+
+NeoWaves does not modify these binaries; the Windows installer copies them
+next to the executable so the ONNX Runtime DirectML backend can be used for
+GPU inference (`installer/NeoWaves.iss`).
+
+Confirm the exact terms shipped with the Microsoft.AI.DirectML package version
+that your ONNX Runtime build links against:
+https://www.nuget.org/packages/Microsoft.AI.DirectML/License
