@@ -1,6 +1,6 @@
 # フォーマット別対応マトリクス (FORMAT_SUPPORT)
 
-最終更新: 2026-08-24 (AAC 無効化・LAME 動的リンク化)
+最終更新: 2026-08-25 (AAC を OS デコーダー経由で再生・LAME 動的リンク化)
 
 NeoWaves が扱う音声フォーマットごとの、デコード / エンコード / メタ情報
 (loop marker・marker・BPM・artwork 等) の対応状況と、
@@ -35,9 +35,13 @@ NeoWaves が扱う音声フォーマットごとの、デコード / エンコ�
 書き出せるかどうかの唯一の判定は `wave::export_format_is_available()`。
 UI の「Convert Format」はこれを見て、含まれていないフォーマットを
 無効化して理由をツールチップに出す（書き出しの最後で失敗させない）。
-AAC は feature ではなく全ビルドで読み書き非対応。FDK と Symphonia AAC codec は
-依存グラフに含めない。AAC 音声付き動画は壊れたファイル扱いにせず、
+AAC コーデックは feature でも入らない。FDK と Symphonia AAC codec は
+依存グラフに含めず、**デコードは OS のデコーダーを借りる**（Windows =
+Media Foundation、`src/audio_mf.rs`）。借りられる環境では mp4 / m4a の AAC 音声を
+通常の音声と同じように再生・計測でき、借りられない環境では従来どおり
 `AAC UNSUPPORTED` と表示して無音タイムラインで映像を再生・シークする。
+判定は `audio_io::aac_decode_available()` の 1 箇所。AAC の書き出しは
+借りられるエンコーダーが無いため全環境で非対応。
 
 ## 1. オーディオ本体
 
@@ -47,16 +51,17 @@ AAC は feature ではなく全ビルドで読み書き非対応。FDK と Symph
 | AIFF / AIF | symphonia (`aiff`) | 自前 writer: 16/24-bit PCM (AIFF), 32-bit float (AIFC `fl32`) | |
 | FLAC | symphonia (`flac`) | flacenc: 16-bit / 24-bit 整数 | FLAC は float 非対応のため 32f 指定・未指定は 24-bit に量子化。9ch 以上は非対応 (仕様上限 8ch) |
 | MP3 | symphonia (`mp3`) | 動的 `libmp3lame` 3.100 CBR (96–320 kbps, 設定値) | ステレオまで (3ch 以上は先頭 2ch) |
-| M4A (AAC) | **非対応** | **非対応** | FDK / Symphonia AAC codec とも不使用 |
+| M4A (AAC) | OS デコーダー (Windows: Media Foundation) | **非対応** | 自前のコーデックは同梱しない。OS デコーダーが無い環境では `AAC UNSUPPORTED` |
 | M4A (ALAC) | symphonia (`isomp4`/`alac`) | 非対応 | 読み込み専用 |
 | OGG (Vorbis) | symphonia (`ogg`/`vorbis`) | vorbis_rs quality-VBR | ステレオまで |
-| MP4 / MOV / M4V / 3GP / 3G2 (音声) | AAC 以外を symphonia でデコード | **非対応 (読み込み専用)** | AAC は `AAC UNSUPPORTED`＋無音タイムライン。ALAC / QuickTime PCM は対応 codec があれば再生 |
+| MP4 / MOV / M4V / 3GP / 3G2 (音声) | AAC は OS デコーダー / それ以外は symphonia | **非対応 (読み込み専用)** | ALAC / QuickTime PCM は symphonia。OS デコーダーの無い環境の AAC のみ `AAC UNSUPPORTED`＋無音タイムライン |
 | MP4 / MOV / M4V / 3GP / 3G2 (映像) | Windows: Media Foundation / 全 OS: openh264 (H.264 のみ) | 非対応 | エディタの Mini Meter にプレビュー表示するためだけにデコードする |
 
 ### 動画コンテナの扱い
 
-- 対応する音声トラックは音声ファイルと同じ経路で読む。AAC トラックはデコードせず、
-  映像プレビュー用の無音タイムラインへ切り替える。
+- 対応する音声トラックは音声ファイルと同じ経路で読む。AAC トラックも OS の
+  デコーダーがある環境では同じ経路で鳴り、無い環境でだけ映像プレビュー用の
+  無音タイムラインへ切り替える。
 - 映像は**プレビュー専用**。エディタの Mini Meter に再生位置のフレームを出し、
   リストのサムネイルに使う以外の用途では一切デコードしない。
 - **書き出しと破壊的編集は不可** (映像エンコーダを持たないため)。

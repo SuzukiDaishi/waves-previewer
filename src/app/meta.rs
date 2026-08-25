@@ -322,10 +322,18 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
     if let Some(meta) = no_audio_video_meta(path, false) {
         return Ok(meta);
     }
-    let aac_unsupported = audio_io::is_isobmff_path(path)
+    // An AAC track is only readable where the OS lends its decoder. Where it is
+    // not, nothing is asked to decode the file: the row says `AAC UNSUPPORTED`
+    // rather than reporting a damaged file. Where it is, a decode that still
+    // fails (an N edition without the Media Feature Pack, a truncated track)
+    // lands in the same place, because the reason the user needs is the same.
+    let track_is_aac = audio_io::is_isobmff_path(path)
         && audio_io::probe_isobmff_aac_audio_track(path).unwrap_or(false);
+    let aac_decodable = !track_is_aac || audio_io::aac_decode_available();
     match audio_io::read_audio_info(path) {
         Ok(info) => {
+            let peak_db = aac_decodable.then(|| quick_peak_db(path)).flatten();
+            let aac_unsupported = track_is_aac && peak_db.is_none();
             let (marker_fracs, loop_frac) = read_wave_annotation_fracs(
                 path,
                 info.sample_rate,
@@ -343,7 +351,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
                 duration_secs: info.duration_secs,
                 total_frames: info.total_frames,
                 rms_db: None,
-                peak_db: (!aac_unsupported).then(|| quick_peak_db(path)).flatten(),
+                peak_db,
                 peak_db_estimate: true,
                 lufs_i: None,
                 lufs_m_max: None,
@@ -391,7 +399,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             thumb: Vec::new(),
             marker_fracs: Vec::new(),
             loop_frac: None,
-            decode_error: Some(if aac_unsupported {
+            decode_error: Some(if track_is_aac {
                 "AAC UNSUPPORTED".to_string()
             } else {
                 "Decode failed".to_string()
@@ -405,8 +413,7 @@ fn no_audio_video_meta(path: &PathBuf, allow_video_poster: bool) -> Option<FileM
         return None;
     }
     let has_audio_track = audio_io::probe_isobmff_audio_track(path).ok()?;
-    let audio_track_unsupported =
-        has_audio_track && audio_io::probe_isobmff_aac_audio_track(path).unwrap_or(false);
+    let audio_track_unsupported = has_audio_track && audio_io::isobmff_aac_audio_unsupported(path);
     if has_audio_track && !audio_track_unsupported {
         return None;
     }
@@ -889,22 +896,32 @@ mod tests {
         assert!(full.thumb.is_empty(), "no waveform should be invented");
     }
 
+    /// Either the OS lends an AAC decoder and the track behaves like any other
+    /// audio, or it does not and the row says so — never a file error.
     #[test]
-    fn persistent_aac_video_fixture_is_unsupported_not_a_file_error() {
+    fn persistent_aac_video_fixture_follows_this_platforms_aac_support() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("test_samples")
             .join("video")
             .join("video_sync_6s_30fps.mp4");
+        let decodable = crate::audio_io::aac_decode_available();
         let header = header_meta(&path).expect("valid AAC video header");
         assert!(!header.audio_track_absent);
-        assert!(header.audio_track_unsupported);
+        assert_eq!(header.audio_track_unsupported, !decodable);
         assert!(header.decode_error.is_none());
         assert!((header.duration_secs.unwrap_or_default() - 6.0).abs() < 0.05);
 
         let full = decode_full_meta(&path, -60.0, false).expect("terminal AAC metadata");
-        assert!(full.audio_track_unsupported);
+        assert_eq!(full.audio_track_unsupported, !decodable);
         assert!(full.decode_error.is_none());
-        assert!(full.thumb.is_empty(), "no waveform should be invented");
+        if decodable {
+            assert!(
+                !full.thumb.is_empty(),
+                "decoded audio should draw a waveform"
+            );
+        } else {
+            assert!(full.thumb.is_empty(), "no waveform should be invented");
+        }
     }
 
     #[test]

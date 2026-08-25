@@ -10,8 +10,10 @@ THE SHORT VERSION
   * NeoWaves's own code is MIT. See LICENSE.
   * MP3 export uses LAME 3.100 as a separate, user-replaceable shared library.
     LAME is covered by the LGPL; it is not incorporated into neowaves.exe.
-  * AAC encoding and decoding are intentionally absent. No Fraunhofer FDK AAC
-    code and no Symphonia AAC decoder are in the dependency graph.
+  * No AAC codec is shipped. No Fraunhofer FDK AAC code and no Symphonia AAC
+    decoder are in the dependency graph. AAC audio is decoded only by the
+    decoder the operating system already provides, and AAC encoding is not
+    supported at all.
   * MPL-2.0 dependencies such as Symphonia and option-ext are commercially
     usable file-level copyleft. If their source files are modified, those
     modified files must remain available under MPL-2.0.
@@ -84,6 +86,24 @@ release uses Media Foundation for video pictures instead. Anyone enabling
 `video` and redistributing that build must review Cisco's binary/patent terms
 for their own distribution.
 
+CODECS BORROWED FROM THE OPERATING SYSTEM
+-----------------------------------------
+
+Two formats are decoded by code that is part of Windows rather than part of
+this product: AAC audio, and video pictures (H.264, HEVC and whatever else the
+machine has). Both are reached through the documented Media Foundation API.
+Nothing is redistributed, statically linked or bundled for either one, and the
+installer copies no codec for them.
+
+Where an operating system offers no such decoder, the format is reported as
+unsupported instead of falling back to a bundled codec: an AAC video still
+shows its picture on a silent timeline. That is the deliberate shape of the
+arrangement, and it is why removing a decoder is a supported outcome rather
+than a defect.
+
+As stated above, a software licence does not itself grant patent rights. This
+records only that no codec for these formats is distributed with NeoWaves.
+
 BUILD WITHOUT MP3 EXPORT
 ------------------------
 
@@ -91,7 +111,8 @@ BUILD WITHOUT MP3 EXPORT
         --features glow,plugin_native_vst3,plugin_native_clap
 
 This removes LAME and MP3 export. MP3 decoding remains available through
-Symphonia. AAC remains unsupported in every build. This is an LGPL-free build,
+Symphonia. No build carries an AAC codec; AAC audio decodes only through the
+operating system's own decoder, as described above. This is an LGPL-free build,
 not a claim that every dependency is permissive: MPL-2.0 components remain.
 
 RELEASE CHECKLIST

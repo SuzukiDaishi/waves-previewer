@@ -86,9 +86,11 @@ plugin_native_clap = ["clack-host", "clack-extensions"]
 # and the first-frame thumbnail go away (on Windows, Media Foundation still
 # supplies both). Off by default -- see the note on `default` above.
 video = ["openh264"]
-# AAC is deliberately unsupported for now. Symphonia's AAC decoder and the
-# Fraunhofer FDK encoder are both absent from the dependency graph; ISO-BMFF
-# remains enabled for ALAC metadata and for video-container inspection.
+# No AAC codec is in the graph, and none is a feature away: Symphonia's AAC
+# decoder and the Fraunhofer FDK encoder are both absent. AAC decoding is
+# borrowed from the operating system instead (Media Foundation on Windows, via
+# src/audio_mf.rs), which ships no codec here and needs no feature. ISO-BMFF
+# stays enabled for ALAC, QuickTime PCM and video-container inspection.
 #
 # MP3 export via LAME. The root build script builds libmp3lame as a replaceable
 # shared library, and src/lame.rs provides NeoWaves's own MIT FFI instead of an

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
-// Retained only as reference for a future, explicitly licensed AAC backend.
-// `cfg(any())` keeps it out of every build while AAC is unsupported.
+// Retained only as reference for a future, explicitly licensed AAC encoder.
+// `cfg(any())` keeps it out of every build: AAC *decoding* is borrowed from the
+// OS where it exists, but encoding would mean shipping one.
 #[cfg(any())]
 use bytes::Bytes;
 #[cfg(any())]
@@ -3133,7 +3134,9 @@ fn encode_mp3(chans: &[Vec<f32>], in_sr: u32) -> Result<Vec<u8>> {
     }
 }
 
-/// AAC is intentionally unavailable for both decode and encode in this build.
+/// AAC encoding stays unavailable: there is no encoder to borrow the way
+/// [`crate::audio_io::aac_decode_available`] borrows the OS decoder, and a
+/// video source has no video encoder to be written back out with either.
 fn encode_aac_to_mp4(_dst: &Path, _chans: &[Vec<f32>], _in_sr: u32) -> Result<()> {
     anyhow::bail!("AAC encoding is not supported; export WAV/FLAC/MP3/OGG instead")
 }

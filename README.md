@@ -3,10 +3,13 @@
 NeoWaves は大量の音声ファイルを素早く一覧表示し、即試聴・編集できる軽量オーディオリストエディタです。UI は `eframe/egui`、オーディオ出力は `cpal` を使用しています。
 
 対応フォーマット（デコード）:
-- WAV / AIFF / FLAC / MP3 / M4A (ALAC) / OGG (Vorbis)。AAC は一旦非対応
-- 動画コンテナ MP4 / MOV / M4V / 3GP / 3G2 — **対応音声トラックを再生**。
-  AAC 音声は `AAC UNSUPPORTED` と表示し、映像は無音タイムラインで動作する。
+- WAV / AIFF / FLAC / MP3 / M4A (ALAC / AAC) / OGG (Vorbis)
+- 動画コンテナ MP4 / MOV / M4V / 3GP / 3G2 — **音声トラックを再生**。
   エディタでは Mini Meter に再生位置の映像フレームを表示する（読み込み専用）
+- AAC は**自前のコーデックを同梱せず、OS のデコーダーを借りて**再生する。
+  Windows では Media Foundation が担当し、mp4 / m4a の AAC 音声がそのまま鳴る。
+  OS デコーダーが無い環境では従来どおり `AAC UNSUPPORTED` と表示し、
+  映像は無音タイムラインで再生・シークできる。AAC の書き出しは全環境で非対応
 
 対応フォーマット（エンコード / 書き出し）:
 - WAV / AIFF / FLAC / MP3 / OGG (Vorbis)
@@ -232,7 +235,7 @@ NeoWaves 本体のソースは MIT です。MP3 書き出しに使う LAME 3.100
 
 | ビルド | 構成 | ライセンス上の位置づけ |
 | --- | --- | --- |
-| 既定 (`cargo build --release`) | MP3 書き出し・VST3・CLAP あり、AAC/OpenH264 なし | MIT アプリ＋動的 LGPL LAME。MPL-2.0 依存あり |
+| 既定 (`cargo build --release`) | MP3 書き出し・VST3・CLAP あり、AAC コーデック/OpenH264 の同梱なし | MIT アプリ＋動的 LGPL LAME。MPL-2.0 依存あり |
 | LAME なし | `--no-default-features --features glow,plugin_native_vst3,plugin_native_clap` | MP3 書き出しなし。MPL-2.0 依存は残る |
 | 映像プレビュー込み | `--features video` | 上記＋自前ビルド OpenH264（下記注意） |
 
@@ -245,7 +248,7 @@ NeoWaves 本体のソースは MIT です。MP3 書き出しに使う LAME 3.100
 | --- | --- |
 | **Steinberg VST 3** | VST 3.8 (2025-10-29) で SDK が MIT に再ライセンスされ、旧来の GPLv3/proprietary 二択が消滅。`vst3` crate も Steinberg のソースを同梱していない。残るのは商標表記のみ（VST is a registered trademark of Steinberg Media Technologies GmbH） |
 | **Cisco OpenH264** | `video` を既定 feature から除外。Cisco の特許料肩代わりは Cisco 配布バイナリ限定で、ソースからビルドすると義務が配布者に移るため。リリースする Windows インストーラでは Media Foundation が映像を担うので機能的損失はない。`--features video` でビルドしたバイナリを再配布する場合は AVC の義務が自分に来る点に注意 |
-| **AAC** | FDK AAC 依存と Symphonia AAC decoder を削除し、読み書きとも一旦非対応。AAC 音声付き動画は `AAC UNSUPPORTED` と表示し、映像は無音タイムラインで再生・シーク可能 |
+| **AAC** | FDK AAC 依存と Symphonia AAC decoder は依存グラフに入れない（feature でも入らない）。デコードは**同梱せず OS のデコーダーを借りる**方式にした。Windows では Media Foundation が AAC 音声を再生し、コーデックは OS の一部なので再配布物には含まれない（映像の H.264 / HEVC と同じ扱い）。OS デコーダーが無い環境では `AAC UNSUPPORTED` と表示し、映像は無音タイムラインで再生・シーク可能。AAC の書き出しは借りられるエンコーダーが無いため引き続き非対応 |
 | **LAME (MP3 書き出し)** | `mp3_lame` feature は既定 ON。LAME を `libmp3lame.dll` として同梱し、EXE は import table 経由で動的リンク。LAME 3.100 同梱原文の LGPL-2.0 §6(b) に沿う共有ライブラリ構成。正確な 3.100 ソースは `vendor/lame-3.100` に固定 |
 
 #### LGPL と商用販売について
