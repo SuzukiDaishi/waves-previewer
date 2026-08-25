@@ -5,11 +5,6 @@ use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-// Kept as dormant reference for a future explicitly licensed AAC backend.
-#[cfg(any())]
-use fdk_aac::dec::{
-    Decoder as AacDecoder, DecoderError as AacDecoderError, Transport as AacTransport,
-};
 use id3::TagLike;
 use mp4::{ChannelConfig, Mp4Reader, TrackType};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
@@ -167,18 +162,15 @@ pub(crate) fn is_isobmff_path(path: &Path) -> bool {
 }
 
 /// Whether the first audio track of an ISO-BMFF file is AAC in an `mp4a` sample
-/// entry, which is the only shape the fdk-aac fast path can decode.
+/// entry, which is the shape the OS decoder is asked for.
 ///
 /// A `.m4a` holding ALAC, or a QuickTime `.mov` holding PCM (`sowt` / `twos` /
 /// `in24` / `lpcm`), parses as ISO-BMFF but has to go through symphonia instead.
 /// The streaming and progressive decoders emit chunks as they go, so they cannot
 /// discover the mismatch halfway and start over — they ask this first.
 ///
-/// Whether an ISO-BMFF container has an AAC (`mp4a`) audio track.
-///
-/// This remains available even though decoding is disabled: video metadata
-/// uses it to present AAC as an unsupported audio track and keep the picture
-/// playable on a silent timeline instead of reporting a damaged file.
+/// Answering `true` says nothing about whether this build can decode it; pair
+/// it with [`aac_decode_available`], or ask [`isobmff_aac_audio_unsupported`].
 pub fn probe_isobmff_aac_audio_track(path: &Path) -> Result<bool> {
     let Ok(file) = File::open(path) else {
         anyhow::bail!("open mp4: {}", path.display());
@@ -194,10 +186,44 @@ pub fn probe_isobmff_aac_audio_track(path: &Path) -> Result<bool> {
     }))
 }
 
-/// There is no AAC path. ISO-BMFF files still go through Symphonia so ALAC and
-/// supported PCM remain usable; AAC tracks produce an explicit codec error.
-fn isobmff_audio_is_aac(_path: &Path) -> bool {
-    false
+/// Whether this build can decode AAC at all.
+///
+/// NeoWaves ships no AAC decoder of its own — that is a patent obligation on
+/// whoever distributes the binary — so the answer is "only where the operating
+/// system has one and lends it out". Today that is Windows, through Media
+/// Foundation (see [`crate::audio_mf`]); everywhere else AAC audio stays
+/// unsupported and a video carrying it plays on a silent timeline.
+pub fn aac_decode_available() -> bool {
+    #[cfg(windows)]
+    {
+        crate::audio_mf::aac_decoder_available()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Whether `path`'s audio is AAC that this build has no decoder for.
+///
+/// The single question the list and the editor ask before labelling a file
+/// `AAC UNSUPPORTED` and switching a video to a silent timeline.
+pub fn isobmff_aac_audio_unsupported(path: &Path) -> bool {
+    !aac_decode_available()
+        && is_isobmff_path(path)
+        && probe_isobmff_aac_audio_track(path).unwrap_or(false)
+}
+
+/// Whether this file's audio should be decoded by the OS AAC decoder rather
+/// than by symphonia. ALAC and the PCM flavours in a `.mov` answer `false` and
+/// keep their existing path.
+///
+/// Both cheap checks come first: on a platform with no AAC decoder, and on a
+/// path that is not an ISO-BMFF container at all, nothing is opened or parsed.
+fn isobmff_audio_is_aac(path: &Path) -> bool {
+    aac_decode_available()
+        && is_isobmff_path(path)
+        && probe_isobmff_aac_audio_track(path).unwrap_or(false)
 }
 
 /// The first track symphonia can actually decode as audio.
@@ -950,159 +976,30 @@ pub fn build_wav_proxy_preview(
     }))
 }
 
-#[cfg(any())]
-fn audio_specific_config_bytes(profile: u8, freq_index: u8, chan_conf: u8) -> [u8; 2] {
-    let byte_a = (profile << 3) | (freq_index >> 1);
-    let byte_b = (freq_index << 7) | (chan_conf << 3);
-    [byte_a, byte_b]
-}
-
-/// Stand-in for the removed FDK fast path.
+/// Decode an ISO-BMFF file's AAC audio track through the OS decoder.
 ///
-/// Every caller already treats an `Err` here as "not AAC, let symphonia have
-/// it" — that is how ALAC and the PCM flavours in a `.mov` are handled — so
-/// failing is exactly the right answer and no call site needs to change.
-fn decode_m4a_fdk(_path: &Path, _max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, u32, bool)> {
-    anyhow::bail!("AAC decoding is not supported; trying another ISO-BMFF codec")
+/// Every caller treats an `Err` here as "not AAC, let symphonia have it" —
+/// that is how ALAC and the PCM flavours in a `.mov` are handled — so bailing
+/// for anything but a decodable AAC track is the right answer.
+fn decode_isobmff_aac(path: &Path, max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, u32, bool)> {
+    if !isobmff_audio_is_aac(path) {
+        anyhow::bail!(
+            "isobmff: not an AAC track this build decodes: {}",
+            path.display()
+        );
+    }
+    #[cfg(windows)]
+    {
+        crate::audio_mf::decode(path, max_secs)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = max_secs;
+        anyhow::bail!("AAC decoding is not supported on this platform")
+    }
 }
 
-#[cfg(any())]
-fn decode_m4a_fdk(path: &Path, max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, u32, bool)> {
-    let file = File::open(path).with_context(|| format!("open m4a: {}", path.display()))?;
-    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut reader =
-        Mp4Reader::read_header(file, size).map_err(|e| anyhow::anyhow!("mp4 header: {e:?}"))?;
-    let mut picked = None;
-    for (&track_id, track) in reader.tracks() {
-        if let Ok(TrackType::Audio) = track.track_type() {
-            picked = Some((track_id, track));
-            break;
-        }
-    }
-    let (track_id, track) = picked.context("m4a: no audio track")?;
-    // The fast path builds an AAC AudioSpecificConfig out of the `mp4a` sample
-    // entry. ALAC, and the PCM flavours a QuickTime .mov carries (`sowt`,
-    // `twos`, `in24`, `lpcm`), have no `mp4a` entry — decoding them here would
-    // read AAC parameters that are not there. Bail so the caller falls through
-    // to symphonia, which handles both.
-    if track.trak.mdia.minf.stbl.stsd.mp4a.is_none() {
-        anyhow::bail!("isobmff: audio track is not AAC: {}", path.display());
-    }
-    let sample_rate = track
-        .sample_freq_index()
-        .map(|idx| idx.freq())
-        .unwrap_or_else(|_| track.timescale())
-        .max(1);
-    let channel_cfg = track.channel_config().unwrap_or(ChannelConfig::Stereo);
-    let channels = channel_config_count(channel_cfg).max(1) as usize;
-    let profile = track
-        .trak
-        .mdia
-        .minf
-        .stbl
-        .stsd
-        .mp4a
-        .as_ref()
-        .and_then(|m| m.esds.as_ref())
-        .map(|esds| esds.es_desc.dec_config.dec_specific.profile)
-        .unwrap_or(2);
-    let freq_index = track
-        .sample_freq_index()
-        .map(|idx| idx as u8)
-        .unwrap_or(mp4::SampleFreqIndex::Freq44100 as u8);
-    let chan_conf = channel_cfg as u8;
-    let asc = audio_specific_config_bytes(profile, freq_index, chan_conf);
-    let mut decoder = AacDecoder::new(AacTransport::Raw);
-    decoder
-        .config_raw(&asc)
-        .map_err(|e| anyhow::anyhow!("m4a decoder config: {e}"))?;
-    let sample_count = reader.sample_count(track_id)?;
-    let mut chans: Vec<Vec<f32>> = vec![Vec::new(); channels];
-    let max_frames = max_secs
-        .and_then(|s| {
-            if s <= 0.0 {
-                None
-            } else {
-                Some(((sample_rate as f32) * s).ceil() as usize)
-            }
-        })
-        .filter(|v| *v > 0);
-    let mut reached_eof = true;
-    for sample_id in 1..=sample_count {
-        let Some(sample) = reader.read_sample(track_id, sample_id)? else {
-            continue;
-        };
-        let mut offset = 0usize;
-        while offset < sample.bytes.len() {
-            let used = decoder
-                .fill(&sample.bytes[offset..])
-                .map_err(|e| anyhow::anyhow!("m4a decoder fill: {e}"))?;
-            if used == 0 {
-                break;
-            }
-            offset += used;
-            let mut frame_size = decoder.decoded_frame_size();
-            if frame_size == 0 {
-                frame_size = 2048 * channels;
-            }
-            let mut pcm = vec![0i16; frame_size];
-            match decoder.decode_frame(&mut pcm) {
-                Ok(()) => {
-                    let info = decoder.stream_info();
-                    let observed_sr = info.sampleRate.max(1) as u32;
-                    if observed_sr != sample_rate {
-                        anyhow::bail!(
-                            "decode_m4a_fdk: sample rate changed during decode: expected={} observed={} path={}",
-                            sample_rate,
-                            observed_sr,
-                            path.display()
-                        );
-                    }
-                    let ch = info.numChannels.max(1) as usize;
-                    if ch != channels {
-                        anyhow::bail!(
-                            "decode_m4a_fdk: channel count changed during decode: expected={} observed={} path={}",
-                            channels,
-                            ch,
-                            path.display()
-                        );
-                    }
-                    let frames = info.frameSize as usize;
-                    let needed = ch.saturating_mul(frames);
-                    if needed == 0 || pcm.len() < needed {
-                        continue;
-                    }
-                    for i in 0..frames {
-                        for c in 0..ch {
-                            let v = pcm[i * ch + c] as f32 / 32768.0;
-                            chans[c].push(v);
-                        }
-                    }
-                    if let Some(limit) = max_frames {
-                        if chans[0].len() >= limit {
-                            reached_eof = false;
-                            for ch in &mut chans {
-                                ch.truncate(limit);
-                            }
-                            return Ok((chans, sample_rate, reached_eof));
-                        }
-                    }
-                }
-                Err(err) => {
-                    if err == AacDecoderError::NOT_ENOUGH_BITS
-                        || err == AacDecoderError::TRANSPORT_SYNC_ERROR
-                    {
-                        break;
-                    }
-                    return Err(anyhow::anyhow!("m4a decode: {err}"));
-                }
-            }
-        }
-    }
-    Ok((chans, sample_rate, reached_eof))
-}
-
-fn emit_ready_chunk<F>(
+pub(crate) fn emit_ready_chunk<F>(
     path: &Path,
     stage: &str,
     sample_rate: u32,
@@ -1180,182 +1077,30 @@ fn enforce_stable_channel_count(
     Ok(())
 }
 
-/// Stand-in for the removed progressive FDK fast path.
+/// Decode an AAC track progressively through the OS decoder.
 ///
-/// Unreachable in practice: `isobmff_audio_is_aac` answers `false` there, so
-/// both call sites take their symphonia branch. It exists so those branches
-/// still type-check.
-pub fn decode_m4a_fdk_progressive_chunks<C, F>(
-    _path: &Path,
-    _emit_every_secs: f32,
-    _should_cancel: C,
-    _on_chunk: F,
-) -> Result<()>
-where
-    C: FnMut() -> bool,
-    F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
-{
-    anyhow::bail!("AAC decoding is not supported; trying another ISO-BMFF codec")
-}
-
-#[cfg(any())]
-pub fn decode_m4a_fdk_progressive_chunks<C, F>(
+/// Same contract as [`decode_audio_multi_symphonia_chunks`]: chunks of roughly
+/// `emit_every_secs` go out as they are decoded, `should_cancel` is asked
+/// between them, and returning `false` from `on_chunk` stops the decode.
+pub fn decode_isobmff_aac_progressive_chunks<C, F>(
     path: &Path,
     emit_every_secs: f32,
-    mut should_cancel: C,
-    mut on_chunk: F,
+    should_cancel: C,
+    on_chunk: F,
 ) -> Result<()>
 where
     C: FnMut() -> bool,
     F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
 {
-    let file = File::open(path).with_context(|| format!("open m4a: {}", path.display()))?;
-    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut reader =
-        Mp4Reader::read_header(file, size).map_err(|e| anyhow::anyhow!("mp4 header: {e:?}"))?;
-    let mut picked = None;
-    for (&track_id, track) in reader.tracks() {
-        if let Ok(TrackType::Audio) = track.track_type() {
-            picked = Some((track_id, track));
-            break;
-        }
+    #[cfg(windows)]
+    {
+        crate::audio_mf::decode_progressive_chunks(path, emit_every_secs, should_cancel, on_chunk)
     }
-    let (track_id, track) = picked.context("m4a: no audio track")?;
-    // The fast path builds an AAC AudioSpecificConfig out of the `mp4a` sample
-    // entry. ALAC, and the PCM flavours a QuickTime .mov carries (`sowt`,
-    // `twos`, `in24`, `lpcm`), have no `mp4a` entry — decoding them here would
-    // read AAC parameters that are not there. Bail so the caller falls through
-    // to symphonia, which handles both.
-    if track.trak.mdia.minf.stbl.stsd.mp4a.is_none() {
-        anyhow::bail!("isobmff: audio track is not AAC: {}", path.display());
+    #[cfg(not(windows))]
+    {
+        let _ = (path, emit_every_secs, should_cancel, on_chunk);
+        anyhow::bail!("AAC decoding is not supported on this platform")
     }
-    let sample_rate = track
-        .sample_freq_index()
-        .map(|idx| idx.freq())
-        .unwrap_or_else(|_| track.timescale())
-        .max(1);
-    let channel_cfg = track.channel_config().unwrap_or(ChannelConfig::Stereo);
-    let channels = channel_config_count(channel_cfg).max(1) as usize;
-    let profile = track
-        .trak
-        .mdia
-        .minf
-        .stbl
-        .stsd
-        .mp4a
-        .as_ref()
-        .and_then(|m| m.esds.as_ref())
-        .map(|esds| esds.es_desc.dec_config.dec_specific.profile)
-        .unwrap_or(2);
-    let freq_index = track
-        .sample_freq_index()
-        .map(|idx| idx as u8)
-        .unwrap_or(mp4::SampleFreqIndex::Freq44100 as u8);
-    let chan_conf = channel_cfg as u8;
-    let asc = audio_specific_config_bytes(profile, freq_index, chan_conf);
-    let mut decoder = AacDecoder::new(AacTransport::Raw);
-    decoder
-        .config_raw(&asc)
-        .map_err(|e| anyhow::anyhow!("m4a decoder config: {e}"))?;
-    let sample_count = reader.sample_count(track_id)?;
-    let emit_frames = ((sample_rate as f32) * emit_every_secs.max(0.05)).ceil() as usize;
-    let emit_frames = emit_frames.max(1);
-    let mut pending: Vec<Vec<f32>> = vec![Vec::new(); channels];
-    let mut decoded_frames = 0usize;
-    for sample_id in 1..=sample_count {
-        if should_cancel() {
-            return Ok(());
-        }
-        let Some(sample) = reader.read_sample(track_id, sample_id)? else {
-            continue;
-        };
-        let mut offset = 0usize;
-        while offset < sample.bytes.len() {
-            if should_cancel() {
-                return Ok(());
-            }
-            let used = decoder
-                .fill(&sample.bytes[offset..])
-                .map_err(|e| anyhow::anyhow!("m4a decoder fill: {e}"))?;
-            if used == 0 {
-                break;
-            }
-            offset += used;
-            let mut frame_size = decoder.decoded_frame_size();
-            if frame_size == 0 {
-                frame_size = 2048 * channels;
-            }
-            let mut pcm = vec![0i16; frame_size];
-            match decoder.decode_frame(&mut pcm) {
-                Ok(()) => {
-                    let info = decoder.stream_info();
-                    let ch = info.numChannels.max(1) as usize;
-                    enforce_stable_channel_count(
-                        path,
-                        "decode_multi_m4a_progressive_chunk",
-                        channels,
-                        ch,
-                    )?;
-                    let observed_sr = info.sampleRate.max(1) as u32;
-                    enforce_stable_sample_rate(
-                        path,
-                        "decode_multi_m4a_progressive_chunk",
-                        sample_rate,
-                        observed_sr,
-                    )?;
-                    let frames = info.frameSize as usize;
-                    let needed = ch.saturating_mul(frames);
-                    if needed == 0 || pcm.len() < needed {
-                        continue;
-                    }
-                    if pending.is_empty() {
-                        pending = vec![Vec::new(); ch];
-                    }
-                    for i in 0..frames {
-                        for c in 0..ch {
-                            let v = pcm[i * ch + c] as f32 / 32768.0;
-                            pending[c].push(v);
-                        }
-                    }
-                    decoded_frames = decoded_frames.saturating_add(frames);
-                    if pending.first().map(|c| c.len()).unwrap_or(0) >= emit_frames
-                        && !emit_ready_chunk(
-                            path,
-                            "decode_multi_m4a_progressive_chunk",
-                            sample_rate,
-                            &mut pending,
-                            decoded_frames,
-                            false,
-                            &mut on_chunk,
-                        )
-                    {
-                        return Ok(());
-                    }
-                }
-                Err(err) => {
-                    if err == AacDecoderError::NOT_ENOUGH_BITS
-                        || err == AacDecoderError::TRANSPORT_SYNC_ERROR
-                    {
-                        break;
-                    }
-                    return Err(anyhow::anyhow!("m4a decode: {err}"));
-                }
-            }
-        }
-    }
-    if should_cancel() {
-        return Ok(());
-    }
-    let _ = emit_ready_chunk(
-        path,
-        "decode_multi_m4a_progressive_final",
-        sample_rate,
-        &mut pending,
-        decoded_frames,
-        true,
-        &mut on_chunk,
-    );
-    Ok(())
 }
 
 pub fn decode_audio_multi_symphonia_chunks<C, F>(
@@ -1483,7 +1228,7 @@ where
     F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
 {
     if is_isobmff_path(path) && isobmff_audio_is_aac(path) {
-        decode_m4a_fdk_progressive_chunks(path, emit_every_secs, should_cancel, on_chunk)
+        decode_isobmff_aac_progressive_chunks(path, emit_every_secs, should_cancel, on_chunk)
     } else {
         decode_audio_multi_symphonia_chunks(path, emit_every_secs, should_cancel, on_chunk)
     }
@@ -1673,6 +1418,18 @@ fn decoded_sample_value_kind(decoded: &AudioBufferRef<'_>) -> SampleValueKind {
 }
 
 fn decode_audio_head_info(path: &Path) -> Option<(u16, u32, u16, SampleValueKind)> {
+    // AAC never reaches symphonia, so the shape of its decoded samples has to
+    // come from the OS decoder — the same 32-bit float every other compressed
+    // format reports here once decoded.
+    if isobmff_audio_is_aac(path) {
+        let (channels, sample_rate, _) = decode_isobmff_aac(path, Some(0.05)).ok()?;
+        return Some((
+            channels.len().max(1) as u16,
+            sample_rate.max(1),
+            32,
+            SampleValueKind::Float,
+        ));
+    }
     let (mut format, mut decoder, track_id, mut sample_rate_hint) = open_decoder(path).ok()?;
     loop {
         let packet = match format.next_packet() {
@@ -1881,9 +1638,20 @@ fn open_decoder(
     Ok((format, decoder, track.id, sample_rate_hint))
 }
 
+/// Symphonia has no AAC decoder in this build, so an AAC track must never
+/// reach it: the OS decoder took it already, or nothing can decode it.
 fn reject_aac_decode(path: &Path) -> Result<()> {
     if is_isobmff_path(path) && probe_isobmff_aac_audio_track(path).unwrap_or(false) {
-        anyhow::bail!("AAC decoding is not supported: {}", path.display());
+        if aac_decode_available() {
+            anyhow::bail!(
+                "AAC decoding is handled by the OS decoder, which did not accept this file: {}",
+                path.display()
+            );
+        }
+        anyhow::bail!(
+            "AAC decoding is not supported on this platform: {}",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -1978,7 +1746,7 @@ pub fn decode_audio_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>,
             Some(max_secs)
         };
         // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
-        if let Ok((chans, sr, reached_eof)) = decode_m4a_fdk(path, max) {
+        if let Ok((chans, sr, reached_eof)) = decode_isobmff_aac(path, max) {
             let mono = mixdown_to_mono(&chans);
             io_trace(
                 "decode_mono_prefix_m4a",
@@ -2100,7 +1868,7 @@ pub fn decode_audio_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>,
 pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
     if is_isobmff_path(path) {
         // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
-        if let Ok((chans, sr, _)) = decode_m4a_fdk(path, None) {
+        if let Ok((chans, sr, _)) = decode_isobmff_aac(path, None) {
             #[cfg(debug_assertions)]
             let mut chans = chans;
             #[cfg(debug_assertions)]
@@ -2186,7 +1954,7 @@ pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
         Ok((chans, sample_rate))
     })();
     if res.is_err() && is_isobmff_path(path) {
-        if let Ok((chans, sr, _)) = decode_m4a_fdk(path, None) {
+        if let Ok((chans, sr, _)) = decode_isobmff_aac(path, None) {
             #[cfg(debug_assertions)]
             let mut chans = chans;
             #[cfg(debug_assertions)]
@@ -2215,7 +1983,7 @@ pub fn decode_audio_multi_prefix(path: &Path, max_secs: f32) -> Result<(Vec<Vec<
             Some(max_secs)
         };
         // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
-        if let Ok((chans, sr, reached_eof)) = decode_m4a_fdk(path, max) {
+        if let Ok((chans, sr, reached_eof)) = decode_isobmff_aac(path, max) {
             return Ok((chans, sr, !reached_eof));
         }
     }
@@ -2342,7 +2110,7 @@ where
         let wants_prefix = prefix_secs > 0.0;
         let wants_emit = emit_every_secs > 0.0;
         if !wants_prefix && !wants_emit {
-            let (chans, sr, _) = decode_m4a_fdk(path, None)?;
+            let (chans, sr, _) = decode_isobmff_aac(path, None)?;
             let _ = on_chunk(chans, sr, true);
             return Ok(());
         }
@@ -2365,7 +2133,7 @@ where
 
         let should_cancel = std::cell::RefCell::new(should_cancel);
 
-        decode_m4a_fdk_progressive_chunks(
+        decode_isobmff_aac_progressive_chunks(
             path,
             chunk_secs,
             || (should_cancel.borrow_mut())(),
@@ -2637,7 +2405,7 @@ pub fn decode_audio_mono_prefix_with_errors(
             Some(max_secs)
         };
         // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
-        if let Ok((chans, sr, reached_eof)) = decode_m4a_fdk(path, max) {
+        if let Ok((chans, sr, reached_eof)) = decode_isobmff_aac(path, max) {
             let mono = mixdown_to_mono(&chans);
             return Ok((mono, sr, reached_eof, 0));
         }
@@ -2780,7 +2548,7 @@ pub fn decode_audio_mono_with_errors(path: &Path) -> Result<(Vec<f32>, u32, u32)
 pub fn decode_audio_multi_with_errors(path: &Path) -> Result<(Vec<Vec<f32>>, u32, u32)> {
     if is_isobmff_path(path) {
         // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
-        if let Ok((chans, sr, _)) = decode_m4a_fdk(path, None) {
+        if let Ok((chans, sr, _)) = decode_isobmff_aac(path, None) {
             #[cfg(debug_assertions)]
             let mut chans = chans;
             #[cfg(debug_assertions)]

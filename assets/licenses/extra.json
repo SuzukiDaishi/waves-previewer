@@ -76,7 +76,7 @@
       "authors": "zukky",
       "repository": "https://github.com/SuzukiDaishi/waves-previewer",
       "flag": null,
-      "note": "NeoWaves's own source is MIT. MP3 export loads a separate, user-replaceable LAME shared library using the LGPL-2.0 section 6(b) mechanism; LAME is not incorporated into the executable. AAC encode/decode support is intentionally absent. Open this entry for the redistribution checklist."
+      "note": "NeoWaves's own source is MIT. MP3 export loads a separate, user-replaceable LAME shared library using the LGPL-2.0 section 6(b) mechanism; LAME is not incorporated into the executable. No AAC codec is shipped: AAC audio is decoded by the operating system's own decoder where there is one, and AAC encoding is unsupported. Open this entry for the redistribution checklist."
     },
     {
       "name": "LAME (libmp3lame)",

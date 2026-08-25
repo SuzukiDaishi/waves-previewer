@@ -11235,9 +11235,12 @@ mod kittest_suite {
     }
 
     #[test]
-    fn explicit_video_open_resolves_a_silent_timeline_without_visiting_the_list() {
+    fn explicit_video_open_resolves_its_transport_without_visiting_the_list() {
+        // The AAC fixture only lands on a silent timeline where no OS decoder
+        // lends itself; where one does, its audio is an ordinary timeline.
+        let aac_unsupported = !neowaves::audio_io::aac_decode_available();
         for (name, expect_absent, expect_unsupported) in [
-            ("video_sync_6s_30fps.mp4", false, true),
+            ("video_sync_6s_30fps.mp4", false, aac_unsupported),
             ("video_no_audio_6s_30fps.mp4", true, false),
         ] {
             let path = video_fixture_path(name);
@@ -11260,15 +11263,17 @@ mod kittest_suite {
                 Some(expect_unsupported),
                 "wrong unsupported-audio classification for {name}"
             );
-            assert!(
+            assert_eq!(
                 harness.state().test_audio_is_silent_timeline(),
-                "direct-open video did not install a silent timeline for {name}"
+                expect_absent || expect_unsupported,
+                "direct-open video installed the wrong transport for {name}"
             );
         }
     }
 
     #[test]
-    fn video_with_unsupported_aac_still_seeks_picture_on_a_silent_playhead() {
+    fn video_with_aac_audio_still_seeks_its_picture_on_the_playhead() {
+        let aac_unsupported = !neowaves::audio_io::aac_decode_available();
         let video_dir = wav_dir().join("video");
         let path = video_fixture_path("video_sync_6s_30fps.mp4");
         let mut harness = harness_with_folder(video_dir);
@@ -11280,14 +11285,20 @@ mod kittest_suite {
         );
         assert_eq!(
             harness.state().test_path_audio_track_unsupported(&path),
-            Some(true)
+            Some(aac_unsupported)
         );
         assert!(harness.state().test_path_decode_error(&path).is_none());
         assert!(harness.state_mut().test_open_tab_for_path(&path));
         wait_for_tab_ready(&mut harness);
         harness.run_steps(3);
-        assert!(harness.state().test_active_tab_audio_track_unsupported());
-        assert!(harness.state().test_audio_is_silent_timeline());
+        assert_eq!(
+            harness.state().test_active_tab_audio_track_unsupported(),
+            aac_unsupported
+        );
+        assert_eq!(
+            harness.state().test_audio_is_silent_timeline(),
+            aac_unsupported
+        );
 
         for target_secs in [0.50_f64, 4.40, 1.10, 5.20, 2.25] {
             let sr = harness
@@ -11432,9 +11443,9 @@ mod kittest_suite {
             .expect("save seeked video frame");
 
         // The requested layout is most crowded when the video has an audio
-        // track, even though AAC is intentionally unavailable:
-        // VIDEO must remain immediately below Time at the left edge while
-        // SCOPE / SPECTRUM / STEREO / PEAK share the rest of the strip.
+        // track, decodable here or not: VIDEO must remain immediately below
+        // Time at the left edge while SCOPE / SPECTRUM / STEREO / PEAK share
+        // the rest of the strip.
         let sync_path = video_fixture_path("video_sync_6s_30fps.mp4");
         let mut sync_cfg = StartupConfig::default();
         sync_cfg.open_folder = Some(wav_dir().join("video"));
@@ -11451,7 +11462,7 @@ mod kittest_suite {
             sync_harness
                 .state()
                 .test_path_audio_track_unsupported(&sync_path),
-            Some(true)
+            Some(!neowaves::audio_io::aac_decode_available())
         );
         assert!(sync_harness.state_mut().test_open_tab_for_path(&sync_path));
         wait_for_tab_ready(&mut sync_harness);
@@ -11468,14 +11479,14 @@ mod kittest_suite {
         sync_harness
             .render()
             .expect("render video frame with audio meters")
-            .save(out_dir.join("04_editor_aac_unsupported_3_25s.png"))
-            .expect("save video frame with unsupported AAC label");
+            .save(out_dir.join("04_editor_aac_audio_3_25s.png"))
+            .expect("save video frame with an AAC audio track");
 
         for name in [
             "01_list_no_audio.png",
             "02_editor_0_50s.png",
             "03_editor_3_25s.png",
-            "04_editor_aac_unsupported_3_25s.png",
+            "04_editor_aac_audio_3_25s.png",
         ] {
             eprintln!("[shot] wrote {}", out_dir.join(name).display());
         }

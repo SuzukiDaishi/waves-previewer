@@ -88,8 +88,11 @@ fn audio_probe_decode_for_available_formats() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// AAC export stays unavailable everywhere: NeoWaves has no encoder for it and
+/// no video encoder to write a video back out with. Decoding follows whether
+/// the operating system lends a decoder, which is what the UI labels too.
 #[test]
-fn aac_is_explicitly_unsupported_for_decode_and_export() {
+fn aac_export_stays_unavailable_and_decode_follows_platform_support() {
     assert!(!neowaves::wave::export_format_is_available("aac"));
     assert!(!neowaves::wave::export_format_is_available("m4a"));
 
@@ -98,10 +101,26 @@ fn aac_is_explicitly_unsupported_for_decode_and_export() {
         .join("video")
         .join("video_sync_6s_30fps.mp4");
     assert!(neowaves::audio_io::probe_isobmff_aac_audio_track(&fixture).expect("probe AAC fixture"));
-    let error = neowaves::audio_io::decode_audio_multi(&fixture)
-        .expect_err("AAC decode must stay disabled");
-    assert!(
-        error.to_string().contains("AAC decoding is not supported"),
-        "unexpected AAC error: {error:#}"
-    );
+
+    if neowaves::audio_io::aac_decode_available() {
+        let (chans, sr) = neowaves::audio_io::decode_audio_multi(&fixture)
+            .expect("the OS AAC decoder should read the fixture");
+        assert!(sr >= 8_000, "implausible AAC sample rate: {sr}");
+        let frames = chans.first().map(|c| c.len()).unwrap_or(0);
+        assert!(
+            frames as f32 / sr as f32 > 5.0,
+            "expected the whole 6 s fixture, decoded {frames} frames at {sr} Hz"
+        );
+        assert!(
+            chans.iter().any(|c| c.iter().any(|v| v.abs() > 0.01)),
+            "the fixture's tones decoded to silence"
+        );
+    } else {
+        let error = neowaves::audio_io::decode_audio_multi(&fixture)
+            .expect_err("AAC must not decode without an OS decoder");
+        assert!(
+            error.to_string().contains("AAC decoding is not supported"),
+            "unexpected AAC error: {error:#}"
+        );
+    }
 }

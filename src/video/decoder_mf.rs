@@ -19,44 +19,17 @@ use anyhow::{Context, Result};
 use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
-    MFCreateSourceReaderFromURL, MFMediaType_Video, MFShutdown, MFStartup, MFVideoFormat_RGB32,
-    MFSTARTUP_LITE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
-    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
+    MFCreateSourceReaderFromURL, MFMediaType_Video, MFVideoFormat_RGB32, MF_MT_FRAME_SIZE,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READERF_ENDOFSTREAM,
+    MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+use crate::mf::MfSession;
 
 use super::container::{VideoCodec, VideoStreamInfo};
 use super::frame::{bgra_stride_to_color_image, Rotation, VideoFrame};
 use super::VideoDecoder;
-
-/// Per-thread Media Foundation lifecycle.
-///
-/// `MFStartup` refcounts internally, but it is per-process and must be paired;
-/// this guard ties one startup to the life of one decoder, which is also the
-/// life of one worker thread.
-struct MfSession;
-
-impl MfSession {
-    fn start() -> Result<Self> {
-        unsafe {
-            // A failure here means COM was already initialised on this thread
-            // with a different model, which is fine to proceed from.
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            MFStartup(MF_VERSION, MFSTARTUP_LITE).context("MFStartup")?;
-        }
-        Ok(Self)
-    }
-}
-
-impl Drop for MfSession {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = MFShutdown();
-        }
-    }
-}
 
 pub struct MediaFoundationDecoder {
     // Field order matters: the reader must be released before MFShutdown runs.

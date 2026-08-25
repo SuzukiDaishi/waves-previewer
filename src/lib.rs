@@ -4,6 +4,8 @@ pub mod audio_asset;
 pub mod audio_capture;
 pub mod audio_channels;
 pub mod audio_io;
+#[cfg(windows)]
+pub mod audio_mf;
 pub mod cli;
 pub mod crash_report;
 pub mod flac_meta;
@@ -15,6 +17,8 @@ pub mod markers;
 pub mod media_kind;
 pub mod metadata;
 pub mod meter;
+#[cfg(windows)]
+pub(crate) mod mf;
 pub mod plugin;
 pub mod ui_wake;
 pub mod video;

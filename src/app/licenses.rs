@@ -595,9 +595,10 @@ mod tests {
         assert!(plain_text().contains("About this distribution"));
     }
 
-    /// AAC support was removed to keep the release clear of its codec and
-    /// patent terms. A stale FDK entry would make the in-app report disagree
-    /// with the executable, so keep the graph and snapshot pinned here.
+    /// No AAC codec is shipped: the decoder comes from the operating system, so
+    /// the graph stays clear of AAC codec and patent terms. A stale FDK entry
+    /// would make the in-app report disagree with the executable, so keep the
+    /// graph and snapshot pinned here.
     #[test]
     fn aac_codec_components_are_absent() {
         let manifest = manifest();

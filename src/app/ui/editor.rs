@@ -3218,7 +3218,7 @@ impl crate::app::WavesPreviewer {
                     .sense(egui::Sense::hover()),
                 )
                 .on_hover_text(if tab.audio_track_unsupported {
-                    "This video has an AAC audio track, which this build intentionally does not decode. The picture remains playable and seekable on a silent timeline, but NeoWaves has no video encoder to write changes back out."
+                    "This video's AAC audio has no decoder on this platform — NeoWaves ships none of its own and borrows the operating system's where there is one. The picture remains playable and seekable on a silent timeline, and there is no video encoder to write changes back out either."
                 } else if tab.audio_track_absent {
                     "This is a video file with no audio track. It remains playable and seekable on a silent timeline, but NeoWaves has no video encoder — so it cannot be edited or written back out."
                 } else {
@@ -3240,7 +3240,7 @@ impl crate::app::WavesPreviewer {
                     .sense(egui::Sense::hover()),
                 )
                 .on_hover_text(if tab.audio_track_unsupported {
-                    "AAC decoding is intentionally disabled. Playback and seeking use a silent timeline so the picture remains fully previewable."
+                    "No AAC decoder on this platform: NeoWaves ships none of its own and borrows the operating system's where there is one. Playback and seeking use a silent timeline so the picture remains fully previewable."
                 } else {
                     "This video has no audio track. Playback and seeking use a silent timeline so the picture remains fully previewable."
                 });
@@ -8812,7 +8812,7 @@ impl crate::app::WavesPreviewer {
                         );
                         ui.label(
                             RichText::new(if tab.audio_track_unsupported {
-                                "AAC audio is unsupported. The video remains playable and seekable on a silent timeline, but cannot be edited or written back out."
+                                "AAC audio has no decoder on this platform. The video remains playable and seekable on a silent timeline, but cannot be edited or written back out."
                             } else if tab.audio_track_absent {
                                 "No audio track. The video remains playable and seekable on a silent timeline, but cannot be edited or written back out."
                             } else {

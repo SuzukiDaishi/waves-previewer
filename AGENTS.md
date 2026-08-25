@@ -55,6 +55,7 @@ Repository Layout
   - `src/cli.rs`: CLI arg parsing and startup config helpers.
   - `src/lib.rs`: crate entry.
   - `src/audio*.rs`, `src/wave.rs`, `src/markers.rs`, `src/loop_markers.rs`: audio I/O and DSP utilities.
+  - `src/audio_mf.rs` (Windows): AAC decoding through Media Foundation's own decoder. Exists so that no AAC codec has to be shipped; `src/mf.rs` holds the `MFStartup`/`MFShutdown` guard it shares with the video decoder.
   - `src/media_kind.rs`: whether a path is audio or video, and what the app is allowed to do with it (edit / export / write metadata). Every gate that refuses an action on a video source reads one of these predicates rather than comparing extensions, so making video editable later is a change to this file alone.
   - `src/video/`: video container demux and frame decoding, for preview only — the mini meter picture and the list thumbnail. `container.rs` demuxes ISO-BMFF through the `mp4` crate already used for m4a, `annexb.rs` converts AVCC samples for a raw-bitstream decoder, `frame.rs` rotates and downscales on the worker, and the two backends are Media Foundation (Windows) and OpenH264 (everywhere).
   - `src/ipc.rs`: IPC message definitions.
@@ -67,7 +68,7 @@ Repository Layout
 Cargo Features
 - `default = glow + plugin_native_vst3 + plugin_native_clap + mp3_lame`.
 - `video` (OpenH264 H.264 preview) is deliberately NOT default: the crate compiles Cisco's sources, and Cisco only covers AVC patent fees for users of *their* prebuilt binaries. The released Windows installer gets its video from Media Foundation instead, so nothing is lost. Build with `--features video` for the picture on Linux/macOS.
-- AAC encode/decode is intentionally unsupported: neither FDK nor Symphonia's AAC codec is in the graph. `mp3_lame` gates LAME MP3 export; MP3 decoding remains available through Symphonia. `wave::export_format_is_available` is the single predicate every format picker consults.
+- No AAC codec is in the dependency graph (neither FDK nor Symphonia's) and none is a feature away. AAC *decoding* is borrowed from the OS instead -- Media Foundation on Windows, through `src/audio_mf.rs` -- so an AAC mp4/m4a plays there and stays `AAC UNSUPPORTED` everywhere else. `audio_io::aac_decode_available()` is the single predicate for that; `audio_io::isobmff_aac_audio_unsupported()` is the one the list and editor label from. AAC *encoding* is unsupported on every platform, because there is no encoder to borrow. `mp3_lame` gates LAME MP3 export; MP3 decoding remains available through Symphonia. `wave::export_format_is_available` is the single predicate every format picker consults.
 - A build with no copyleft at all: `cargo build --no-default-features --features glow,plugin_native_vst3,plugin_native_clap`.
 - LAME 3.100 is built as a replaceable `libmp3lame.dll` from `vendor/lame-3.100`; `src/lame.rs` is the MIT FFI and the installer must copy the DLL. ONNX Runtime, Oniguruma and SQLite remain linked into the executable. `licenses::tests::redistributed_runtime_dlls_match_the_installer` keeps the licence data honest.
 
