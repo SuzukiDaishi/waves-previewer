@@ -115,6 +115,36 @@ fn aac_export_stays_unavailable_and_decode_follows_platform_support() {
             chans.iter().any(|c| c.iter().any(|v| v.abs() > 0.01)),
             "the fixture's tones decoded to silence"
         );
+
+        let (prefix, prefix_sr, truncated) =
+            neowaves::audio_io::decode_audio_multi_prefix(&fixture, 0.2)
+                .expect("the OS AAC decoder should read a prefix");
+        assert_eq!(prefix_sr, sr);
+        assert!(truncated, "a 0.2 s prefix should not reach the end");
+        assert_eq!(prefix.len(), chans.len());
+        assert_eq!(prefix[0].len(), (prefix_sr as f32 * 0.2).ceil() as usize);
+
+        let mut progressive_frames = 0usize;
+        let mut saw_final = false;
+        neowaves::audio_io::decode_audio_multi_progressive(
+            &fixture,
+            0.2,
+            0.2,
+            || false,
+            |chunk, chunk_sr, final_chunk| {
+                assert_eq!(chunk_sr, sr);
+                assert_eq!(chunk.len(), chans.len());
+                progressive_frames = chunk.first().map(Vec::len).unwrap_or(0);
+                saw_final |= final_chunk;
+                true
+            },
+        )
+        .expect("the OS AAC decoder should progressively read the fixture");
+        assert!(
+            saw_final,
+            "progressive AAC decode should emit a final chunk"
+        );
+        assert_eq!(progressive_frames, frames);
     } else {
         let error = neowaves::audio_io::decode_audio_multi(&fixture)
             .expect_err("AAC must not decode without an OS decoder");

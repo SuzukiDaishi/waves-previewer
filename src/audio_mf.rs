@@ -269,12 +269,6 @@ impl MfAudioDecoder {
     }
 }
 
-// Safety: every method takes `&mut self`, and one decoder is owned by exactly
-// one worker thread for its whole life (created there, dropped there). The COM
-// objects are apartment-agnostic under COINIT_MULTITHREADED, which the session
-// guard establishes on that same thread.
-unsafe impl Send for MfAudioDecoder {}
-
 fn request_output(reader: &IMFSourceReader, subtype: GUID, bits: Option<u32>) -> Result<()> {
     unsafe {
         let media_type: IMFMediaType = MFCreateMediaType().context("MFCreateMediaType")?;
