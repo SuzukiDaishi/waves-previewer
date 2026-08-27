@@ -9,7 +9,7 @@
 | MP3/M4A/OGG のリスト再生を安定化したい | `src/app/list_preview_ops.rs`, `src/audio_io.rs` | `src/audio.rs`, `src/app/preview_ops.rs`, `src/app/logic.rs` |
 | 動画の映像プレビューや音との同期を直したい | `src/app/video_ops.rs`, `src/video/` | `src/app/ui/editor.rs` (`draw_editor_video_panel`), `src/app/render/video_panel.rs`, `src/app/perf_profile.rs` |
 | 動画を編集・書き出し可能にしたい | `src/media_kind.rs` | `src/app/export_ops.rs`, `src/wave.rs` (`pick_format`), `src/app/ui/list/row_menu.rs`, `src/app/ui/editor.rs` |
-| 対応する拡張子を増やしたい | `src/audio_io.rs` (`SUPPORTED_*_EXTS`) | `installer/NeoWaves.iss`, `src/app/ui/list/badges.rs`, `docs/FORMAT_SUPPORT.md` |
+| 対応する拡張子を増やしたい | `src/audio_io.rs` (`SUPPORTED_*_EXTS`) | `installer/NeoWaves.nsi`, `src/app/ui/list/badges.rs`, `docs/FORMAT_SUPPORT.md` |
 | playback device / 音量 / rate を直したい | `src/audio.rs`, `src/app/audio_ops.rs` | `src/app/ui/topbar/transport.rs`, `src/app/list_preview_ops.rs`, `src/app/editor_ops.rs` |
 | エディタ初回表示を軽くしたい | `src/app/editor_decode_ops.rs`, `src/app/ui/editor.rs` | `src/app/editor_viewport.rs`, `src/app/spectrogram_jobs.rs`, `src/app/render/waveform_pyramid.rs` |
 | Spectrogram / Mel / feature 描画を改善したい | `src/app/spectrogram_jobs.rs`, `src/app/editor_viewport.rs` | `src/app/spectrogram.rs`, `src/app/render/spectrogram.rs`, `src/app/render/music_features.rs` |
