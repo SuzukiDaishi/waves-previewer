@@ -85,6 +85,28 @@ pub fn frame_box_px(column: Rect, aspect: f32, pixels_per_point: f32) -> (u32, u
     (quantize(fitted.width()), quantize(fitted.height()))
 }
 
+/// Pixel box for the detached viewer, capped to a 1080p-equivalent surface.
+///
+/// Landscape may reach 1920x1080 and portrait 1080x1920. Bounding both the
+/// long edge and total pixels keeps the read-ahead ring finite for 4K sources
+/// without distorting either orientation.
+pub fn detached_frame_box_px(panel: Rect, aspect: f32, pixels_per_point: f32) -> (u32, u32) {
+    let (width, height) = frame_box_px(panel, aspect, pixels_per_point);
+    let width_f = f64::from(width.max(1));
+    let height_f = f64::from(height.max(1));
+    let portrait = aspect.is_finite() && aspect > 0.0 && aspect < 1.0;
+    let (max_width, max_height) = if portrait {
+        (1080.0, 1920.0)
+    } else {
+        (1920.0, 1080.0)
+    };
+    let scale = (max_width / width_f).min(max_height / height_f).min(1.0);
+    (
+        (width_f * scale).floor().max(1.0) as u32,
+        (height_f * scale).floor().max(1.0) as u32,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +210,18 @@ mod tests {
         let one = frame_box_px(a, WIDE, 1.0);
         let two = frame_box_px(a, WIDE, 2.0);
         assert!(two.0 > one.0 && two.1 > one.1);
+    }
+
+    #[test]
+    fn detached_box_caps_landscape_and_portrait_to_1080p_equivalent() {
+        let landscape = Rect::from_min_size(pos2(0.0, 0.0), vec2(3840.0, 2160.0));
+        let landscape = detached_frame_box_px(landscape, WIDE, 1.0);
+        assert!(landscape.0 <= 1920 && landscape.1 <= 1080);
+        assert!(u64::from(landscape.0) * u64::from(landscape.1) <= 1920 * 1080);
+
+        let portrait = Rect::from_min_size(pos2(0.0, 0.0), vec2(2160.0, 3840.0));
+        let portrait = detached_frame_box_px(portrait, TALL, 1.0);
+        assert!(portrait.0 <= 1080 && portrait.1 <= 1920);
+        assert!(u64::from(portrait.0) * u64::from(portrait.1) <= 1920 * 1080);
     }
 }

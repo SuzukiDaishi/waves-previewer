@@ -11379,6 +11379,169 @@ mod kittest_suite {
         );
     }
 
+    #[test]
+    fn audio_only_editor_has_no_video_popout_button() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+        assert_eq!(
+            harness
+                .query_all_by_label("Open video in a separate window")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn video_popout_is_single_target_frozen_on_other_audio_and_closes_with_tab() {
+        let video_dir = wav_dir().join("video");
+        let first = video_fixture_path("video_no_audio_6s_30fps.mp4");
+        let second = video_fixture_path("video_sync_6s_30fps.mp4");
+        let mut harness = harness_with_folder(video_dir);
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        wait_for_video_metadata(&mut harness, &first);
+        wait_for_video_metadata(&mut harness, &second);
+
+        assert!(harness.state_mut().test_open_tab_for_path(&first));
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+        let first_id = harness
+            .state()
+            .active_tab
+            .and_then(|idx| harness.state().test_tab_id(idx))
+            .expect("first video tab id");
+        let sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("first video sample rate");
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample((1.25 * sr as f64) as usize));
+        let first_pts = wait_for_video_pts(&mut harness, 1.25);
+
+        let buttons: Vec<_> = harness
+            .query_all_by_label("Open video in a separate window")
+            .collect();
+        assert_eq!(
+            buttons.len(),
+            1,
+            "only the inline video panel has a popout button"
+        );
+        buttons[0].click();
+        harness.run_steps(3);
+        assert_eq!(harness.state().test_detached_video_tab_id(), Some(first_id));
+        let (_, _, inline_box, detached_box) = harness
+            .state()
+            .test_video_state_for_tab_id(first_id)
+            .expect("first detached video state");
+        assert!(detached_box.0 > 0 && detached_box.1 > 0);
+        assert!(
+            u64::from(detached_box.0) * u64::from(detached_box.1) <= 1920 * 1080,
+            "detached decode request exceeded 1080p: {detached_box:?}"
+        );
+        assert!(
+            u64::from(detached_box.0) * u64::from(detached_box.1)
+                >= u64::from(inline_box.0) * u64::from(inline_box.1),
+            "detached window should request at least the inline resolution"
+        );
+
+        // Activating another source must not retarget the existing window or
+        // advance its texture with the new source's clock.
+        assert!(harness.state_mut().test_open_tab_for_path(&second));
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(5);
+        assert_eq!(harness.state().test_playing_path(), Some(&second));
+        assert_eq!(harness.state().test_detached_video_tab_id(), Some(first_id));
+        let frozen_pts = harness
+            .state()
+            .test_video_state_for_tab_id(first_id)
+            .and_then(|state| state.0)
+            .expect("frozen first-video PTS");
+        assert!(
+            (frozen_pts - first_pts).abs() < 1.0e-7,
+            "detached picture advanced while another source was active"
+        );
+
+        let second_id = harness
+            .state()
+            .active_tab
+            .and_then(|idx| harness.state().test_tab_id(idx))
+            .expect("second video tab id");
+        harness
+            .get_by_label("Open video in a separate window")
+            .click();
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().test_detached_video_tab_id(),
+            Some(second_id)
+        );
+        assert_eq!(
+            harness
+                .state()
+                .test_video_state_for_tab_id(first_id)
+                .expect("first video after target switch")
+                .3,
+            (0, 0),
+            "switching target should release the old large decode request"
+        );
+
+        assert!(harness.state_mut().test_close_active_tab());
+        assert_eq!(harness.state().test_detached_video_tab_id(), None);
+    }
+
+    /// Visual evidence for the inline button and the video-only viewport.
+    ///   cargo test --features kittest_render -- --ignored video_popout_screenshots --nocapture
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    #[ignore]
+    fn video_popout_screenshots() {
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("video_popout");
+        std::fs::create_dir_all(&out_dir).expect("create video popout screenshot directory");
+
+        let path = video_fixture_path("video_no_audio_6s_30fps.mp4");
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(wav_dir().join("video"));
+        let mut harness = harness_with_startup_size(cfg, egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        wait_for_video_metadata(&mut harness, &path);
+        assert!(harness.state_mut().test_open_tab_for_path(&path));
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+        let sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("video sample rate");
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample((2.25 * sr as f64) as usize));
+        wait_for_video_pts(&mut harness, 2.25);
+        harness.run_steps(2);
+        harness
+            .render()
+            .expect("render inline video panel")
+            .save(out_dir.join("01_inline.png"))
+            .expect("save inline video screenshot");
+
+        harness
+            .get_by_label("Open video in a separate window")
+            .click();
+        harness.run_steps(3);
+        harness
+            .render()
+            .expect("render detached video viewport")
+            .save(out_dir.join("02_detached.png"))
+            .expect("save detached video screenshot");
+
+        eprintln!("[shot] wrote {}", out_dir.join("01_inline.png").display());
+        eprintln!("[shot] wrote {}", out_dir.join("02_detached.png").display());
+    }
+
     /// Stable visual evidence for the list label and before/after video seek.
     ///   cargo test --features kittest_render — --ignored video_mini_meter_screenshots --nocapture
     #[cfg(feature = "kittest_render")]

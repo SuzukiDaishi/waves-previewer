@@ -1823,6 +1823,126 @@ impl crate::app::WavesPreviewer {
         );
     }
 
+    /// Paint one video surface from the tab's shared frame ring and texture.
+    /// Both the inline panel and the detached native viewport call this, so
+    /// frame selection and letterboxing cannot drift apart.
+    pub(super) fn paint_video_surface(
+        ui: &egui::Ui,
+        tab_id: u64,
+        panel: &mut VideoPanelState,
+        rect: egui::Rect,
+        video_secs: f64,
+        show_labels: bool,
+        surface_key: &'static str,
+    ) {
+        use crate::app::render::video_panel;
+
+        let painter = ui.painter();
+        let panel_bg = Color32::from_rgb(16, 18, 23);
+        let label_font = egui::FontId::monospace(9.0);
+        let label_col = Color32::from_rgb(120, 132, 150);
+        painter.rect_filled(rect, 4.0, panel_bg);
+
+        // Pick the latest frame whose presentation time the audio clock has
+        // reached. This never lets picture lead sound.
+        if let Some((pts, image)) = panel.frame_at(video_secs) {
+            let dims = [image.size[0], image.size[1]];
+            let needs_new_texture = panel
+                .texture
+                .as_ref()
+                .map(|tex| tex.size() != dims)
+                .unwrap_or(true);
+            if needs_new_texture {
+                panel.texture = Some(ui.ctx().load_texture(
+                    format!("video_panel_{tab_id}"),
+                    (*image).clone(),
+                    egui::TextureOptions::LINEAR,
+                ));
+                panel.shown_pts = Some(pts);
+            } else if panel.shown_pts != Some(pts) {
+                if let Some(tex) = panel.texture.as_mut() {
+                    tex.set((*image).clone(), egui::TextureOptions::LINEAR);
+                }
+                panel.shown_pts = Some(pts);
+            }
+        }
+
+        // If decoding falls behind, retain the last texture only while its
+        // PTS is still at or behind the source clock. A backward seek never
+        // flashes a future frame; switching audio sources freezes exactly the
+        // last synchronized picture.
+        let drawn = panel
+            .texture
+            .as_ref()
+            .zip(panel.shown_pts)
+            .filter(|(_, pts)| *pts <= video_secs)
+            .map(|(tex, _)| {
+                let frame_rect = video_panel::letterbox_rect(rect.shrink(2.0), panel.info.aspect());
+                painter.image(
+                    tex.id(),
+                    frame_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                painter.rect_stroke(
+                    frame_rect,
+                    0.0,
+                    Stroke::new(1.0, Color32::from_rgb(40, 46, 56)),
+                    egui::StrokeKind::Inside,
+                );
+            })
+            .is_some();
+
+        if !drawn {
+            let (message, color) = match &panel.status {
+                VideoPanelStatus::Probing | VideoPanelStatus::Ready => {
+                    ("decoding...".to_string(), label_col)
+                }
+                VideoPanelStatus::Unsupported(codec) => (
+                    format!("no preview ({codec})"),
+                    Color32::from_rgb(220, 180, 110),
+                ),
+                VideoPanelStatus::Failed(_) => (
+                    "preview failed".to_string(),
+                    Color32::from_rgb(226, 122, 122),
+                ),
+            };
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                message,
+                label_font.clone(),
+                color,
+            );
+        }
+
+        if show_labels {
+            painter.text(
+                rect.left_top() + egui::vec2(4.0, 2.0),
+                egui::Align2::LEFT_TOP,
+                "VIDEO",
+                label_font.clone(),
+                label_col,
+            );
+            if let Some(pts) = panel.shown_pts {
+                let mins = (pts / 60.0).floor().max(0.0) as u64;
+                let secs = (pts - mins as f64 * 60.0).max(0.0);
+                painter.text(
+                    rect.right_bottom() + egui::vec2(-4.0, -2.0),
+                    egui::Align2::RIGHT_BOTTOM,
+                    format!("{mins}:{secs:05.2}"),
+                    label_font,
+                    label_col,
+                );
+            }
+        }
+
+        if let VideoPanelStatus::Failed(reason) = &panel.status {
+            ui.interact(rect, egui::Id::new((surface_key, tab_id)), Sense::hover())
+                .on_hover_text(reason);
+        }
+    }
+
     /// Draw the video frame column at the left of the mini meter strip and
     /// report how much width it took (including the gap after it), so the
     /// audio panels can lay out in what is left.
@@ -1831,9 +1951,9 @@ impl crate::app::WavesPreviewer {
     /// carry one — in which case the strip looks exactly as it did before this
     /// panel existed.
     fn draw_editor_video_panel(
-        ui: &egui::Ui,
+        ui: &mut egui::Ui,
         tab: &mut EditorTab,
-        painter: &egui::Painter,
+        _painter: &egui::Painter,
         inner: egui::Rect,
         gap: f32,
         video_secs: f64,
@@ -1841,6 +1961,7 @@ impl crate::app::WavesPreviewer {
         use crate::app::render::video_panel;
         use crate::app::types::VideoPanelStatus;
 
+        let tab_id = tab.tab_id;
         let Some(panel) = tab.video_panel.as_mut() else {
             return 0.0;
         };
@@ -1860,103 +1981,35 @@ impl crate::app::WavesPreviewer {
         // pixel of window resize does not throw away every cached frame.
         panel.wanted_box_px =
             video_panel::frame_box_px(column.shrink(2.0), aspect, ui.ctx().pixels_per_point());
-        let panel_bg = Color32::from_rgb(16, 18, 23);
-        let label_font = egui::FontId::monospace(9.0);
-        let label_col = Color32::from_rgb(120, 132, 150);
-        painter.rect_filled(column, 4.0, panel_bg);
-
-        // Pick the frame whose time the playhead has just reached, and upload
-        // it only when it differs from what is already on the GPU.
-        let mut drawn = false;
-        if let Some((pts, image)) = panel.frame_at(video_secs) {
-            let dims = [image.size[0], image.size[1]];
-            let needs_new_texture = panel
-                .texture
-                .as_ref()
-                .map(|tex| tex.size() != dims)
-                .unwrap_or(true);
-            if needs_new_texture {
-                panel.texture = Some(ui.ctx().load_texture(
-                    format!("editor_video_panel_{}", tab.tab_id),
-                    (*image).clone(),
-                    egui::TextureOptions::LINEAR,
-                ));
-                panel.shown_pts = Some(pts);
-            } else if panel.shown_pts != Some(pts) {
-                if let Some(tex) = panel.texture.as_mut() {
-                    tex.set((*image).clone(), egui::TextureOptions::LINEAR);
-                }
-                panel.shown_pts = Some(pts);
-            }
-            if let Some(tex) = panel.texture.as_ref() {
-                let frame_rect = video_panel::letterbox_rect(column.shrink(2.0), aspect);
-                painter.image(
-                    tex.id(),
-                    frame_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-                painter.rect_stroke(
-                    frame_rect,
-                    0.0,
-                    Stroke::new(1.0, Color32::from_rgb(40, 46, 56)),
-                    egui::StrokeKind::Inside,
-                );
-                drawn = true;
-            }
-        }
-
-        if !drawn {
-            let (message, color) = match &panel.status {
-                VideoPanelStatus::Probing | VideoPanelStatus::Ready => {
-                    ("decoding...".to_string(), label_col)
-                }
-                VideoPanelStatus::Unsupported(codec) => (
-                    format!("no preview ({codec})"),
-                    Color32::from_rgb(220, 180, 110),
-                ),
-                VideoPanelStatus::Failed(_) => (
-                    "preview failed".to_string(),
-                    Color32::from_rgb(226, 122, 122),
-                ),
-            };
-            painter.text(
-                column.center(),
-                egui::Align2::CENTER_CENTER,
-                message,
-                label_font.clone(),
-                color,
-            );
-        }
-
-        painter.text(
-            column.left_top() + egui::vec2(4.0, 2.0),
-            egui::Align2::LEFT_TOP,
-            "VIDEO",
-            label_font.clone(),
-            label_col,
+        Self::paint_video_surface(
+            ui,
+            tab_id,
+            panel,
+            column,
+            video_secs,
+            true,
+            "editor_video_panel",
         );
-        // The frame's own timestamp, so a drift between picture and sound is
-        // visible rather than something you have to feel.
-        if let Some(pts) = panel.shown_pts {
-            let mins = (pts / 60.0).floor().max(0.0) as u64;
-            let secs = (pts - mins as f64 * 60.0).max(0.0);
-            painter.text(
-                column.right_bottom() + egui::vec2(-4.0, -2.0),
-                egui::Align2::RIGHT_BOTTOM,
-                format!("{mins}:{secs:05.2}"),
-                label_font,
-                label_col,
-            );
-        }
-        if let VideoPanelStatus::Failed(reason) = &panel.status {
-            let reason = reason.clone();
-            ui.interact(
-                column,
-                egui::Id::new(("editor_video_panel", tab.tab_id)),
-                Sense::hover(),
+
+        let button_rect = egui::Rect::from_min_size(
+            egui::pos2(column.right() - 22.0, column.top() + 2.0),
+            egui::vec2(20.0, 18.0),
+        );
+        let response = ui
+            .push_id(("video_popout_button", tab_id), |ui| {
+                ui.put(button_rect, egui::Button::new("↗").small())
+            })
+            .inner;
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                ui.is_enabled(),
+                "Open video in a separate window",
             )
-            .on_hover_text(reason);
+        });
+        let response = response.on_hover_text("Open video in a separate window");
+        if response.clicked() {
+            panel.popout_requested = true;
         }
 
         column_w + gap
@@ -14314,6 +14367,15 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
         self.plugin_preset_name_input = plugin_preset_name_input;
         if touch_spectro_cache {
             self.touch_spectro_cache(&spec_path);
+        }
+        let popout_requested = self
+            .tabs
+            .get_mut(tab_idx)
+            .and_then(|tab| tab.video_panel.as_mut())
+            .is_some_and(|panel| std::mem::take(&mut panel.popout_requested));
+        if popout_requested {
+            let tab_id = self.tabs[tab_idx].tab_id;
+            self.open_detached_video_for_tab(tab_id, ctx);
         }
         if let Some((secs, playing)) = video_request {
             self.request_video_frame_for_tab(tab_idx, secs, playing);

@@ -2153,10 +2153,17 @@ pub struct VideoPanelState {
     /// The pixel box the panel wants at its current size, written by the draw
     /// and read by the request. Zero until the panel has been laid out once.
     pub wanted_box_px: (u32, u32),
+    /// Pixel box requested by the detached native window. Kept separate from
+    /// the inline box so the editor draw cannot overwrite the larger request
+    /// before the detached viewport gets its turn later in the frame.
+    pub detached_wanted_box_px: (u32, u32),
     /// Bumped on every request. Only one request may be in flight, so a
     /// completed generation is always displayable unless the tab was closed.
     pub generation: u64,
     pub inflight: bool,
+    /// One-frame UI signal consumed by `ui_editor_view` after it releases the
+    /// mutable tab borrow.
+    pub popout_requested: bool,
 }
 
 impl VideoPanelState {
@@ -2170,8 +2177,24 @@ impl VideoPanelState {
             requested_secs: f64::NEG_INFINITY,
             box_px: (0, 0),
             wanted_box_px: (0, 0),
+            detached_wanted_box_px: (0, 0),
             generation: 0,
             inflight: false,
+            popout_requested: false,
+        }
+    }
+
+    /// Decoder target shared by the inline and detached views. The detached
+    /// window wins while open; the same larger texture is downscaled by the
+    /// GPU for the small inline panel.
+    pub fn effective_wanted_box_px(&self) -> (u32, u32) {
+        let inline_area = u64::from(self.wanted_box_px.0) * u64::from(self.wanted_box_px.1);
+        let detached_area =
+            u64::from(self.detached_wanted_box_px.0) * u64::from(self.detached_wanted_box_px.1);
+        if detached_area > inline_area {
+            self.detached_wanted_box_px
+        } else {
+            self.wanted_box_px
         }
     }
 
@@ -2183,9 +2206,6 @@ impl VideoPanelState {
             .filter(|(pts, _)| *pts <= secs)
             .next_back()
             .cloned()
-            // Before the first frame's timestamp nothing is "current" yet;
-            // show the earliest frame rather than an empty panel.
-            .or_else(|| self.ring.front().cloned())
     }
 }
 
@@ -5604,6 +5624,53 @@ mod playback_timeline_tests {
                 assert!((restored_frame - source_frame as i64).abs() <= 1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod video_panel_state_tests {
+    use super::{VideoPanelState, VideoPanelStatus};
+
+    fn panel() -> VideoPanelState {
+        let mut panel = VideoPanelState::new(crate::video::VideoStreamInfo {
+            coded_width: 1920,
+            coded_height: 1080,
+            display_width: 1920,
+            display_height: 1080,
+            rotation: crate::video::Rotation::None,
+            duration_secs: 10.0,
+            nominal_fps: 30.0,
+            codec_label: "test".to_string(),
+            codec: crate::video::VideoCodec::Unknown,
+        });
+        panel.status = VideoPanelStatus::Ready;
+        panel
+    }
+
+    #[test]
+    fn frame_selection_never_returns_a_future_pts() {
+        let mut panel = panel();
+        for pts in [1.0, 1.0 + 1.0 / 30.0, 1.0 + 2.0 / 30.0] {
+            panel.ring.push_back((
+                pts,
+                std::sync::Arc::new(egui::ColorImage::filled([1, 1], egui::Color32::BLACK)),
+            ));
+        }
+        assert!(panel.frame_at(0.999).is_none());
+        assert_eq!(
+            panel.frame_at(1.05).map(|(pts, _)| pts),
+            Some(1.0 + 1.0 / 30.0)
+        );
+    }
+
+    #[test]
+    fn larger_detached_request_wins_without_losing_inline_size() {
+        let mut panel = panel();
+        panel.wanted_box_px = (320, 180);
+        panel.detached_wanted_box_px = (1280, 720);
+        assert_eq!(panel.effective_wanted_box_px(), (1280, 720));
+        panel.detached_wanted_box_px = (0, 0);
+        assert_eq!(panel.effective_wanted_box_px(), (320, 180));
     }
 }
 

@@ -229,7 +229,7 @@ impl WavesPreviewer {
         }
         // The size the panel asked for on its last draw. Zero means the strip
         // is too narrow to show a picture, so nothing needs decoding.
-        let box_px = panel.wanted_box_px;
+        let box_px = panel.effective_wanted_box_px();
         if box_px.0 == 0 || box_px.1 == 0 {
             return;
         }
@@ -269,9 +269,10 @@ impl WavesPreviewer {
 
         if box_changed {
             // Frames were scaled into the old box on the way in; they cannot
-            // be grown back.
+            // be grown back. Keep the current texture and its synchronized
+            // PTS on screen until the replacement arrives, though: opening or
+            // resizing the detached window must not blank a valid picture.
             panel.ring.clear();
-            panel.shown_pts = None;
             panel.box_px = box_px;
         }
         let outside_ring =

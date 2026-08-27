@@ -169,6 +169,7 @@ impl WavesPreviewer {
             video_frame_tx: None,
             video_frame_rx: None,
             video_workers: Vec::new(),
+            detached_video_tab_id: None,
             editor_viewport_tx: None,
             editor_viewport_rx: None,
             editor_viewport_request_tx: None,

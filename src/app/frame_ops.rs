@@ -681,6 +681,7 @@ impl WavesPreviewer {
         self.run_frame_resample_dialog(ctx);
         self.ui_crash_report_window(ctx);
         self.ui_debug_window(ctx);
+        self.ui_detached_video_viewport(ctx);
         self.handle_global_shortcuts(ctx);
         self.handle_clipboard_hotkeys(ctx);
         self.handle_undo_redo_hotkeys(ctx);

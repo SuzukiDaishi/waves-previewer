@@ -641,6 +641,9 @@ pub struct WavesPreviewer {
     video_frame_rx: Option<std::sync::mpsc::Receiver<video_ops::VideoFrameMsg>>,
     /// One entry per open video tab. Dropping a handle stops its worker.
     video_workers: Vec<video_ops::VideoWorkerHandle>,
+    /// At most one native video viewport, fixed to a tab identity rather than
+    /// its movable index. Runtime-only; sessions never persist windows.
+    detached_video_tab_id: Option<u64>,
     /// No window and nobody watching: the headless CLI. Background work whose
     /// only product is something on screen is skipped.
     headless: bool,
@@ -1591,6 +1594,9 @@ impl WavesPreviewer {
         }
         self.cache_dirty_tab_at(idx);
         if let Some(tab_id) = self.tabs.get(idx).map(|t| t.tab_id) {
+            if self.detached_video_tab_id == Some(tab_id) {
+                self.detached_video_tab_id = None;
+            }
             self.stop_video_worker_for_tab_id(tab_id);
         }
         let prev_active = self.active_tab;

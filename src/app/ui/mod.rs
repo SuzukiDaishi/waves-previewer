@@ -22,4 +22,5 @@ pub(super) mod topbar;
 pub(super) mod transcript;
 pub(super) mod transcription_settings;
 pub(super) mod undo_history;
+pub(super) mod video_viewport;
 pub(super) mod zoo;

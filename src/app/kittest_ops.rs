@@ -2757,6 +2757,28 @@ impl super::WavesPreviewer {
         self.tabs.get(idx)?.video_panel.as_ref()?.shown_pts
     }
 
+    pub fn test_detached_video_tab_id(&self) -> Option<u64> {
+        self.detached_video_tab_id
+    }
+
+    pub fn test_video_state_for_tab_id(
+        &self,
+        tab_id: u64,
+    ) -> Option<(Option<f64>, f64, (u32, u32), (u32, u32))> {
+        let panel = self
+            .tabs
+            .iter()
+            .find(|tab| tab.tab_id == tab_id)?
+            .video_panel
+            .as_ref()?;
+        Some((
+            panel.shown_pts,
+            panel.requested_secs,
+            panel.wanted_box_px,
+            panel.detached_wanted_box_px,
+        ))
+    }
+
     pub fn test_active_video_ring_pts(&self) -> Vec<f64> {
         let Some(idx) = self.active_tab else {
             return Vec::new();
