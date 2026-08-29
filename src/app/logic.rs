@@ -763,6 +763,13 @@ impl super::WavesPreviewer {
         if self.audio_bootstrap_rx.is_some() {
             return;
         }
+        // A second Play/Pause action during the short video prebuffer is a
+        // cancellation, exactly like pausing an already-running transport.
+        if self.cancel_pending_video_play_start() {
+            self.audio.stop();
+            self.playback_sync_state_snapshot();
+            return;
+        }
         if self.is_list_workspace_active() {
             if self.list_seek_gesture.is_some() {
                 return;
@@ -885,6 +892,13 @@ impl super::WavesPreviewer {
                 }
                 self.playback_capture_editor_start_display_sample();
                 if self.playback_mode_needs_fx_buffer() && !self.spawn_playback_fx_render(true) {
+                    self.playback_sync_state_snapshot();
+                    return;
+                }
+                if self
+                    .active_tab
+                    .is_some_and(|idx| self.defer_video_play_start_for_tab(idx))
+                {
                     self.playback_sync_state_snapshot();
                     return;
                 }
@@ -1296,7 +1310,6 @@ impl super::WavesPreviewer {
                     time_sig_numerator: tab.time_sig_numerator,
                     time_sig_denominator: tab.time_sig_denominator,
                     extra_selections: tab.extra_selections.clone(),
-                    snap_zero_cross: tab.snap_zero_cross,
                     tool_state: tab.tool_state,
                     active_tool: tab.active_tool,
                     plugin_fx_draft: tab.plugin_fx_draft.clone(),
@@ -1697,7 +1710,6 @@ impl super::WavesPreviewer {
         tab.fade_in_shape = crate::app::types::FadeShape::SCurve;
         tab.fade_out_shape = crate::app::types::FadeShape::SCurve;
         tab.set_leaf_view_mode(crate::app::types::ViewMode::Waveform);
-        tab.snap_zero_cross = true;
         tab.selection_anchor_sample = None;
         tab.right_drag_mode = None;
         tab.active_tool = crate::app::types::ToolKind::LoopEdit;

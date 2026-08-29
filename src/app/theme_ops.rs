@@ -330,18 +330,36 @@ impl WavesPreviewer {
             cfg.db_floor = -120.0;
         }
         cfg.db_floor = cfg.db_floor.clamp(-160.0, -20.0);
+        if !cfg.db_ceiling.is_finite() {
+            cfg.db_ceiling = 0.0;
+        }
+        cfg.db_ceiling = cfg.db_ceiling.clamp(-80.0, 0.0);
+        cfg.db_floor = cfg.db_floor.min(cfg.db_ceiling - 10.0).clamp(-160.0, -20.0);
         if !cfg.max_freq_hz.is_finite() || cfg.max_freq_hz < 0.0 {
             cfg.max_freq_hz = 0.0;
         }
     }
 
-    pub(super) fn apply_spectro_config(&mut self, mut next: SpectrogramConfig) {
+    pub(super) fn apply_spectro_config(&mut self, next: SpectrogramConfig) {
+        self.apply_spectro_config_inner(next, true);
+    }
+
+    fn apply_spectro_config_inner(&mut self, mut next: SpectrogramConfig, persist: bool) {
         Self::normalize_spectro_cfg(&mut next);
         if next == self.spectro_cfg {
             return;
         }
+        let analysis_changed = self.spectro_cfg.fft_size != next.fft_size
+            || self.spectro_cfg.window != next.window
+            || self.spectro_cfg.hop_size != next.hop_size
+            || self.spectro_cfg.max_frames != next.max_frames;
         self.spectro_cfg = next;
-        self.save_prefs();
+        if persist {
+            self.save_prefs();
+        }
+        if !analysis_changed {
+            return;
+        }
         self.cancel_all_spectrograms();
         self.spectro_cache.clear();
         self.spectro_cache_order.clear();
@@ -378,6 +396,12 @@ impl WavesPreviewer {
             } else if let Some(rest) = line.strip_prefix("skip_dotfiles=") {
                 let v = matches!(rest.trim(), "1" | "true" | "yes" | "on");
                 self.skip_dotfiles = v;
+            } else if let Some(rest) = line.strip_prefix("monitor_volume_db=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    if v.is_finite() {
+                        self.volume_db = v.clamp(-80.0, 6.0);
+                    }
+                }
             } else if let Some(rest) = line.strip_prefix("zero_cross_eps=") {
                 if let Ok(v) = rest.trim().parse::<f32>() {
                     if v.is_finite() {
@@ -488,6 +512,10 @@ impl WavesPreviewer {
             } else if let Some(rest) = line.strip_prefix("spectro_db_floor=") {
                 if let Ok(v) = rest.trim().parse::<f32>() {
                     self.spectro_cfg.db_floor = v;
+                }
+            } else if let Some(rest) = line.strip_prefix("spectro_db_ceiling=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    self.spectro_cfg.db_ceiling = v;
                 }
             } else if let Some(rest) = line.strip_prefix("spectro_max_hz=") {
                 if let Ok(v) = rest.trim().parse::<f32>() {
@@ -798,6 +826,7 @@ impl WavesPreviewer {
         self.set_recent_sessions_from_prefs(recent_sessions);
         self.sanitize_transcript_ai_config();
         self.push_blank_threshold_to_meta_pool();
+        self.apply_effective_volume();
     }
 
     pub(super) fn save_prefs(&self) {
@@ -944,6 +973,7 @@ impl WavesPreviewer {
         };
         let mut out = format!(
             "theme={}\nskip_dotfiles={}\n\
+monitor_volume_db={:.2}\n\
 zero_cross_eps={:.6}\n\
 blank_threshold_dbfs={:.1}\n\
 blank_min_ms={:.0}\n\
@@ -961,6 +991,7 @@ spectro_max_frames={}\n\
 spectro_scale={}\n\
 spectro_mel_scale={}\n\
 spectro_db_floor={:.1}\n\
+spectro_db_ceiling={:.1}\n\
 spectro_db_ref={}\n\
 world_f0_method={}\n\
 spectro_max_hz={:.1}\n\
@@ -1014,6 +1045,7 @@ zoo_speed={:.1}\n\
 zoo_flip_manual={}\n",
             theme,
             skip,
+            self.volume_db.clamp(-80.0, 6.0),
             self.zero_cross_epsilon,
             self.blank_threshold_dbfs,
             self.blank_min_ms,
@@ -1031,6 +1063,7 @@ zoo_flip_manual={}\n",
             scale,
             mel_scale,
             self.spectro_cfg.db_floor,
+            self.spectro_cfg.db_ceiling,
             match self.spectro_cfg.db_ref {
                 crate::app::types::SpectrogramDbRef::Absolute => "absolute",
                 crate::app::types::SpectrogramDbRef::MaxNormalized => "max",
@@ -1176,6 +1209,7 @@ zoo_flip_manual={}\n",
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::types::SpectrogramData;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1198,6 +1232,90 @@ mod tests {
 
     fn touch(path: &std::path::Path) {
         std::fs::write(path, "session placeholder").expect("touch session");
+    }
+
+    #[test]
+    fn monitor_volume_prefs_roundtrip_clamps_and_updates_the_engine() {
+        let dir = temp_dir("monitor_volume");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        app.volume_db = -23.75;
+        app.save_prefs_to_path(&prefs);
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert!((loaded.volume_db - -23.75).abs() < 0.001);
+        let linear = loaded
+            .audio
+            .shared
+            .vol
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!((linear - 10.0_f32.powf(-23.75 / 20.0)).abs() < 0.000_01);
+
+        std::fs::write(&prefs, "monitor_volume_db=99\n").expect("write high volume");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(loaded.volume_db, 6.0);
+
+        let mut invalid =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        std::fs::write(&prefs, "monitor_volume_db=NaN\n").expect("write invalid volume");
+        invalid.load_prefs_from_path(&prefs);
+        assert_eq!(invalid.volume_db, 0.0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn spectrogram_color_range_prefs_roundtrip_and_normalize() {
+        let dir = temp_dir("spectro_color_range");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        app.spectro_cfg.db_floor = -96.0;
+        app.spectro_cfg.db_ceiling = -12.0;
+        app.save_prefs_to_path(&prefs);
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(loaded.spectro_cfg.db_floor, -96.0);
+        assert_eq!(loaded.spectro_cfg.db_ceiling, -12.0);
+
+        std::fs::write(&prefs, "spectro_db_floor=-20\nspectro_db_ceiling=-80\n")
+            .expect("write reversed range");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(loaded.spectro_cfg.db_ceiling, -80.0);
+        assert_eq!(loaded.spectro_cfg.db_floor, -90.0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn display_only_spectrogram_changes_keep_analysis_cache() {
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        let path = PathBuf::from("display-only.wav");
+        app.spectro_cache.insert(
+            path.clone(),
+            std::sync::Arc::new(vec![SpectrogramData {
+                frames: 1,
+                bins: 1,
+                frame_step: 1,
+                sample_rate: 48_000,
+                values_db: vec![-40.0],
+                values_max_db: -40.0,
+            }]),
+        );
+        let mut display = app.spectro_cfg.clone();
+        display.db_floor = -90.0;
+        display.db_ceiling = -10.0;
+        app.apply_spectro_config_inner(display, false);
+        assert!(app.spectro_cache.contains_key(&path));
+
+        let mut analysis = app.spectro_cfg.clone();
+        analysis.fft_size *= 2;
+        app.apply_spectro_config_inner(analysis, false);
+        assert!(app.spectro_cache.is_empty());
     }
 
     #[test]

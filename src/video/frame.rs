@@ -200,6 +200,24 @@ pub fn bgra_stride_to_color_image(
     let (dst_w, dst_h) = fit_within(src_w, src_h, box_w, box_h);
     let mut pixels = Vec::with_capacity(dst_w as usize * dst_h as usize);
 
+    // Media Foundation can resize into the requested output type. In that
+    // common playback path there is nothing left to interpolate: walking the
+    // rows once is substantially cheaper than doing four floating-point
+    // samples per colour channel for every pixel.
+    if dst_w == src_w && dst_h == src_h {
+        for y in 0..src_h as usize {
+            let row = &bgra[y * stride..y * stride + src_w as usize * 4];
+            for pixel in row.chunks_exact(4) {
+                pixels.push(egui::Color32::from_rgb(pixel[2], pixel[1], pixel[0]));
+            }
+        }
+        return Some(egui::ColorImage {
+            size: [dst_w as usize, dst_h as usize],
+            pixels,
+            source_size: egui::vec2(dst_w as f32, dst_h as f32),
+        });
+    }
+
     let sample = |x: u32, y: u32, channel: usize| -> f32 {
         bgra[y as usize * stride + x as usize * 4 + channel] as f32
     };
@@ -343,5 +361,17 @@ mod tests {
     fn media_foundation_bgra_scaler_rejects_short_or_invalid_rows() {
         assert!(bgra_stride_to_color_image(&[0; 15], 2, 2, 8, 2, 2).is_none());
         assert!(bgra_stride_to_color_image(&[0; 16], 2, 2, 7, 2, 2).is_none());
+    }
+
+    #[test]
+    fn media_foundation_same_size_path_copies_without_resampling() {
+        let bytes = vec![
+            3, 2, 1, 0, 30, 20, 10, 0, // two BGRX pixels
+            9, 9, 9, 9, // row padding
+        ];
+        let image = bgra_stride_to_color_image(&bytes, 2, 1, 12, 2, 1).expect("BGRA image");
+        assert_eq!(image.size, [2, 1]);
+        assert_eq!(image.pixels[0], egui::Color32::from_rgb(1, 2, 3));
+        assert_eq!(image.pixels[1], egui::Color32::from_rgb(10, 20, 30));
     }
 }

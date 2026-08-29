@@ -90,6 +90,34 @@ pub struct AggregatedWaveColumn {
     pub stroke: f32,
 }
 
+/// Join two adjacent min/max columns at their nearest (or overlapping) point.
+///
+/// A min/max waveform is an envelope sampled once per device pixel. Drawing
+/// only the independent vertical spans makes a sloped signal look dashed as
+/// soon as the editor leaves raw-sample mode. This one-pixel bridge preserves
+/// the envelope while keeping the trace visually continuous across LOD and
+/// zoom changes.
+fn waveform_column_bridge(previous: (f32, f32, f32), current: (f32, f32, f32)) -> [egui::Pos2; 2] {
+    let (previous_x, previous_top, previous_bottom) = previous;
+    let (current_x, current_top, current_bottom) = current;
+    let overlap_top = previous_top.max(current_top);
+    let overlap_bottom = previous_bottom.min(current_bottom);
+    if overlap_top <= overlap_bottom {
+        let y = (overlap_top + overlap_bottom) * 0.5;
+        [egui::pos2(previous_x, y), egui::pos2(current_x, y)]
+    } else if previous_bottom < current_top {
+        [
+            egui::pos2(previous_x, previous_bottom),
+            egui::pos2(current_x, current_top),
+        ]
+    } else {
+        [
+            egui::pos2(previous_x, previous_top),
+            egui::pos2(current_x, current_bottom),
+        ]
+    }
+}
+
 pub fn compute_waveform_device_columns(
     span_rect: Rect,
     pixels_per_point: f32,
@@ -121,12 +149,15 @@ pub fn draw_aggregated_waveform_columns<F>(
     }
     let max_count = column_count.min(columns.column_count().saturating_sub(start_column));
     let min_bar_height = columns.min_bar_height_pt();
+    let mut previous_span: Option<(f32, f32, f32)> = None;
     for local_idx in 0..max_count {
         let Some(column) = column_at(local_idx) else {
+            previous_span = None;
             continue;
         };
         let x = columns.x_center_pt(start_column + local_idx);
         if !x.is_finite() || !column.min.is_finite() || !column.max.is_finite() {
+            previous_span = None;
             continue;
         }
         let mut y0 =
@@ -134,6 +165,7 @@ pub fn draw_aggregated_waveform_columns<F>(
         let mut y1 =
             waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, column.min);
         if !y0.is_finite() || !y1.is_finite() {
+            previous_span = None;
             continue;
         }
         if (y1 - y0).abs() < min_bar_height {
@@ -142,10 +174,19 @@ pub fn draw_aggregated_waveform_columns<F>(
             y0 = mid - half;
             y1 = mid + half;
         }
+        let top = y0.min(y1);
+        let bottom = y0.max(y1);
+        if let Some(previous) = previous_span {
+            painter.line_segment(
+                waveform_column_bridge(previous, (x, top, bottom)),
+                egui::Stroke::new(column.stroke, column.color),
+            );
+        }
         painter.line_segment(
-            [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
+            [egui::pos2(x, top), egui::pos2(x, bottom)],
             egui::Stroke::new(column.stroke, column.color),
         );
+        previous_span = Some((x, top, bottom));
     }
 }
 
@@ -374,7 +415,7 @@ pub fn draw_bins_in_rect(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_waveform_device_columns, WaveformDeviceColumns};
+    use super::{compute_waveform_device_columns, waveform_column_bridge, WaveformDeviceColumns};
     use egui::{pos2, vec2, Rect};
 
     fn assert_monotonic_columns(columns: WaveformDeviceColumns, rect: Rect, ppp: f32) {
@@ -419,5 +460,20 @@ mod tests {
             let expected = ((rect.width() * ppp).round()).max(1.0) as usize;
             assert_eq!(columns.column_count(), expected);
         }
+    }
+
+    #[test]
+    fn waveform_bridge_uses_the_overlap_between_neighbor_columns() {
+        let bridge = waveform_column_bridge((10.0, 20.0, 40.0), (11.0, 30.0, 50.0));
+        assert_eq!(bridge, [pos2(10.0, 35.0), pos2(11.0, 35.0)]);
+    }
+
+    #[test]
+    fn waveform_bridge_joins_nearest_edges_when_neighbor_columns_are_disjoint() {
+        let falling = waveform_column_bridge((10.0, 20.0, 30.0), (11.0, 40.0, 50.0));
+        assert_eq!(falling, [pos2(10.0, 30.0), pos2(11.0, 40.0)]);
+
+        let rising = waveform_column_bridge((10.0, 40.0, 50.0), (11.0, 20.0, 30.0));
+        assert_eq!(rising, [pos2(10.0, 40.0), pos2(11.0, 30.0)]);
     }
 }

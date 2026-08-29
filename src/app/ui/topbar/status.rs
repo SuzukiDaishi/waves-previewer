@@ -844,6 +844,12 @@ impl WavesPreviewer {
         if changed {
             self.apply_effective_volume();
         }
+        // Positional drags update the monitor continuously, but only persist
+        // the final value. Discrete clicks and keyboard steps commit in the
+        // same frame.
+        if response.drag_stopped() || (changed && !response.dragged()) {
+            self.save_prefs();
+        }
 
         let painter = ui.painter_at(rect);
         let palette = self.palette();

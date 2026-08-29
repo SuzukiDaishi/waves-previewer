@@ -220,7 +220,7 @@ impl PeakPyramid {
         start: usize,
         end: usize,
         width_px: usize,
-        spp: f32,
+        _spp: f32,
         out: &mut Vec<Peak>,
     ) {
         out.clear();
@@ -233,7 +233,12 @@ impl PeakPyramid {
             return;
         }
         let visible_len = end.saturating_sub(start);
-        let level = self.pick_level(spp);
+        // The output is one peak per device column. On a scaled display (or a
+        // coarse background pass) logical samples-per-point is not the actual
+        // density of this buffer, so choose the pyramid level from the real
+        // samples represented by each output column.
+        let samples_per_column = visible_len as f32 / width_px as f32;
+        let level = self.pick_level(samples_per_column);
         let bin_samples = level.bin_samples.max(1);
         out.reserve(width_px);
         for x in 0..width_px {
@@ -562,6 +567,32 @@ mod tests {
                 b
             );
         }
+    }
+
+    #[test]
+    fn query_columns_selects_lod_from_actual_output_column_density() {
+        let samples: Vec<f32> = (0..1024).map(|i| i as f32).collect();
+        let pyramid = PeakPyramid::from_samples(&samples, 64);
+        let mut peaks = Vec::new();
+        // The caller's logical spp can differ from the output buffer on HiDPI
+        // and coarse passes. Eight columns across 1024 samples are 128 spp,
+        // so this must use 128-sample bins rather than the supplied 512 spp.
+        pyramid.query_columns(0, 1024, 8, 512.0, &mut peaks);
+        assert_eq!(peaks.len(), 8);
+        assert_eq!(
+            peaks[0],
+            Peak {
+                min: 0.0,
+                max: 127.0
+            }
+        );
+        assert_eq!(
+            peaks[1],
+            Peak {
+                min: 128.0,
+                max: 255.0
+            }
+        );
     }
 
     #[test]

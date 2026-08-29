@@ -2410,17 +2410,6 @@ impl super::WavesPreviewer {
             .unwrap_or_default()
     }
 
-    pub fn test_set_zero_cross_snap(&mut self, on: bool) -> bool {
-        let Some(tab_idx) = self.active_tab else {
-            return false;
-        };
-        let Some(tab) = self.tabs.get_mut(tab_idx) else {
-            return false;
-        };
-        tab.snap_zero_cross = on;
-        true
-    }
-
     pub fn test_loop_region(&self) -> Option<(usize, usize)> {
         let Some(tab_idx) = self.active_tab else {
             return None;
@@ -2759,6 +2748,29 @@ impl super::WavesPreviewer {
 
     pub fn test_detached_video_tab_id(&self) -> Option<u64> {
         self.detached_video_tab_id
+    }
+
+    pub fn test_video_play_start_pending(&self) -> bool {
+        self.video_play_start_pending()
+    }
+
+    pub fn test_clear_active_video_buffer(&mut self) -> bool {
+        let Some(idx) = self.active_tab else {
+            return false;
+        };
+        let Some(panel) = self
+            .tabs
+            .get_mut(idx)
+            .and_then(|tab| tab.video_panel.as_mut())
+        else {
+            return false;
+        };
+        panel.generation = panel.generation.wrapping_add(1).max(1);
+        panel.inflight = false;
+        panel.ring.clear();
+        panel.texture = None;
+        panel.shown_pts = None;
+        true
     }
 
     pub fn test_video_state_for_tab_id(
@@ -3634,6 +3646,15 @@ impl super::WavesPreviewer {
         self.debug_summary()
     }
 
+    pub fn test_set_debug_window_open(&mut self, open: bool) {
+        self.debug.cfg.enabled = true;
+        self.debug.show_window = open;
+    }
+
+    pub fn test_frame_profiler_sample_count(&self) -> usize {
+        self.debug.frame_profiler.samples().len()
+    }
+
     pub fn test_crash_report_window_open(&self) -> bool {
         self.crash_reports.window_open
     }
@@ -3851,6 +3872,26 @@ impl super::WavesPreviewer {
 
     pub fn test_spectro_overlap(&self) -> f32 {
         self.spectro_cfg.overlap
+    }
+
+    pub fn test_spectro_color_range(&self) -> (f32, f32) {
+        (self.spectro_cfg.db_floor, self.spectro_cfg.db_ceiling)
+    }
+
+    pub fn test_set_spectro_color_range(&mut self, floor: f32, ceiling: f32) {
+        let mut next = self.spectro_cfg.clone();
+        next.db_floor = floor;
+        next.db_ceiling = ceiling;
+        self.apply_spectro_config(next);
+    }
+
+    pub fn test_nearest_zero_cross(&self, sample: usize) -> Option<usize> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        Some(super::ui::editor::zc_snap_nearest(
+            &tab.ch_samples,
+            self.zero_cross_epsilon,
+            sample,
+        ))
     }
 
     pub fn test_set_mock_transcript_model_download_progress(&mut self, done: usize, total: usize) {

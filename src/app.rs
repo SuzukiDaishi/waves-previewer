@@ -54,6 +54,7 @@ mod external_ops;
 pub mod fingerprint;
 mod frame_budget;
 mod frame_ops;
+mod frame_profiler;
 mod gain_ops;
 mod helpers;
 mod hf_cache;
@@ -378,6 +379,16 @@ struct PendingEditorPlaybackHandoff {
     desired_playing: bool,
 }
 
+/// A short, runtime-only gate between an editor-video Play request and the
+/// audio callback. It never delays audio by more than 150 ms and exists only
+/// to let the target picture plus a small read-ahead land before source time
+/// begins advancing.
+struct PendingVideoPlayStart {
+    tab_id: u64,
+    target_secs: f64,
+    deadline: std::time::Instant,
+}
+
 #[derive(Clone, Debug)]
 struct PlaybackSessionState {
     source: PlaybackSourceKind,
@@ -644,6 +655,7 @@ pub struct WavesPreviewer {
     /// At most one native video viewport, fixed to a tab identity rather than
     /// its movable index. Runtime-only; sessions never persist windows.
     detached_video_tab_id: Option<u64>,
+    pending_video_play_start: Option<PendingVideoPlayStart>,
     /// No window and nobody watching: the headless CLI. Background work whose
     /// only product is something on screen is skipped.
     headless: bool,
@@ -1594,6 +1606,13 @@ impl WavesPreviewer {
         }
         self.cache_dirty_tab_at(idx);
         if let Some(tab_id) = self.tabs.get(idx).map(|t| t.tab_id) {
+            if self
+                .pending_video_play_start
+                .as_ref()
+                .is_some_and(|pending| pending.tab_id == tab_id)
+            {
+                self.pending_video_play_start = None;
+            }
             if self.detached_video_tab_id == Some(tab_id) {
                 self.detached_video_tab_id = None;
             }
@@ -2872,7 +2891,6 @@ impl WavesPreviewer {
             fade_in_shape: tab.fade_in_shape,
             fade_out_shape: tab.fade_out_shape,
             loop_mode: tab.loop_mode,
-            snap_zero_cross: tab.snap_zero_cross,
             tool_state: tab.tool_state,
             active_tool: tab.active_tool,
             plugin_fx_draft: tab.plugin_fx_draft.clone(),
@@ -2981,7 +2999,6 @@ impl WavesPreviewer {
             tab.fade_in_shape = state.fade_in_shape;
             tab.fade_out_shape = state.fade_out_shape;
             tab.loop_mode = state.loop_mode;
-            tab.snap_zero_cross = state.snap_zero_cross;
             tab.tool_state = state.tool_state;
             tab.active_tool = state.active_tool;
             tab.plugin_fx_draft = state.plugin_fx_draft;

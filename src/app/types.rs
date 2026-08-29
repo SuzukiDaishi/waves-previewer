@@ -1115,7 +1115,8 @@ pub struct SpectrogramConfig {
     pub max_frames: usize,
     pub scale: SpectrogramScale,
     pub mel_scale: SpectrogramScale,
-    pub db_floor: f32, // negative dB relative to `db_ref`
+    pub db_floor: f32,   // negative dB relative to `db_ref`
+    pub db_ceiling: f32, // upper color limit relative to `db_ref`
     pub db_ref: SpectrogramDbRef,
     pub max_freq_hz: f32, // 0 = Nyquist
     pub show_note_labels: bool,
@@ -1132,6 +1133,7 @@ impl Default for SpectrogramConfig {
             scale: SpectrogramScale::Linear,
             mel_scale: SpectrogramScale::Linear,
             db_floor: -120.0,
+            db_ceiling: 0.0,
             db_ref: SpectrogramDbRef::Absolute,
             max_freq_hz: 0.0,
             show_note_labels: false,
@@ -2148,8 +2150,15 @@ pub struct VideoPanelState {
     pub shown_pts: Option<f64>,
     /// The source time the worker was last asked for.
     pub requested_secs: f64,
+    /// Audio-clock target observed on the previous UI request. Unlike
+    /// `requested_secs`, this never points into read-ahead and can therefore
+    /// distinguish a real backwards seek from ordinary prefetch.
+    pub last_target_secs: f64,
     /// The pixel box the frames in `ring` were scaled into.
     pub box_px: (u32, u32),
+    /// Actual uncompressed size reported by the decoder for the current
+    /// generation. It can differ when a native resize is unavailable.
+    pub output_px: (u32, u32),
     /// The pixel box the panel wants at its current size, written by the draw
     /// and read by the request. Zero until the panel has been laid out once.
     pub wanted_box_px: (u32, u32),
@@ -2157,10 +2166,27 @@ pub struct VideoPanelState {
     /// the inline box so the editor draw cannot overwrite the larger request
     /// before the detached viewport gets its turn later in the frame.
     pub detached_wanted_box_px: (u32, u32),
-    /// Bumped on every request. Only one request may be in flight, so a
-    /// completed generation is always displayable unless the tab was closed.
+    /// Raw effective box most recently observed and the time it stopped
+    /// changing. Native output is not reconfigured until a resize is stable.
+    pub observed_wanted_box_px: (u32, u32),
+    pub stable_wanted_box_px: (u32, u32),
+    pub wanted_box_changed_at: std::time::Instant,
+    /// Adaptive long-edge candidate: 640, 960, 1280 or 1920 pixels.
+    pub quality_level: usize,
+    pub quality_changed_at: std::time::Instant,
+    pub quality_stable_since: std::time::Instant,
+    pub underrun_times: std::collections::VecDeque<std::time::Instant>,
+    pub underrun_active: bool,
+    /// Bumped on every request. Only chunks for the newest generation are
+    /// accepted; a seek or catch-up can supersede an older worker batch.
     pub generation: u64,
     pub inflight: bool,
+    /// Exponential moving average of worker milliseconds per decoded frame.
+    pub decode_ms_ema: f32,
+    pub decode_timing_samples: u32,
+    /// True only for a backwards/discontinuous seek whose old texture lies in
+    /// the future relative to the new audio clock.
+    pub seeking: bool,
     /// One-frame UI signal consumed by `ui_editor_view` after it releases the
     /// mutable tab borrow.
     pub popout_requested: bool,
@@ -2168,6 +2194,7 @@ pub struct VideoPanelState {
 
 impl VideoPanelState {
     pub fn new(info: crate::video::VideoStreamInfo) -> Self {
+        let now = std::time::Instant::now();
         Self {
             info,
             status: VideoPanelStatus::Probing,
@@ -2175,11 +2202,24 @@ impl VideoPanelState {
             texture: None,
             shown_pts: None,
             requested_secs: f64::NEG_INFINITY,
+            last_target_secs: f64::NEG_INFINITY,
             box_px: (0, 0),
+            output_px: (0, 0),
             wanted_box_px: (0, 0),
             detached_wanted_box_px: (0, 0),
+            observed_wanted_box_px: (0, 0),
+            stable_wanted_box_px: (0, 0),
+            wanted_box_changed_at: now,
+            quality_level: 1,
+            quality_changed_at: now,
+            quality_stable_since: now,
+            underrun_times: std::collections::VecDeque::new(),
+            underrun_active: false,
             generation: 0,
             inflight: false,
+            decode_ms_ema: 0.0,
+            decode_timing_samples: 0,
+            seeking: false,
             popout_requested: false,
         }
     }
@@ -2206,6 +2246,13 @@ impl VideoPanelState {
             .filter(|(pts, _)| *pts <= secs)
             .next_back()
             .cloned()
+    }
+
+    pub fn ring_bytes(&self) -> usize {
+        self.ring
+            .iter()
+            .map(|(_, image)| image.pixels.len().saturating_mul(4))
+            .sum()
     }
 }
 
@@ -2482,7 +2529,6 @@ pub struct EditorTab {
     pub time_sig_numerator: u8,      // time signature numerator (e.g. 4)
     pub time_sig_denominator: u8,    // time signature denominator (e.g. 4)
     pub seek_hold: Option<SeekHoldState>, // key repeat state for seek
-    pub snap_zero_cross: bool,       // enable zero-cross snapping
     pub selection_anchor_sample: Option<usize>, // shared Shift/click/drag anchor
     pub right_drag_mode: Option<RightDragMode>, // transient mode while secondary drag
     pub active_tool: ToolKind,       // current editing tool
@@ -2798,7 +2844,6 @@ impl EditorTab {
             time_sig_numerator: 4,
             time_sig_denominator: 4,
             seek_hold: None,
-            snap_zero_cross: true,
             selection_anchor_sample: None,
             right_drag_mode: None,
             active_tool: crate::app::types::ToolKind::LoopEdit,
@@ -3445,7 +3490,6 @@ pub struct EditorUndoState {
     pub fade_in_shape: FadeShape,
     pub fade_out_shape: FadeShape,
     pub loop_mode: LoopMode,
-    pub snap_zero_cross: bool,
     pub tool_state: ToolState,
     pub active_tool: ToolKind,
     pub plugin_fx_draft: PluginFxDraft,
@@ -3495,7 +3539,6 @@ pub struct CachedEdit {
     pub time_sig_numerator: u8,
     pub time_sig_denominator: u8,
     pub extra_selections: Vec<(usize, usize)>,
-    pub snap_zero_cross: bool,
     pub tool_state: ToolState,
     pub active_tool: ToolKind,
     pub plugin_fx_draft: PluginFxDraft,
@@ -5088,6 +5131,7 @@ impl Default for DebugConfig {
 pub struct DebugState {
     pub cfg: DebugConfig,
     pub show_window: bool,
+    pub frame_profiler: crate::app::frame_profiler::FrameProfiler,
     pub logs: VecDeque<String>,
     pub input_trace: VecDeque<String>,
     pub input_trace_enabled: bool,
@@ -5205,6 +5249,7 @@ impl DebugState {
         Self {
             cfg,
             show_window: show,
+            frame_profiler: crate::app::frame_profiler::FrameProfiler::default(),
             logs: VecDeque::new(),
             input_trace: VecDeque::new(),
             input_trace_enabled,

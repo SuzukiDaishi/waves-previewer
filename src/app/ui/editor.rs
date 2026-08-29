@@ -26,6 +26,19 @@ enum WaveformRenderLod {
     Pyramid,
 }
 
+fn waveform_render_lod(
+    samples_per_device_column: f32,
+    pyramid_base_samples: f32,
+) -> WaveformRenderLod {
+    if samples_per_device_column < 2.0 {
+        WaveformRenderLod::Raw
+    } else if samples_per_device_column < pyramid_base_samples.max(1.0) {
+        WaveformRenderLod::VisibleMinMax
+    } else {
+        WaveformRenderLod::Pyramid
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AmplitudeNavDragKind {
     MoveCenter,
@@ -37,6 +50,18 @@ struct AmplitudeNavDragState {
     kind: AmplitudeNavDragKind,
     pointer_amp_offset: f32,
     fixed_center: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpectroColorRangeHandle {
+    Ceiling,
+    Floor,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SpectroColorRangeEdit {
+    changed: bool,
+    committed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -274,7 +299,7 @@ fn selection_stretch_rate(source_len: usize, target_len: usize) -> f32 {
 
 /// Find the nearest zero crossing (in either direction, max 48001 samples) using mixdown.
 /// Used for Alt+drag snapping without holding a `&self` borrow.
-fn zc_snap_nearest(ch_samples: &[Vec<f32>], eps: f32, cur: usize) -> usize {
+pub(in crate::app) fn zc_snap_nearest(ch_samples: &[Vec<f32>], eps: f32, cur: usize) -> usize {
     let ch_count = ch_samples.len();
     if ch_count == 0 {
         return cur;
@@ -576,8 +601,7 @@ impl crate::app::WavesPreviewer {
     /// Markers win over zero crossings, which is the order that matters when
     /// both are in reach: a marker is a place the user put deliberately, a zero
     /// crossing is one the signal happens to offer. Zero crossings only apply
-    /// when the tab's own Zero Cross Snap is on — the `R` key has advertised
-    /// that setting since before anything on the canvas read it.
+    /// while Alt is held; an ordinary drag remains sample-accurate.
     ///
     /// A snapped edge takes the marker's own sample index. Rounding back
     /// through the pixel it was drawn at would leave the loop a sample or two
@@ -589,6 +613,7 @@ impl crate::app::WavesPreviewer {
         tab: &EditorTab,
         geom: &EditorDisplayGeometry,
         zero_cross_epsilon: f32,
+        snap_to_zero_cross: bool,
         x: f32,
     ) -> usize {
         let mut nearest: Option<(f32, usize)> = None;
@@ -605,7 +630,7 @@ impl crate::app::WavesPreviewer {
             return sample;
         }
         let raw = geom.x_to_display_sample(x);
-        if tab.snap_zero_cross {
+        if snap_to_zero_cross {
             return zc_snap_nearest(&tab.ch_samples, zero_cross_epsilon, raw);
         }
         raw
@@ -1640,6 +1665,248 @@ impl crate::app::WavesPreviewer {
         changed.then_some((next_zoom, next_center))
     }
 
+    fn spectro_color_range_y(rect: egui::Rect, db: f32) -> f32 {
+        rect.top() + ((0.0 - db.clamp(-160.0, 0.0)) / 160.0) * rect.height()
+    }
+
+    fn spectro_color_range_db(rect: egui::Rect, y: f32) -> f32 {
+        let t = ((y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0);
+        -160.0 * t
+    }
+
+    fn set_spectro_color_range_handle(
+        cfg: &mut SpectrogramConfig,
+        handle: SpectroColorRangeHandle,
+        db: f32,
+    ) {
+        match handle {
+            SpectroColorRangeHandle::Ceiling => {
+                cfg.db_ceiling = db
+                    .clamp((cfg.db_floor + 10.0).max(-80.0), 0.0)
+                    .clamp(-80.0, 0.0);
+            }
+            SpectroColorRangeHandle::Floor => {
+                cfg.db_floor = db
+                    .clamp(-160.0, (cfg.db_ceiling - 10.0).min(-20.0))
+                    .clamp(-160.0, -20.0);
+            }
+        }
+    }
+
+    fn draw_editor_spectro_color_range(
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        cfg: &mut SpectrogramConfig,
+    ) -> SpectroColorRangeEdit {
+        let before = (cfg.db_floor, cfg.db_ceiling);
+        let response = ui.interact(
+            rect,
+            ui.id().with("editor_spectro_color_range"),
+            Sense::click_and_drag(),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Slider,
+                ui.is_enabled(),
+                "Spectrogram color range",
+            )
+        });
+        let response = response.on_hover_text(format!(
+            "Spectrogram color range: {:.0} to {:.0} {}\nDrag either handle; double-click to reset.",
+            cfg.db_floor,
+            cfg.db_ceiling,
+            match cfg.db_ref {
+                SpectrogramDbRef::Absolute => "dBFS",
+                SpectrogramDbRef::MaxNormalized => "dB relative to max",
+            }
+        ));
+        let drag_id = response.id.with("drag_handle");
+        let selected_id = response.id.with("selected_handle");
+        let last_click_id = response.id.with("last_click");
+        let mut active_handle = ui
+            .ctx()
+            .memory(|mem| mem.data.get_temp::<SpectroColorRangeHandle>(drag_id));
+        let mut committed = false;
+
+        let (press_pos, input_time) = ui.input(|i| {
+            let press_pos = i.events.iter().find_map(|event| match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    ..
+                } if rect.contains(*pos) => Some(*pos),
+                _ => None,
+            });
+            (press_pos, i.time)
+        });
+        let mut repeated_click = false;
+        if let Some(pos) = press_pos {
+            repeated_click = ui.ctx().memory(|mem| {
+                mem.data
+                    .get_temp::<(f64, egui::Pos2)>(last_click_id)
+                    .is_some_and(|(previous_time, previous_pos)| {
+                        input_time - previous_time <= 0.8 && previous_pos.distance(pos) <= 6.0
+                    })
+            });
+            ui.ctx().memory_mut(|mem| {
+                mem.data.insert_temp(last_click_id, (input_time, pos));
+            });
+            response.request_focus();
+            let ceiling_y = Self::spectro_color_range_y(rect, cfg.db_ceiling);
+            let floor_y = Self::spectro_color_range_y(rect, cfg.db_floor);
+            let handle = if (pos.y - ceiling_y).abs() <= (pos.y - floor_y).abs() {
+                SpectroColorRangeHandle::Ceiling
+            } else {
+                SpectroColorRangeHandle::Floor
+            };
+            active_handle = Some(handle);
+            ui.ctx().memory_mut(|mem| {
+                mem.data.insert_temp(drag_id, handle);
+                mem.data.insert_temp(selected_id, handle);
+            });
+            Self::set_spectro_color_range_handle(
+                cfg,
+                handle,
+                Self::spectro_color_range_db(rect, pos.y),
+            );
+        }
+
+        if response.dragged() {
+            if let (Some(handle), Some(pos)) = (active_handle, response.interact_pointer_pos()) {
+                Self::set_spectro_color_range_handle(
+                    cfg,
+                    handle,
+                    Self::spectro_color_range_db(rect, pos.y),
+                );
+            }
+        }
+
+        if response.double_clicked() || repeated_click {
+            cfg.db_floor = -120.0;
+            cfg.db_ceiling = 0.0;
+            committed = true;
+            ui.ctx().memory_mut(|mem| {
+                mem.data.remove::<SpectroColorRangeHandle>(drag_id);
+            });
+        }
+
+        if response.has_focus() {
+            let up = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+            let down = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+            if up || down {
+                let handle = ui
+                    .ctx()
+                    .memory(|mem| mem.data.get_temp::<SpectroColorRangeHandle>(selected_id))
+                    .unwrap_or(SpectroColorRangeHandle::Ceiling);
+                let current = match handle {
+                    SpectroColorRangeHandle::Ceiling => cfg.db_ceiling,
+                    SpectroColorRangeHandle::Floor => cfg.db_floor,
+                };
+                Self::set_spectro_color_range_handle(
+                    cfg,
+                    handle,
+                    current + if up { 1.0 } else { -1.0 },
+                );
+                committed = true;
+            }
+        }
+
+        if response.drag_stopped() {
+            committed = true;
+            ui.ctx().memory_mut(|mem| {
+                mem.data.remove::<SpectroColorRangeHandle>(drag_id);
+            });
+        } else if response.clicked() {
+            committed = true;
+        }
+
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, Color32::from_rgb(13, 15, 19));
+        painter.rect_stroke(
+            rect,
+            4.0,
+            Stroke::new(1.0, Color32::from_rgb(46, 54, 66)),
+            egui::StrokeKind::Inside,
+        );
+        let gradient_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 3.0, rect.top() + 3.0),
+            egui::pos2(rect.left() + 12.0, rect.bottom() - 3.0),
+        );
+        const GRADIENT_STEPS: usize = 64;
+        for step in 0..GRADIENT_STEPS {
+            let y0 =
+                gradient_rect.top() + gradient_rect.height() * step as f32 / GRADIENT_STEPS as f32;
+            let y1 = gradient_rect.top()
+                + gradient_rect.height() * (step + 1) as f32 / GRADIENT_STEPS as f32;
+            let brightness = 1.0 - (step as f32 + 0.5) / GRADIENT_STEPS as f32;
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(gradient_rect.left(), y0),
+                    egui::pos2(gradient_rect.right(), y1 + 1.0),
+                ),
+                0.0,
+                db_to_color(-80.0 + brightness * 80.0),
+            );
+        }
+        let ceiling_y = Self::spectro_color_range_y(rect, cfg.db_ceiling);
+        let floor_y = Self::spectro_color_range_y(rect, cfg.db_floor);
+        if ceiling_y > rect.top() {
+            painter.rect_filled(
+                egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), ceiling_y)),
+                0.0,
+                Color32::from_black_alpha(150),
+            );
+        }
+        if floor_y < rect.bottom() {
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(rect.left(), floor_y), rect.max),
+                0.0,
+                Color32::from_black_alpha(150),
+            );
+        }
+        let tick_font = FontId::monospace(8.0);
+        for db in (0..=160).step_by(20) {
+            let value = if db == 0 { 0.0 } else { -(db as f32) };
+            let y = Self::spectro_color_range_y(rect, value);
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left() + 12.0, y),
+                    egui::pos2(rect.left() + 15.0, y),
+                ],
+                Stroke::new(1.0, Color32::from_rgb(112, 122, 138)),
+            );
+            painter.text(
+                egui::pos2(rect.left() + 17.0, y),
+                egui::Align2::LEFT_CENTER,
+                format!("{value:.0}"),
+                tick_font.clone(),
+                Color32::from_rgb(154, 164, 180),
+            );
+        }
+        for (y, color) in [
+            (ceiling_y, Color32::from_rgb(245, 245, 250)),
+            (floor_y, Color32::from_rgb(92, 188, 255)),
+        ] {
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left() + 1.0, y),
+                    egui::pos2(rect.right() - 1.0, y),
+                ],
+                Stroke::new(2.0, color),
+            );
+            painter.circle_filled(egui::pos2(rect.left() + 8.0, y), 3.0, color);
+        }
+        if response.hovered() || active_handle.is_some() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeVertical);
+        }
+
+        SpectroColorRangeEdit {
+            changed: before != (cfg.db_floor, cfg.db_ceiling),
+            committed,
+        }
+    }
+
     /// Seam-continuity check: the tail running into the loop end and the
     /// head starting at the loop start drawn as ONE continuous trace, joined
     /// at the jump. A smooth line across the center means the loop connects;
@@ -1896,7 +2163,11 @@ impl crate::app::WavesPreviewer {
         if !drawn {
             let (message, color) = match &panel.status {
                 VideoPanelStatus::Probing | VideoPanelStatus::Ready => {
-                    ("decoding...".to_string(), label_col)
+                    if panel.seeking {
+                        ("seeking...".to_string(), label_col)
+                    } else {
+                        ("decoding...".to_string(), label_col)
+                    }
                 }
                 VideoPanelStatus::Unsupported(codec) => (
                     format!("no preview ({codec})"),
@@ -2930,13 +3201,13 @@ impl crate::app::WavesPreviewer {
             &mut scratch.line_points,
         );
         let bins = waveform_columns.column_count().max(1);
-        let mut lod = if spp < 2.0 {
-            WaveformRenderLod::Raw
-        } else if spp < 32.0 {
-            WaveformRenderLod::VisibleMinMax
-        } else {
-            WaveformRenderLod::Pyramid
-        };
+        let samples_per_column = visible_len as f32 / bins as f32;
+        let pyramid_base_samples = tab
+            .waveform_pyramid
+            .as_ref()
+            .map(|set| set.base_bin_samples.max(1) as f32)
+            .unwrap_or(f32::INFINITY);
+        let mut lod = waveform_render_lod(samples_per_column, pyramid_base_samples);
 
         let query_started = std::time::Instant::now();
         peaks.clear();
@@ -3146,6 +3417,7 @@ impl crate::app::WavesPreviewer {
         }
         let editor_panel_rect = ui.max_rect();
         let mut apply_pending_loop = false;
+        let mut save_spectro_color_range = false;
         // Double-clicking a loop handle zooms in around that point. Deferred
         // because the zoom helpers take `&mut self` and the pointer block runs
         // with the tab already borrowed.
@@ -4070,11 +4342,21 @@ impl crate::app::WavesPreviewer {
                         view_mode,
                         ViewMode::Waveform | ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel
                     );
+                    let show_spectro_color_range = matches!(
+                        view_mode,
+                        ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel
+                    );
                     let amplitude_nav_gap = if show_amplitude_navigator { 6.0 } else { 0.0 };
                     let amplitude_nav_right_pad = if show_amplitude_navigator { 6.0 } else { 0.0 };
                     let amplitude_nav_strip_w = if show_amplitude_navigator { 18.0 } else { 0.0 };
+                    let spectro_color_range_gap = if show_spectro_color_range { 6.0 } else { 0.0 };
+                    let spectro_color_range_w = if show_spectro_color_range { 44.0 } else { 0.0 };
                     let amplitude_nav_reserved_w =
-                        amplitude_nav_gap + amplitude_nav_right_pad + amplitude_nav_strip_w;
+                        amplitude_nav_gap
+                            + amplitude_nav_right_pad
+                            + amplitude_nav_strip_w
+                            + spectro_color_range_gap
+                            + spectro_color_range_w;
                     let wave_left = rect.left() + gutter_w;
                     let wave_w = (w - gutter_w - amplitude_nav_reserved_w).max(1.0);
                     let amplitude_nav_rect = if show_amplitude_navigator {
@@ -4082,6 +4364,24 @@ impl crate::app::WavesPreviewer {
                             egui::pos2(rect.right() - amplitude_nav_right_pad - amplitude_nav_strip_w, rect.top() + 10.0),
                             egui::pos2(rect.right() - amplitude_nav_right_pad, rect.bottom() - 10.0),
                         ))
+                    } else {
+                        None
+                    };
+                    let spectro_color_range_rect = if show_spectro_color_range {
+                        amplitude_nav_rect.map(|amp_rect| {
+                            egui::Rect::from_min_max(
+                                egui::pos2(
+                                    amp_rect.left()
+                                        - spectro_color_range_gap
+                                        - spectro_color_range_w,
+                                    rect.top() + 10.0,
+                                ),
+                                egui::pos2(
+                                    amp_rect.left() - spectro_color_range_gap,
+                                    rect.bottom() - 10.0,
+                                ),
+                            )
+                        })
                     } else {
                         None
                     };
@@ -5040,6 +5340,9 @@ impl crate::app::WavesPreviewer {
                 rect.contains(p)
                     && amplitude_nav_rect
                         .map(|amp_rect| !amp_rect.contains(p))
+                        .unwrap_or(true)
+                    && spectro_color_range_rect
+                        .map(|range_rect| !range_rect.contains(p))
                         .unwrap_or(true)
             });
             if pointer_over_waveform {
@@ -6305,6 +6608,7 @@ impl crate::app::WavesPreviewer {
                                         tab,
                                         &geom,
                                         self.zero_cross_epsilon,
+                                        alt_now,
                                         pos.x,
                                     );
                                     match marker {
@@ -8668,6 +8972,18 @@ impl crate::app::WavesPreviewer {
                         tab.vertical_view_center,
                     ));
                 }
+            }
+
+            if let Some(range_rect) = spectro_color_range_rect {
+                let edit = Self::draw_editor_spectro_color_range(
+                    ui,
+                    range_rect,
+                    &mut self.spectro_cfg,
+                );
+                if edit.changed {
+                    ctx.request_repaint();
+                }
+                save_spectro_color_range |= edit.committed;
             }
 
             if display_samples_len > 0 {
@@ -14747,6 +15063,9 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
             // one recognisable notch rather than a jump to some fixed depth.
             self.editor_zoom_centered_on_sample(tab_idx, sample, 0.9);
         }
+        if save_spectro_color_range {
+            self.save_prefs();
+        }
         self.ui_editor_zoo_overlay(ctx, Some(tab_idx), editor_panel_rect);
     }
 }
@@ -14755,8 +15074,9 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
 mod tests {
     use super::{
         in_selection_stretch_band, nearest_handle, selection_stretch_rate,
-        selection_stretch_target_len, EditorDisplayGeometry, SELECTION_EDGE_GRAB_RADIUS,
-        SELECTION_STRETCH_HANDLE_H, SELECTION_STRETCH_HANDLE_W,
+        selection_stretch_target_len, waveform_render_lod, EditorDisplayGeometry,
+        WaveformRenderLod, SELECTION_EDGE_GRAB_RADIUS, SELECTION_STRETCH_HANDLE_H,
+        SELECTION_STRETCH_HANDLE_W,
     };
     use crate::app::types::{EditorHorizontalScrollSpeed, SelectionStretchEdge};
 
@@ -14770,6 +15090,31 @@ mod tests {
             display_samples_len: 100_000,
             visible_count: (800.0 * spp) as usize,
         }
+    }
+
+    #[test]
+    fn waveform_lod_changes_without_an_early_pyramid_jump() {
+        let base = 64.0;
+        assert_eq!(waveform_render_lod(1.5, base), WaveformRenderLod::Raw);
+        for spp in [2.0, 5.0, 31.5, 32.0, 63.5] {
+            assert_eq!(
+                waveform_render_lod(spp, base),
+                WaveformRenderLod::VisibleMinMax,
+                "spp={spp}"
+            );
+        }
+        for spp in [64.0, 128.0] {
+            assert_eq!(
+                waveform_render_lod(spp, base),
+                WaveformRenderLod::Pyramid,
+                "spp={spp}"
+            );
+        }
+        assert_eq!(
+            waveform_render_lod(48.0, base),
+            WaveformRenderLod::VisibleMinMax,
+            "HiDPI density must be measured per device column"
+        );
     }
 
     #[test]

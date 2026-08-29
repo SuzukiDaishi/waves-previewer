@@ -547,7 +547,9 @@ impl super::WavesPreviewer {
                 };
                 let spp = tab.samples_per_px.max(0.0001);
                 let visible_len = hint.end.saturating_sub(hint.start);
-                let raw_mode = matches!(quality, EditorViewportRenderQuality::Fine) && spp < 2.0;
+                let samples_per_column = visible_len as f32 / bins.max(1) as f32;
+                let raw_mode = matches!(quality, EditorViewportRenderQuality::Fine)
+                    && samples_per_column < 2.0;
                 let mut lanes = Vec::with_capacity(hint.lane_count.max(1));
                 if tab.loading && !tab.loading_waveform_minmax.is_empty() {
                     for _ in 0..hint.lane_count.max(1) {
@@ -574,11 +576,10 @@ impl super::WavesPreviewer {
                         };
                         let start = hint.start.min(channel.len());
                         let end = hint.end.min(channel.len()).max(start);
-                        if matches!(quality, EditorViewportRenderQuality::Fine)
-                            && spp >= 32.0
-                            && tab.waveform_pyramid.is_some()
-                        {
-                            if let Some(pyramid_set) = tab.waveform_pyramid.as_ref() {
+                        if matches!(quality, EditorViewportRenderQuality::Fine) {
+                            if let Some(pyramid_set) = tab.waveform_pyramid.as_ref().filter(|set| {
+                                samples_per_column >= set.base_bin_samples.max(1) as f32
+                            }) {
                                 if let Some(pyramid) = pyramid_set.channels.get(channel_idx) {
                                     lanes.push(WaveLaneRequest::Pyramid {
                                         pyramid: pyramid.clone(),
@@ -1125,11 +1126,11 @@ impl super::WavesPreviewer {
                     };
                     let idx = base + bin.min(max_bin);
                     let db_raw = (spec.values_db.get(idx).copied().unwrap_or(-120.0) - ref_db)
-                        .clamp(cfg.db_floor, 0.0);
-                    let norm = if (0.0 - cfg.db_floor).abs() < f32::EPSILON {
+                        .clamp(cfg.db_floor, cfg.db_ceiling);
+                    let norm = if (cfg.db_ceiling - cfg.db_floor).abs() < f32::EPSILON {
                         0.0
                     } else {
-                        (db_raw - cfg.db_floor) / (0.0 - cfg.db_floor)
+                        (db_raw - cfg.db_floor) / (cfg.db_ceiling - cfg.db_floor)
                     };
                     let image_y = lane_y0 + y.min(target_lane_h.saturating_sub(1));
                     let pixel_idx = image_y * target_w + x;
@@ -1447,6 +1448,7 @@ impl super::WavesPreviewer {
         cfg.hop_size.hash(&mut hasher);
         cfg.max_frames.hash(&mut hasher);
         cfg.db_floor.to_bits().hash(&mut hasher);
+        cfg.db_ceiling.to_bits().hash(&mut hasher);
         match cfg.db_ref {
             super::types::SpectrogramDbRef::Absolute => 1u8.hash(&mut hasher),
             super::types::SpectrogramDbRef::MaxNormalized => 2u8.hash(&mut hasher),
@@ -1605,6 +1607,22 @@ mod tests {
         assert!(
             bright > dim + 50.0,
             "ref=max should brighten a -60 dBFS spectrogram (abs={dim:.1}, max={bright:.1})"
+        );
+    }
+
+    #[test]
+    fn color_ceiling_saturates_values_above_the_selected_range() {
+        let default = SpectrogramConfig::default();
+        let compressed = SpectrogramConfig {
+            db_floor: -120.0,
+            db_ceiling: -70.0,
+            ..SpectrogramConfig::default()
+        };
+        let ordinary = mean_brightness(&default);
+        let saturated = mean_brightness(&compressed);
+        assert!(
+            saturated > ordinary + 50.0,
+            "a -60 dB bin above a -70 dB ceiling should take the top color ({ordinary:.1} -> {saturated:.1})"
         );
     }
 

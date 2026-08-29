@@ -310,14 +310,53 @@ impl PerfProfile {
     /// resolution, so a slow machine keeps a shorter run.
     pub fn video_decode_ahead_frames(&self) -> usize {
         if self.remote_root {
-            // Reading ahead over a share buys latency for the file the user is
-            // actually listening to.
-            return 1;
+            return 6;
         }
         match self.tier {
-            PerfTier::Low => 2,
-            PerfTier::Normal => 8,
-            PerfTier::High => 16,
+            PerfTier::Low => 8,
+            PerfTier::Normal => 12,
+            PerfTier::High => 18,
+        }
+    }
+
+    /// Read-ahead measured in time, then converted through the source FPS.
+    /// A fixed frame count gives a 60 fps movie half the safety margin of a
+    /// 30 fps movie, which is exactly where a native decode hiccup becomes a
+    /// visible underrun.
+    pub fn video_decode_ahead_frames_for_fps(&self, fps: f32) -> usize {
+        let fps = if fps.is_finite() && fps > 1.0 {
+            fps
+        } else {
+            30.0
+        };
+        let seconds: f32 = if self.remote_root {
+            0.25
+        } else {
+            match self.tier {
+                PerfTier::Low => 0.25,
+                PerfTier::Normal => 0.40,
+                PerfTier::High => 0.60,
+            }
+        };
+        let max_frames = match self.tier {
+            PerfTier::Low => 15,
+            PerfTier::Normal => 24,
+            PerfTier::High => 36,
+        };
+        ((fps * seconds).ceil() as usize)
+            .max(self.video_decode_ahead_frames().min(max_frames))
+            .min(max_frames)
+    }
+
+    /// Hard memory ceiling for decoded RGBA video frames in one open tab.
+    pub fn video_ring_memory_bytes(&self) -> usize {
+        if self.remote_root {
+            return 24 * 1024 * 1024;
+        }
+        match self.tier {
+            PerfTier::Low => 24 * 1024 * 1024,
+            PerfTier::Normal => 48 * 1024 * 1024,
+            PerfTier::High => 96 * 1024 * 1024,
         }
     }
 
@@ -475,8 +514,24 @@ mod tests {
 
         let mut remote = PerfProfile::from_cores(16, PerfTierPreference::Auto);
         remote.set_remote_root(true);
-        assert_eq!(remote.video_decode_ahead_frames(), 1);
+        assert_eq!(remote.video_decode_ahead_frames(), 6);
+        assert_eq!(remote.video_ring_memory_bytes(), 24 * 1024 * 1024);
         assert_eq!(remote.video_poster_concurrency(), 1);
+    }
+
+    #[test]
+    fn video_read_ahead_is_time_based_and_memory_bounded() {
+        let low = PerfProfile::from_cores(2, PerfTierPreference::Auto);
+        let normal = PerfProfile::from_cores(6, PerfTierPreference::Auto);
+        let high = PerfProfile::from_cores(16, PerfTierPreference::Auto);
+        assert!(
+            normal.video_decode_ahead_frames_for_fps(60.0)
+                > normal.video_decode_ahead_frames_for_fps(24.0)
+        );
+        assert_eq!(low.video_decode_ahead_frames_for_fps(60.0), 15);
+        assert_eq!(normal.video_decode_ahead_frames_for_fps(60.0), 24);
+        assert_eq!(high.video_decode_ahead_frames_for_fps(60.0), 36);
+        assert_eq!(normal.video_ring_memory_bytes(), 48 * 1024 * 1024);
     }
 
     #[test]

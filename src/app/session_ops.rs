@@ -1946,7 +1946,6 @@ impl super::WavesPreviewer {
                 fade_in_shape: format!("{:?}", cached.fade_in_shape),
                 fade_out_shape: format!("{:?}", cached.fade_out_shape),
                 loop_mode: format!("{:?}", cached.loop_mode),
-                snap_zero_cross: cached.snap_zero_cross,
                 tool_state: ProjectToolState {
                     fade_in_ms: cached.tool_state.fade_in_ms,
                     fade_out_ms: cached.tool_state.fade_out_ms,
@@ -3317,7 +3316,6 @@ impl super::WavesPreviewer {
                     fade_in_shape: fade_shape_from_str(&edit.fade_in_shape),
                     fade_out_shape: fade_shape_from_str(&edit.fade_out_shape),
                     loop_mode: loop_mode_from_str(&edit.loop_mode),
-                    snap_zero_cross: edit.snap_zero_cross,
                     tool_state: project_tool_state_to_tool_state(&edit.tool_state),
                     active_tool: tool_kind_from_str(&edit.active_tool),
                     plugin_fx_draft: project_plugin_fx_draft_to_draft(&edit.plugin_fx_draft),
@@ -3408,7 +3406,6 @@ impl super::WavesPreviewer {
                         fade_in_shape: fade_shape_from_str(&tab.fade_in_shape),
                         fade_out_shape: fade_shape_from_str(&tab.fade_out_shape),
                         loop_mode: loop_mode_from_str(&tab.loop_mode),
-                        snap_zero_cross: tab.snap_zero_cross,
                         tool_state: project_tool_state_to_tool_state(&tab.tool_state),
                         active_tool: tool_kind_from_str(&tab.active_tool),
                         plugin_fx_draft: project_plugin_fx_draft_to_draft(&tab.plugin_fx_draft),
@@ -3532,7 +3529,6 @@ impl super::WavesPreviewer {
                     t.fade_out_range = tab.fade_out_range.map(|v| (v[0], v[1]));
                     t.fade_in_shape = fade_shape_from_str(&tab.fade_in_shape);
                     t.fade_out_shape = fade_shape_from_str(&tab.fade_out_shape);
-                    t.snap_zero_cross = tab.snap_zero_cross;
                     t.bpm_enabled = tab.bpm_enabled;
                     t.bpm_value = tab.bpm_value;
                     t.bpm_user_set = tab.bpm_user_set;

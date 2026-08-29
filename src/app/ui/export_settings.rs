@@ -594,6 +594,7 @@ impl crate::app::WavesPreviewer {
                                         scale: SpectrogramScale::Log,
                                         mel_scale: SpectrogramScale::Linear,
                                         db_floor: -120.0,
+                                        db_ceiling: 0.0,
                                         db_ref: crate::app::types::SpectrogramDbRef::Absolute,
                                         max_freq_hz: 8000.0,
                                         show_note_labels: false,
@@ -728,13 +729,29 @@ impl crate::app::WavesPreviewer {
                                 "Show note labels (C, C#...)",
                             );
                             ui.horizontal_wrapped(|ui| {
-                                ui.label("Dynamic Range Floor (dB):");
+                                ui.label("Color Range Min (dB):");
                                 let mut floor = next_cfg.db_floor;
                                 if ui
-                                    .add(egui::Slider::new(&mut floor, -160.0..=-20.0))
+                                    .add(egui::Slider::new(
+                                        &mut floor,
+                                        -160.0..=(next_cfg.db_ceiling - 10.0).min(-20.0),
+                                    ))
                                     .changed()
                                 {
                                     next_cfg.db_floor = floor;
+                                }
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Color Range Max (dB):");
+                                let mut ceiling = next_cfg.db_ceiling;
+                                if ui
+                                    .add(egui::Slider::new(
+                                        &mut ceiling,
+                                        (next_cfg.db_floor + 10.0).max(-80.0)..=0.0,
+                                    ))
+                                    .changed()
+                                {
+                                    next_cfg.db_ceiling = ceiling;
                                 }
                             });
                             ui.horizontal_wrapped(|ui| {

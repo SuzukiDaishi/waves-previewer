@@ -487,6 +487,43 @@ impl WavesPreviewer {
                 String::new()
             }
         ));
+        let profiler_samples = self.debug.frame_profiler.samples();
+        if !profiler_samples.is_empty() {
+            let intervals: Vec<f32> = profiler_samples
+                .iter()
+                .filter_map(|sample| (sample.interval_ms > 0.0).then_some(sample.interval_ms))
+                .collect();
+            let average_interval = intervals.iter().sum::<f32>() / intervals.len().max(1) as f32;
+            let average_fps = if average_interval > 0.0 {
+                1_000.0 / average_interval
+            } else {
+                0.0
+            };
+            let max_app_ms = profiler_samples
+                .iter()
+                .map(|sample| sample.app_ms)
+                .fold(0.0_f32, f32::max);
+            let deferred_frames = profiler_samples
+                .iter()
+                .filter(|sample| sample.deferred_count > 0)
+                .count();
+            lines.push(format!(
+                "frame_profiler: n={} avg_fps={average_fps:.1} max_app_ms={max_app_ms:.1} deferred_frames={deferred_frames}",
+                profiler_samples.len()
+            ));
+            for stage in self
+                .debug
+                .frame_profiler
+                .stage_summaries()
+                .into_iter()
+                .take(5)
+            {
+                lines.push(format!(
+                    "  blocker: {} p95={:.2}ms avg={:.2}ms max={:.2}ms",
+                    stage.name, stage.p95_ms, stage.average_ms, stage.max_ms
+                ));
+            }
+        }
         if self.debug.long_frames.is_empty() {
             lines.push("long_frames: none".to_string());
         } else {

@@ -220,7 +220,6 @@ pub struct ProjectEdit {
     pub fade_in_shape: String,
     pub fade_out_shape: String,
     pub loop_mode: String,
-    pub snap_zero_cross: bool,
     pub tool_state: ProjectToolState,
     pub active_tool: String,
     pub show_waveform_overlay: bool,
@@ -428,10 +427,16 @@ pub struct ProjectSpectrogram {
     pub scale: String,
     pub mel_scale: String,
     pub db_floor: f32,
+    #[serde(default = "default_spectrogram_db_ceiling")]
+    pub db_ceiling: f32,
     #[serde(default)]
     pub db_ref: Option<String>,
     pub max_freq_hz: f32,
     pub show_note_labels: bool,
+}
+
+fn default_spectrogram_db_ceiling() -> f32 {
+    0.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -485,7 +490,6 @@ pub struct ProjectTab {
     pub fade_out_range: Option<[usize; 2]>,
     pub fade_in_shape: String,
     pub fade_out_shape: String,
-    pub snap_zero_cross: bool,
     pub view_offset: usize,
     pub samples_per_px: f32,
     #[serde(default = "default_vertical_zoom")]
@@ -1257,6 +1261,7 @@ pub fn spectro_config_from_project(p: &ProjectSpectrogram) -> SpectrogramConfig 
         scale,
         mel_scale,
         db_floor: p.db_floor,
+        db_ceiling: p.db_ceiling,
         db_ref: match p.db_ref.as_deref() {
             Some("max") => super::types::SpectrogramDbRef::MaxNormalized,
             _ => super::types::SpectrogramDbRef::Absolute,
@@ -1288,6 +1293,7 @@ pub fn project_spectrogram_from_cfg(cfg: &SpectrogramConfig) -> ProjectSpectrogr
         scale: scale.to_string(),
         mel_scale: mel_scale.to_string(),
         db_floor: cfg.db_floor,
+        db_ceiling: cfg.db_ceiling,
         db_ref: Some(
             match cfg.db_ref {
                 super::types::SpectrogramDbRef::MaxNormalized => "max",
@@ -1395,7 +1401,6 @@ pub fn project_tab_from_tab(
         fade_out_range: tab.fade_out_range.map(|(a, b)| [a, b]),
         fade_in_shape: format!("{:?}", tab.fade_in_shape),
         fade_out_shape: format!("{:?}", tab.fade_out_shape),
-        snap_zero_cross: tab.snap_zero_cross,
         view_offset: tab.view_offset,
         samples_per_px: tab.samples_per_px,
         vertical_zoom: tab.vertical_zoom,
@@ -2196,6 +2201,7 @@ wave = true
             scale: "log".to_string(),
             mel_scale: "linear".to_string(),
             db_floor: -120.0,
+            db_ceiling: 0.0,
             db_ref: None,
             max_freq_hz: 0.0,
             show_note_labels: false,
@@ -2213,6 +2219,7 @@ wave = true
             scale: "log".to_string(),
             mel_scale: "linear".to_string(),
             db_floor: -120.0,
+            db_ceiling: 0.0,
             db_ref: None,
             max_freq_hz: 0.0,
             show_note_labels: false,
@@ -2327,8 +2334,10 @@ show_note_labels = false
     #[test]
     fn serialize_deserialize_minimal_roundtrip() {
         let p = deserialize_project(MINIMAL_TOML).unwrap();
+        assert_eq!(p.spectrogram.db_ceiling, 0.0);
         assert_eq!(p.app.list_columns_window_pos, None);
         let s = serialize_project(&p).unwrap();
+        assert!(s.contains("db_ceiling = 0.0"));
         let p2 = deserialize_project(&s).unwrap();
         assert_eq!(p.version, p2.version);
         assert_eq!(p.name, p2.name);
@@ -2337,6 +2346,26 @@ show_note_labels = false
         assert_eq!(p.list.files, p2.list.files);
         assert_eq!(p.app.theme, p2.app.theme);
         assert_eq!(p.app.sort_key, p2.app.sort_key);
+    }
+
+    #[test]
+    fn spectrogram_color_range_roundtrips_in_a_session() {
+        let mut project = deserialize_project(MINIMAL_TOML).unwrap();
+        project.spectrogram.db_floor = -98.0;
+        project.spectrogram.db_ceiling = -12.0;
+        let encoded = serialize_project(&project).expect("serialize color range");
+        let restored = deserialize_project(&encoded).expect("deserialize color range");
+        assert_eq!(restored.spectrogram.db_floor, -98.0);
+        assert_eq!(restored.spectrogram.db_ceiling, -12.0);
+    }
+
+    #[test]
+    fn legacy_snap_zero_cross_fields_are_ignored_and_not_written_again() {
+        let legacy = include_str!("../../debug/cli-renders/phase1b_smoke.nwsess");
+        assert!(legacy.contains("snap_zero_cross"));
+        let project = deserialize_project(legacy).expect("load legacy session");
+        let encoded = serialize_project(&project).expect("serialize migrated session");
+        assert!(!encoded.contains("snap_zero_cross"));
     }
 
     #[test]

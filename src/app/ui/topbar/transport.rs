@@ -162,7 +162,7 @@ impl WavesPreviewer {
             .shared
             .playing
             .load(std::sync::atomic::Ordering::Relaxed);
-        let play_text = if playing {
+        let play_text = if playing || self.video_play_start_pending() {
             "Pause (Space)"
         } else {
             "Play (Space)"

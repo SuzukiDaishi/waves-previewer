@@ -304,11 +304,6 @@ impl super::WavesPreviewer {
                 if self.keymap_consume(ctx, Action::EditorAddMarker) {
                     self.add_applied_marker_at_playhead(tab_idx);
                 }
-                if self.keymap_consume(ctx, Action::EditorToggleZeroCross) {
-                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                        tab.snap_zero_cross = !tab.snap_zero_cross;
-                    }
-                }
                 // Digit seek: keyboard row order 1..9,0 spans start -> end
                 // (1 = 0%, 2 = 1/9, ..., 9 = 8/9, 0 = 100%). See CONTROLS.md.
                 const DIGIT_SEEK: [(egui::Key, usize); 10] = [
@@ -550,6 +545,7 @@ impl super::WavesPreviewer {
         if (next - self.volume_db).abs() >= f32::EPSILON {
             self.volume_db = next;
             self.apply_effective_volume();
+            self.save_prefs();
         }
     }
 

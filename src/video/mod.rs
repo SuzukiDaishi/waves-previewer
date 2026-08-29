@@ -47,6 +47,16 @@ pub use frame::{Rotation, VideoFrame};
 pub trait VideoDecoder: Send {
     fn info(&self) -> &VideoStreamInfo;
 
+    /// Prepare the decoder to produce pictures inside `box_px`.
+    ///
+    /// Software decoders may leave this as a no-op and scale in
+    /// [`VideoDecoder::next_frame`]. Native backends can override it so their
+    /// video processor performs the resize before pixels reach Rust. The
+    /// returned size is the actual uncompressed frame carried by the backend.
+    fn prepare_output(&mut self, box_px: (u32, u32)) -> Result<(u32, u32)> {
+        Ok(box_px)
+    }
+
     /// Position so the next [`VideoDecoder::next_frame`] returns the picture
     /// showing at `secs`.
     ///

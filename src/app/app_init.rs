@@ -170,6 +170,7 @@ impl WavesPreviewer {
             video_frame_rx: None,
             video_workers: Vec::new(),
             detached_video_tab_id: None,
+            pending_video_play_start: None,
             editor_viewport_tx: None,
             editor_viewport_rx: None,
             editor_viewport_request_tx: None,
@@ -490,6 +491,7 @@ impl WavesPreviewer {
         };
         app.load_prefs();
         app.apply_audio_channel_map_mode();
+        app.apply_effective_volume();
         app.load_metadata_column_registry();
         app.sanitize_list_column_layout();
         app

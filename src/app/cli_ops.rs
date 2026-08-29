@@ -3315,7 +3315,6 @@ fn default_project_tab_for_path(
         fade_out_range: None,
         fade_in_shape: "SCurve".to_string(),
         fade_out_shape: "SCurve".to_string(),
-        snap_zero_cross: false,
         view_offset: 0,
         samples_per_px: (info.sample_rate.max(1) as f32 / 120.0).max(1.0),
         vertical_zoom: 1.0,

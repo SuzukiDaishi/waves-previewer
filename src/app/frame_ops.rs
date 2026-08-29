@@ -12,8 +12,20 @@ impl WavesPreviewer {
         frame_started: Instant,
         had_ui_input: bool,
     ) {
+        let profile = self
+            .debug
+            .frame_profiler
+            .is_recording(self.debug.show_window);
+        self.debug
+            .frame_profiler
+            .begin_frame(frame_started, profile);
+        let phase_started = Instant::now();
         self.run_frame_close_guard(ctx);
         self.run_frame_pre_ui(ctx, frame_started, had_ui_input);
+        self.debug.frame_profiler.note_phase(
+            crate::app::frame_profiler::FramePhase::PreUi,
+            phase_started.elapsed().as_secs_f32() * 1_000.0,
+        );
     }
 
     /// Intercept the window close request while unsaved in-memory edits
@@ -75,22 +87,56 @@ impl WavesPreviewer {
 
     pub(super) fn run_frame_ui(&mut self, ui: &mut egui::Ui, frame_started: Instant) {
         let ctx = ui.ctx().clone();
+        let profile = self
+            .debug
+            .frame_profiler
+            .is_recording(self.debug.show_window);
+        self.debug
+            .frame_profiler
+            .ensure_frame(frame_started, profile);
         let t_ws = Instant::now();
         let activate_path = self.run_frame_workspace(ui);
+        let workspace_ms = t_ws.elapsed().as_secs_f32() * 1_000.0;
+        self.debug.frame_profiler.note_phase(
+            crate::app::frame_profiler::FramePhase::Workspace,
+            workspace_ms,
+        );
         if std::env::var_os("NEOWAVES_BENCH_TRACE").is_some() {
-            let ms = t_ws.elapsed().as_secs_f64() * 1000.0;
+            let ms = workspace_ms as f64;
             if ms > 50.0 {
                 eprintln!("[trace] stage run_frame_workspace took {ms:.1}ms");
             }
         }
+        let activation_started = Instant::now();
         let activated_tab_idx = self.run_frame_activation(&ctx, activate_path);
         if let Some(tab_idx) = activated_tab_idx {
             self.refresh_tool_preview_for_tab(tab_idx);
         }
         self.run_frame_pending_editor_autoplay(&ctx);
+        self.debug.frame_profiler.note_phase(
+            crate::app::frame_profiler::FramePhase::Activation,
+            activation_started.elapsed().as_secs_f32() * 1_000.0,
+        );
+        let overlays_started = Instant::now();
         self.run_frame_overlays(&ctx);
+        self.debug.frame_profiler.note_phase(
+            crate::app::frame_profiler::FramePhase::Overlays,
+            overlays_started.elapsed().as_secs_f32() * 1_000.0,
+        );
+        let windows_started = Instant::now();
         self.run_frame_modal_windows(&ctx);
+        self.debug.frame_profiler.note_phase(
+            crate::app::frame_profiler::FramePhase::Windows,
+            windows_started.elapsed().as_secs_f32() * 1_000.0,
+        );
+        let finish_started = Instant::now();
         self.run_frame_finish(&ctx, frame_started);
+        self.debug.frame_profiler.note_phase(
+            crate::app::frame_profiler::FramePhase::Finish,
+            finish_started.elapsed().as_secs_f32() * 1_000.0,
+        );
+        let deferred_count = self.frame_budget.deferred_count();
+        self.debug.frame_profiler.finish_frame(deferred_count);
     }
 
     fn run_frame_pre_ui(
@@ -104,15 +150,25 @@ impl WavesPreviewer {
         // Resolve once, before any handler runs, so every shortcut answers
         // "am I allowed to act?" from the same snapshot.
         self.resolve_input_scope(ctx);
-        // Coarse per-stage tracing for benchmark hunts (NEOWAVES_BENCH_TRACE=1).
+        // Coarse per-stage tracing for benchmark hunts and the live Debug
+        // profiler. The environment lookup is done once: repeating it around
+        // every drain would itself show up as UI-thread work.
+        let bench_trace = std::env::var_os("NEOWAVES_BENCH_TRACE").is_some();
+        let profile_frame_stages = self
+            .debug
+            .frame_profiler
+            .is_recording(self.debug.show_window);
         macro_rules! trace_stage {
             ($name:expr, $body:expr) => {{
-                if std::env::var_os("NEOWAVES_BENCH_TRACE").is_some() {
+                if bench_trace || profile_frame_stages {
                     let t = Instant::now();
                     let out = $body;
-                    let ms = t.elapsed().as_secs_f64() * 1000.0;
-                    if ms > 50.0 {
+                    let ms = t.elapsed().as_secs_f32() * 1_000.0;
+                    if bench_trace && ms > 50.0 {
                         eprintln!("[trace] stage {} took {ms:.1}ms", $name);
+                    }
+                    if profile_frame_stages {
+                        self.debug.frame_profiler.note_stage($name, ms);
                     }
                     out
                 } else {
@@ -143,7 +199,10 @@ impl WavesPreviewer {
         if had_ui_input {
             self.debug.ui_input_started_at = Some(frame_started);
         }
-        self.tick_deferred_startup(ctx, frame_started, had_ui_input);
+        trace_stage!(
+            "startup / input",
+            self.tick_deferred_startup(ctx, frame_started, had_ui_input)
+        );
         self.suppress_list_enter = false;
         if ctx.dragged_id().is_some() && !ctx.input(|i| i.pointer.any_down()) {
             if self.debug.cfg.enabled {
@@ -151,9 +210,9 @@ impl WavesPreviewer {
             }
             ctx.stop_dragging();
         }
-        self.ensure_theme_visuals(ctx);
-        self.tick_project_open();
-        self.playback_sync_state_snapshot();
+        trace_stage!("theme", self.ensure_theme_visuals(ctx));
+        trace_stage!("session open", self.tick_project_open());
+        trace_stage!("playback sync", self.playback_sync_state_snapshot());
         let protect_editor_playback = !self.is_list_workspace_active()
             && (self.playback_is_playing_now() || self.playback_session.is_playing);
         if let Some(pool) = self.meta_pool.as_ref() {
@@ -162,116 +221,170 @@ impl WavesPreviewer {
         if let Some(pool) = self.metadata_summary_pool.as_ref() {
             pool.set_paused(protect_editor_playback);
         }
-        self.sync_channel_masks_to_engine();
-        self.meter_db = self.current_output_meter_db();
-        self.update_channel_meters();
-        self.apply_effective_volume();
-        trace_stage!("process_scan_messages", self.process_scan_messages());
-        trace_stage!("pump_list_jobs", {
+        trace_stage!("audio meters / volume", {
+            self.sync_channel_masks_to_engine();
+            self.meter_db = self.current_output_meter_db();
+            self.update_channel_meters();
+            self.apply_effective_volume();
+        });
+        trace_stage!("scanner results", self.process_scan_messages());
+        trace_stage!("list sort / filter", {
             if self.pump_list_jobs() {
                 ctx.request_repaint();
             }
         });
         deferrable!(trace_stage!(
-            "pump_list_meta_prefetch",
+            "list metadata prefetch",
             self.pump_list_meta_prefetch()
         ));
         deferrable!(trace_stage!(
-            "pump_metadata_summary_prefetch",
+            "metadata summary prefetch",
             self.pump_metadata_summary_prefetch()
         ));
-        self.process_ipc_requests();
-        self.apply_pending_transcript_seek();
-        self.process_tool_results();
-        self.process_tool_queue();
-        trace_stage!("apply_search_if_due", self.apply_search_if_due());
-        self.handle_screenshot_events(ctx);
+        trace_stage!("IPC / tool queue", {
+            self.process_ipc_requests();
+            self.apply_pending_transcript_seek();
+            self.process_tool_results();
+            self.process_tool_queue();
+        });
+        trace_stage!("search", self.apply_search_if_due());
+        trace_stage!("screenshots", self.handle_screenshot_events(ctx));
         if self.global_keys_allowed() && ctx.input(|i| i.key_pressed(Key::F9)) {
             let path = self.default_screenshot_path();
             self.request_screenshot(ctx, path, false);
         }
-        self.run_startup_actions(ctx);
-        self.debug_tick(ctx);
-        self.drain_heavy_preview_results();
-        trace_stage!(
-            "drain_list_preview_results",
-            self.drain_list_preview_results()
-        );
+        trace_stage!("startup actions", self.run_startup_actions(ctx));
+        trace_stage!("debug automation", self.debug_tick(ctx));
+        trace_stage!("heavy preview results", self.drain_heavy_preview_results());
+        trace_stage!("list preview results", self.drain_list_preview_results());
         // Not behind `deferrable!`: the user is synchronously waiting to hear
         // the seek they just asked for, and this returns immediately when
         // nothing is parked.
-        self.apply_pending_list_seek();
-        self.maintain_list_playback_buffer();
-        self.maintain_editor_playback_handoff();
+        trace_stage!("playback buffer / seek", {
+            self.apply_pending_list_seek();
+            self.maintain_list_playback_buffer();
+            self.maintain_editor_playback_handoff();
+        });
         trace_stage!(
-            "drain_list_preview_prefetch_results",
+            "list preview prefetch results",
             self.drain_list_preview_prefetch_results()
         );
-        self.drain_editor_decode();
-        self.drain_heavy_overlay_results();
-        deferrable!(self.drain_auto_trim_results());
-        deferrable!(self.poll_auto_trim_live_rerun());
-        deferrable!(self.drain_loop_detect_results());
-        self.drain_recording_events();
-        self.tick_audio_device_watch(frame_started);
-        self.drain_editor_apply_jobs(ctx);
-        self.drain_mix_audition(ctx);
-        deferrable!({
+        trace_stage!("editor decode results", self.drain_editor_decode());
+        trace_stage!("overlay results", self.drain_heavy_overlay_results());
+        deferrable!(trace_stage!("auto trim results", {
+            self.drain_auto_trim_results();
+            self.poll_auto_trim_live_rerun();
+        }));
+        deferrable!(trace_stage!(
+            "loop detection results",
+            self.drain_loop_detect_results()
+        ));
+        trace_stage!("recording / audio device", {
+            self.drain_recording_events();
+            self.tick_audio_device_watch(frame_started);
+        });
+        trace_stage!("editor apply results", self.drain_editor_apply_jobs(ctx));
+        trace_stage!("mix audition", self.drain_mix_audition(ctx));
+        deferrable!(trace_stage!("path status results", {
             // Applying an answer only touches a hash map, but a screen of
             // rows resolving at once still deserves a cap.
             if self.path_status.drain(256) > 0 {
                 ctx.request_repaint();
             }
-        });
-        deferrable!(self.tick_folder_watch(ctx));
-        deferrable!(self.poll_resample_fallbacks());
-        self.drain_editor_wave_cache_jobs(ctx);
-        self.poll_editor_play_selection(ctx);
-        self.drain_session_save(ctx);
-        self.drain_clipboard_prep(ctx);
-        self.tick_virtual_trim_state(ctx);
-        self.drain_plugin_jobs(ctx);
-        self.poll_plugin_auto_preview(ctx);
-        self.poll_variation_audition(ctx);
-        deferrable!(self.drain_duplicate_scan(ctx));
-        deferrable!(self.drain_transcript_model_download_results(ctx));
-        deferrable!(self.drain_transcript_ai_results(ctx));
-        deferrable!(self.drain_music_model_download_results(ctx));
-        deferrable!(self.drain_music_ai_results(ctx));
-        self.drain_music_preview_results(ctx);
-        deferrable!(self.enforce_music_stem_cache_policy());
+        }));
+        deferrable!(trace_stage!("folder watch", self.tick_folder_watch(ctx)));
         deferrable!(trace_stage!(
-            "drain_meta_updates",
+            "resample fallbacks",
+            self.poll_resample_fallbacks()
+        ));
+        trace_stage!(
+            "waveform cache results",
+            self.drain_editor_wave_cache_jobs(ctx)
+        );
+        trace_stage!("selection playback", self.poll_editor_play_selection(ctx));
+        trace_stage!("session save results", self.drain_session_save(ctx));
+        trace_stage!("clipboard preparation", self.drain_clipboard_prep(ctx));
+        trace_stage!("virtual trim", self.tick_virtual_trim_state(ctx));
+        trace_stage!("plugin jobs", self.drain_plugin_jobs(ctx));
+        trace_stage!("plugin preview", self.poll_plugin_auto_preview(ctx));
+        trace_stage!("variation audition", self.poll_variation_audition(ctx));
+        deferrable!(trace_stage!(
+            "duplicate scan",
+            self.drain_duplicate_scan(ctx)
+        ));
+        deferrable!(trace_stage!("transcript download", {
+            self.drain_transcript_model_download_results(ctx)
+        }));
+        deferrable!(trace_stage!("transcript AI results", {
+            self.drain_transcript_ai_results(ctx)
+        }));
+        deferrable!(trace_stage!("music model download", {
+            self.drain_music_model_download_results(ctx)
+        }));
+        deferrable!(trace_stage!("music AI results", {
+            self.drain_music_ai_results(ctx)
+        }));
+        trace_stage!("music preview", self.drain_music_preview_results(ctx));
+        deferrable!(trace_stage!("music stem cache", {
+            self.enforce_music_stem_cache_policy()
+        }));
+        deferrable!(trace_stage!(
+            "metadata row updates",
             self.drain_meta_updates(ctx)
         ));
         deferrable!(trace_stage!(
-            "drain_metadata_summary_updates",
+            "metadata summary updates",
             self.drain_metadata_summary_updates(ctx)
         ));
-        deferrable!(self.drain_external_load_results(ctx));
-        self.check_csv_export_completion();
-        self.tick_bulk_resample();
-        if self.bulk_resample_state.is_some() {
-            ctx.request_repaint();
+        deferrable!(trace_stage!("external data results", {
+            self.drain_external_load_results(ctx)
+        }));
+        trace_stage!("batch operations", {
+            self.check_csv_export_completion();
+            self.tick_bulk_resample();
+            if self.bulk_resample_state.is_some() {
+                ctx.request_repaint();
+            }
+            self.tick_batch_loudnorm();
+            if self.batch_loudnorm_state.is_some() {
+                ctx.request_repaint();
+            }
+        });
+        deferrable!(trace_stage!("spectrogram updates", {
+            self.apply_spectrogram_updates(ctx)
+        }));
+        deferrable!(trace_stage!("feature analysis updates", {
+            self.apply_feature_analysis_updates(ctx)
+        }));
+        deferrable!(trace_stage!("editor viewport texture", {
+            self.apply_editor_viewport_render_updates(ctx)
+        }));
+        deferrable!(trace_stage!("video worker maintenance", {
+            self.ensure_video_workers()
+        }));
+        if self.video_updates_are_latency_critical() {
+            trace_stage!("video frame upload", self.apply_video_frame_updates(ctx));
+        } else {
+            deferrable!(trace_stage!("video frame upload", {
+                self.apply_video_frame_updates(ctx)
+            }));
         }
-        self.tick_batch_loudnorm();
-        if self.batch_loudnorm_state.is_some() {
-            ctx.request_repaint();
-        }
-        deferrable!(self.apply_spectrogram_updates(ctx));
-        deferrable!(self.apply_feature_analysis_updates(ctx));
-        deferrable!(self.apply_editor_viewport_render_updates(ctx));
-        deferrable!(self.ensure_video_workers());
-        deferrable!(self.apply_video_frame_updates(ctx));
-        self.drain_export_results(ctx);
-        deferrable!(self.drain_lufs_recalc_results());
+        trace_stage!("video play start", self.tick_pending_video_play_start(ctx));
+        trace_stage!("export results", self.drain_export_results(ctx));
+        deferrable!(trace_stage!("loudness recalc results", {
+            self.drain_lufs_recalc_results()
+        }));
         if self.inspection_run_state.is_some() {
-            deferrable!(self.drain_inspection_results(ctx));
+            deferrable!(trace_stage!("inspection results", {
+                self.drain_inspection_results(ctx)
+            }));
         }
-        self.drain_effect_graph_runner(ctx);
-        self.tick_playback_fx_state(ctx);
-        deferrable!(self.pump_lufs_recalc_worker());
-        self.tick_processing_state(ctx);
+        trace_stage!("effect graph runner", self.drain_effect_graph_runner(ctx));
+        trace_stage!("playback effects", self.tick_playback_fx_state(ctx));
+        deferrable!(trace_stage!("loudness recalc worker", {
+            self.pump_lufs_recalc_worker()
+        }));
+        trace_stage!("processing state", self.tick_processing_state(ctx));
         // Anything skipped above must come back promptly, or a backlog
         // would sit until the next unrelated repaint.
         if self.frame_budget.has_deferred_work() {
@@ -281,8 +394,18 @@ impl WavesPreviewer {
 
     fn run_frame_workspace(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
         let ctx = ui.ctx().clone();
+        let profile_frame_stages = self
+            .debug
+            .frame_profiler
+            .is_recording(self.debug.show_window);
+        let top_bar_started = profile_frame_stages.then(Instant::now);
         self.ui_top_bar(ui);
         self.handle_dropped_files(&ctx);
+        if let Some(started) = top_bar_started {
+            self.debug
+                .frame_profiler
+                .note_stage("Top bar UI", started.elapsed().as_secs_f32() * 1_000.0);
+        }
         let mut activate_path: Option<PathBuf> = None;
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -434,17 +557,28 @@ impl WavesPreviewer {
             let workspace_rect = ui.available_rect_before_wrap();
             {
                 let _scroll_guard = self.pointer_scroll_input_guard(scroll_target, &ctx);
+                let view_started = profile_frame_stages.then(Instant::now);
+                let view_stage;
                 if self.is_effect_graph_workspace_active() {
+                    view_stage = "Effect graph UI";
                     self.ui_effect_graph_view(ui, &ctx);
                 } else if self.workspace_view == WorkspaceView::Recording {
+                    view_stage = "Recording UI";
                     self.ui_recording_view(ui, &ctx);
                 } else if let Some(tab_idx) = self
                     .active_tab
                     .filter(|_| self.workspace_view == WorkspaceView::Editor)
                 {
+                    view_stage = "Editor UI";
                     self.ui_editor_view(ui, &ctx, tab_idx);
                 } else {
+                    view_stage = "List UI";
                     self.ui_list_view(ui, &ctx);
+                }
+                if let Some(started) = view_started {
+                    self.debug
+                        .frame_profiler
+                        .note_stage(view_stage, started.elapsed().as_secs_f32() * 1_000.0);
                 }
             }
             self.ui_input_focus
@@ -653,6 +787,10 @@ impl WavesPreviewer {
     }
 
     fn run_frame_modal_windows(&mut self, ctx: &egui::Context) {
+        let profile_frame_stages = self
+            .debug
+            .frame_profiler
+            .is_recording(self.debug.show_window);
         self.run_frame_leave_prompt(ctx);
         self.run_frame_quit_prompt(ctx);
         self.run_frame_first_save_prompt(ctx);
@@ -680,8 +818,21 @@ impl WavesPreviewer {
         self.run_frame_rename_dialogs(ctx);
         self.run_frame_resample_dialog(ctx);
         self.ui_crash_report_window(ctx);
+        let debug_window_started = profile_frame_stages.then(Instant::now);
         self.ui_debug_window(ctx);
+        if let Some(started) = debug_window_started {
+            self.debug
+                .frame_profiler
+                .note_stage("Debug window UI", started.elapsed().as_secs_f32() * 1_000.0);
+        }
+        let detached_video_started = profile_frame_stages.then(Instant::now);
         self.ui_detached_video_viewport(ctx);
+        if let Some(started) = detached_video_started {
+            self.debug.frame_profiler.note_stage(
+                "Detached video UI",
+                started.elapsed().as_secs_f32() * 1_000.0,
+            );
+        }
         self.handle_global_shortcuts(ctx);
         self.handle_clipboard_hotkeys(ctx);
         self.handle_undo_redo_hotkeys(ctx);
@@ -1112,10 +1263,16 @@ impl WavesPreviewer {
             .shared
             .playing
             .load(std::sync::atomic::Ordering::Relaxed);
+        let frame_profiler_recording = self
+            .debug
+            .frame_profiler
+            .is_recording(self.debug.show_window);
         // Latency-sensitive states keep the 16ms cadence; background progress
         // (scans, exports, metadata streams, analysis) repaints at 50ms so the
         // UI thread does not spin at 60fps competing with saturated workers.
         let fast_repaint = playing
+            || frame_profiler_recording
+            || self.video_play_start_pending()
             || self.processing.is_some()
             || self.playback_fx_state.is_some()
             || self.list_preview_rx.is_some()

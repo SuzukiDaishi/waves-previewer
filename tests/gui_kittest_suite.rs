@@ -539,6 +539,18 @@ mod kittest_suite {
         }
     }
 
+    fn wait_for_video_playback_start(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        while !harness.state().test_audio_is_playing() {
+            harness.run_steps(1);
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "video playback did not leave its 150 ms prebuffer"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn wait_for_tab_fully_loaded(harness: &mut Harness<'static, WavesPreviewer>) {
         let start = Instant::now();
         loop {
@@ -3258,18 +3270,6 @@ mod kittest_suite {
         harness.run_steps(2);
         let region = harness.state().tabs[0].loop_region;
         assert!(matches!(region, Some((s, e)) if e > s));
-    }
-
-    #[test]
-    fn zero_cross_snap_toggles() {
-        let mut harness = harness_with_wavs(false);
-        wait_for_scan(&mut harness);
-        open_first_tab(&mut harness);
-        let before = harness.state().tabs[0].snap_zero_cross;
-        harness.key_press(Key::R);
-        harness.run_steps(2);
-        let after = harness.state().tabs[0].snap_zero_cross;
-        assert_ne!(before, after);
     }
 
     #[test]
@@ -6072,6 +6072,64 @@ mod kittest_suite {
     }
 
     #[test]
+    fn spectrogram_color_range_is_a_separate_two_handle_rail() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(
+            harness.query_by_label("Spectrogram color range").is_none(),
+            "waveform view must not reserve the color rail"
+        );
+
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Spectrogram));
+        harness.run_steps(4);
+        let range_rect = harness.get_by_label("Spectrogram color range").rect();
+        let amplitude_rect = editor_amplitude_nav_rect(&harness);
+        assert!(
+            range_rect.right() < amplitude_rect.left(),
+            "color range must sit beside, not over, the amplitude navigator: {range_rect:?} {amplitude_rect:?}"
+        );
+        assert!((range_rect.width() - 44.0).abs() <= 1.5);
+
+        let (_, ceiling) = harness.state().test_spectro_color_range();
+        let floor_y = range_rect.top() + (120.0 / 160.0) * range_rect.height();
+        let target_y = range_rect.top() + (80.0 / 160.0) * range_rect.height();
+        editor_pointer_drag(
+            &mut harness,
+            egui::pos2(range_rect.center().x, floor_y),
+            egui::pos2(range_rect.center().x, target_y),
+        );
+        let (floor, after_ceiling) = harness.state().test_spectro_color_range();
+        assert!((floor - -80.0).abs() <= 2.0, "floor={floor}");
+        assert_eq!(after_ceiling, ceiling);
+
+        let ceiling_y = range_rect.top();
+        let target_ceiling_y = range_rect.top() + (20.0 / 160.0) * range_rect.height();
+        editor_pointer_drag(
+            &mut harness,
+            egui::pos2(range_rect.center().x, ceiling_y),
+            egui::pos2(range_rect.center().x, target_ceiling_y),
+        );
+        let (after_floor, ceiling) = harness.state().test_spectro_color_range();
+        assert_eq!(after_floor, floor);
+        assert!((ceiling - -20.0).abs() <= 2.0, "ceiling={ceiling}");
+
+        double_click_at(&mut harness, range_rect.center());
+        assert_eq!(harness.state().test_spectro_color_range(), (-120.0, 0.0));
+
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Tempogram));
+        harness.run_steps(3);
+        assert!(
+            harness.query_by_label("Spectrogram color range").is_none(),
+            "non-spectrogram feature views must not show the color rail"
+        );
+    }
+
+    #[test]
     fn editor_amplitude_navigator_center_drag_changes_vertical_view_center() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
@@ -8332,6 +8390,54 @@ mod kittest_suite {
         assert!(std::fs::metadata(&after_out).is_ok());
     }
 
+    /// Visual regression set for the raw/visible-minmax/pyramid waveform LODs.
+    ///
+    /// Run with:
+    ///   cargo test --features kittest_render --test gui_kittest_suite -- --ignored waveform_zoom_continuity_screenshots --nocapture
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    #[ignore = "writes the multi-zoom visual evidence set"]
+    fn waveform_zoom_continuity_screenshots() {
+        let out_dir = PathBuf::from(
+            std::env::var("NEOWAVES_SHOT_DIR").unwrap_or_else(|_| "/tmp".to_string()),
+        );
+        std::fs::create_dir_all(&out_dir).expect("create waveform zoom screenshot dir");
+
+        let mut harness = harness_with_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_tab_view_offset(12_000));
+
+        for (name, samples_per_px) in [
+            ("01_raw_spp_1_5.png", 1.5),
+            ("02_minmax_boundary_spp_2.png", 2.0),
+            ("03_minmax_spp_5.png", 5.0),
+            ("04_minmax_spp_31_5.png", 31.5),
+            ("05_former_boundary_spp_32.png", 32.0),
+            ("06_before_pyramid_spp_63_5.png", 63.5),
+            ("07_pyramid_boundary_spp_64.png", 64.0),
+            ("08_pyramid_spp_128.png", 128.0),
+        ] {
+            assert!(harness
+                .state_mut()
+                .test_set_tab_samples_per_px(samples_per_px));
+            harness.run_steps(3);
+            let out = out_dir.join(name);
+            harness
+                .render()
+                .unwrap_or_else(|e| {
+                    panic!("render waveform at {samples_per_px} samples/px failed: {e}")
+                })
+                .save(&out)
+                .unwrap_or_else(|e| panic!("save {} failed: {e}", out.display()));
+            eprintln!(
+                "[waveform-zoom] spp={samples_per_px} path={}",
+                out.display()
+            );
+        }
+    }
+
     #[cfg(feature = "kittest_render")]
     #[test]
     fn kittest_render_pan_changes_waveform_position_png() {
@@ -8840,6 +8946,25 @@ mod kittest_suite {
             "Idle",
             "resume should do nothing while idle"
         );
+    }
+
+    #[test]
+    fn debug_window_shows_live_fps_and_ui_blocker_profiler() {
+        let mut harness = harness_default();
+        harness.state_mut().test_set_debug_window_open(true);
+        harness.run_steps(5);
+
+        harness.get_by_label("Frame Profiler");
+        harness.get_by_label("Actual FPS");
+        harness.get_by_label("UI Thread Time");
+        harness.get_by_label("Top UI-thread blockers (recent P95)");
+        assert!(
+            harness.state().test_frame_profiler_sample_count() >= 2,
+            "opening the profiler should collect consecutive frame samples"
+        );
+        let summary = harness.state().test_debug_summary_text();
+        assert!(summary.contains("frame_profiler:"), "{summary}");
+        assert!(summary.contains("blocker:"), "{summary}");
     }
 
     #[test]
@@ -11324,6 +11449,45 @@ mod kittest_suite {
                 "frame image did not move with its PTS: pts={pts:.3}, marker={marker:.3}, expected={expected_marker:.3}"
             );
         }
+
+        // AAC priming/padding makes this fixture's audio timeline about 37 ms
+        // longer than its six-second video track. Seeking to the actual audio
+        // end must retain the final video frame, not permanently fail the
+        // Media Foundation worker with MF_E_INVALIDREQUEST.
+        let audio_tail = harness
+            .state()
+            .test_editor_display_samples_len()
+            .expect("AAC display sample length");
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample(audio_tail));
+        let started = Instant::now();
+        loop {
+            harness.run_steps(1);
+            let status = harness.state().test_active_video_status();
+            assert!(
+                !status
+                    .as_deref()
+                    .is_some_and(|status| status.starts_with("failed:")),
+                "video preview failed at AAC-padded audio tail: {status:?}"
+            );
+            if harness
+                .state()
+                .test_active_video_shown_pts()
+                .is_some_and(|pts| pts > 5.9 && pts < 6.0)
+            {
+                break;
+            }
+            assert!(
+                started.elapsed() < TAB_READY_TIMEOUT,
+                "final video frame did not arrive at AAC-padded audio tail"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            harness.state().test_active_video_status().as_deref(),
+            Some("ready")
+        );
     }
 
     #[test]
@@ -11350,9 +11514,11 @@ mod kittest_suite {
 
         harness.state_mut().test_request_workspace_play_toggle();
         assert!(
-            harness.state().test_audio_is_playing(),
-            "silent video transport must accept Play"
+            harness.state().test_audio_is_playing()
+                || harness.state().test_video_play_start_pending(),
+            "silent video transport must accept Play or enter its short prebuffer"
         );
+        wait_for_video_playback_start(&mut harness);
         harness.state_mut().test_request_workspace_play_toggle();
         assert!(!harness.state().test_audio_is_playing());
 
@@ -11377,6 +11543,38 @@ mod kittest_suite {
             (marker - 0.5125).abs() < 0.06,
             "3-second fixture image is displaced: marker={marker:.3}"
         );
+    }
+
+    #[test]
+    fn video_play_prebuffer_is_cancellable_and_never_blocks_transport() {
+        let video_dir = wav_dir().join("video");
+        let path = video_fixture_path("video_no_audio_6s_30fps.mp4");
+        let mut harness = harness_with_folder(video_dir);
+        wait_for_scan(&mut harness);
+        wait_for_video_metadata(&mut harness, &path);
+        assert!(harness.state_mut().test_open_tab_for_path(&path));
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+
+        assert!(harness.state_mut().test_clear_active_video_buffer());
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(harness.state().test_video_play_start_pending());
+        assert!(!harness.state().test_audio_is_playing());
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(!harness.state().test_video_play_start_pending());
+        assert!(!harness.state().test_audio_is_playing());
+
+        assert!(harness.state_mut().test_clear_active_video_buffer());
+        let started = Instant::now();
+        harness.state_mut().test_request_workspace_play_toggle();
+        wait_for_video_playback_start(&mut harness);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "150 ms video prebuffer blocked transport for {:?}",
+            started.elapsed()
+        );
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(!harness.state().test_audio_is_playing());
     }
 
     #[test]
@@ -11540,6 +11738,56 @@ mod kittest_suite {
 
         eprintln!("[shot] wrote {}", out_dir.join("01_inline.png").display());
         eprintln!("[shot] wrote {}", out_dir.join("02_detached.png").display());
+    }
+
+    /// Regression evidence for AAC padding extending the audio clock slightly
+    /// past the final video PTS.
+    ///   cargo test --features kittest_render -- --ignored video_preview_audio_tail_screenshot --nocapture
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    #[ignore]
+    fn video_preview_audio_tail_screenshot() {
+        let out_dir = std::path::PathBuf::from(
+            std::env::var("NEOWAVES_SHOT_DIR").unwrap_or_else(|_| "/tmp".to_string()),
+        );
+        std::fs::create_dir_all(&out_dir).ok();
+
+        let path = video_fixture_path("video_sync_6s_30fps.mp4");
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(wav_dir().join("video"));
+        let mut harness = harness_with_startup_size(cfg, egui::vec2(1920.0, 1080.0));
+        wait_for_scan(&mut harness);
+        wait_for_video_metadata(&mut harness, &path);
+        assert!(harness.state_mut().test_open_tab_for_path(&path));
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+
+        let audio_tail = harness
+            .state()
+            .test_editor_display_samples_len()
+            .expect("display sample length");
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample(audio_tail));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            harness.run_steps(1);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let status = harness.state().test_active_video_status();
+        let shown = harness.state().test_active_video_shown_pts();
+        let ring = harness.state().test_active_video_ring_pts();
+        eprintln!("[video-tail] status={status:?} shown={shown:?} ring={ring:?}");
+        assert_eq!(status.as_deref(), Some("ready"));
+        assert!(shown.is_some_and(|pts| pts > 5.9 && pts < 6.0));
+        assert!(!ring.is_empty());
+        let output = out_dir.join("video_audio_tail.png");
+        harness
+            .render()
+            .expect("render AAC audio tail")
+            .save(&output)
+            .expect("save AAC audio tail screenshot");
+        eprintln!("[shot] wrote {}", output.display());
     }
 
     /// Stable visual evidence for the list label and before/after video seek.
@@ -11801,21 +12049,54 @@ mod kittest_suite {
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
         assert!(harness.state_mut().test_clear_markers());
-        assert!(harness.state_mut().test_set_zero_cross_snap(false));
         assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.70));
         harness.run_steps(2);
 
         let before = harness.state().test_loop_region().expect("loop region");
         let from = editor_pos_at_loop_edge(&harness, before.1);
         let to = egui::pos2(from.x - 80.0, from.y);
+        let expected = harness
+            .state()
+            .test_editor_x_offset_to_display_sample(to.x - editor_wave_left(&harness))
+            .expect("raw target sample");
         editor_pointer_drag(&mut harness, from, to);
 
         let after = harness.state().test_loop_region().expect("loop region");
         assert_eq!(after.0, before.0, "the opposite edge stays put");
-        assert!(
-            after.1 < before.1,
-            "dragging the end edge inward shortens the loop: {before:?} -> {after:?}"
+        assert_eq!(
+            after.1, expected,
+            "ordinary loop drag must land on the requested sample rather than a zero crossing"
         );
+    }
+
+    #[test]
+    fn alt_loop_edge_drag_snaps_to_the_nearest_zero_crossing() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_clear_markers());
+        assert!(harness.state_mut().test_set_loop_region_frac(0.30, 0.70));
+        harness.run_steps(2);
+
+        let before = harness.state().test_loop_region().expect("loop region");
+        let from = editor_pos_at_loop_edge(&harness, before.1);
+        let to = egui::pos2(from.x - 77.0, from.y);
+        let raw = harness
+            .state()
+            .test_editor_x_offset_to_display_sample(to.x - editor_wave_left(&harness))
+            .expect("raw target sample");
+        let expected = harness
+            .state()
+            .test_nearest_zero_cross(raw)
+            .expect("nearest zero crossing")
+            .max(before.0);
+        assert_ne!(raw, expected, "fixture target must exercise snapping");
+
+        editor_pointer_drag_with_modifiers(&mut harness, from, to, Modifiers::ALT);
+        let after = harness.state().test_loop_region().expect("loop region");
+        assert_eq!(after.0, before.0);
+        assert_eq!(after.1, expected);
     }
 
     #[test]
@@ -11856,7 +12137,6 @@ mod kittest_suite {
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
         assert!(harness.state_mut().test_clear_markers());
-        assert!(harness.state_mut().test_set_zero_cross_snap(false));
         assert!(harness.state_mut().test_set_loop_region_frac(0.02, 0.06));
         harness.run_steps(2);
         let before = harness.state().test_loop_region().expect("loop region");
@@ -11891,7 +12171,6 @@ mod kittest_suite {
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
         assert!(harness.state_mut().test_clear_markers());
-        assert!(harness.state_mut().test_set_zero_cross_snap(false));
         // Short enough that both edges are inside one grab radius of each
         // other, which is where the old `if / else if` always chose the start.
         assert!(harness.state_mut().test_set_loop_region_frac(0.50, 0.502));

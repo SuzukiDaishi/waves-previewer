@@ -1,13 +1,14 @@
 ﻿#[test]
-fn controls_doc_has_stable_editor_s_and_r_mapping() {
+fn controls_doc_has_stable_editor_s_and_alt_snap_mapping() {
     let text = std::fs::read_to_string("docs/CONTROLS.md").expect("read docs/CONTROLS.md");
     assert!(
         text.contains("`S`: 表示モード切り替え") || text.contains("`S`: View"),
         "controls doc must define S as view switch"
     );
+    assert!(!text.contains("`R`: Zero Cross Snap"));
     assert!(
-        text.contains("`R`: Zero Cross Snap") || text.contains("`R`: Zero Cross"),
-        "controls doc must define R as zero-cross toggle"
+        text.contains("`Alt` を押している間だけ") || text.contains("`Alt` でゼロクロス"),
+        "controls doc must define Alt as the zero-cross modifier"
     );
 }
 

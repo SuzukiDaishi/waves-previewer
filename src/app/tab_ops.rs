@@ -207,7 +207,6 @@ impl super::WavesPreviewer {
                 tab.bpm_offset_sec = cached.bpm_offset_sec;
                 tab.time_sig_numerator = cached.time_sig_numerator;
                 tab.time_sig_denominator = cached.time_sig_denominator;
-                tab.snap_zero_cross = cached.snap_zero_cross;
                 tab.active_tool = cached.active_tool;
                 tab.tool_state = cached.tool_state;
                 tab.loop_mode = cached.loop_mode;
@@ -384,7 +383,6 @@ impl super::WavesPreviewer {
             tab.bpm_offset_sec = cached.bpm_offset_sec;
             tab.time_sig_numerator = cached.time_sig_numerator;
             tab.time_sig_denominator = cached.time_sig_denominator;
-            tab.snap_zero_cross = cached.snap_zero_cross;
             tab.active_tool = cached.active_tool;
             tab.tool_state = cached.tool_state;
             tab.loop_mode = cached.loop_mode;

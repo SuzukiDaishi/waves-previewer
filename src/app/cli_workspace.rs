@@ -36,7 +36,6 @@ pub(super) struct CliWorkspace {
 #[derive(Clone)]
 struct SessionTabSnapshot {
     show_waveform_overlay: bool,
-    snap_zero_cross: bool,
     active_tool: ToolKind,
     tool_state: ToolState,
     loop_mode: LoopMode,
@@ -672,7 +671,6 @@ impl CliWorkspace {
             return;
         };
         tab.show_waveform_overlay = snapshot.show_waveform_overlay;
-        tab.snap_zero_cross = snapshot.snap_zero_cross;
         tab.active_tool = snapshot.active_tool;
         tab.tool_state = snapshot.tool_state;
         tab.loop_mode = snapshot.loop_mode;
@@ -706,7 +704,6 @@ impl SessionTabSnapshot {
     fn from_project_tab(tab: &super::project::ProjectTab) -> Self {
         Self {
             show_waveform_overlay: tab.show_waveform_overlay,
-            snap_zero_cross: tab.snap_zero_cross,
             active_tool: super::project::tool_kind_from_str(&tab.active_tool),
             tool_state: super::project::project_tool_state_to_tool_state(&tab.tool_state),
             loop_mode: super::project::loop_mode_from_str(&tab.loop_mode),

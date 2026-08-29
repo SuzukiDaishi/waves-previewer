@@ -20,8 +20,9 @@ use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
     MFCreateSourceReaderFromURL, MFMediaType_Video, MFVideoFormat_RGB32, MF_MT_FRAME_SIZE,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READERF_ENDOFSTREAM,
-    MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 
@@ -36,8 +37,15 @@ pub struct MediaFoundationDecoder {
     reader: IMFSourceReader,
     _session: MfSession,
     info: VideoStreamInfo,
+    /// Native RGB32 size selected when the OS cannot resize this stream.
+    native_frame_size: (u32, u32),
     /// Decoder output size, which is what the frames actually carry.
     frame_size: (u32, u32),
+    /// Bounding box most recently prepared by the worker.
+    prepared_box_px: Option<(u32, u32)>,
+    /// False after an output-size media type was rejected. The decoder stays
+    /// usable and falls back to the existing Rust scaler.
+    native_resize_available: bool,
     /// A seek starts decoding at the preceding keyframe. Keep walking until
     /// this exact presentation time is covered before returning a picture.
     pending_seek_secs: Option<f64>,
@@ -56,13 +64,18 @@ impl MediaFoundationDecoder {
 
         let attributes: IMFAttributes = unsafe {
             let mut attributes = None;
-            MFCreateAttributes(&mut attributes, 1).context("MFCreateAttributes")?;
+            MFCreateAttributes(&mut attributes, 2).context("MFCreateAttributes")?;
             let attributes = attributes.context("MFCreateAttributes returned nothing")?;
             // Lets the reader insert a converter/scaler, which is what makes
             // "give me RGB32" work for any input format.
             attributes
                 .SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)
                 .context("enable advanced video processing")?;
+            // This is opportunistic: systems without a matching hardware MFT
+            // continue through Media Foundation's software transforms.
+            attributes
+                .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)
+                .context("enable hardware transforms")?;
             attributes
         };
 
@@ -123,7 +136,10 @@ impl MediaFoundationDecoder {
             reader,
             _session: session,
             info,
+            native_frame_size: (coded_width, coded_height),
             frame_size: (coded_width, coded_height),
+            prepared_box_px: None,
+            native_resize_available: true,
             pending_seek_secs: None,
             queued_frame: None,
             last_returned_secs: None,
@@ -139,6 +155,54 @@ impl MediaFoundationDecoder {
         self.info.nominal_fps = container.nominal_fps;
         self.info.codec_label = container.codec_label.clone();
         self.info.codec = container.codec;
+    }
+
+    fn rgb32_type(frame_size: Option<(u32, u32)>) -> Result<IMFMediaType> {
+        let media_type: IMFMediaType = unsafe { MFCreateMediaType().context("MFCreateMediaType")? };
+        unsafe {
+            media_type
+                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                .context("set major type")?;
+            media_type
+                .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
+                .context("set subtype")?;
+            if let Some((width, height)) = frame_size {
+                let packed = (u64::from(width) << 32) | u64::from(height);
+                media_type
+                    .SetUINT64(&MF_MT_FRAME_SIZE, packed)
+                    .context("set output frame size")?;
+            }
+        }
+        Ok(media_type)
+    }
+
+    fn select_rgb32_output(&mut self, frame_size: Option<(u32, u32)>) -> Result<(u32, u32)> {
+        let media_type = Self::rgb32_type(frame_size)?;
+        unsafe {
+            self.reader
+                .SetCurrentMediaType(
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                    None,
+                    &media_type,
+                )
+                .context("select RGB32 video output")?;
+        }
+        let selected = unsafe {
+            self.reader
+                .GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
+                .context("GetCurrentMediaType after resize")?
+        };
+        let packed = unsafe { selected.GetUINT64(&MF_MT_FRAME_SIZE).unwrap_or(0) };
+        let actual = ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32);
+        if actual.0 == 0 || actual.1 == 0 {
+            anyhow::bail!("Media Foundation selected a zero-sized RGB32 output");
+        }
+        self.frame_size = actual;
+        self.pending_seek_secs = None;
+        self.queued_frame = None;
+        self.last_returned_secs = None;
+        self.finished = false;
+        Ok(actual)
     }
 
     fn read_next_frame(
@@ -211,6 +275,52 @@ impl MediaFoundationDecoder {
 impl VideoDecoder for MediaFoundationDecoder {
     fn info(&self) -> &VideoStreamInfo {
         &self.info
+    }
+
+    fn prepare_output(&mut self, box_px: (u32, u32)) -> Result<(u32, u32)> {
+        let box_px = (box_px.0.max(1), box_px.1.max(1));
+        if self.prepared_box_px == Some(box_px) {
+            return Ok(self.frame_size);
+        }
+        self.prepared_box_px = Some(box_px);
+
+        if !self.native_resize_available {
+            // The Rust scaler can use a new bounding box without flushing and
+            // re-selecting the same native RGB32 media type on every resize.
+            return Ok(self.frame_size);
+        }
+        let target = super::frame::fit_within(
+            self.native_frame_size.0,
+            self.native_frame_size.1,
+            box_px.0,
+            box_px.1,
+        );
+        match self.select_rgb32_output(Some(target)) {
+            Ok(actual) => return Ok(actual),
+            Err(err) => {
+                eprintln!(
+                    "video: Media Foundation output resize to {}x{} was rejected: {err:#}",
+                    target.0, target.1
+                );
+                self.native_resize_available = false;
+            }
+        }
+
+        // A codec or third-party transform can reject sized output types.
+        // Re-select plain RGB32 and retain the existing CPU scaling fallback.
+        // Even if that defensive re-selection is also rejected, the reader's
+        // last valid RGB32 type remains usable; output-size negotiation must
+        // never turn an otherwise playable stream into a hard failure.
+        match self.select_rgb32_output(None) {
+            Ok(actual) => Ok(actual),
+            Err(fallback_err) => {
+                eprintln!(
+                    "video: Media Foundation could not re-select native RGB32; keeping {}x{}: {fallback_err:#}",
+                    self.frame_size.0, self.frame_size.1
+                );
+                Ok(self.frame_size)
+            }
+        }
     }
 
     fn seek(&mut self, secs: f64, max_forward_walk: usize) -> Result<()> {
