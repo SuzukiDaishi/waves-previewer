@@ -64,15 +64,27 @@ those rights in the jurisdictions where they distribute the product.
 INSTALLER BUILD TOOL
 --------------------
 
-Inno Setup is used to build the Windows installer but is not included in the
-installed product. Its publisher requests that all commercial users purchase a
-commercial licence. Before a commercial production release, purchase a licence
-and configure its key as the INNO_SETUP_LICENSE_KEY repository secret; the
-release workflow installs that key without printing it. A build made without
-that secret is for non-commercial or test release use only. Review the current
-policy here:
+NSIS (Nullsoft Scriptable Install System) builds the Windows installer. It is a
+build-time tool: nothing from NSIS is installed beside NeoWaves. The only NSIS
+output that reaches anyone is the setup executable itself, which the user runs
+once.
 
-    https://jrsoftware.org/isorder.php
+NSIS is licensed under the zlib/libpng licence, which grants permission to use
+the software for any purpose, including commercial applications. No fee is
+charged, none is requested, and an acknowledgement is welcomed but not
+required.
+
+The LZMA compression module NSIS uses is under the Common Public License
+version 1.0, and its authors grant an explicit exception permitting code to be
+linked or bound to that module without becoming subject to the CPL. Only
+modifications to the module itself carry CPL terms. NeoWaves modifies no NSIS
+module, so the generated installer takes on no obligation from it.
+
+Nothing about the installer build tool has to be bought, negotiated or waived
+before a commercial release of NeoWaves, and no build produced by this
+repository is restricted to testing for that reason. The current terms:
+
+    https://nsis.sourceforge.io/License
 
 REDISTRIBUTED AND OPTIONAL NATIVE CODE
 --------------------------------------

@@ -18,7 +18,7 @@ NeoWaves が扱う音声フォーマットごとの、デコード / エンコ�
 `src/media_kind.rs` の capability (`source_allows_destructive_edit` /
 `source_allows_export` / `source_allows_metadata_write`) が決める。
 
-拡張子を増やす場合はこれらの定数と `installer/NeoWaves.iss` の関連付け、
+拡張子を増やす場合はこれらの定数と `installer/NeoWaves.nsi` の関連付け、
 `badges.rs` / `row_menu.rs` の UI を更新する。動画を編集可能にするときは
 `src/media_kind.rs` の capability を 1 箇所変えるだけで、ゲートは全て追従する。
 
@@ -177,7 +177,7 @@ export 側の marker / loop 再書き込み (`export_ops.rs`)。
 
 ## 7. インストーラ / OS 関連付け
 
-`installer/NeoWaves.iss` の "assoc" タスクで
+`installer/NeoWaves.nsi` の "assoc" タスクで
 `.wav / .aiff / .aif / .flac / .mp3 / .m4a / .ogg / .mp4 / .mov / .m4v / .3gp / .3g2 / .nwsess` を
 ProgId `NeoWaves.Audio` に関連付け + `OpenWithProgids` / `SupportedTypes` 登録。
 (2026-07-03: それまで `.aiff/.aif/.ogg` が漏れていたのを修正、`.flac` を追加)

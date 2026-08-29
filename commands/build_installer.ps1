@@ -1,10 +1,9 @@
 param(
-    [string]$IssPath = "installer\NeoWaves.iss",
-    [string]$IsccPath = "",
+    [string]$NsiPath = "installer\NeoWaves.nsi",
+    [string]$MakensisPath = "",
     [string]$OutputDir = "",
     [string]$AppVersion = "",
     [string]$BuildId = "",
-    [string]$InstallerAppId = "",
     [ValidateSet("", "admin", "lowest", "poweruser")]
     [string]$PrivilegesRequired = "",
     [switch]$SkipCargoBuild,
@@ -14,49 +13,42 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Resolve-Iscc {
+function Resolve-Makensis {
     param([string]$Override)
     if ($Override -and (Test-Path $Override)) {
         return (Resolve-Path $Override).Path
     }
     $candidates = @(
-        "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
-        "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
-        "$env:ProgramFiles\Inno Setup 5\ISCC.exe",
-        "$env:ProgramFiles(x86)\Inno Setup 5\ISCC.exe",
-        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
-        "$env:LOCALAPPDATA\Programs\Inno Setup 5\ISCC.exe",
-        "$env:LOCALAPPDATA\Microsoft\WinGet\Links\ISCC.exe",
-        "$env:ProgramData\chocolatey\bin\ISCC.exe"
+        "$env:ProgramFiles\NSIS\makensis.exe",
+        "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+        "$env:LOCALAPPDATA\Programs\NSIS\makensis.exe",
+        "$env:ProgramData\chocolatey\bin\makensis.exe"
     )
     foreach ($c in $candidates) {
         if ($c -and (Test-Path $c)) { return $c }
     }
     $regKeys = @(
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1",
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 5_is1",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 5_is1"
+        "HKLM:\SOFTWARE\NSIS",
+        "HKLM:\SOFTWARE\WOW6432Node\NSIS"
     )
     foreach ($key in $regKeys) {
-        if (Test-Path $key) {
+        if (Test-Path $key -ErrorAction SilentlyContinue) {
             try {
-                $loc = (Get-ItemProperty -Path $key -Name "InstallLocation" -ErrorAction Stop).InstallLocation
+                # NSIS records its install directory as the key's default value,
+                # which only GetValue("") reads reliably.
+                $loc = (Get-Item -Path $key -ErrorAction Stop).GetValue("")
                 if ($loc) {
-                    $cand = Join-Path $loc "ISCC.exe"
+                    $cand = Join-Path $loc "makensis.exe"
                     if (Test-Path $cand) { return $cand }
-                }
-                $icon = (Get-ItemProperty -Path $key -Name "DisplayIcon" -ErrorAction SilentlyContinue).DisplayIcon
-                if ($icon) {
-                    $iconPath = $icon -split "," | Select-Object -First 1
-                    if (Test-Path $iconPath) { return $iconPath }
                 }
             } catch {}
         }
     }
-    $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+    $cmd = Get-Command makensis.exe -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
-    throw "ISCC.exe not found. Install Inno Setup or pass -IsccPath."
+    $cmd = Get-Command makensis -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    throw "makensis.exe not found. Install NSIS (choco install nsis) or pass -MakensisPath."
 }
 
 function Find-CargoToml {
@@ -130,10 +122,10 @@ function Update-CargoVersionToToday {
     return $next
 }
 
-$issFull = Resolve-Path $IssPath
-$root = Split-Path -Parent $issFull
+$nsiFull = Resolve-Path $NsiPath
+$root = Split-Path -Parent $nsiFull
 $workdir = $root
-$iscc = Resolve-Iscc $IsccPath
+$makensis = Resolve-Makensis $MakensisPath
 
 $cargoToml = $null
 $version = $AppVersion
@@ -201,29 +193,27 @@ function Sync-RuntimeDlls {
 
 function Build-Args {
     param(
-        [string]$OutDir,
+        [string]$OutFile,
         [string]$Ver,
-        [string]$Id
+        [string]$Id,
+        [string]$SrcDir,
+        [string]$RepoDir
     )
+    # makensis has no /O switch: the output path is a define the script uses for
+    # OutFile, so the caller decides the full path rather than just a directory.
     $localArgs = @()
-    if ($OutDir) {
-        $outFull = Resolve-Path -Path $OutDir -ErrorAction SilentlyContinue
-        if (-not $outFull) {
-            New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-            $outFull = Resolve-Path $OutDir
-        }
-        $localArgs += "/O$outFull"
-    }
-    if ($Quiet) { $localArgs += "/Q" }
-    if ($Id) { $localArgs += "/DMyAppBuildId=$Id" }
-    $localArgs += "/DMyAppVersion=$Ver"
-    if ($InstallerAppId) { $localArgs += "/DMyAppId=$InstallerAppId" }
-    if ($PrivilegesRequired) { $localArgs += "/DMyPrivilegesRequired=$PrivilegesRequired" }
-    $localArgs += $issFull
+    $localArgs += if ($Quiet) { "-V1" } else { "-V2" }
+    $localArgs += "-DAPP_VERSION=$Ver"
+    if ($Id) { $localArgs += "-DBUILD_ID=$Id" }
+    $localArgs += "-DOUT_FILE=$OutFile"
+    $localArgs += "-DSRC_DIR=$SrcDir"
+    $localArgs += "-DREPO_DIR=$RepoDir"
+    if ($PrivilegesRequired) { $localArgs += "-DPRIVILEGES=$PrivilegesRequired" }
+    $localArgs += $nsiFull
     return $localArgs
 }
 
-function Invoke-IsccCommand {
+function Invoke-Makensis {
     param(
         [string]$ExePath,
         [string[]]$ExeArgs
@@ -282,11 +272,9 @@ function Show-UpdateSmokeGuidance {
 if (-not $BuildId) {
     $BuildId = New-BuildId
 }
-$hasExplicitOutputDir = -not [string]::IsNullOrWhiteSpace($OutputDir)
 if (-not $OutputDir) {
     $OutputDir = Join-Path $root ("out\\installer_" + $BuildId)
 }
-$requestedOutputDir = $OutputDir
 
 if (-not $SkipCargoBuild) {
     Write-Host "Building release binaries (cargo build --release --bins)..."
@@ -302,71 +290,35 @@ if (-not $SkipCargoBuild) {
     Sync-RuntimeDlls -RepoRoot $repoRoot
 }
 
-$args = Build-Args -OutDir $OutputDir -Ver $version -Id $BuildId
-
-Write-Host "Using ISCC: $iscc"
-Write-Host "Building: $issFull"
-Write-Host "AppVersion: $version"
-Write-Host "BuildId: $BuildId"
-Write-Host "OutputDir: $OutputDir"
-Write-Warning "For commercial production releases, review Inno Setup's commercial-licence request: https://jrsoftware.org/isorder.php"
-
-$attempts = 0
-$maxAttempts = 5
-$usedTempOutputFallback = $false
-while ($true) {
-    $attempts++
-    $run = Invoke-IsccCommand -ExePath $iscc -ExeArgs $args
-    $output = $run.Output
-    $code = $run.ExitCode
-    $text = $run.Text
-    $resourceUpdateError = ($text -match "Resource update error") -or ($text -match "EndUpdateResource failed")
-    if ($code -eq 0) {
-        if ($output) { $output | Write-Host }
-        break
-    }
-    if ($output) { $output | Write-Host }
-    if (-not $resourceUpdateError -or $attempts -ge $maxAttempts) {
-        if ($resourceUpdateError) {
-            throw "ISCC failed after $attempts attempts due to resource update error (110). Try excluding installer output/temp folders from antivirus software."
-        }
-        throw "ISCC failed with exit code $code"
-    }
-    if (-not $usedTempOutputFallback -and $attempts -ge 2) {
-        $usedTempOutputFallback = $true
-        $OutputDir = Join-Path $env:TEMP ("neowaves_installer_" + $BuildId)
-        Write-Host "ISCC resource update failed (110). Switching OutputDir to temp path: $OutputDir"
-    } else {
-        Write-Host "ISCC resource update failed (110). Retrying with new BuildId..."
-    }
-    $delayMs = [Math]::Min(5000, 500 * [Math]::Pow(2, $attempts - 1))
-    Start-Sleep -Milliseconds ([int]$delayMs)
-    $BuildId = New-BuildId
-    if (-not $usedTempOutputFallback) {
-        $OutputDir = if ($hasExplicitOutputDir) {
-            $requestedOutputDir
-        } else {
-            Join-Path $root ("out\\installer_" + $BuildId)
-        }
-    } else {
-        $OutputDir = Join-Path $env:TEMP ("neowaves_installer_" + $BuildId)
-    }
-    $args = Build-Args -OutDir $OutputDir -Ver $version -Id $BuildId
-    Write-Host "Retrying ISCC ($($attempts + 1)/$maxAttempts)..."
-}
-
-if ($usedTempOutputFallback) {
-    Write-Host "Installer output fallback used. Final OutputDir: $OutputDir"
-}
-
 $installerBaseName = "NeoWaves-Setup-$version"
 if ($BuildId) {
     $installerBaseName += "-$BuildId"
 }
+# release.yml locates the artifact by globbing installer\out for
+# NeoWaves-Setup-*.exe, so this layout is part of the contract.
+New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+$OutputDir = (Resolve-Path $OutputDir).Path
 $installerPath = Join-Path $OutputDir ($installerBaseName + ".exe")
+
+$srcDir = Join-Path (Join-Path $repoRoot "target") "release"
+$makensisArgs = Build-Args -OutFile $installerPath -Ver $version -Id $BuildId -SrcDir $srcDir -RepoDir $repoRoot
+
+Write-Host "Using makensis: $makensis"
+Write-Host "Building: $nsiFull"
+Write-Host "AppVersion: $version"
+Write-Host "BuildId: $BuildId"
+Write-Host "OutputDir: $OutputDir"
+
+$run = Invoke-Makensis -ExePath $makensis -ExeArgs $makensisArgs
+if ($run.Output) { $run.Output | Write-Host }
+if ($run.ExitCode -ne 0) {
+    throw "makensis failed with exit code $($run.ExitCode)"
+}
 
 Write-Host "Done."
 if (Test-Path $installerPath) {
     Write-Host "InstallerPath: $installerPath"
+} else {
+    throw "makensis reported success but $installerPath is missing."
 }
 Show-UpdateSmokeGuidance -InstallerPath $installerPath -Version $version

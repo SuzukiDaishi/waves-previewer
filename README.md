@@ -121,8 +121,8 @@ cargo build
 - `installer\\out\\installer_<buildid>\\NeoWaves-Setup-<version>-<buildid>.exe`
 
 補足:
-- `build_installer.ps1` は `ISCC` の `Resource update error ... EndUpdateResource failed (110)` を検知した場合、再試行します。
-- 再試行中に失敗が続く場合は出力先を `%TEMP%` 配下へ切り替えて継続します（最終 `OutputDir` はログに表示）。
+- インストーラー生成には NSIS を使います。事前に `choco install nsis`（または公式インストーラー）で `makensis.exe` を入れてください。見つからない場合は `-MakensisPath` で明示できます。
+- スクリプト本体は `installer\\NeoWaves.nsi` です。Windows版`makensis.exe`で検証してください。
 - スクリプトの最後に更新 smoke checklist を出します。既存版の上書きインストール、設定保持、関連付け、shell-open の確認に使ってください。
 
 ---
@@ -250,6 +250,7 @@ NeoWaves 本体のソースは MIT です。MP3 書き出しに使う LAME 3.100
 | **Cisco OpenH264** | `video` を既定 feature から除外。Cisco の特許料肩代わりは Cisco 配布バイナリ限定で、ソースからビルドすると義務が配布者に移るため。リリースする Windows インストーラでは Media Foundation が映像を担うので機能的損失はない。`--features video` でビルドしたバイナリを再配布する場合は AVC の義務が自分に来る点に注意 |
 | **AAC** | FDK AAC 依存と Symphonia AAC decoder は依存グラフに入れない（feature でも入らない）。デコードは**同梱せず OS のデコーダーを借りる**方式にした。Windows では Media Foundation が AAC 音声を再生し、コーデックは OS の一部なので再配布物には含まれない（映像の H.264 / HEVC と同じ扱い）。OS デコーダーが無い環境では `AAC UNSUPPORTED` と表示し、映像は無音タイムラインで再生・シーク可能。AAC の書き出しは借りられるエンコーダーが無いため引き続き非対応 |
 | **LAME (MP3 書き出し)** | `mp3_lame` feature は既定 ON。LAME を `libmp3lame.dll` として同梱し、EXE は import table 経由で動的リンク。LAME 3.100 同梱原文の LGPL-2.0 §6(b) に沿う共有ライブラリ構成。正確な 3.100 ソースは `vendor/lame-3.100` に固定 |
+| **インストーラー生成ツール** | Inno Setup は配布物に同梱されないビルド専用ツールだが、公式が全商用ユーザーに商用ライセンス購入を要請しており、未購入のビルドは「非商用/テスト専用」扱いだった。zlib/libpng ライセンスで商用利用を無償許諾する **NSIS** へ置き換え、購入要請そのものを解消。LZMA モジュールの CPL-1.0 には作者によるリンク例外があるため生成物に義務は及ばない |
 
 #### LGPL と商用販売について
 
@@ -276,9 +277,12 @@ Oniguruma、SQLite は従来どおり EXE 側にリンクされ、DirectML は W
 OS コンポーネントを呼ぶだけで再頒布しません。`LICENSE` と
 `THIRD_PARTY_NOTICES.txt` もインストール先へコピーします。
 
-インストーラー生成には Inno Setup を使用します。Inno Setup 本体は配布物へ同梱されず、
-公式はすべての商用ユーザーに商用ライセンス購入を要請しています。商用の production
-release 前に [Inno Setup Commercial Licenses](https://jrsoftware.org/isorder.php) を確認し、
-GitHub Actions の repository secret `INNO_SETUP_LICENSE_KEY` に購入済みキーを登録して
-ください。キー未設定でもテスト用インストーラーは生成できますが、商用 production 用の
-成果物としては扱いません。
+インストーラー生成には [NSIS](https://nsis.sourceforge.io/License) を使用します。NSIS 本体は
+配布物へ同梱されず、ビルド時にしか登場しません。NSIS は zlib/libpng ライセンスで、
+**商用利用を含むあらゆる用途を無償で許諾**しています。購入要請はなく、謝辞も任意です。
+LZMA 圧縮モジュールだけは CPL-1.0 ですが、作者による明示的なリンク例外があるため、
+モジュール自体を改変しない限り生成物に義務は及びません。
+
+つまり**インストーラー生成ツールに起因する商用リリースの前提条件はありません**。
+鍵の購入も secret の登録も不要で、CI が出力するインストーラーはそのまま商用
+production 成果物として扱えます。

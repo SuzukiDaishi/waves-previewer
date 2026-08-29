@@ -511,6 +511,44 @@ mod tests {
         }
     }
 
+    /// The tool that builds the installer must not put a precondition on a
+    /// commercial release. Inno Setup asked every commercial user to buy a
+    /// licence, which made every installer this repository produced a test-only
+    /// artefact; NSIS grants commercial use outright, so the installer moved
+    /// there. If that reasoning falls out of the distribution terms, the
+    /// project can drift back to a tool with strings attached and nobody would
+    /// notice until a release had already shipped.
+    #[test]
+    fn the_installer_build_tool_asks_nothing_of_a_commercial_release() {
+        let manifest = manifest();
+        let terms = manifest
+            .distribution_terms()
+            .expect("the distribution terms went missing");
+        let text = terms
+            .license_keys
+            .iter()
+            .filter_map(|key| manifest.license(key))
+            .map(|license| license.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("NSIS"),
+            "the distribution terms no longer name the installer build tool"
+        );
+        assert!(
+            text.contains("zlib/libpng"),
+            "the terms should name the licence that makes the build tool free to \
+             use commercially, not just the tool"
+        );
+        for abandoned in ["Inno Setup", "INNO_SETUP_LICENSE_KEY"] {
+            assert!(
+                !text.contains(abandoned),
+                "{abandoned} is back in the distribution terms: the installer tool \
+                 would once again ask to be paid before a commercial release"
+            );
+        }
+    }
+
     #[test]
     fn known_dependencies_are_present() {
         let manifest = manifest();

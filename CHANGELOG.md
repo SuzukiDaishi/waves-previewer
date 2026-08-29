@@ -4,6 +4,21 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### インストーラーを Inno Setup から NSIS へ移した
+
+- **「買ってください」と言ってくるビルドツールが、商用リリースの最後の前提条件だった**: 依存グラフ側の商用ブロッカーは既に片付いていた（GPL/AGPL 依存ゼロ、LAME は LGPL-2.0 §6(b) の差し替え可能 DLL、Symphonia の MPL-2.0 は file-level）。残っていたのは**配布物に一切含まれない**ビルド専用ツール、Inno Setup だけ。公式は年商 5,000 USD 超の商用利用者全員に商用ライセンス購入を要請しており（法的には必須ではないと明記されているが）、それに従って `INNO_SETUP_LICENSE_KEY` 未設定のビルドを「非商用/テスト専用」と自称していた。つまり鍵を買うまで、この repo が出すインストーラーは全部テスト用という扱いだった。
+  - **NSIS へ置き換えた**。zlib/libpng ライセンスで「商用アプリケーションを含むあらゆる目的での使用」を無償許諾しており、購入要請も謝辞義務もない。LZMA 圧縮モジュールだけは CPL-1.0 だが、Igor Pavlov と Amir Szekely による明示的なリンク例外があるため、モジュール自体を改変しない限り生成物に義務は及ばない。
+  - WiX v6 も検討したが、収益を生む利用に Open Source Maintenance Fee が**必須**で、Inno Setup より条件が悪いので採らなかった。
+  - `INNO_SETUP_LICENSE_KEY` secret は不要になった。release ワークフローから鍵の設定ステップごと削除している。
+- **`installer/NeoWaves.iss` → `installer/NeoWaves.nsi`**: 挙動は移植であって作り直しではない。ライセンス同意ページ（`LICENSE` の MIT 全文）、`{autopf}` / per-user のインストール先分岐、前回インストール先の再利用、スタートメニューとデスクトップのショートカット、13 拡張子の関連付けタスク（既定 OFF）、`libmp3lame.dll` を EXE に取り込まず別ファイルで配ること、`LICENSE` と `THIRD_PARTY_NOTICES.txt` の同梱、インストール後の昇格を落とした起動 — 全部そのまま。
+  - **`SetupLogging` 相当だけは無い**。NSIS の標準ビルドには実行時ログ機能がないため、これ 1 つだけ意図的に落とした。
+  - **関連付けの後始末が良くなった**: 従来は関連付けを解除するとき拡張子の既定値を削除するだけで、NeoWaves より前にその拡張子を持っていたアプリに戻らなかった。元の ProgId を退避しておき、アンインストール時に**まだ NeoWaves が持っていれば**元へ返すようにした。
+  - **既存の Inno 版からのアップグレード経路を用意した**: 旧 `.iss` は `ArchitecturesInstallIn64BitMode` を設定していなかったので、Inno は 32bit モードで動いていた — 実際のインストール先は `Program Files (x86)\\NeoWaves`、アンインストール登録は `WOW6432Node` 側。新インストーラーは両方の registry view から旧インストール先を探し、**見つかればそこへ上書きする**（勝手に `Program Files` 側へ二重インストールしない）。同時に旧 Inno のアンインストール登録と `unins000.exe` / `unins000.dat` を撤去するので、「プログラムの追加と削除」に NeoWaves が 2 つ並ぶことはない。新規インストールは `Program Files` 側になる。
+  - **起動中の NeoWaves の閉じ方**: Windows は実行中の EXE を書き込みロックするので、上書き対象を追記モードで開けるかどうかで判定する。ロックされていれば `taskkill`（`/F` なし = WM_CLOSE）で Inno と同じ穏当な終了を促し、2 巡しても閉じなければ Retry/Cancel を出す。外部プラグイン（nsProcess 等）は入れていない — バイナリを 1 個も増やさないのが今回の趣旨なので。
+- **`commands/build_installer.ps1`**: `ISCC.exe` の探索・実行を `makensis.exe` に差し替え。`Resource update error (110)` のリトライループと `%TEMP%` へのフォールバックは ISCC 固有の失敗モードなので削除した。バージョン自動採番、`Sync-RuntimeDlls`、smoke checklist、`installer\out\installer_<buildid>\NeoWaves-Setup-<version>-<buildid>.exe` という出力レイアウトは変えていない（release ワークフローがこのパスを glob している）。パラメータ名は `-IssPath` / `-IsccPath` → `-NsiPath` / `-MakensisPath`、Inno 固有の `-InstallerAppId` は削除。
+- **ライセンス表記を実態に合わせた**: `THIRD_PARTY_NOTICES.txt` と Help → Licenses の `INSTALLER BUILD TOOL` 節を、購入要請の話から「そもそも要請がない」話へ差し替え。`licenses::tests::the_installer_build_tool_asks_nothing_of_a_commercial_release` が、この節が NSIS と zlib/libpng に言及し続けること、そして Inno Setup が戻ってこないことを固定する。
+- **検証の申し送り**: Windows版`makensis.exe`でスクリプトのコンパイルと同梱物の中身を検証する。上書きアップグレード、関連付けの登録/解除、昇格を落とした起動の3点は、`build_installer.ps1`が最後に出すsmoke checklistに従って実機確認する。
+
 ## 0.20260830.0 - 2026-08-30
 
 - **Live frame profiler in the Debug window**: added real FPS/cadence history, a stacked UI-thread phase graph, deferred-work markers, and a recent P95 blocker table with per-stage last/average/peak timings. Capture runs only while the panel is visible and can be held or cleared for inspection.
