@@ -3299,17 +3299,82 @@ impl SessionSidecarSource {
     }
 }
 
+/// Where in the session document a sidecar's path is written once the save
+/// worker knows it.
+///
+/// The name is derived from the audio's own hash, which is far too expensive
+/// to compute on the UI thread (a dirty tab can hold a hundred megabytes), so
+/// the document is built with the reference empty and the worker fills it in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidecarSlot {
+    /// Managed audio for a virtual item, keyed by asset id hex. Keyed rather
+    /// than indexed because `assets` and `virtual_items` are sorted after
+    /// the plan is built.
+    ManagedAsset {
+        asset_id: String,
+        revision: u64,
+    },
+    TabEdited(usize),
+    TabPreview(usize),
+    CachedEdit(usize),
+}
+
 pub struct SessionSidecarJob {
-    pub dst: PathBuf,
+    /// Which document field receives the committed path.
+    pub slot: SidecarSlot,
     pub source: SessionSidecarSource,
     pub sample_rate: u32,
     pub label: &'static str,
 }
 
+/// Why a save was refused, and what the user can do about it.
+///
+/// A conflict means **nothing was written**: the document on disk is the
+/// other person's, and the local edits are still only in memory.
+#[derive(Clone, Debug)]
+pub struct SessionConflict {
+    /// Where the save was headed.
+    pub path: PathBuf,
+    /// Whoever wrote the document currently on disk, as it describes itself.
+    pub on_disk: String,
+    /// The revision this session was based on, if it had one.
+    pub based_on_revision: Option<u64>,
+    /// Set when the conflict interrupted a Session Close, so accepting a
+    /// resolution can finish the close the user asked for.
+    pub close_when_resolved: bool,
+}
+
+/// Another process saved the open session. Held until the user acts, because
+/// a toast expires long before they get back to the window.
+#[derive(Clone, Debug)]
+pub struct SessionChangedOnDisk {
+    pub path: PathBuf,
+    /// How the new document on disk describes itself.
+    pub on_disk: String,
+    /// True when the file is gone rather than merely different.
+    pub removed: bool,
+}
+
+/// Result of the disk-touching half of a session save.
+pub enum SessionSaveOutcome {
+    Saved {
+        path: PathBuf,
+        fingerprint: crate::app::session_sync::SessionFingerprint,
+        session_id: String,
+        revision: u64,
+        /// Where each managed asset actually landed. The UI adopts these
+        /// directly instead of re-deriving the path and stat-ing it, which
+        /// it may not do on the UI thread anyway.
+        committed_assets: Vec<(crate::audio_asset::AudioAssetId, PathBuf)>,
+    },
+    /// The document changed since it was read. Nothing was committed.
+    Conflict(SessionConflict),
+}
+
 /// In-flight background session save (sidecar encodes + TOML write).
 pub struct SessionSaveState {
     pub msg: String,
-    pub rx: std::sync::mpsc::Receiver<Result<PathBuf, String>>,
+    pub rx: std::sync::mpsc::Receiver<Result<SessionSaveOutcome, String>>,
     #[allow(dead_code)]
     pub started_at: std::time::Instant,
 }

@@ -3489,6 +3489,61 @@ impl super::WavesPreviewer {
         self.open_project_file(path.to_path_buf()).is_ok()
     }
 
+    // ---- Shared-session state, for tests of the two-writer flow ----------
+
+    /// The conflict the last save was refused with, described the way the
+    /// prompt shows it. `None` when the save committed.
+    pub fn test_session_conflict(&self) -> Option<String> {
+        self.session_conflict
+            .as_ref()
+            .map(|conflict| conflict.on_disk.clone())
+    }
+
+    /// The standing "someone else saved this" banner, if it is showing.
+    pub fn test_session_changed_on_disk(&self) -> Option<String> {
+        self.session_changed_on_disk
+            .as_ref()
+            .map(|changed| changed.on_disk.clone())
+    }
+
+    pub fn test_session_revision(&self) -> Option<u64> {
+        self.session_revision
+    }
+
+    /// Start an interactive (worker-backed) save, the way Ctrl+S does.
+    pub fn test_begin_session_save(&mut self, path: &Path) -> bool {
+        self.save_project_as(path.to_path_buf()).is_ok()
+    }
+
+    /// Interactive save with the compare-and-swap skipped, the way the
+    /// conflict prompt's Overwrite button does.
+    pub fn test_begin_session_save_forced(&mut self, path: &Path) -> bool {
+        self.save_project_as_forced(path.to_path_buf(), true).is_ok()
+    }
+
+    pub fn test_session_save_in_flight(&self) -> bool {
+        self.session_save_state.is_some()
+    }
+
+    /// Make the watch report the given document state without waiting for a
+    /// poll interval. Exercises the drain and the banner, not the probe --
+    /// the probe has its own tests in `session_watch`.
+    pub fn test_report_session_changed_on_disk(&mut self, on_disk: &str) {
+        let Some(path) = self.project_path.clone() else {
+            return;
+        };
+        self.session_changed_on_disk = Some(crate::app::types::SessionChangedOnDisk {
+            path,
+            on_disk: on_disk.to_string(),
+            removed: false,
+        });
+    }
+
+    pub fn test_request_session_reload_prompt(&mut self) -> bool {
+        self.request_session_reload_prompt();
+        self.session_reload_prompt
+    }
+
     pub fn test_set_channel_view_mixdown(&mut self) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;

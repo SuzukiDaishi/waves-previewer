@@ -5,8 +5,9 @@ use crate::audio::AudioBuffer;
 use crate::ipc;
 
 use super::external_ops;
+use super::session_sync;
 use super::project::{
-    asset_audio_dst, can_store_relative, describe_missing, deserialize_project,
+    can_store_relative, describe_missing, deserialize_project,
     fade_shape_from_str, load_sidecar_audio, loop_mode_from_str, loop_shape_from_str,
     marker_entry_to_project, metadata_sub_view_from_project, missing_file_meta,
     primary_view_from_project, project_channel_view_to_channel_view, project_marker_to_entry,
@@ -14,7 +15,7 @@ use super::project::{
     project_plugin_fx_chain_to_draft, project_plugin_fx_draft_from_draft,
     project_plugin_fx_draft_to_draft, project_region_to_entry, project_spectrogram_from_cfg,
     project_tab_from_tab, project_tool_state_to_tool_state, region_entry_to_project, rel_path,
-    repair_project_source_paths, resolve_path, serialize_project, session_path, sidecar_audio_dst,
+    repair_project_source_paths, resolve_path, serialize_project, session_path,
     spectro_config_from_project, tool_kind_from_str, ProjectApp, ProjectAppliedEffectGraph,
     ProjectAsset, ProjectBitDepthOverride, ProjectEdit, ProjectEffectGraphUi, ProjectExportPolicy,
     ProjectExternalSource, ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList,
@@ -31,6 +32,10 @@ pub(super) struct ParsedSession {
     pub path: PathBuf,
     /// Boxed: `ProjectFile` is large and this crosses a channel.
     pub project: Box<ProjectFile>,
+    /// The exact bytes this document was read from. A later save refuses to
+    /// commit unless the file still matches, so another person's save in the
+    /// meantime is reported rather than overwritten.
+    pub fingerprint: session_sync::SessionFingerprint,
     pub path_repair: SessionPathRepair,
     pub session_path_mode: SessionPathMode,
     pub base_dir: PathBuf,
@@ -221,37 +226,6 @@ pub(super) struct ProjectOpenState {
     /// dropped rather than applied over the newer one.
     pub generation: u64,
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-#[cfg(windows)]
-fn atomic_replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination_wide: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let ok = unsafe {
-        MoveFileExW(
-            source_wide.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(windows))]
-fn atomic_replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    std::fs::rename(source, destination)
 }
 
 fn external_key_rule_to_project(rule: super::types::ExternalKeyRule) -> &'static str {
@@ -722,6 +696,8 @@ mod tests {
         std::fs::rename(&old_found, &relocated_found).expect("move source fixture");
         let relocated_session = new_dir.join("portable.nwsess");
         std::fs::rename(&old_session, &relocated_session).expect("move session");
+        let moved_text =
+            std::fs::read_to_string(&relocated_session).expect("read moved session");
 
         let mut restored =
             crate::app::WavesPreviewer::new_headless(crate::StartupConfig::default())
@@ -748,6 +724,26 @@ mod tests {
             super::super::types::MediaStatus::DecodeFailed(_)
         ));
 
+        // Opening must not have touched the file. On a shared file server
+        // the repair-on-open write made every reader a writer, racing the
+        // people actually saving; the repair now rides in memory until the
+        // next explicit save.
+        let after_open =
+            std::fs::read_to_string(&relocated_session).expect("read session after open");
+        assert_eq!(
+            after_open, moved_text,
+            "opening a relocated session must leave the file on disk untouched"
+        );
+        assert!(
+            restored.session_paths_repaired,
+            "the pending repair has to be remembered so a later save writes it"
+        );
+
+        // The repair reaches disk on the next save, which is the same
+        // compare-and-swapped write as any other.
+        restored
+            .save_project_as_blocking(relocated_session.clone())
+            .expect("save the repaired session");
         let updated_text =
             std::fs::read_to_string(&relocated_session).expect("read self-healed session");
         let updated = deserialize_project(&updated_text).expect("parse self-healed session");
@@ -817,6 +813,396 @@ mod tests {
                 .all(|raw| !Path::new(raw).is_absolute()),
             "relative mode must apply to every source"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---- Shared file server: two writers, no lock ------------------------
+
+    /// Build an app with one file listed, saved to `session`.
+    fn app_with_saved_session(dir: &Path, name: &str) -> (crate::app::WavesPreviewer, PathBuf) {
+        let audio = dir.join("source.wav");
+        if !audio.is_file() {
+            crate::wave::export_channels_audio(&[vec![0.1, -0.1, 0.2]], 48_000, &audio)
+                .expect("write fixture");
+        }
+        let session = dir.join(name);
+        let mut app = crate::app::WavesPreviewer::new_headless(crate::StartupConfig::default())
+            .expect("headless app");
+        app.replace_with_files(&[audio]);
+        app.save_project_as_blocking(session.clone())
+            .expect("initial save");
+        (app, session)
+    }
+
+    #[test]
+    fn a_save_stamps_the_document_so_a_conflict_can_name_who_wrote_it() {
+        let dir = temp_dir("stamp");
+        let (app, session) = app_with_saved_session(&dir, "stamped.nwsess");
+        let stored = deserialize_project(
+            &std::fs::read_to_string(&session).expect("read session"),
+        )
+        .expect("parse session");
+        assert_eq!(stored.revision, Some(1), "the first save is revision 1");
+        assert!(stored.session_id.is_some());
+        assert!(stored.saved_at.is_some());
+        assert!(stored.saved_by.is_some());
+        assert_eq!(app.session_revision, Some(1));
+        assert!(app.session_disk_fingerprint.is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_second_save_advances_the_revision() {
+        let dir = temp_dir("revision");
+        let (mut app, session) = app_with_saved_session(&dir, "rev.nwsess");
+        app.save_project_as_blocking(session.clone())
+            .expect("second save");
+        let stored = deserialize_project(
+            &std::fs::read_to_string(&session).expect("read session"),
+        )
+        .expect("parse session");
+        assert_eq!(stored.revision, Some(2));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_save_refuses_when_the_document_changed_since_it_was_read() {
+        let dir = temp_dir("conflict");
+        let (mut app, session) = app_with_saved_session(&dir, "shared.nwsess");
+        let ours = std::fs::read_to_string(&session).expect("read our version");
+
+        // Somebody else saves over it.
+        let mut theirs = deserialize_project(&ours).expect("parse");
+        theirs.revision = Some(42);
+        theirs.saved_by = Some("tanaka".to_string());
+        theirs.name = Some("their edit".to_string());
+        let theirs_text = serialize_project(&theirs).expect("serialize theirs");
+        std::fs::write(&session, &theirs_text).expect("their save");
+
+        let err = app
+            .save_project_as_blocking(session.clone())
+            .expect_err("a save over somebody else's work must be refused");
+        assert!(
+            err.contains("changed on disk"),
+            "the error has to say what happened, got: {err}"
+        );
+        assert!(err.contains("tanaka"), "and who it happened to: {err}");
+
+        let after = std::fs::read_to_string(&session).expect("read after refusal");
+        assert_eq!(
+            after, theirs_text,
+            "a refused save must leave their document exactly as it was"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_forced_save_wins_but_keeps_the_document_it_replaced() {
+        let dir = temp_dir("force");
+        let (mut app, session) = app_with_saved_session(&dir, "forced.nwsess");
+        let mut theirs =
+            deserialize_project(&std::fs::read_to_string(&session).expect("read")).expect("parse");
+        theirs.revision = Some(9);
+        theirs.name = Some("their edit".to_string());
+        let theirs_text = serialize_project(&theirs).expect("serialize theirs");
+        std::fs::write(&session, &theirs_text).expect("their save");
+
+        app.save_project_as_blocking_forced(session.clone(), true)
+            .expect("a forced save commits");
+
+        let stored = deserialize_project(
+            &std::fs::read_to_string(&session).expect("read session"),
+        )
+        .expect("parse session");
+        assert_eq!(
+            stored.revision,
+            Some(10),
+            "the revision keeps climbing from what was on disk"
+        );
+        let backup = crate::app::WavesPreviewer::session_backup_path(&session);
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("read backup"),
+            theirs_text,
+            "the overwritten version has to remain recoverable"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_save_to_a_new_path_is_never_a_conflict() {
+        let dir = temp_dir("save_as");
+        let (mut app, session) = app_with_saved_session(&dir, "original.nwsess");
+        let original_id = app.session_id.clone().expect("first save issued an id");
+        std::fs::write(&session, "version = 2\nrevision = 77\n").expect("someone else saves");
+
+        let other = dir.join("copy.nwsess");
+        app.save_project_as_blocking(other.clone())
+            .expect("Save As to a fresh path has nothing to conflict with");
+        let stored =
+            deserialize_project(&std::fs::read_to_string(&other).expect("read copy"))
+                .expect("parse copy");
+        assert_ne!(
+            stored.session_id.as_deref(),
+            Some(original_id.as_str()),
+            "Save As forks the document, so a later conflict names the right session"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_save_recreates_a_session_somebody_deleted_rather_than_refusing() {
+        let dir = temp_dir("deleted");
+        let (mut app, session) = app_with_saved_session(&dir, "gone.nwsess");
+        std::fs::remove_file(&session).expect("somebody deletes it");
+        app.save_project_as_blocking(session.clone())
+            .expect("a deleted session is recreated, not refused");
+        assert!(session.is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn two_writers_editing_the_same_tab_do_not_share_a_sidecar_name() {
+        // The failure this guards: both used to write `data/tab_0000.wav`,
+        // so the second person's save destroyed the first person's audio
+        // even when the document-level check later refused their document.
+        let dir = temp_dir("sidecar_clash");
+        let audio = dir.join("source.wav");
+        crate::wave::export_channels_audio(&[vec![0.0; 64]], 48_000, &audio)
+            .expect("write fixture");
+        let session = dir.join("shared.nwsess");
+
+        let sidecar_names = |channels: Vec<f32>| -> Vec<String> {
+            let mut app =
+                crate::app::WavesPreviewer::new_headless(crate::StartupConfig::default())
+                    .expect("headless app");
+            app.replace_with_files(&[audio.clone()]);
+            app.open_or_activate_tab(&audio);
+            let tab = app.tabs.first_mut().expect("tab opened");
+            tab.ch_samples = vec![channels.clone()];
+            tab.ch_samples_arc = std::sync::Arc::new(vec![channels]);
+            tab.buffer_sample_rate = 48_000;
+            tab.dirty = true;
+            app.save_project_as_blocking_forced(session.clone(), true)
+                .expect("save with a dirty tab");
+            let stored = deserialize_project(
+                &std::fs::read_to_string(&session).expect("read session"),
+            )
+            .expect("parse session");
+            stored
+                .tabs
+                .iter()
+                .filter_map(|tab| tab.edited_audio.clone())
+                .collect()
+        };
+
+        let first = sidecar_names(vec![0.25; 64]);
+        let second = sidecar_names(vec![-0.75; 64]);
+        assert!(!first.is_empty(), "a dirty tab must write a sidecar");
+        assert_ne!(
+            first, second,
+            "two different takes must not be written to the same file"
+        );
+        // Both sets of audio survive: nothing was overwritten.
+        for name in first.iter().chain(second.iter()) {
+            assert!(
+                dir.join(name).is_file(),
+                "both writers' audio must still be on disk: {name}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resaving_unchanged_audio_reuses_the_sidecar_instead_of_churning_files() {
+        let dir = temp_dir("sidecar_dedup");
+        let audio = dir.join("source.wav");
+        crate::wave::export_channels_audio(&[vec![0.0; 64]], 48_000, &audio)
+            .expect("write fixture");
+        let session = dir.join("dedup.nwsess");
+        let mut app = crate::app::WavesPreviewer::new_headless(crate::StartupConfig::default())
+            .expect("headless app");
+        app.replace_with_files(&[audio.clone()]);
+        app.open_or_activate_tab(&audio);
+        {
+            let tab = app.tabs.first_mut().expect("tab opened");
+            tab.ch_samples = vec![vec![0.5; 64]];
+            tab.ch_samples_arc = std::sync::Arc::new(vec![vec![0.5; 64]]);
+            tab.buffer_sample_rate = 48_000;
+            tab.dirty = true;
+        }
+        app.save_project_as_blocking(session.clone())
+            .expect("first save");
+        app.save_project_as_blocking(session.clone())
+            .expect("second save");
+
+        let data_dir = super::super::project::project_data_dir(&session);
+        let count = std::fs::read_dir(&data_dir)
+            .expect("read data dir")
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "wav"))
+            .count();
+        assert_eq!(
+            count, 1,
+            "unchanged audio must reuse its sidecar rather than pile up copies"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_committed_save_leaves_no_temp_files_behind() {
+        let dir = temp_dir("no_temps");
+        let (_app, session) = app_with_saved_session(&dir, "clean.nwsess");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".tmp") || name.ends_with(".stage"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a save must clean up after itself, found {leftovers:?}"
+        );
+        assert!(session.is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_empty_session_file_reports_something_a_person_can_act_on() {
+        let dir = temp_dir("empty_doc");
+        let session = dir.join("truncated.nwsess");
+        std::fs::write(&session, "").expect("write empty session");
+        let err = match crate::app::WavesPreviewer::parse_session_document(session.clone()) {
+            Err(err) => err,
+            Ok(_) => panic!("an empty document cannot be opened"),
+        };
+        assert!(
+            err.contains("empty") && err.contains("interrupted"),
+            "the message must explain the state, got: {err}"
+        );
+
+        // With a backup beside it, say where it is.
+        let backup = crate::app::WavesPreviewer::session_backup_path(&session);
+        std::fs::write(&backup, "version = 2\n").expect("write backup");
+        let err = match crate::app::WavesPreviewer::parse_session_document(session) {
+            Err(err) => err,
+            Ok(_) => panic!("still cannot be opened"),
+        };
+        assert!(
+            err.contains(&backup.display().to_string()),
+            "the message must point at the backup, got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn opening_does_not_write_to_the_session_file() {
+        // Every reader used to be a writer whenever a path repair fired.
+        let dir = temp_dir("readonly_open");
+        let (_app, session) = app_with_saved_session(&dir, "readonly.nwsess");
+        let before = std::fs::read(&session).expect("read before");
+        let mut reader = crate::app::WavesPreviewer::new_headless(crate::StartupConfig::default())
+            .expect("headless app");
+        reader
+            .open_project_file(session.clone())
+            .expect("open session");
+        let after = std::fs::read(&session).expect("read after");
+        assert_eq!(before, after, "opening a session must not modify it");
+        assert_eq!(
+            reader.session_disk_fingerprint,
+            Some(super::session_sync::SessionFingerprint::of_bytes(&after)),
+            "the opener has to remember exactly what it read"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_stale_temp_sweep_only_touches_files_it_made_itself() {
+        // The session's folder belongs to the user. Somebody's unrelated
+        // `.tmp` in there -- an Office lock file, a colleague's scratch --
+        // is not ours to delete no matter how old it is.
+        let dir = temp_dir("sweep");
+        let (mut app, session) = app_with_saved_session(&dir, "swept.nwsess");
+
+        let ours = dir.join(format!(
+            "swept.nwsess.{}1234.99.abcdef01.tmp",
+            crate::app::WavesPreviewer::SAVE_TEMP_MARKER
+        ));
+        let theirs = dir.join("~$somebody-elses-document.tmp");
+        let also_theirs = dir.join("render.stage");
+        for path in [&ours, &theirs, &also_theirs] {
+            std::fs::write(path, b"leftover").expect("write leftover");
+        }
+        // Age them past the sweep's grace period.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 60 * 60);
+        for path in [&ours, &theirs, &also_theirs] {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("open leftover");
+            let _ = file.set_modified(old);
+        }
+
+        app.save_project_as_blocking(session)
+            .expect("save runs the sweep");
+
+        assert!(!ours.is_file(), "our own stale temp must be cleaned up");
+        assert!(
+            theirs.is_file(),
+            "somebody else's .tmp must be left completely alone"
+        );
+        assert!(
+            also_theirs.is_file(),
+            "a .stage file we did not write is not ours to delete"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_recent_temp_of_ours_survives_the_sweep() {
+        // A save in flight on another machine has stage files on disk right
+        // now. Deleting those would break it.
+        let dir = temp_dir("sweep_recent");
+        let (mut app, session) = app_with_saved_session(&dir, "recent.nwsess");
+        let in_flight = dir.join(format!(
+            "other.nwsess.{}999.1.deadbeef.stage",
+            crate::app::WavesPreviewer::SAVE_TEMP_MARKER
+        ));
+        std::fs::write(&in_flight, b"in flight").expect("write in-flight stage");
+
+        app.save_project_as_blocking(session)
+            .expect("save runs the sweep");
+
+        assert!(
+            in_flight.is_file(),
+            "a temp young enough to belong to a save in flight must survive"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_legacy_sidecar_name_still_resolves_after_the_scheme_changed() {
+        // Sessions written before content addressing point at `tab_0000.wav`
+        // and `assets/<id>/1.wav`; nothing resolves a sidecar except through
+        // the string in the document, so they must keep opening.
+        let dir = temp_dir("legacy_sidecar");
+        let session = dir.join("legacy.nwsess");
+        let legacy_asset = super::super::project::legacy_asset_audio_dst(
+            &session,
+            crate::audio_asset::AudioAssetId(0x1234),
+            crate::audio_asset::AssetRevision(1),
+        );
+        assert!(legacy_asset.to_string_lossy().ends_with("1.wav"));
+        std::fs::create_dir_all(legacy_asset.parent().expect("asset parent"))
+            .expect("create legacy asset dir");
+        crate::wave::export_channels_audio(&[vec![0.2; 32]], 48_000, &legacy_asset)
+            .expect("write legacy asset");
+        let base = session.parent().expect("session parent");
+        let stored = rel_path(&legacy_asset, base);
+        let (channels, sample_rate, _) =
+            super::super::project::load_sidecar_audio(&session, &stored)
+                .expect("a legacy sidecar reference still resolves");
+        assert_eq!(sample_rate, 48_000);
+        assert_eq!(channels.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
@@ -984,6 +1370,16 @@ impl super::WavesPreviewer {
             .filter_map(|path| Self::normalize_recent_session_path(path))
             .take(Self::RECENT_SESSION_LIMIT)
             .collect()
+    }
+
+    /// The name stamped into a saved session's `saved_by`. Prefers the
+    /// `display_name=` pref so a team can use names they recognise rather
+    /// than OS account names.
+    pub(super) fn session_saved_by(&self) -> String {
+        self.session_display_name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(session_sync::local_display_name)
     }
 
     pub(super) fn add_recent_session_path(&mut self, path: &Path) {
@@ -1392,6 +1788,23 @@ impl super::WavesPreviewer {
     }
 
     fn path_mode_for_save(&mut self, base_dir: &Path) -> SessionPathMode {
+        // A session being written to a share for the first time gets
+        // relative paths. Colleagues mount the same share differently --
+        // `Z:\Proj` here, `\\server\share\Proj` there -- so absolute
+        // paths in a shared session resolve for whoever saved it and for
+        // nobody else. Relative paths follow the `.nwsess` and are correct
+        // for everyone. An existing session keeps the policy it was written
+        // with; only a document that has never been saved switches.
+        if self.session_path_mode != SessionPathMode::Relative
+            && self.project_path.is_none()
+            && crate::audio_io::is_remote_file_path(base_dir)
+        {
+            self.session_path_mode = SessionPathMode::Relative;
+            self.debug_log(
+                "new session on a network share defaults to relative paths so it resolves from any machine"
+                    .to_string(),
+            );
+        }
         if self.session_path_mode != SessionPathMode::Relative {
             return SessionPathMode::Absolute;
         }
@@ -1447,7 +1860,7 @@ impl super::WavesPreviewer {
         ),
         String,
     > {
-        use crate::app::types::{SessionSidecarJob, SessionSidecarSource};
+        use crate::app::types::{SessionSidecarJob, SessionSidecarSource, SidecarSlot};
         let path = if path
             .extension()
             .and_then(|s| s.to_str())
@@ -1465,6 +1878,12 @@ impl super::WavesPreviewer {
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join(path)
         };
+        // Save As to a different file forks the document: the copy is a new
+        // lineage, and inheriting the original's id would make a later
+        // conflict describe the wrong session.
+        if self.project_path.as_deref() != Some(path.as_path()) {
+            self.session_id = None;
+        }
         let mut sidecar_jobs: Vec<SessionSidecarJob> = Vec::new();
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let path_mode = self.path_mode_for_save(base_dir);
@@ -1542,7 +1961,6 @@ impl super::WavesPreviewer {
                 .as_ref()
                 .map(|state| virtual_ops_to_project(&state.op_chain))
                 .unwrap_or_default();
-            let mut sidecar_audio: Option<String> = None;
             // Snapshot the item's *current* audio (including destructive editor
             // edits sitting in a dirty tab / edited_cache), not the possibly
             // stale `virtual_audio`. The sidecar is the authoritative copy used
@@ -1568,39 +1986,52 @@ impl super::WavesPreviewer {
                 .map(|state| state.bits_per_sample)
                 .or_else(|| item.meta.as_ref().map(|m| m.bits_per_sample))
                 .unwrap_or(32);
-            let asset_dst = asset_audio_dst(&path, item.audio_asset.id, item.audio_asset.revision);
+            // The destination is filled in by the worker once it has hashed
+            // the audio, and patched into both the asset and the virtual
+            // item by their shared asset id.
+            let asset_slot = SidecarSlot::ManagedAsset {
+                asset_id: item.audio_asset.id.to_hex(),
+                revision: item.audio_asset.revision.0.max(1),
+            };
+            let mut has_asset_audio = true;
             if let Some(audio) = current_audio.as_ref() {
                 sidecar_jobs.push(SessionSidecarJob {
-                    dst: asset_dst.clone(),
+                    slot: asset_slot,
                     source: SessionSidecarSource::Buffer(audio.clone()),
                     sample_rate,
                     label: "managed virtual asset",
                 });
-                sidecar_audio = Some(rel_path(&asset_dst, base_dir));
             } else if let Some(source_path) = item.audio_asset.backing.file_path() {
                 sidecar_jobs.push(SessionSidecarJob {
-                    dst: asset_dst.clone(),
+                    slot: asset_slot,
                     source: SessionSidecarSource::File(source_path.to_path_buf()),
                     sample_rate,
                     label: "managed virtual asset",
                 });
-                sidecar_audio = Some(rel_path(&asset_dst, base_dir));
+            } else {
+                has_asset_audio = false;
             }
-            assets.push(ProjectAsset {
-                id: item.audio_asset.id.to_hex(),
-                revision: item.audio_asset.revision.0.max(1),
-                item_path: if item.path.to_string_lossy().contains("://") {
-                    item.path.to_string_lossy().to_string()
-                } else {
-                    session_path(&item.path, base_dir, path_mode)
-                },
-                backing: "managed".to_string(),
-                location: rel_path(&asset_dst, base_dir),
-                sample_rate,
-                channels,
-                bits_per_sample,
-                frame_count: item.audio_asset.frame_count,
-            });
+            // No audio to write means no file to point at. Recording an
+            // asset whose `location` the worker will never fill in would
+            // write a manifest entry naming nothing.
+            if has_asset_audio {
+                assets.push(ProjectAsset {
+                    id: item.audio_asset.id.to_hex(),
+                    revision: item.audio_asset.revision.0.max(1),
+                    item_path: if item.path.to_string_lossy().contains("://") {
+                        item.path.to_string_lossy().to_string()
+                    } else {
+                        session_path(&item.path, base_dir, path_mode)
+                    },
+                    backing: "managed".to_string(),
+                    // Filled in by the save worker, keyed by `id`.
+                    location: String::new(),
+                    sample_rate,
+                    channels,
+                    bits_per_sample,
+                    frame_count: item.audio_asset.frame_count,
+                });
+            }
             virtual_items.push(ProjectVirtualItem {
                 path: if item.path.to_string_lossy().contains("://") {
                     item.path.to_string_lossy().to_string()
@@ -1613,7 +2044,8 @@ impl super::WavesPreviewer {
                 bits_per_sample,
                 source,
                 op_chain,
-                sidecar_audio,
+                // Filled in by the save worker alongside the asset location.
+                sidecar_audio: None,
                 asset_id: Some(item.audio_asset.id.to_hex()),
                 asset_revision: Some(item.audio_asset.revision.0.max(1)),
             });
@@ -1859,57 +2291,46 @@ impl super::WavesPreviewer {
 
         let mut tabs = Vec::new();
         for (idx, tab) in self.tabs.iter().enumerate() {
-            let mut edited_audio = None;
-            let mut preview_audio = None;
             let mut preview_tool = None;
+            // Sidecar paths are left empty here and filled in by the save
+            // worker: the filename is the audio's own hash, and hashing a
+            // dirty tab's buffer on the UI thread would stall the frame.
             if tab.dirty && !tab.ch_samples.is_empty() {
                 let sidecar_sr = tab.buffer_sample_rate.max(1);
-                let dst = sidecar_audio_dst(&path, "tab", idx);
                 sidecar_jobs.push(SessionSidecarJob {
-                    dst: dst.clone(),
+                    slot: SidecarSlot::TabEdited(idx),
                     source: SessionSidecarSource::Channels(tab.ch_samples_arc.clone()),
                     sample_rate: sidecar_sr,
                     label: "edited audio",
                 });
-                edited_audio = Some(dst);
             }
             if let Some(overlay) = tab.preview_overlay.as_ref() {
                 if overlay.is_full_sample() {
-                    let dst = sidecar_audio_dst(&path, "preview", idx);
                     sidecar_jobs.push(SessionSidecarJob {
-                        dst: dst.clone(),
+                        slot: SidecarSlot::TabPreview(idx),
                         source: SessionSidecarSource::Channels(std::sync::Arc::new(
                             overlay.channels.clone(),
                         )),
                         sample_rate: self.audio.shared.out_sample_rate,
                         label: "preview audio",
                     });
-                    preview_audio = Some(dst);
                     preview_tool = Some(format!("{:?}", overlay.source_tool));
                 }
             } else if let Some(tool) = tab.preview_audio_tool {
                 preview_tool = Some(format!("{:?}", tool));
             }
-            let entry = project_tab_from_tab(
-                tab,
-                base_dir,
-                path_mode,
-                edited_audio,
-                preview_audio,
-                preview_tool,
-            );
+            let entry = project_tab_from_tab(tab, base_dir, path_mode, None, None, preview_tool);
             tabs.push(entry);
         }
 
         let mut cached_edits = Vec::new();
-        for (idx, (item_path, cached)) in self.edited_cache.iter().enumerate() {
+        for (item_path, cached) in self.edited_cache.iter() {
             if cached.ch_samples.is_empty() {
                 continue;
             }
             let sidecar_sr = cached.buffer_sample_rate.max(1);
-            let edited_audio = sidecar_audio_dst(&path, "cache", idx);
             sidecar_jobs.push(crate::app::types::SessionSidecarJob {
-                dst: edited_audio.clone(),
+                slot: SidecarSlot::CachedEdit(cached_edits.len()),
                 source: crate::app::types::SessionSidecarSource::Channels(std::sync::Arc::new(
                     cached.ch_samples.clone(),
                 )),
@@ -1918,7 +2339,8 @@ impl super::WavesPreviewer {
             });
             cached_edits.push(ProjectEdit {
                 path: session_path(item_path, base_dir, path_mode),
-                edited_audio: rel_path(&edited_audio, base_dir),
+                // Filled in by the worker, alongside the tab sidecars.
+                edited_audio: String::new(),
                 buffer_sample_rate: Some(cached.buffer_sample_rate.max(1)),
                 dirty: cached.dirty,
                 loop_region: cached.loop_region.map(|v| [v.0, v.1]),
@@ -1997,6 +2419,19 @@ impl super::WavesPreviewer {
 
         let project = ProjectFile {
             version: 2,
+            // Carried across saves of the same document; `save_project_as`
+            // to a different path forks it before the plan is built.
+            session_id: Some(
+                self.session_id
+                    .get_or_insert_with(super::session_sync::new_session_id)
+                    .clone(),
+            ),
+            // `revision` and `saved_at` are stamped on the worker, once it
+            // has read what is actually on disk -- the new revision has to
+            // follow the document it is replacing, not the one we loaded.
+            revision: None,
+            saved_at: None,
+            saved_by: Some(self.session_saved_by()),
             assets,
             transcripts,
             name: path
@@ -2018,31 +2453,139 @@ impl super::WavesPreviewer {
     /// The disk-touching half of a session save: sidecar WAV encodes, TOML
     /// serialization, and the session file write. Runs on a worker thread
     /// for interactive saves and inline for the blocking variant.
+    ///
+    /// `expected` is the fingerprint of the document this save is based on.
+    /// When it is set and the file on disk no longer matches, **nothing is
+    /// committed** and the caller gets a [`SessionSaveOutcome::Conflict`] --
+    /// on a shared file server the mismatch is a colleague's save, and
+    /// replacing it is silent data loss. `None` means the caller has no
+    /// expectation: a Save As to a fresh path, or an overwrite the user
+    /// asked for after seeing the conflict.
+    ///
+    /// The check runs twice. Once before the sidecar encodes, which can take
+    /// seconds, so an already-doomed save fails fast; and once immediately
+    /// before the document commit, which is the one that decides. A few
+    /// milliseconds still separate that read from the rename -- closing that
+    /// window needs a lock, and this design deliberately has none.
     fn run_session_save_jobs(
         path: &Path,
-        project: &ProjectFile,
+        project: &mut ProjectFile,
         jobs: &[crate::app::types::SessionSidecarJob],
-    ) -> Result<(), String> {
-        let nonce = format!(
-            "{}.{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
+        expected: Option<session_sync::SessionFingerprint>,
+    ) -> Result<crate::app::types::SessionSaveOutcome, String> {
+        use crate::app::types::{SessionSaveOutcome, SidecarSlot};
+
+        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+        // Fail fast: do not spend seconds encoding WAVs for a document that
+        // is already going to be refused.
+        let disk = session_sync::read_session_state(path)
+            .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+        if let Some(conflict) = Self::session_conflict_from(path, &disk, expected) {
+            return Ok(SessionSaveOutcome::Conflict(conflict));
+        }
+
+        let nonce = Self::save_nonce();
         let mut staged = Vec::<(PathBuf, PathBuf)>::new();
-        for job in jobs {
-            if let Some(parent) = job.dst.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to save {}: {e}", job.label))?;
+        // Drop the staged sidecars if the save aborts. A leaked stage file is
+        // visible junk in a folder the whole team looks at.
+        let cleanup = |staged: &[(PathBuf, PathBuf)]| {
+            for (pending, _) in staged {
+                let _ = std::fs::remove_file(pending);
             }
-            let extension = job
-                .dst
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or("wav");
-            let stage = job.dst.with_extension(format!("{extension}.{nonce}.stage"));
+        };
+
+        let mut committed_assets = Vec::new();
+        for job in jobs {
+            // The sidecar is named after its own contents, so two people
+            // saving the same shared session write to different files rather
+            // than over each other's audio.
+            let content_hash = match &job.source {
+                crate::app::types::SessionSidecarSource::File(source) => {
+                    match session_sync::hash_file_content(source) {
+                        Ok(hash) => hash,
+                        Err(error) => {
+                            cleanup(&staged);
+                            return Err(format!("Failed to read {}: {error}", job.label));
+                        }
+                    }
+                }
+                crate::app::types::SessionSidecarSource::Channels(_)
+                | crate::app::types::SessionSidecarSource::Buffer(_) => {
+                    session_sync::hash_audio_content(job.source.channels(), job.sample_rate)
+                }
+            };
+            let dst = match &job.slot {
+                SidecarSlot::ManagedAsset { asset_id, revision } => {
+                    let Some(id) = crate::audio_asset::AudioAssetId::from_hex(asset_id) else {
+                        // We wrote this id ourselves, so it round-trips.
+                        // Skipping the job would leave the manifest entry
+                        // pointing at nothing, so fail the save instead.
+                        cleanup(&staged);
+                        return Err(format!("Malformed audio asset id: {asset_id}"));
+                    };
+                    super::project::asset_audio_dst(
+                        path,
+                        id,
+                        crate::audio_asset::AssetRevision(*revision),
+                        &content_hash,
+                    )
+                }
+                _ => super::project::sidecar_audio_dst(path, &content_hash),
+            };
+            let reference = rel_path(&dst, base_dir);
+            match &job.slot {
+                SidecarSlot::ManagedAsset { asset_id, .. } => {
+                    // Both records name the same file; they are keyed rather
+                    // than indexed because the plan sorts them afterwards.
+                    for asset in project
+                        .assets
+                        .iter_mut()
+                        .filter(|asset| &asset.id == asset_id)
+                    {
+                        asset.location = reference.clone();
+                    }
+                    for item in project
+                        .list
+                        .virtual_items
+                        .iter_mut()
+                        .filter(|item| item.asset_id.as_deref() == Some(asset_id.as_str()))
+                    {
+                        item.sidecar_audio = Some(reference.clone());
+                    }
+                    if let Some(id) = crate::audio_asset::AudioAssetId::from_hex(asset_id) {
+                        committed_assets.push((id, dst.clone()));
+                    }
+
+                }
+                SidecarSlot::TabEdited(idx) => {
+                    if let Some(tab) = project.tabs.get_mut(*idx) {
+                        tab.edited_audio = Some(reference);
+                    }
+                }
+                SidecarSlot::TabPreview(idx) => {
+                    if let Some(tab) = project.tabs.get_mut(*idx) {
+                        tab.preview_audio = Some(reference);
+                    }
+                }
+                SidecarSlot::CachedEdit(idx) => {
+                    if let Some(edit) = project.cached_edits.get_mut(*idx) {
+                        edit.edited_audio = reference;
+                    }
+                }
+            }
+            if let Some(parent) = dst.parent() {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    cleanup(&staged);
+                    return Err(format!("Failed to save {}: {error}", job.label));
+                }
+            }
+            // Content addressing makes a re-save of unchanged audio a no-op:
+            // the bytes already on disk are the bytes we would write.
+            if dst.is_file() {
+                continue;
+            }
+            let stage = dst.with_extension(format!("wav.{nonce}.stage"));
             let result = match &job.source {
                 crate::app::types::SessionSidecarSource::File(source) => {
                     if std::fs::hard_link(source, &stage).is_ok() {
@@ -2061,41 +2604,215 @@ impl super::WavesPreviewer {
                 }
             };
             if let Err(error) = result {
-                for (pending, _) in &staged {
-                    let _ = std::fs::remove_file(pending);
-                }
+                cleanup(&staged);
                 let _ = std::fs::remove_file(&stage);
                 return Err(format!("Failed to stage {}: {error}", job.label));
             }
-            staged.push((stage, job.dst.clone()));
+            staged.push((stage, dst));
         }
-        let text = serialize_project(project).map_err(|e| e.to_string())?;
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        for (stage, destination) in &staged {
-            atomic_replace_file(stage, destination).map_err(|error| {
-                format!(
+
+        // The check that decides. Everything above is reversible; from here
+        // on the document is replaced.
+        let disk = session_sync::read_session_state(path)
+            .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+        if let Some(conflict) = Self::session_conflict_from(path, &disk, expected) {
+            cleanup(&staged);
+            return Ok(SessionSaveOutcome::Conflict(conflict));
+        }
+
+        // Stamp the document against what is actually on disk, so the
+        // revision keeps climbing even across a forced overwrite.
+        let stamp = disk.stamp();
+        let revision = stamp.revision.unwrap_or(0).saturating_add(1);
+        let session_id = project
+            .session_id
+            .clone()
+            .unwrap_or_else(session_sync::new_session_id);
+        project.session_id = Some(session_id.clone());
+        project.revision = Some(revision);
+        project.saved_at = Some(session_sync::now_rfc3339());
+
+        let text = serialize_project(project).map_err(|e| e.to_string())?;
+
+        // Replacing a document we had no expectation for -- a deliberate
+        // overwrite, or a Save As onto an existing file -- keeps one copy of
+        // what was there. It is the only way back if the overwrite was a
+        // mistake, and someone else's day of work is on the other side of it.
+        if expected.is_none() {
+            if let Some(previous) = disk.bytes() {
+                let backup = Self::session_backup_path(path);
+                let backup_temp = backup.with_extension(format!("bak.{nonce}.tmp"));
+                let backed_up = std::fs::write(&backup_temp, previous)
+                    .and_then(|()| session_sync::atomic_replace_file(&backup_temp, &backup));
+                if backed_up.is_err() {
+                    let _ = std::fs::remove_file(&backup_temp);
+                }
+            }
+        }
+
+        for (index, (stage, destination)) in staged.iter().enumerate() {
+            if let Err(error) = session_sync::atomic_replace_file(stage, destination) {
+                // Whatever committed before this point is additive -- the
+                // names are content hashes, so nothing was replaced -- and
+                // the document is not written, so nothing references them.
+                // Drop the stages that never made it.
+                cleanup(&staged[index..]);
+                return Err(format!(
                     "Failed to commit session asset {}: {error}",
                     destination.display()
-                )
-            })?;
+                ));
+            }
         }
+
         let session_temp = path.with_extension(format!("nwsess.{nonce}.tmp"));
-        std::fs::write(&session_temp, text).map_err(|e| e.to_string())?;
-        atomic_replace_file(&session_temp, path).map_err(|e| e.to_string())?;
-        Ok(())
+        session_sync::retry_shared_io(|| std::fs::write(&session_temp, &text))
+            .map_err(|e| e.to_string())?;
+        if let Err(error) = session_sync::atomic_replace_file(&session_temp, path) {
+            let _ = std::fs::remove_file(&session_temp);
+            return Err(error.to_string());
+        }
+
+        Self::sweep_stale_session_temps(path);
+
+        Ok(SessionSaveOutcome::Saved {
+            path: path.to_path_buf(),
+            fingerprint: session_sync::SessionFingerprint::of_bytes(text.as_bytes()),
+            session_id,
+            revision,
+            committed_assets,
+        })
     }
 
-    fn finish_session_save(&mut self, path: PathBuf) {
+    /// Marks a name as one of ours, so the stale-temp sweep can never
+    /// mistake somebody's unrelated `.tmp` for garbage of its own making.
+    pub(super) const SAVE_TEMP_MARKER: &'static str = "nwtmp";
+
+    /// A temp-name suffix no other writer can produce. The pid alone is not
+    /// enough on a share: two machines hand out the same pids.
+    fn save_nonce() -> String {
+        format!(
+            "{}{}.{}.{}",
+            Self::SAVE_TEMP_MARKER,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            &session_sync::new_session_id()[..8]
+        )
+    }
+
+    pub(super) fn session_backup_path(path: &Path) -> PathBuf {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "session.nwsess".to_string());
+        path.with_file_name(format!("{name}.bak"))
+    }
+
+    /// Decide whether the document on disk is still the one this save is
+    /// based on. `None` means "go ahead".
+    fn session_conflict_from(
+        path: &Path,
+        disk: &session_sync::SessionDiskState,
+        expected: Option<session_sync::SessionFingerprint>,
+    ) -> Option<crate::app::types::SessionConflict> {
+        let expected = expected?;
+        match disk.fingerprint() {
+            // Gone. Recreating it is what the user asked for, and refusing
+            // would strand their edits with nowhere to go.
+            None => None,
+            Some(actual) if actual == expected => None,
+            Some(_) => {
+                let stamp = disk.stamp();
+                Some(crate::app::types::SessionConflict {
+                    path: path.to_path_buf(),
+                    on_disk: stamp.describe(),
+                    based_on_revision: None,
+                    close_when_resolved: false,
+                })
+            }
+        }
+    }
+
+    /// Remove staging leftovers from a save that died before it could clean
+    /// up after itself. Only unambiguous garbage: our own temp suffixes, and
+    /// only once they are old enough that no save in flight -- ours or
+    /// another machine's -- could still be using them.
+    ///
+    /// Committed sidecars are never touched. On a shared session another
+    /// person's current document may reference audio this one does not, and
+    /// nothing here can tell the difference between "orphaned" and "theirs".
+    fn sweep_stale_session_temps(path: &Path) {
+        const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+        // The session usually sits in the folder it lists, which in this app
+        // can hold a hundred thousand files. Walking all of it on every save
+        // would cost more than the save. `read_dir` is lazy, so stopping
+        // early actually stops the work.
+        const MAX_ENTRIES_SCANNED: usize = 4096;
+        let mut dirs = Vec::new();
+        if let Some(parent) = path.parent() {
+            dirs.push(parent.to_path_buf());
+        }
+        dirs.push(super::project::project_data_dir(path));
+        let now = std::time::SystemTime::now();
+        for dir in dirs {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.take(MAX_ENTRIES_SCANNED).flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                // The session's folder is a folder the user owns. Only names
+                // carrying our own marker are ours to delete -- somebody
+                // else's stale `.tmp` in there is none of our business.
+                if !name.contains(Self::SAVE_TEMP_MARKER) {
+                    continue;
+                }
+                if !name.ends_with(".stage") && !name.ends_with(".tmp") {
+                    continue;
+                }
+                let old = entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|modified| now.duration_since(modified).ok())
+                    .map(|age| age > STALE_AFTER)
+                    .unwrap_or(false);
+                if old {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    /// Re-point virtual items at the managed audio the save just committed.
+    ///
+    /// The worker reports where each asset actually landed rather than the
+    /// UI re-deriving the name and stat-ing it: the name now carries a
+    /// content hash the UI thread has no cheap way to know, and statting a
+    /// path on a share from the UI thread is exactly what `AGENTS.md`
+    /// forbids.
+    fn finish_session_save(
+        &mut self,
+        path: PathBuf,
+        committed_assets: &[(crate::audio_asset::AudioAssetId, PathBuf)],
+    ) {
         for item in self
             .items
             .iter_mut()
             .filter(|item| item.source == MediaSource::Virtual)
         {
-            let managed = asset_audio_dst(&path, item.audio_asset.id, item.audio_asset.revision);
-            if managed.is_file() {
-                item.audio_asset.backing = crate::audio_asset::AudioBacking::ManagedFile(managed);
+            if let Some((_, managed)) = committed_assets
+                .iter()
+                .find(|(id, _)| *id == item.audio_asset.id)
+            {
+                item.audio_asset.backing =
+                    crate::audio_asset::AudioBacking::ManagedFile(managed.clone());
             }
         }
         self.project_path = Some(path.clone());
@@ -2108,6 +2825,16 @@ impl super::WavesPreviewer {
     /// Interactive save: snapshots everything cheaply, then encodes and
     /// writes on a worker while the busy overlay keeps the UI responsive.
     pub(super) fn save_project_as(&mut self, path: PathBuf) -> Result<(), String> {
+        self.save_project_as_forced(path, false)
+    }
+
+    /// `force` skips the compare-and-swap. Only the conflict prompt sets it,
+    /// after the user has been shown whose save they are replacing.
+    pub(super) fn save_project_as_forced(
+        &mut self,
+        path: PathBuf,
+        force: bool,
+    ) -> Result<(), String> {
         if self.session_save_state.is_some() {
             return Err("session save already in progress".to_string());
         }
@@ -2116,15 +2843,18 @@ impl super::WavesPreviewer {
         if self.session_open_in_progress() {
             return Err("session is still opening".to_string());
         }
-        let (path, project, jobs) = self.build_session_save_plan(path)?;
+        let (path, mut project, jobs) = self.build_session_save_plan(path)?;
         let job_count = jobs.len();
+        let expected = self.expected_fingerprint_for(&path, force);
         let (tx, rx) = std::sync::mpsc::channel();
         let worker_path = path.clone();
         std::thread::spawn(move || {
             crate::app::threading::lower_current_thread_priority();
-            let result =
-                Self::run_session_save_jobs(&worker_path, &project, &jobs).map(|_| worker_path);
+            let result = Self::run_session_save_jobs(&worker_path, &mut project, &jobs, expected);
             let _ = tx.send(result);
+            // The frame loop sleeps when idle; without this the save result
+            // sits in the channel until the user moves the mouse.
+            crate::ui_wake::wake_ui();
         });
         self.session_save_state = Some(crate::app::types::SessionSaveState {
             msg: if job_count == 0 {
@@ -2140,11 +2870,94 @@ impl super::WavesPreviewer {
 
     /// Synchronous save for flows that must observe completion (CLI, tests,
     /// close-with-autosave).
+    ///
+    /// A conflict is reported as an error here rather than a prompt: the
+    /// callers are headless. It still never overwrites.
     pub(super) fn save_project_as_blocking(&mut self, path: PathBuf) -> Result<(), String> {
-        let (path, project, jobs) = self.build_session_save_plan(path)?;
-        Self::run_session_save_jobs(&path, &project, &jobs)?;
-        self.finish_session_save(path);
-        Ok(())
+        self.save_project_as_blocking_forced(path, false)
+    }
+
+    pub(super) fn save_project_as_blocking_forced(
+        &mut self,
+        path: PathBuf,
+        force: bool,
+    ) -> Result<(), String> {
+        let (path, mut project, jobs) = self.build_session_save_plan(path)?;
+        let expected = self.expected_fingerprint_for(&path, force);
+        match Self::run_session_save_jobs(&path, &mut project, &jobs, expected)? {
+            crate::app::types::SessionSaveOutcome::Saved {
+                path,
+                fingerprint,
+                session_id,
+                revision,
+                committed_assets,
+            } => {
+                self.adopt_saved_session(
+                    path,
+                    fingerprint,
+                    session_id,
+                    revision,
+                    &committed_assets,
+                );
+                Ok(())
+            }
+            crate::app::types::SessionSaveOutcome::Conflict(conflict) => Err(format!(
+                "Session changed on disk since it was opened ({}) — nothing was written",
+                conflict.on_disk
+            )),
+        }
+    }
+
+    /// What this save is allowed to assume is on disk.
+    ///
+    /// `None` -- no expectation, commit unconditionally -- for a Save As to
+    /// a different path (nothing of ours is there to protect) and for an
+    /// overwrite the user chose after seeing the conflict.
+    fn expected_fingerprint_for(
+        &mut self,
+        path: &Path,
+        force: bool,
+    ) -> Option<session_sync::SessionFingerprint> {
+        if force {
+            return None;
+        }
+        if self.project_path.as_deref() != Some(path) {
+            return None;
+        }
+        if self.session_disk_fingerprint.is_none() {
+            // Saving over the session we have open without knowing what we
+            // read from it. Every path that sets `project_path` also records
+            // the fingerprint, so this should be unreachable -- but if it
+            // ever is reached the save proceeds unchecked, which is exactly
+            // the behavior this feature exists to remove. Make it visible.
+            self.debug_log(
+                "session save has no fingerprint for the open document; the overwrite check is being skipped"
+                    .to_string(),
+            );
+        }
+        self.session_disk_fingerprint
+    }
+
+    /// Record what we just wrote, so the watch does not report our own save
+    /// as somebody else's and the next save has something to compare with.
+    fn adopt_saved_session(
+        &mut self,
+        path: PathBuf,
+        fingerprint: session_sync::SessionFingerprint,
+        session_id: String,
+        revision: u64,
+        committed_assets: &[(crate::audio_asset::AudioAssetId, PathBuf)],
+    ) {
+        self.session_disk_fingerprint = Some(fingerprint);
+        self.session_id = Some(session_id);
+        self.session_revision = Some(revision);
+        self.session_paths_repaired = false;
+        self.session_changed_on_disk = None;
+        self.session_conflict = None;
+        self.finish_session_save(path, committed_assets);
+        // Re-arm the watch against what we just wrote, so our own save is
+        // never reported back as somebody else's.
+        self.restart_session_watch();
     }
 
     pub(super) fn drain_session_save(&mut self, ctx: &egui::Context) {
@@ -2161,24 +2974,50 @@ impl super::WavesPreviewer {
         self.session_save_state = None;
         let close_when_done = std::mem::take(&mut self.close_after_session_save);
         match result {
-            Ok(path) => {
-                self.debug_log(format!("session saved: {}", path.display()));
-                self.finish_session_save(path);
+            Ok(crate::app::types::SessionSaveOutcome::Saved {
+                path,
+                fingerprint,
+                session_id,
+                revision,
+                committed_assets,
+            }) => {
+                self.debug_log(format!(
+                    "session saved: {} (revision {revision}, {})",
+                    path.display(),
+                    fingerprint.short_hex()
+                ));
+                self.adopt_saved_session(
+                    path,
+                    fingerprint,
+                    session_id,
+                    revision,
+                    &committed_assets,
+                );
                 if close_when_done {
                     self.close_project();
                 }
             }
+            Ok(crate::app::types::SessionSaveOutcome::Conflict(mut conflict)) => {
+                self.debug_log(format!(
+                    "session save refused, document changed on disk: {}",
+                    conflict.on_disk
+                ));
+                conflict.based_on_revision = self.session_revision;
+                // A close that cannot write must not tear the session down:
+                // the edits it failed to persist are still only in memory.
+                conflict.close_when_resolved = close_when_done;
+                self.session_conflict = Some(conflict);
+            }
             Err(err) => {
                 self.debug_log(format!("session save error: {err}"));
-                if close_when_done {
-                    // Keep the session open on a failed autosave, the way
-                    // the blocking close does -- tearing it down here would
-                    // discard the edits the save could not persist.
-                    self.push_toast(
-                        super::types::ToastSeverity::Error,
-                        format!("Session close autosave failed: {err}"),
-                    );
-                }
+                self.push_toast(
+                    super::types::ToastSeverity::Error,
+                    if close_when_done {
+                        format!("Session close autosave failed: {err}")
+                    } else {
+                        format!("Session save failed: {err}")
+                    },
+                );
             }
         }
         ctx.request_repaint();
@@ -2197,7 +3036,28 @@ impl super::WavesPreviewer {
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join(path)
         };
-        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let bytes = session_sync::read_session_bytes(&path)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Session file not found: {}", path.display()))?;
+        // A zero-length document is what an interrupted non-atomic write
+        // leaves behind -- older builds and outside tools still produce
+        // those. Say so, and point at the backup if one is there, rather
+        // than reporting an unhelpful TOML parse error.
+        if bytes.is_empty() {
+            let backup = Self::session_backup_path(&path);
+            return Err(if backup.is_file() {
+                format!(
+                    "Session file is empty — a previous save may have been interrupted. A backup is at {}",
+                    backup.display()
+                )
+            } else {
+                "Session file is empty — a previous save may have been interrupted".to_string()
+            });
+        }
+        let fingerprint = session_sync::SessionFingerprint::of_bytes(&bytes);
+        let text = String::from_utf8(bytes).map_err(|_| {
+            format!("Session file is not valid UTF-8: {}", path.display())
+        })?;
         let mut project = deserialize_project(&text).map_err(|e| e.to_string())?;
         if project.version != 1 && project.version != 2 {
             return Err(format!("Unsupported session version: {}", project.version));
@@ -2220,6 +3080,7 @@ impl super::WavesPreviewer {
         Ok(ParsedSession {
             path,
             project: Box::new(project),
+            fingerprint,
             path_repair,
             session_path_mode,
             base_dir,
@@ -2585,6 +3446,7 @@ impl super::WavesPreviewer {
         let ParsedSession {
             path,
             project,
+            fingerprint: session_fingerprint,
             path_repair,
             session_path_mode,
             base_dir,
@@ -3608,21 +4470,18 @@ impl super::WavesPreviewer {
         } else {
             self.workspace_view = super::types::WorkspaceView::List;
         }
+        // Opening no longer writes the repaired paths back. On a shared
+        // file server that made every reader a writer -- each person who
+        // merely opened the session rewrote it, non-atomically, racing the
+        // people actually saving. The repair stays in memory and rides along
+        // to the next real save, which is compare-and-swapped like any other.
+        self.session_paths_repaired = path_repair.relocated_references > 0;
         if path_repair.relocated_references > 0 {
-            match serialize_project(&project)
-                .map_err(|err| err.to_string())
-                .and_then(|text| std::fs::write(&project_path, text).map_err(|err| err.to_string()))
-            {
-                Ok(()) => self.debug_log(format!(
-                    "session paths repaired: {} reference(s) updated relative to {}",
-                    path_repair.relocated_references,
-                    project_path.display()
-                )),
-                Err(err) => self.debug_log(format!(
-                    "session paths repaired in memory but could not update {}: {err}",
-                    project_path.display()
-                )),
-            }
+            self.debug_log(format!(
+                "session paths repaired in memory: {} reference(s) resolved next to {} (written on the next save)",
+                path_repair.relocated_references,
+                project_path.display()
+            ));
         }
         if path_repair.unresolved_references > 0 {
             self.debug_log(format!(
@@ -3630,7 +4489,13 @@ impl super::WavesPreviewer {
                 path_repair.unresolved_references
             ));
         }
+        self.session_disk_fingerprint = Some(session_fingerprint);
+        self.session_id = project.session_id.clone();
+        self.session_revision = project.revision;
+        self.session_conflict = None;
+        self.session_changed_on_disk = None;
         self.add_recent_session_path(&project_path);
+        self.restart_session_watch();
         Ok(())
     }
 

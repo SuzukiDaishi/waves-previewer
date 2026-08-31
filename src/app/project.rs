@@ -16,6 +16,23 @@ use crate::markers::MarkerEntry;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectFile {
     pub version: u32,
+    /// Identifies the document's lineage, so a conflict can distinguish "the
+    /// same session, saved again by someone else" from "a different session
+    /// now lives at this path". Issued on the first save; a Save As forks it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Incremented on every successful save. Advisory only -- the authority
+    /// on whether a document changed is a hash of its bytes (see
+    /// `session_sync`), because an older build or an outside tool can write
+    /// the file without touching this. It exists to *describe* a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    /// RFC3339 UTC. UTC so two machines in different time zones compare.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_at: Option<String>,
+    /// Who saved it, for the conflict message. See `session_sync::local_display_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_by: Option<String>,
     #[serde(default)]
     pub assets: Vec<ProjectAsset>,
     #[serde(default)]
@@ -947,6 +964,141 @@ fn saved_session_base(project: &ProjectFile, session_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| session_dir.to_path_buf())
 }
 
+/// The same location written the other way round: a mapped drive as its UNC
+/// share, or a UNC share as a drive that is mapped to it here.
+///
+/// A session on a file server is opened by people whose machines mount the
+/// same share differently -- `Z:\Proj` for one, `\\server\share\Proj` for
+/// another. The absolute paths inside it then resolve for whoever saved it
+/// and for nobody else. New sessions saved on a share default to relative
+/// paths, which sidesteps this entirely; this is the repair for the ones
+/// already written.
+///
+/// The rewriting is split from the drive lookup so the part that is easy to
+/// get wrong -- the string surgery -- is testable on any platform, and only
+/// the `WNetGetConnectionW` call is Windows-only.
+/// `X:` plus the share it is mapped to, e.g. `("Z:", r"\\server\share")`.
+type DriveMapping = (String, String);
+
+/// A drive-letter path rewritten onto the share that drive is mapped to.
+/// `Z:\Proj\a.wav` + (`Z:`, `\\server\share`) -> `\\server\share\Proj\a.wav`.
+fn unc_form_of_mapped_drive(path: &str, mapping: &DriveMapping) -> Option<PathBuf> {
+    let (drive, remote) = mapping;
+    let drive = drive.trim_end_matches(['\\', '/']);
+    if drive.len() < 2 {
+        return None;
+    }
+    let head = path.get(..2)?;
+    if !head.eq_ignore_ascii_case(drive) {
+        return None;
+    }
+    let remote = remote.trim_end_matches(['\\', '/']);
+    if remote.is_empty() {
+        return None;
+    }
+    let suffix = path[2..].trim_start_matches(['\\', '/']);
+    Some(PathBuf::from(if suffix.is_empty() {
+        remote.to_string()
+    } else {
+        format!("{remote}\\{suffix}")
+    }))
+}
+
+/// A UNC path rewritten onto a local drive letter mapped to that share.
+/// `\\server\share\Proj\a.wav` + (`Z:`, `\\server\share`) -> `Z:\Proj\a.wav`.
+///
+/// Shares are case-insensitive and a mapping may be recorded in either case,
+/// so the prefix match ignores case -- but the suffix is taken from the
+/// original text, because the part below the share root may well be on a
+/// case-sensitive server.
+fn drive_form_of_unc(path: &str, mapping: &DriveMapping) -> Option<PathBuf> {
+    let (drive, remote) = mapping;
+    let drive = drive.trim_end_matches(['\\', '/']);
+    let remote = remote.trim_end_matches(['\\', '/']);
+    if drive.len() < 2 || remote.is_empty() {
+        return None;
+    }
+    let lower_path = path.to_ascii_lowercase();
+    let lower_remote = remote.to_ascii_lowercase();
+    if !lower_path.starts_with(&lower_remote) {
+        return None;
+    }
+    // The match must end at a path boundary: `\\srv\share` must not match
+    // `\\srv\share2`.
+    let rest = &path[remote.len()..];
+    if !rest.is_empty() && !rest.starts_with('\\') && !rest.starts_with('/') {
+        return None;
+    }
+    let suffix = rest.trim_start_matches(['\\', '/']);
+    Some(PathBuf::from(if suffix.is_empty() {
+        format!("{drive}\\")
+    } else {
+        format!("{drive}\\{suffix}")
+    }))
+}
+
+/// Look up what each drive letter is mapped to. Windows only; elsewhere a
+/// share is just a mount point and there is no second spelling to try.
+#[cfg(windows)]
+fn network_drive_mappings(only: Option<char>) -> Vec<DriveMapping> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::NetworkManagement::WNet::WNetGetConnectionW;
+
+    let letters: Vec<char> = match only {
+        Some(letter) => vec![letter],
+        None => (b'A'..=b'Z').map(|b| b as char).collect(),
+    };
+    let mut out = Vec::new();
+    for letter in letters {
+        let drive = format!("{letter}:");
+        let wide: Vec<u16> = std::ffi::OsStr::new(&drive)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let mut buffer = vec![0u16; 1024];
+        let mut len = buffer.len() as u32;
+        let ok = unsafe { WNetGetConnectionW(wide.as_ptr(), buffer.as_mut_ptr(), &mut len) };
+        if ok != 0 {
+            continue;
+        }
+        let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+        let remote = String::from_utf16_lossy(&buffer[..end]);
+        if remote.trim().is_empty() {
+            continue;
+        }
+        out.push((drive, remote));
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn network_drive_mappings(_only: Option<char>) -> Vec<DriveMapping> {
+    Vec::new()
+}
+
+pub(crate) fn unc_drive_alternatives(path: &Path) -> Vec<PathBuf> {
+    let text = path.to_string_lossy().to_string();
+    let bytes = text.as_bytes();
+
+    // `Z:\dir\file` -> the share `Z:` is mapped to.
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let letter = bytes[0] as char;
+        return network_drive_mappings(Some(letter))
+            .iter()
+            .filter_map(|mapping| unc_form_of_mapped_drive(&text, mapping))
+            .collect();
+    }
+
+    // `\\server\share\dir\file` -> whichever local drive is mapped to it.
+    if text.starts_with("\\\\") && !text.starts_with("\\\\?\\") {
+        return network_drive_mappings(None)
+            .iter()
+            .filter_map(|mapping| drive_form_of_unc(&text, mapping))
+            .collect();
+    }
+    Vec::new()
+}
+
 fn repair_one_source_path(
     raw: &mut String,
     old_base: &Path,
@@ -963,6 +1115,16 @@ fn repair_one_source_path(
         }
         if let Some(relative) = diff_paths(&stored, old_base) {
             let candidate = session_dir.join(relative);
+            if candidate.exists() {
+                *raw = session_path(&candidate, session_dir, SessionPathMode::Absolute);
+                report.relocated_references = report.relocated_references.saturating_add(1);
+                return;
+            }
+        }
+        // Last resort: the same share, written the way this machine mounts
+        // it. Whoever saved the session may have had it on a drive letter
+        // this machine does not use, or vice versa.
+        for candidate in unc_drive_alternatives(&stored) {
             if candidate.exists() {
                 *raw = session_path(&candidate, session_dir, SessionPathMode::Absolute);
                 report.relocated_references = report.relocated_references.saturating_add(1);
@@ -1097,7 +1259,8 @@ fn project_sidecar_dir(path: &Path) -> PathBuf {
     path.with_extension(format!("{ext}.d"))
 }
 
-fn project_data_dir(path: &Path) -> PathBuf {
+/// Where a session's own sidecar audio lives: `<name>.nwsess.d/data/`.
+pub fn project_data_dir(path: &Path) -> PathBuf {
     project_sidecar_dir(path).join("data")
 }
 
@@ -1860,11 +2023,24 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
 /// Destination path a sidecar WAV will be written to, without writing it.
 /// Lets the session-save planner reference sidecars in the document while
 /// deferring the actual encode to a worker thread.
-pub fn sidecar_audio_dst(project_path: &Path, prefix: &str, index: usize) -> PathBuf {
-    project_data_dir(project_path).join(format!("{prefix}_{index:04}.wav"))
+/// Where a sidecar with this content hash lives.
+///
+/// Named after its contents rather than its index in the tab list. The index
+/// scheme (`tab_0000.wav`) made every writer of a shared session target the
+/// same handful of names, so two people saving the same session overwrote
+/// each other's audio. Sessions written by older builds still reference the
+/// old names and keep resolving -- nothing reads these paths except through
+/// the string stored in the document -- and migrate on their next save.
+pub fn sidecar_audio_dst(project_path: &Path, content_hash: &str) -> PathBuf {
+    project_data_dir(project_path).join(format!("{content_hash}.wav"))
 }
 
-pub fn asset_audio_dst(
+/// Where a managed asset revision lives, for a session written before
+/// content hashes were part of the name. Reading still resolves these --
+/// nothing looks a sidecar up except through the string in the document --
+/// so this exists only for the tests and the migration path.
+#[cfg(test)]
+pub fn legacy_asset_audio_dst(
     project_path: &Path,
     id: crate::audio_asset::AudioAssetId,
     revision: crate::audio_asset::AssetRevision,
@@ -1872,6 +2048,24 @@ pub fn asset_audio_dst(
     project_assets_dir(project_path)
         .join(id.to_hex())
         .join(format!("{}.wav", revision.0.max(1)))
+}
+
+/// Where a managed asset revision lives.
+///
+/// `AssetRevision` is a plain counter, and the id it hangs off is stored in
+/// the session -- so two people editing the same virtual item in a shared
+/// session both produce revision 2 and, under the old name, wrote different
+/// audio to the same file. The content hash makes their two revision 2s two
+/// different files.
+pub fn asset_audio_dst(
+    project_path: &Path,
+    id: crate::audio_asset::AudioAssetId,
+    revision: crate::audio_asset::AssetRevision,
+    content_hash: &str,
+) -> PathBuf {
+    project_assets_dir(project_path)
+        .join(id.to_hex())
+        .join(format!("{}-{content_hash}.wav", revision.0.max(1)))
 }
 
 pub fn load_sidecar_audio(
@@ -1921,6 +2115,14 @@ impl super::WavesPreviewer {
         self.overwrite_undo_stack.clear();
         self.project_path = None;
         self.session_path_mode = SessionPathMode::Absolute;
+        self.session_disk_fingerprint = None;
+        self.session_id = None;
+        self.session_revision = None;
+        self.session_paths_repaired = false;
+        self.stop_session_watch();
+        self.session_conflict = None;
+        self.session_changed_on_disk = None;
+        self.session_reload_prompt = false;
         self.list_columns_window_pos = self.list_columns_window_global_pos;
     }
 
@@ -1984,6 +2186,89 @@ impl super::WavesPreviewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Mapped drive <-> UNC rewriting -----------------------------
+    //
+    // Runs on every platform: the lookup is Windows-only, but the string
+    // surgery is where the mistakes live, and a session written by a
+    // colleague on a mapped drive has to resolve here.
+
+    fn mapping() -> (String, String) {
+        ("Z:".to_string(), r"\\server\share".to_string())
+    }
+
+    #[test]
+    fn a_mapped_drive_path_rewrites_onto_its_share() {
+        assert_eq!(
+            unc_form_of_mapped_drive(r"Z:\Proj\a.wav", &mapping()),
+            Some(PathBuf::from(r"\\server\share\Proj\a.wav"))
+        );
+        // The drive letter's case is not meaningful on Windows.
+        assert_eq!(
+            unc_form_of_mapped_drive(r"z:\Proj\a.wav", &mapping()),
+            Some(PathBuf::from(r"\\server\share\Proj\a.wav"))
+        );
+        // A different drive is not this mapping's business.
+        assert_eq!(unc_form_of_mapped_drive(r"Y:\Proj\a.wav", &mapping()), None);
+    }
+
+    #[test]
+    fn the_share_root_itself_rewrites_without_a_trailing_separator() {
+        assert_eq!(
+            unc_form_of_mapped_drive(r"Z:\", &mapping()),
+            Some(PathBuf::from(r"\\server\share"))
+        );
+    }
+
+    #[test]
+    fn a_unc_path_rewrites_onto_the_drive_mapped_to_it() {
+        assert_eq!(
+            drive_form_of_unc(r"\\server\share\Proj\a.wav", &mapping()),
+            Some(PathBuf::from(r"Z:\Proj\a.wav"))
+        );
+        // Shares are case-insensitive; the mapping may be recorded either way.
+        assert_eq!(
+            drive_form_of_unc(r"\\SERVER\Share\Proj\a.wav", &mapping()),
+            Some(PathBuf::from(r"Z:\Proj\a.wav"))
+        );
+    }
+
+    #[test]
+    fn a_share_whose_name_merely_starts_the_same_does_not_match() {
+        // `\\server\share2` must not be rewritten as if it were under
+        // `\\server\share` -- that would silently redirect to another share.
+        assert_eq!(
+            drive_form_of_unc(r"\\server\share2\Proj\a.wav", &mapping()),
+            None
+        );
+        assert_eq!(drive_form_of_unc(r"\\server\other\a.wav", &mapping()), None);
+    }
+
+    #[test]
+    fn the_part_below_the_share_keeps_its_original_case() {
+        // The server may well be case-sensitive below the share root.
+        assert_eq!(
+            drive_form_of_unc(r"\\SERVER\SHARE\MixedCase\A.WAV", &mapping()),
+            Some(PathBuf::from(r"Z:\MixedCase\A.WAV"))
+        );
+    }
+
+    #[test]
+    fn an_empty_or_malformed_mapping_rewrites_nothing() {
+        let empty = ("Z:".to_string(), String::new());
+        assert_eq!(unc_form_of_mapped_drive(r"Z:\a.wav", &empty), None);
+        assert_eq!(drive_form_of_unc(r"\\server\share\a.wav", &empty), None);
+        let no_drive = (String::new(), r"\\server\share".to_string());
+        assert_eq!(drive_form_of_unc(r"\\server\share\a.wav", &no_drive), None);
+    }
+
+    #[test]
+    fn an_ordinary_local_path_has_no_alternative_spelling() {
+        assert!(unc_drive_alternatives(Path::new(r"C:\Users\me\a.wav")).is_empty());
+        assert!(unc_drive_alternatives(Path::new("/home/me/a.wav")).is_empty());
+        // A verbatim path is left alone: rewriting one changes its meaning.
+        assert!(unc_drive_alternatives(Path::new(r"\\?\C:\a.wav")).is_empty());
+    }
 
     #[test]
     fn rel_path_prefers_relative_for_same_volume() {

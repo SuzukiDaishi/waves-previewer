@@ -146,6 +146,21 @@ impl WavesPreviewer {
                 }
                 ui.close();
             }
+            let changed_on_disk = self.session_changed_on_disk.is_some();
+            if ui
+                .add_enabled(
+                    changed_on_disk,
+                    egui::Button::new("Reload Session from Disk..."),
+                )
+                .on_hover_text(
+                    "Someone else saved this session. Open their version, discarding local edits.",
+                )
+                .on_disabled_hover_text("The session on disk matches the one open here")
+                .clicked()
+            {
+                self.request_session_reload_prompt();
+                ui.close();
+            }
             if ui.button("Session Close").clicked() {
                 if let Err(err) = self.request_close_project_with_autosave() {
                     self.debug_log(format!("session close save error: {err}"));

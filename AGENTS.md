@@ -39,6 +39,8 @@ Repository Layout
     - `types.rs`: shared app state and enums.
     - `project.rs`: session (nwsess) serialization helpers (legacy naming).
     - `session_ops.rs`: session open/save/IPC/drag-drop.
+    - `session_sync.rs`: everything a `.nwsess` on a shared file server needs from the filesystem -- content fingerprints, the version stamp parser, the atomic replace, and the retry that keeps a sharing violation from losing a save. All of it blocks; none of it may be called from the UI thread.
+    - `session_watch.rs`: polling probe that notices when somebody else saves the open session. Reports only -- reloading is the user's decision, because an automatic reload discards unsaved edits.
     - `theme_ops.rs`: theme + prefs load/save.
     - `scan_ops.rs`: folder scan job orchestration + results apply.
     - `transcript_ops.rs`: transcript seek handling.
@@ -159,6 +161,8 @@ Implementation Principles
 - **Never call the filesystem from the UI thread** — no `is_file`, `exists`, `metadata`, `read`, or `walkdir` on any path the user supplied. On a network share one of those blocks for the SMB timeout, which is a hung window on its own; a per-frame budget does not help. Ask `path_status.rs` for existence, and put anything else on a worker. (Paths the app owns — its own prefs and config — are the only exception.)
 - Background sweeps against a user path must back off from their own measured cost, and check `perf_profile.rs` for whether the root is remote before choosing a concurrency.
 - Preserve original files unless the user explicitly saves destructive edits.
+- A `.nwsess` may have more than one writer (two GUI instances, or a GUI and a `--cli` batch, against a file server). There is deliberately no lock. Any new session write goes through the compare-and-swap in `run_session_save_jobs` / `cli_ops::write_project_file_checked` -- never a bare `fs::write` -- and any new file the session owns is named after its contents, never after an index or a counter, because both of those are shared between writers and collide.
+- Reading a session must not write to it. A repair or migration discovered while opening rides in memory to the next explicit save.
 - Video sources are read-only: there is no video encoder here, so an edit or an export has nowhere to go. Ask `src/media_kind.rs` rather than testing the extension.
 - Prefer progressive loading for long audio (preview first, full decode later).
 

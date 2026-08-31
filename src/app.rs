@@ -97,6 +97,8 @@ mod resample_ops;
 mod scan_ops;
 mod search_ops;
 mod session_ops;
+mod session_sync;
+mod session_watch;
 mod sort_filter_jobs;
 mod spectral_ops;
 mod spectrogram;
@@ -1004,6 +1006,39 @@ pub struct WavesPreviewer {
     /// Set when an interactive Session Close is waiting on its async
     /// autosave; `drain_session_save` tears the session down once written.
     close_after_session_save: bool,
+    /// The exact bytes `project_path` held when this session was last read
+    /// or written. A save refuses to commit if the file no longer matches --
+    /// on a shared file server that is another person's work, and
+    /// overwriting it is silent data loss. `None` means no expectation
+    /// (no session open, or a Save As to a fresh path).
+    session_disk_fingerprint: Option<session_sync::SessionFingerprint>,
+    /// Document lineage id, carried across saves of the same session and
+    /// re-issued by Save As. See `ProjectFile::session_id`.
+    session_id: Option<String>,
+    /// `revision` of the document as last read/written, so a conflict can
+    /// say "yours is based on revision 41".
+    session_revision: Option<u64>,
+    /// Optional `display_name=` from prefs, written into the session's
+    /// `saved_by` instead of the OS user name.
+    session_display_name: Option<String>,
+    /// Source paths were relocated in memory while opening, and the document
+    /// on disk still holds the stale ones. Opening no longer writes them
+    /// back -- on a share every reader would then be a writer -- so the
+    /// repair rides along until the next real save.
+    session_paths_repaired: bool,
+    /// A save was refused because the document changed underneath it. Drives
+    /// the modal that offers Save As / Overwrite / Reload.
+    session_conflict: Option<types::SessionConflict>,
+    /// Someone else saved the open session while we were looking at it. Held
+    /// until the user reloads or saves, because a toast expires in seconds
+    /// and this has to stay visible until it is acted on.
+    session_changed_on_disk: Option<types::SessionChangedOnDisk>,
+    /// Background probe watching `project_path` for other people's saves.
+    session_watch: Option<session_watch::SessionWatch>,
+    /// The "somebody else saved this, reload?" dialog is open. The banner in
+    /// `session_changed_on_disk` outlives it -- dismissing the dialog only
+    /// postpones the decision.
+    session_reload_prompt: bool,
     theme_mode: ThemeMode,
     item_bg_mode: ItemBgMode,
     show_rename_dialog: bool,

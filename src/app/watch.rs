@@ -71,7 +71,7 @@ pub type WatchSnapshot = HashMap<PathBuf, (Option<SystemTime>, u64)>;
 ///
 /// Capped so a pathological one-off (a server that hung for ten minutes and
 /// then recovered) cannot silently turn the watch off for the session.
-fn next_walk_delay(interval_ms: u64, last_walk: Duration) -> Duration {
+pub(crate) fn next_walk_delay(interval_ms: u64, last_walk: Duration) -> Duration {
     const BACKOFF_FACTOR: u32 = 4;
     const MAX_DELAY: Duration = Duration::from_secs(300);
     let floor = Duration::from_millis(interval_ms.max(20));

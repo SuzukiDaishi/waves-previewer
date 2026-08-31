@@ -155,6 +155,10 @@ windows = { version = "0.62", features = [
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # WNetGetConnectionW, for resolving a mapped drive back to its UNC share.
+    # A session on a file server is opened by people whose machines mount the
+    # same share under different names; see `project::unc_drive_alternatives`.
+    "Win32_NetworkManagement_WNet",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",

@@ -196,7 +196,43 @@ impl WavesPreviewer {
         visible
     }
 
+    /// A standing warning that the open session is not the one on disk any
+    /// more. Deliberately not a toast: toasts expire in seconds, and the
+    /// user has to be able to see this whenever they come back to the
+    /// window, right up until they act on it.
+    fn ui_topbar_session_changed_badge(&mut self, ui: &mut egui::Ui) {
+        let Some(changed) = self.session_changed_on_disk.clone() else {
+            return;
+        };
+        ui.separator();
+        let (label, tooltip) = if changed.removed {
+            (
+                "⚠ session file removed",
+                format!(
+                    "{} is no longer on disk. Save the session to write it again.",
+                    changed.path.display()
+                ),
+            )
+        } else {
+            (
+                "⟳ changed on disk",
+                format!(
+                    "Someone else saved this session ({}).\nClick to reload it — your unsaved edits would be discarded.",
+                    changed.on_disk
+                ),
+            )
+        };
+        let color = Color32::from_rgb(240, 190, 90);
+        let response = ui
+            .add(egui::Button::new(RichText::new(label).color(color)).frame(false))
+            .on_hover_text(tooltip);
+        if response.clicked() && !changed.removed {
+            self.request_session_reload_prompt();
+        }
+    }
+
     fn ui_topbar_activity_slot(&mut self, ui: &mut egui::Ui) {
+        self.ui_topbar_session_changed_badge(ui);
         let items = self.topbar_activity_items();
         ui.separator();
         ui.allocate_ui_with_layout(

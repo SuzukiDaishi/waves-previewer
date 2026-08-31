@@ -112,6 +112,24 @@ struct LoadedSession {
     base_dir: PathBuf,
     path_mode: SessionPathMode,
     project: ProjectFile,
+    /// The bytes this command read. `save_session` refuses to commit unless
+    /// the file still matches, so a batch run against a shared session
+    /// cannot quietly replace a save that landed while it was working.
+    fingerprint: crate::app::session_sync::SessionFingerprint,
+}
+
+/// Whether `--force` was given. Process-wide because it is a property of the
+/// invocation, not of any one command, and every mutating command routes
+/// through the same `save_session`.
+static CLI_FORCE_OVERWRITE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn set_cli_force_overwrite(force: bool) {
+    CLI_FORCE_OVERWRITE.store(force, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn cli_force_overwrite() -> bool {
+    CLI_FORCE_OVERWRITE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +221,7 @@ struct ColumnDescriptor {
 }
 
 pub fn run_cli(root: CliRoot) -> Result<()> {
+    set_cli_force_overwrite(root.force);
     let command_name = cli_command_name(&root.command).to_string();
     match dispatch_cli(root.command) {
         Ok(out) => {
@@ -3030,20 +3049,25 @@ fn debug_screenshot(args: DebugScreenshotArgs) -> Result<CliCommandOutput> {
 
 fn load_session(path: &Path) -> Result<LoadedSession> {
     let path = absolute_existing_path(path)?;
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("read session file: {}", path.display()))?;
+    let bytes = crate::app::session_sync::read_session_bytes(&path)
+        .with_context(|| format!("read session file: {}", path.display()))?
+        .with_context(|| format!("session file not found: {}", path.display()))?;
+    if bytes.is_empty() {
+        bail!(
+            "session file is empty — a previous save may have been interrupted: {}",
+            path.display()
+        );
+    }
+    let fingerprint = crate::app::session_sync::SessionFingerprint::of_bytes(&bytes);
+    let text = String::from_utf8(bytes)
+        .with_context(|| format!("session file is not valid UTF-8: {}", path.display()))?;
     let mut project = deserialize_project(&text)
         .with_context(|| format!("parse session file: {}", path.display()))?;
     let path_mode = SessionPathMode::from_project(&project);
-    let repaired = project::repair_project_source_paths(&mut project, &path);
-    if repaired.relocated_references > 0 {
-        write_project_file(&path, &project).with_context(|| {
-            format!(
-                "update {} repaired session path reference(s)",
-                repaired.relocated_references
-            )
-        })?;
-    }
+    // Repaired paths are kept in memory and written by the next save.
+    // Writing them here made every read of a shared session a write, racing
+    // the people actually saving it.
+    project::repair_project_source_paths(&mut project, &path);
     let base_dir = path
         .parent()
         .map(Path::to_path_buf)
@@ -3053,18 +3077,109 @@ fn load_session(path: &Path) -> Result<LoadedSession> {
         base_dir,
         path_mode,
         project,
+        fingerprint,
     })
 }
 
+/// Write the session back, refusing to replace a document that changed since
+/// `load_session` read it.
+///
+/// The CLI is the most likely concurrent writer on a shared session -- a
+/// batch script runs dozens of mutating commands while somebody has the same
+/// file open in the GUI -- and it used to overwrite with a bare
+/// `std::fs::write`: not atomic, and blind to anyone else's work.
 fn save_session(session: &LoadedSession) -> Result<()> {
-    write_project_file(&session.path, &session.project)
+    let mut project = session.project.clone();
+    project.saved_by = Some(crate::app::session_sync::local_display_name());
+    let expected = (!cli_force_overwrite()).then_some(session.fingerprint);
+    match write_project_file_checked(&session.path, &mut project, expected)? {
+        SessionWriteOutcome::Written => Ok(()),
+        SessionWriteOutcome::Conflict(on_disk) => bail!(
+            "session changed on disk since it was read ({on_disk}); nothing was written to {}. \
+             Re-run the command, or pass --force to overwrite (the current document is kept as .bak)",
+            session.path.display()
+        ),
+    }
 }
 
-fn write_project_file(path: &Path, project: &ProjectFile) -> Result<()> {
+enum SessionWriteOutcome {
+    Written,
+    /// Refused. Carries how the document on disk describes itself.
+    Conflict(String),
+}
+
+/// Atomic, compare-and-swapped session write shared by every CLI mutation.
+fn write_project_file_checked(
+    path: &Path,
+    project: &mut ProjectFile,
+    expected: Option<crate::app::session_sync::SessionFingerprint>,
+) -> Result<SessionWriteOutcome> {
+    use crate::app::session_sync;
     ensure_parent_dir(path)?;
+    let disk = session_sync::read_session_state(path)
+        .with_context(|| format!("read {}", path.display()))?;
+    if let (Some(expected), Some(actual)) = (expected, disk.fingerprint()) {
+        if expected != actual {
+            return Ok(SessionWriteOutcome::Conflict(disk.stamp().describe()));
+        }
+    }
+    let stamp = disk.stamp();
+    project.revision = Some(stamp.revision.unwrap_or(0).saturating_add(1));
+    project.saved_at = Some(session_sync::now_rfc3339());
+    if project.session_id.is_none() {
+        project.session_id = Some(
+            stamp
+                .session_id
+                .unwrap_or_else(session_sync::new_session_id),
+        );
+    }
     let text = serialize_project(project).context("serialize session file")?;
-    std::fs::write(path, text).with_context(|| format!("write {}", path.display()))?;
-    Ok(())
+    // Same marker the GUI uses, so its stale-temp sweep can clean up after a
+    // CLI run that died mid-save.
+    let nonce = format!(
+        "{}{}.{}",
+        crate::app::WavesPreviewer::SAVE_TEMP_MARKER,
+        std::process::id(),
+        &session_sync::new_session_id()[..8]
+    );
+    // A deliberate overwrite keeps what it replaces: it is the only way back
+    // if the document belonged to somebody else.
+    if expected.is_none() {
+        if let Some(previous) = disk.bytes() {
+            let backup = path.with_file_name(format!(
+                "{}.bak",
+                path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "session.nwsess".to_string())
+            ));
+            let backup_temp = backup.with_extension(format!("bak.{nonce}.tmp"));
+            if std::fs::write(&backup_temp, previous)
+                .and_then(|()| session_sync::atomic_replace_file(&backup_temp, &backup))
+                .is_err()
+            {
+                let _ = std::fs::remove_file(&backup_temp);
+            }
+        }
+    }
+    let temp = path.with_extension(format!("nwsess.{nonce}.tmp"));
+    session_sync::retry_shared_io(|| std::fs::write(&temp, &text))
+        .with_context(|| format!("write {}", temp.display()))?;
+    if let Err(err) = session_sync::atomic_replace_file(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(anyhow::Error::from(err)
+            .context(format!("commit {}", path.display())));
+    }
+    Ok(SessionWriteOutcome::Written)
+}
+
+/// Unconditional write for paths that own the file outright: `session new`
+/// and the throwaway documents under the CLI render directory.
+fn write_project_file(path: &Path, project: &ProjectFile) -> Result<()> {
+    let mut project = project.clone();
+    match write_project_file_checked(path, &mut project, None)? {
+        SessionWriteOutcome::Written => Ok(()),
+        SessionWriteOutcome::Conflict(_) => unreachable!("no expectation was set"),
+    }
 }
 
 fn write_temp_project_file(prefix: &str, project: &ProjectFile) -> Result<PathBuf> {
@@ -3120,6 +3235,10 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
     let cols = parse_list_column_config(DEFAULT_LIST_COLUMNS)?;
     Ok(ProjectFile {
         version: 2,
+        session_id: None,
+        revision: None,
+        saved_at: None,
+        saved_by: None,
         assets: Vec::new(),
         transcripts: Vec::new(),
         name: None,
@@ -7635,4 +7754,146 @@ fn plugin_session_chain_set(args: PluginSessionChainSetArgs) -> Result<CliComman
         result: json!({"path": pathbuf_to_string(&tab.path), "chain": plugin_chain_json(&tab.plugin_fx_chain)}),
         warnings: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod shared_session_tests {
+    use super::*;
+
+    /// `--force` is process-wide, which is right for a CLI invocation (one
+    /// command per process) but means these tests cannot run side by side.
+    fn force_flag_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_cli_shared_{tag}_{}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn seed_session(dir: &Path) -> PathBuf {
+        let path = dir.join("shared.nwsess");
+        let project = build_project_file_from_entries(&[]).expect("build session");
+        write_project_file(&path, &project).expect("seed session");
+        path
+    }
+
+    #[test]
+    fn a_cli_save_refuses_to_replace_a_document_that_changed_underneath_it() {
+        let _guard = force_flag_guard();
+        set_cli_force_overwrite(false);
+        let dir = temp_dir("refuse");
+        let path = seed_session(&dir);
+        let session = load_session(&path).expect("load session");
+
+        // Somebody saves while the command is working.
+        let mut theirs = session.project.clone();
+        theirs.revision = Some(50);
+        theirs.saved_by = Some("tanaka".to_string());
+        let theirs_text = serialize_project(&theirs).expect("serialize theirs");
+        std::fs::write(&path, &theirs_text).expect("their save");
+
+        let err = save_session(&session).expect_err("the CLI must not overwrite their save");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("changed on disk"),
+            "the error must say what happened: {message}"
+        );
+        assert!(
+            message.contains("--force"),
+            "and how to proceed deliberately: {message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read after refusal"),
+            theirs_text,
+            "a refused CLI save must leave their document intact"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_forced_cli_save_overwrites_and_keeps_a_backup() {
+        let _guard = force_flag_guard();
+        let dir = temp_dir("force");
+        let path = seed_session(&dir);
+        let session = load_session(&path).expect("load session");
+        let mut theirs = session.project.clone();
+        theirs.revision = Some(7);
+        let theirs_text = serialize_project(&theirs).expect("serialize theirs");
+        std::fs::write(&path, &theirs_text).expect("their save");
+
+        set_cli_force_overwrite(true);
+        let result = save_session(&session);
+        set_cli_force_overwrite(false);
+        result.expect("a forced save commits");
+
+        let stored =
+            deserialize_project(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(stored.revision, Some(8));
+        let backup = path.with_file_name("shared.nwsess.bak");
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("read backup"),
+            theirs_text,
+            "the overwritten document must remain recoverable"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unchanged_document_saves_and_advances_the_revision() {
+        let _guard = force_flag_guard();
+        set_cli_force_overwrite(false);
+        let dir = temp_dir("ok");
+        let path = seed_session(&dir);
+        let before = deserialize_project(&std::fs::read_to_string(&path).expect("read"))
+            .expect("parse")
+            .revision
+            .expect("seed stamped a revision");
+        let session = load_session(&path).expect("load session");
+        save_session(&session).expect("an untouched document saves");
+        let after = deserialize_project(&std::fs::read_to_string(&path).expect("read"))
+            .expect("parse")
+            .revision
+            .expect("save stamped a revision");
+        assert_eq!(after, before + 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn loading_a_session_never_writes_to_it() {
+        let _guard = force_flag_guard();
+        set_cli_force_overwrite(false);
+        let dir = temp_dir("readonly");
+        let path = seed_session(&dir);
+        let before = std::fs::read(&path).expect("read before");
+        let _session = load_session(&path).expect("load session");
+        assert_eq!(
+            std::fs::read(&path).expect("read after"),
+            before,
+            "a CLI read must not rewrite a shared session"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_empty_session_is_reported_rather_than_parsed() {
+        let dir = temp_dir("empty");
+        let path = dir.join("truncated.nwsess");
+        std::fs::write(&path, "").expect("write empty session");
+        let err = load_session(&path).expect_err("an empty document cannot be loaded");
+        let message = format!("{err:#}");
+        assert!(message.contains("empty"), "got: {message}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
