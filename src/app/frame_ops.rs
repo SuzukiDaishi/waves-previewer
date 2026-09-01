@@ -825,6 +825,7 @@ impl WavesPreviewer {
         self.ui_licenses_window(ctx);
         self.ui_undo_history_window(ctx);
         self.ui_regions_window(ctx);
+        self.ui_comments_window(ctx);
         self.ui_harmonic_window(ctx);
         self.ui_plugin_manager_window(ctx);
         self.ui_duplicates_window(ctx);

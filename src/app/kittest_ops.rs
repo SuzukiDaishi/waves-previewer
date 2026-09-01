@@ -3696,20 +3696,30 @@ impl super::WavesPreviewer {
     }
 
     /// Post as if from another machine, so a test can build the two-writer
-    /// case without a second harness and a second identity.
+    /// case without a second harness and a second identity. Built directly
+    /// rather than posted and patched: the write worker starts immediately,
+    /// so patching afterwards would race the bytes it already sent.
     pub fn test_post_comment_as(
         &mut self,
         author_id: &str,
         parent: Option<&str>,
         body: &str,
     ) -> Option<String> {
-        let id = self.post_comment(parent.map(str::to_string), body)?;
-        if let Some(comment) = self.comments.iter_mut().find(|c| c.id == id) {
-            comment.author_id = author_id.to_string();
-        }
-        if let Some(comment) = self.comment_outbox.iter_mut().find(|c| c.id == id) {
-            comment.author_id = author_id.to_string();
-        }
+        let id = crate::app::comments::new_comment_id();
+        self.enqueue_comment(crate::app::project::ProjectComment {
+            id: id.clone(),
+            parent: parent.map(str::to_string),
+            author_id: author_id.to_string(),
+            author_host: Some("OTHER-PC".to_string()),
+            author_name: None,
+            created_at: crate::app::session_sync::now_rfc3339(),
+            edited_at: None,
+            rev: 0,
+            body: body.to_string(),
+            deleted: false,
+            resolved_by: None,
+            resolved_at: None,
+        });
         self.test_settle_comment_jobs();
         Some(id)
     }
@@ -3727,6 +3737,46 @@ impl super::WavesPreviewer {
         });
         self.request_comment_pull();
         self.test_settle_comment_jobs();
+    }
+
+    // ---- Comments window ------------------------------------------------
+
+    pub fn test_open_comments_window(&mut self) {
+        self.open_comments_window();
+    }
+
+    pub fn test_comments_window_open(&self) -> bool {
+        self.show_comments_window
+    }
+
+    pub fn test_comments_detached(&self) -> bool {
+        self.comments_detached
+    }
+
+    pub fn test_set_comment_draft(&mut self, body: &str) {
+        self.comment_draft = body.to_string();
+    }
+
+    pub fn test_set_comment_reply_to(&mut self, id: Option<&str>) {
+        self.comment_reply_to = id.map(str::to_string);
+    }
+
+    pub fn test_comment_filter(&self) -> &'static str {
+        self.comment_filter.label()
+    }
+
+    /// The threads the window would draw, as `(body, replies, resolved)`.
+    pub fn test_comment_threads(&self) -> Vec<(String, usize, bool)> {
+        crate::app::comments::build_threads(&self.comments)
+            .iter()
+            .map(|node| {
+                (
+                    node.comment.body.clone(),
+                    node.len() - 1,
+                    node.comment.resolved_at.is_some(),
+                )
+            })
+            .collect()
     }
 
     // ---- Referenced-file change tracking --------------------------------

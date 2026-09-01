@@ -193,7 +193,7 @@ impl crate::app::WavesPreviewer {
     }
 
     /// Show it here now, and get it to the document when the worker is free.
-    fn enqueue_comment(&mut self, comment: ProjectComment) {
+    pub(crate) fn enqueue_comment(&mut self, comment: ProjectComment) {
         comments::merge_into(&mut self.comments, [comment.clone()]);
         // Replace rather than append: several quick edits to one comment
         // should send the last of them, not each keystroke's worth in turn.
@@ -288,8 +288,11 @@ impl crate::app::WavesPreviewer {
                     written.revision,
                     written.fingerprint.short_hex()
                 ));
-                self.comments = written.comments;
-                comments::sort_for_storage(&mut self.comments);
+                // Merged, never assigned. A comment written while this one
+                // was in flight is still only in memory, and the document we
+                // just read knows nothing about it -- assigning would drop it
+                // from the window while it sat in the outbox waiting its turn.
+                comments::merge_into(&mut self.comments, written.comments);
                 // Adopt what we just wrote as the baseline. Without this the
                 // watch reports our own post back to us as "someone else
                 // saved", and the next real save would see a false conflict.

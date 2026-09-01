@@ -1103,6 +1103,20 @@ pub struct WavesPreviewer {
     /// says whether the document actually changed in a way worth warning
     /// about. A colleague's comment must not read as "your session is stale".
     session_changed_pending: Option<types::SessionChangedOnDisk>,
+    show_comments_window: bool,
+    /// Whether the conversation is in its own OS window. Reviewing means
+    /// reading notes *while* scrubbing what they are about, and a floating
+    /// window over the editor makes you choose between the two.
+    comments_detached: bool,
+    comment_draft: String,
+    /// The comment the composer is answering, or `None` for a new thread.
+    comment_reply_to: Option<String>,
+    comment_editing_id: Option<String>,
+    comment_edit_draft: String,
+    comment_filter: ui::comments::CommentFilter,
+    comment_search: String,
+    /// Threads whose replies are folded away, by root id.
+    comment_collapsed: std::collections::HashSet<String>,
     show_session_changes_window: bool,
     show_session_history_window: bool,
     session_history_entries: Vec<session_store::HistoryEntry>,

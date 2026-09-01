@@ -2260,6 +2260,12 @@ impl super::WavesPreviewer {
         self.comment_write = None;
         self.comment_pull = None;
         self.session_changed_pending = None;
+        self.comment_draft.clear();
+        self.comment_reply_to = None;
+        self.comment_editing_id = None;
+        self.comment_edit_draft.clear();
+        self.comment_search.clear();
+        self.comment_collapsed.clear();
         self.show_session_changes_window = false;
         self.show_session_history_window = false;
         self.session_history_entries.clear();
