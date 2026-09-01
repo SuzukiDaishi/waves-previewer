@@ -261,9 +261,32 @@ impl WavesPreviewer {
         }
     }
 
+    /// A standing count of what colleagues have said and this person has not
+    /// read. Standing, like the two badges above, and for the same reason: a
+    /// toast is gone in seconds and the reader may have been away.
+    fn ui_topbar_unread_comments_badge(&mut self, ui: &mut egui::Ui) {
+        if self.show_comments_window && !self.comments_detached {
+            // It is on screen. Counting what is being read would be noise.
+            return;
+        }
+        let count = self.unread_comment_count();
+        if count == 0 {
+            return;
+        }
+        ui.separator();
+        let color = Color32::from_rgb(140, 190, 240);
+        let response = ui
+            .add(egui::Button::new(RichText::new(format!("💬 {count} new")).color(color)).frame(false))
+            .on_hover_text("Comments from other people in this session. Click to read them.");
+        if response.clicked() {
+            self.open_comments_window();
+        }
+    }
+
     fn ui_topbar_activity_slot(&mut self, ui: &mut egui::Ui) {
         self.ui_topbar_session_changed_badge(ui);
         self.ui_topbar_session_files_changed_badge(ui);
+        self.ui_topbar_unread_comments_badge(ui);
         let items = self.topbar_activity_items();
         ui.separator();
         ui.allocate_ui_with_layout(

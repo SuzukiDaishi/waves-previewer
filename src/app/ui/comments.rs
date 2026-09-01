@@ -15,6 +15,7 @@
 use egui::{Align, Color32, RichText};
 
 use crate::app::comments::{self, CommentAnchor, CommentNode, CommentRef};
+use crate::app::ui::comment_markdown::{self, Block, Span};
 use crate::app::project::ProjectComment;
 
 /// How much of the conversation the window is showing.
@@ -88,6 +89,11 @@ impl crate::app::WavesPreviewer {
         if let Some(shown) = shown.as_ref() {
             self.register_scroll_surface(scroll_target, &shown.response);
         }
+        if !open {
+            // Closing clears the highlights: next time it opens, "new" means
+            // new since now.
+            self.comment_unread_shown.clear();
+        }
         self.show_comments_window = open;
     }
 
@@ -128,6 +134,8 @@ impl crate::app::WavesPreviewer {
 
     fn ui_comments_body(&mut self, ui: &mut egui::Ui) {
         let mut actions: Vec<CommentAction> = Vec::new();
+        // Showing them is what reading them means.
+        self.mark_comments_read();
         self.ui_comments_header(ui);
         ui.separator();
 
@@ -398,6 +406,10 @@ impl crate::app::WavesPreviewer {
                     .weak()
                     .small(),
             );
+            if self.comment_is_unread(&node.comment) {
+                ui.label(RichText::new("●").small().color(Color32::from_rgb(140, 190, 240)))
+                    .on_hover_text("New since you last looked");
+            }
             if self.comment_is_unsent(&node.comment.id) {
                 ui.label(
                     RichText::new("· not shared yet")
@@ -739,36 +751,107 @@ impl crate::app::WavesPreviewer {
         self.comment_draft.push(' ');
     }
 
-    /// A comment body with its `@[...]` references drawn as chips you can
-    /// press. Returns the one that was pressed, if any.
+    /// A comment body, drawn as its small Markdown with `@[...]` references
+    /// as chips you can press. Returns the one that was pressed, if any.
     ///
     /// The chips cannot be part of the surrounding text run: a `LayoutJob`
-    /// paints, it does not take clicks. So the body is split at the token
-    /// ranges and rebuilt as wrapped text and buttons side by side.
+    /// paints, it does not take clicks. So a paragraph is laid out as wrapped
+    /// labels and buttons side by side rather than as one job.
     fn ui_comment_body(&mut self, ui: &mut egui::Ui, body: &str) -> Option<CommentRef> {
-        let refs = comments::find_refs(body);
-        if refs.is_empty() {
-            ui.label(body);
-            return None;
-        }
+        let blocks = comment_markdown::parse_comment_body(body);
         let mut clicked = None;
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 3.0;
-            let mut cursor = 0usize;
-            for (range, reference) in &refs {
-                if range.start > cursor {
-                    ui.label(body[cursor..range.start].trim_end_matches('\n'));
+        for block in &blocks {
+            match block {
+                Block::Heading { level, spans } => {
+                    let size = match level {
+                        1 => 17.0,
+                        2 => 15.0,
+                        _ => 14.0,
+                    };
+                    self.ui_comment_spans(ui, spans, Some(size), None, &mut clicked);
                 }
-                if self.ui_comment_ref_chip(ui, reference) {
-                    clicked = Some(reference.clone());
+                Block::Paragraph(spans) => {
+                    self.ui_comment_spans(ui, spans, None, None, &mut clicked)
                 }
-                cursor = range.end;
+                Block::Item { ordinal, spans } => {
+                    let bullet = match ordinal {
+                        Some(n) => format!("{n}."),
+                        None => "•".to_string(),
+                    };
+                    ui.horizontal_top(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(bullet).weak());
+                        self.ui_comment_spans(ui, spans, None, None, &mut clicked);
+                    });
+                }
+                Block::Quote(spans) => {
+                    ui.horizontal_top(|ui| {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("▏").weak());
+                        let quote = ui.visuals().weak_text_color();
+                        self.ui_comment_spans(ui, spans, None, Some(quote), &mut clicked);
+                    });
+                }
+                Block::Code(text) => {
+                    egui::Frame::group(ui.style())
+                        .inner_margin(4.0)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(RichText::new(text).monospace());
+                        });
+                }
             }
-            if cursor < body.len() {
-                ui.label(&body[cursor..]);
+        }
+        clicked
+    }
+
+    fn ui_comment_spans(
+        &self,
+        ui: &mut egui::Ui,
+        spans: &[Span],
+        size: Option<f32>,
+        color: Option<Color32>,
+        clicked: &mut Option<CommentRef>,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for span in spans {
+                match span {
+                    Span::Text { text, style } => {
+                        let mut rich = RichText::new(text);
+                        if style.bold {
+                            rich = rich.strong();
+                        }
+                        if style.italic {
+                            rich = rich.italics();
+                        }
+                        if style.strike {
+                            rich = rich.strikethrough();
+                        }
+                        if style.code {
+                            rich = rich.monospace().background_color(
+                                ui.visuals().extreme_bg_color,
+                            );
+                        }
+                        if let Some(size) = size {
+                            rich = rich.size(size);
+                        }
+                        if let Some(color) = color {
+                            rich = rich.color(color);
+                        }
+                        ui.label(rich);
+                    }
+                    Span::Link(url) => {
+                        ui.hyperlink(url);
+                    }
+                    Span::Reference(reference) => {
+                        if self.ui_comment_ref_chip(ui, reference) {
+                            *clicked = Some(reference.clone());
+                        }
+                    }
+                }
             }
         });
-        clicked
     }
 
     fn ui_comment_ref_chip(&self, ui: &mut egui::Ui, reference: &CommentRef) -> bool {

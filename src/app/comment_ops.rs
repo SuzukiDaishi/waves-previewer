@@ -265,6 +265,63 @@ impl crate::app::WavesPreviewer {
         self.comment_pull = Some(rx);
     }
 
+    // ---- Unread ----------------------------------------------------------
+
+    /// Comments this person has not seen. Their own never count: you do not
+    /// need telling about what you just wrote.
+    pub(crate) fn unread_comment_count(&self) -> usize {
+        let me = self.comment_author().id;
+        self.comments
+            .iter()
+            .filter(|comment| {
+                !comment.deleted
+                    && comment.author_id != me
+                    && !self.comment_reads.contains(&comment.id)
+            })
+            .count()
+    }
+
+    /// Mark everything currently in the conversation as seen.
+    ///
+    /// Called when the window is showing, because that is what "read" means
+    /// here. The record is per-user and lives in the local database; losing
+    /// it costs a re-read, never any of anybody's work.
+    pub(crate) fn mark_comments_read(&mut self) {
+        let me = self.comment_author().id;
+        let unseen: Vec<String> = self
+            .comments
+            .iter()
+            .filter(|comment| comment.author_id != me && !self.comment_reads.contains(&comment.id))
+            .map(|comment| comment.id.clone())
+            .collect();
+        if unseen.is_empty() {
+            return;
+        }
+        for id in &unseen {
+            self.comment_reads.insert(id.clone());
+            // Also remembered as "was new while this window was open", so the
+            // dot survives the frame that marked it read.
+            self.comment_unread_shown.insert(id.clone());
+        }
+        let Some(path) = self.project_path.clone() else {
+            return;
+        };
+        let key = super::session_store::session_key(self.session_id.as_deref(), &path);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs() as i64)
+            .unwrap_or(0);
+        self.session_store.mark_comments_read(key, unseen, now);
+    }
+
+    /// True for a comment that was new when this window was opened, or
+    /// arrived while it was open. Not the same question the topbar count
+    /// asks: that one is about what is still unread, this one is about what
+    /// to point at while the reader is looking.
+    pub(crate) fn comment_is_unread(&self, comment: &ProjectComment) -> bool {
+        self.comment_unread_shown.contains(&comment.id)
+    }
+
     // ---- References ------------------------------------------------------
 
     /// Turn a stored reference path into one this machine can open.

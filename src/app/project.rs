@@ -2269,6 +2269,9 @@ impl super::WavesPreviewer {
         self.pending_comment_jump = None;
         self.comment_mention_open = false;
         self.comment_mention_index = 0;
+        self.comment_reads.clear();
+        self.comment_reads_request = None;
+        self.comment_unread_shown.clear();
         self.show_session_changes_window = false;
         self.show_session_history_window = false;
         self.session_history_entries.clear();

@@ -3779,6 +3779,27 @@ impl super::WavesPreviewer {
             .collect()
     }
 
+    pub fn test_unread_comment_count(&self) -> usize {
+        self.unread_comment_count()
+    }
+
+    pub fn test_mark_comments_read(&mut self) {
+        self.mark_comments_read();
+    }
+
+    /// The comments the window would still be pointing at as new.
+    pub fn test_highlighted_comment_count(&self) -> usize {
+        self.comments
+            .iter()
+            .filter(|comment| self.comment_is_unread(comment))
+            .count()
+    }
+
+    pub fn test_close_comments_window(&mut self) {
+        self.show_comments_window = false;
+        self.comment_unread_shown.clear();
+    }
+
     pub fn test_comment_draft(&self) -> String {
         self.comment_draft.clone()
     }

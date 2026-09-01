@@ -302,6 +302,12 @@ impl super::WavesPreviewer {
         // at that point would silently lose it.
         self.baseline_tracked = self.tracked_session_files();
         let key = super::session_store::session_key(self.session_id.as_deref(), &path);
+        // Which comments this person has already read is per-user state like
+        // the baseline beside it, and belongs in the same local database for
+        // the same reason: a shared document has nowhere to keep a different
+        // answer for each colleague.
+        self.comment_reads.clear();
+        self.comment_reads_request = self.session_store.load_comment_reads(key.clone());
         if let Some(request) = self.session_store.load(key.clone()) {
             self.session_store_load = Some((request, key));
         }
@@ -341,6 +347,14 @@ impl super::WavesPreviewer {
                     }
                     let since = visit.map(|v| v.last_opened_at);
                     self.begin_baseline_scan(key, since, baseline);
+                }
+                super::session_store::StoreReply::CommentReads { request, ids } => {
+                    if self.comment_reads_request != Some(request) {
+                        // A reply for a session the user has since closed.
+                        continue;
+                    }
+                    self.comment_reads_request = None;
+                    self.comment_reads = ids.into_iter().collect();
                 }
                 super::session_store::StoreReply::History { request, entries } => {
                     if self.session_history_request == Some(request) {

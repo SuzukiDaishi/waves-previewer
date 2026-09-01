@@ -347,6 +347,45 @@ mod comments_ui {
     }
 
     #[test]
+    fn a_colleagues_comment_reads_as_new_until_it_has_been_looked_at() {
+        let (mut harness, session) = open_saved_session("unread");
+
+        // Their comment is new; ours never is -- you do not need telling
+        // about what you just wrote.
+        harness
+            .state_mut()
+            .test_post_comment_blocking(None, "mine")
+            .expect("my post");
+        harness
+            .state_mut()
+            .test_post_comment_as("tanaka", None, "theirs")
+            .expect("their post");
+        assert_eq!(harness.state().test_unread_comment_count(), 1);
+
+        harness.state_mut().test_open_comments_window();
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().test_unread_comment_count(),
+            0,
+            "showing them is what reading them means"
+        );
+        assert_eq!(
+            harness.state().test_highlighted_comment_count(),
+            1,
+            "but the dot survives the frame that marked it read, or nobody              would ever see which comment was the new one"
+        );
+
+        harness.state_mut().test_close_comments_window();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_highlighted_comment_count(),
+            0,
+            "closing the window resets what counts as new"
+        );
+        assert!(session.is_file());
+    }
+
+    #[test]
     fn a_withdrawn_comment_leaves_its_replies_readable() {
         let (mut harness, _session) = open_saved_session("withdraw");
         harness.state_mut().test_open_comments_window();

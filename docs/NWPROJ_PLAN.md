@@ -110,6 +110,24 @@ tags = ["foley"]
 - All five fields are optional; a session written before they existed loads
   with an empty palette and no assignments.
 
+### Comments
+
+`[[comments]]` holds the session's conversation: author, RFC3339 UTC stamp,
+`parent` for replies, and a body carrying `@[path|start-end|low-highHz]`
+reference tokens. Additive `#[serde(default)]`, so `version` does not move.
+
+Flat rather than nested, and keyed by a random id rather than a counter,
+because it is the one part of this document that several people write
+concurrently and it therefore needs a merge rule: a set union by id, settled
+by `(rev, edited_at)`. That rule is what lets a comment write retry a lost
+compare-and-swap rather than raising the conflict modal, and what lets a full
+save carry a colleague's comment instead of overwriting it.
+
+Whether a change on disk is "somebody commented" or "somebody saved" is
+decided by hashing the document with its comments *and* its save stamp
+removed (`project::comment_free_fingerprint`) -- the stamp moves on every
+write, comment-only ones included. See `docs/COMMENTS_SPEC.md`.
+
 ### Notes
 - `path_mode`: source/user paths use one policy for the entire session:
   `absolute` or `relative`. Per-file mixing is not written. New sessions
@@ -344,8 +362,10 @@ the repair chain.
   `search_query` are per-user but stored in the session, so a colleague's
   save changes them for everyone on the next reload. Annoying, not
   corrupting; out of scope so far.
-- **No merging.** Conflicts are resolved by choosing a whole document:
-  Save As, Overwrite, or Reload.
+- **No merging, except for comments.** Conflicts are resolved by choosing a
+  whole document: Save As, Overwrite, or Reload. `[[comments]]` is the one
+  part with a merge rule of its own, and a change confined to it is exempted
+  from the conflict check entirely.
 
 ---
 

@@ -1,4 +1,5 @@
 pub(super) mod channel_routing;
+pub(super) mod comment_markdown;
 pub(super) mod comments;
 pub(super) mod debug;
 pub(super) mod dsp_widgets;

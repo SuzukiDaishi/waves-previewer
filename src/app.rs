@@ -1130,6 +1130,16 @@ pub struct WavesPreviewer {
     /// Explorer onto it becomes a reference instead of being loaded into the
     /// list. `None` while it is closed or detached.
     comments_window_rect: Option<egui::Rect>,
+    /// Comments this person has already seen. Per-user, so it lives in the
+    /// local database beside the file baseline rather than in the shared
+    /// document.
+    comment_reads: std::collections::HashSet<String>,
+    comment_reads_request: Option<u64>,
+    /// What was new when this window was opened, kept for as long as it
+    /// stays open. Marking a comment read the moment it is drawn is what
+    /// "read" means for the topbar count, but it would also erase the dot in
+    /// the same frame it appeared -- so the highlight rides on this instead.
+    comment_unread_shown: std::collections::HashSet<String>,
     show_session_changes_window: bool,
     show_session_history_window: bool,
     session_history_entries: Vec<session_store::HistoryEntry>,

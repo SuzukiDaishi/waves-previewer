@@ -227,6 +227,12 @@ impl Db {
             );
             CREATE INDEX IF NOT EXISTS session_history_key
                 ON session_history(session_key, id);
+            CREATE TABLE IF NOT EXISTS comment_read (
+                session_key TEXT NOT NULL,
+                comment_id  TEXT NOT NULL,
+                read_at     INTEGER NOT NULL,
+                PRIMARY KEY (session_key, comment_id)
+            );
             ",
         )?;
         Ok(())
@@ -249,6 +255,31 @@ impl Db {
             )
             .optional()?;
         Ok(visit)
+    }
+
+    /// Which comments this person has already seen.
+    ///
+    /// Per user, so it cannot live in the shared document -- a `.nwsess` has
+    /// nowhere to put a different answer for each colleague, and writing one
+    /// on open would make every reader a writer again.
+    fn load_comment_reads(&self, key: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .connection
+            .prepare("SELECT comment_id FROM comment_read WHERE session_key = ?1")?;
+        let rows = stmt.query_map(params![key], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(|row| row.ok()).collect())
+    }
+
+    fn mark_comments_read(&self, key: &str, ids: &[String], read_at: i64) -> Result<()> {
+        let mut stmt = self.connection.prepare(
+            "INSERT INTO comment_read (session_key, comment_id, read_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_key, comment_id) DO NOTHING",
+        )?;
+        for id in ids {
+            stmt.execute(params![key, id, read_at])?;
+        }
+        Ok(())
     }
 
     fn load_baseline(&self, key: &str) -> Result<Vec<(PathBuf, FileBaseline)>> {
@@ -525,6 +556,15 @@ enum Command {
         key: String,
         request: u64,
     },
+    LoadCommentReads {
+        key: String,
+        request: u64,
+    },
+    MarkCommentsRead {
+        key: String,
+        ids: Vec<String>,
+        read_at: i64,
+    },
     RestoreHistory {
         id: i64,
         request: u64,
@@ -548,6 +588,10 @@ pub enum StoreReply {
     HistoryBytes {
         request: u64,
         bytes: Option<Vec<u8>>,
+    },
+    CommentReads {
+        request: u64,
+        ids: Vec<String>,
     },
     Failed {
         request: u64,
@@ -621,6 +665,20 @@ impl SessionStore {
         let request = self.next_request();
         self.send(Command::Load { key, request });
         Some(request)
+    }
+
+    pub fn load_comment_reads(&mut self, key: String) -> Option<u64> {
+        self.tx.as_ref()?;
+        let request = self.next_request();
+        self.send(Command::LoadCommentReads { key, request });
+        Some(request)
+    }
+
+    pub fn mark_comments_read(&self, key: String, ids: Vec<String>, read_at: i64) {
+        if ids.is_empty() {
+            return;
+        }
+        self.send(Command::MarkCommentsRead { key, ids, read_at });
     }
 
     pub fn record_visit(
@@ -798,6 +856,14 @@ fn run_command(db: &mut Db, command: Command, reply: &mpsc::Sender<StoreReply>) 
                 &bytes,
             )
             .map_err(|e| (None, e)),
+        Command::LoadCommentReads { key, request } => {
+            let ids = db.load_comment_reads(&key).map_err(|e| (Some(request), e))?;
+            let _ = reply.send(StoreReply::CommentReads { request, ids });
+            Ok(())
+        }
+        Command::MarkCommentsRead { key, ids, read_at } => db
+            .mark_comments_read(&key, &ids, read_at)
+            .map_err(|e| (None, e)),
         Command::ListHistory { key, request } => {
             let entries = db.list_history(&key).map_err(|e| (Some(request), e))?;
             let _ = reply.send(StoreReply::History { request, entries });
@@ -836,6 +902,29 @@ mod tests {
             content_hash: hash.map(str::to_string),
             recorded_at: 1_700_000_000,
         }
+    }
+
+    #[test]
+    fn comment_reads_are_per_session_and_survive_being_recorded_twice() {
+        let path = temp_db("comment_reads");
+        let db = Db::open(&path).expect("open");
+        assert!(db.load_comment_reads("id:abc").expect("load").is_empty());
+
+        db.mark_comments_read("id:abc", &["one".to_string(), "two".to_string()], 100)
+            .expect("mark");
+        // Recording the same comment again is what happens every frame the
+        // window is open, so it has to be free rather than an error.
+        db.mark_comments_read("id:abc", &["one".to_string()], 200)
+            .expect("mark again");
+
+        let mut ids = db.load_comment_reads("id:abc").expect("load");
+        ids.sort();
+        assert_eq!(ids, vec!["one".to_string(), "two".to_string()]);
+        assert!(
+            db.load_comment_reads("id:other").expect("load").is_empty(),
+            "another session's reads are not this one's"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
