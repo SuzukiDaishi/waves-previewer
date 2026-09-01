@@ -364,6 +364,13 @@ impl GuiArgs {
     after_help = CLI_AFTER_HELP
 )]
 pub struct CliRoot {
+    /// Overwrite a session that changed on disk since the command read it.
+    ///
+    /// Without this, a command that would replace somebody else's save
+    /// stops and reports it instead. The document being replaced is kept as
+    /// `<session>.nwsess.bak`.
+    #[arg(long, global = true)]
+    pub force: bool,
     #[command(subcommand)]
     pub command: CliCommand,
 }

@@ -16,6 +16,8 @@ pub(super) mod metadata_inspector;
 pub(super) mod plugin_manager;
 pub(super) mod recording;
 pub(super) mod regions;
+pub(super) mod session_changes;
+pub(super) mod session_sharing;
 pub(super) mod shortcuts;
 pub(super) mod tools;
 pub(super) mod topbar;

@@ -146,6 +146,49 @@ impl WavesPreviewer {
                 }
                 ui.close();
             }
+            let changed_on_disk = self.session_changed_on_disk.is_some();
+            if ui
+                .add_enabled(
+                    changed_on_disk,
+                    egui::Button::new("Reload Session from Disk..."),
+                )
+                .on_hover_text(
+                    "Someone else saved this session. Open their version, discarding local edits.",
+                )
+                .on_disabled_hover_text("The session on disk matches the one open here")
+                .clicked()
+            {
+                self.request_session_reload_prompt();
+                ui.close();
+            }
+            let has_changes = self
+                .session_file_changes
+                .as_ref()
+                .map(|report| !report.changes.is_empty())
+                .unwrap_or(false);
+            if ui
+                .add_enabled(
+                    has_changes,
+                    egui::Button::new("Changed Since Last Open..."),
+                )
+                .on_hover_text("Files this session points at that changed since you last opened it")
+                .on_disabled_hover_text("No referenced file changed since you last opened this session")
+                .clicked()
+            {
+                self.show_session_changes_window = true;
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    self.project_path.is_some(),
+                    egui::Button::new("Session History..."),
+                )
+                .on_hover_text("Earlier versions of this session saved from this machine")
+                .clicked()
+            {
+                self.open_session_history_window();
+                ui.close();
+            }
             if ui.button("Session Close").clicked() {
                 if let Err(err) = self.request_close_project_with_autosave() {
                     self.debug_log(format!("session close save error: {err}"));

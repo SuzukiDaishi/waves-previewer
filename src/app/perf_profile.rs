@@ -255,6 +255,21 @@ impl PerfProfile {
         }
     }
 
+    /// How often to check whether somebody else saved the open session.
+    ///
+    /// This is a floor -- `watch::next_walk_delay` stretches it by whatever
+    /// a pass actually costs. A share gets a long one because the answer
+    /// changes on human timescales (a colleague pressing Ctrl+S), not
+    /// machine ones, and because every probe competes with the audio the
+    /// user is waiting on over the same link.
+    pub fn session_watch_interval_ms(&self) -> u64 {
+        if self.remote_root {
+            20_000
+        } else {
+            5_000
+        }
+    }
+
     /// Worker count for background scan-style pools (inspection, duplicate
     /// fingerprinting). Always leaves the UI thread a core to itself.
     pub fn scan_pool_workers(&self, cap: usize) -> usize {
@@ -532,6 +547,17 @@ mod tests {
         assert_eq!(normal.video_decode_ahead_frames_for_fps(60.0), 24);
         assert_eq!(high.video_decode_ahead_frames_for_fps(60.0), 36);
         assert_eq!(normal.video_ring_memory_bytes(), 48 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_remote_root_polls_the_session_less_often() {
+        let mut profile = PerfProfile::from_cores(16, PerfTierPreference::Auto);
+        let local = profile.session_watch_interval_ms();
+        profile.set_remote_root(true);
+        assert!(
+            profile.session_watch_interval_ms() > local,
+            "a share must not be probed as often as a local disk"
+        );
     }
 
     #[test]

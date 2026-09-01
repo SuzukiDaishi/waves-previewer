@@ -393,6 +393,12 @@ impl WavesPreviewer {
                     "light" => ThemeMode::Light,
                     _ => ThemeMode::Dark,
                 };
+            } else if let Some(rest) = line.strip_prefix("display_name=") {
+                // Written into a shared session's `saved_by` so a colleague
+                // reading a conflict knows whose save they would replace.
+                let value = rest.trim();
+                self.session_display_name =
+                    (!value.is_empty()).then(|| value.chars().take(64).collect());
             } else if let Some(rest) = line.strip_prefix("skip_dotfiles=") {
                 let v = matches!(rest.trim(), "1" | "true" | "yes" | "on");
                 self.skip_dotfiles = v;
@@ -1140,6 +1146,11 @@ zoo_flip_manual={}\n",
         out.push_str("perf_tier=");
         out.push_str(self.perf.preference.as_str());
         out.push('\n');
+        if let Some(name) = &self.session_display_name {
+            out.push_str("display_name=");
+            out.push_str(&name.replace('\n', " "));
+            out.push('\n');
+        }
         if let Some(path) = &self.zoo_gif_path {
             out.push_str("zoo_gif_path=");
             out.push_str(&path.to_string_lossy().replace('\n', " "));

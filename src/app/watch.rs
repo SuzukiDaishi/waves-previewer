@@ -71,7 +71,7 @@ pub type WatchSnapshot = HashMap<PathBuf, (Option<SystemTime>, u64)>;
 ///
 /// Capped so a pathological one-off (a server that hung for ten minutes and
 /// then recovered) cannot silently turn the watch off for the session.
-fn next_walk_delay(interval_ms: u64, last_walk: Duration) -> Duration {
+pub(crate) fn next_walk_delay(interval_ms: u64, last_walk: Duration) -> Duration {
     const BACKOFF_FACTOR: u32 = 4;
     const MAX_DELAY: Duration = Duration::from_secs(300);
     let floor = Duration::from_millis(interval_ms.max(20));
@@ -382,6 +382,16 @@ impl crate::app::WavesPreviewer {
         let mut removed_skipped = 0usize;
         let mut modified = 0usize;
         let mut modified_skipped = 0usize;
+        // Every path the batch touched, including the ones skipped below as
+        // our own writes: the session's baseline has to follow what is on
+        // disk regardless of who put it there, or the next open reports a
+        // change the user already watched happen.
+        let touched: Vec<PathBuf> = batches
+            .iter()
+            .flatten()
+            .map(|event| event.path().to_path_buf())
+            .collect();
+        self.note_session_file_changed(touched);
         for event in batches.into_iter().flatten() {
             if recently_self_written(event.path()) {
                 continue;

@@ -42,7 +42,7 @@ impl WavesPreviewer {
         }
     }
 
-    fn has_unsaved_work(&mut self) -> bool {
+    pub(in crate::app) fn has_unsaved_work(&mut self) -> bool {
         self.tabs.iter().any(|t| t.dirty)
             || !self.edited_cache.is_empty()
             || self.pending_gain_count_throttled() > 0
@@ -293,6 +293,16 @@ impl WavesPreviewer {
             }
         }));
         deferrable!(trace_stage!("folder watch", self.tick_folder_watch(ctx)));
+        deferrable!(trace_stage!("session watch", self.tick_session_watch()));
+        trace_stage!("session store results", self.drain_session_store());
+        deferrable!(trace_stage!(
+            "session baseline scan",
+            self.drain_baseline_scan()
+        ));
+        deferrable!(trace_stage!(
+            "session baseline notes",
+            self.drain_baseline_notes()
+        ));
         deferrable!(trace_stage!(
             "resample fallbacks",
             self.poll_resample_fallbacks()
@@ -793,6 +803,10 @@ impl WavesPreviewer {
             .is_recording(self.debug.show_window);
         self.run_frame_leave_prompt(ctx);
         self.run_frame_quit_prompt(ctx);
+        self.run_frame_session_conflict_prompt(ctx);
+        self.run_frame_session_reload_prompt(ctx);
+        self.ui_session_changes_window(ctx);
+        self.ui_session_history_window(ctx);
         self.run_frame_first_save_prompt(ctx);
         self.ui_export_settings_window(ctx);
         self.ui_list_columns_window(ctx);

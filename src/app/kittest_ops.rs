@@ -3489,6 +3489,154 @@ impl super::WavesPreviewer {
         self.open_project_file(path.to_path_buf()).is_ok()
     }
 
+    // ---- Shared-session state, for tests of the two-writer flow ----------
+
+    /// The conflict the last save was refused with, described the way the
+    /// prompt shows it. `None` when the save committed.
+    pub fn test_session_conflict(&self) -> Option<String> {
+        self.session_conflict
+            .as_ref()
+            .map(|conflict| conflict.on_disk.clone())
+    }
+
+    /// Answer the conflict prompt with "Save As...". Under kittest the file
+    /// picker always cancels, so this exercises the back-out path.
+    pub fn test_conflict_choose_save_as(&mut self) -> bool {
+        if self.session_conflict.is_none() {
+            return false;
+        }
+        self.resolve_session_conflict_save_as();
+        true
+    }
+
+    /// The standing "someone else saved this" banner, if it is showing.
+    pub fn test_session_changed_on_disk(&self) -> Option<String> {
+        self.session_changed_on_disk
+            .as_ref()
+            .map(|changed| changed.on_disk.clone())
+    }
+
+    pub fn test_session_revision(&self) -> Option<u64> {
+        self.session_revision
+    }
+
+    /// Start an interactive (worker-backed) save, the way Ctrl+S does.
+    pub fn test_begin_session_save(&mut self, path: &Path) -> bool {
+        self.save_project_as(path.to_path_buf()).is_ok()
+    }
+
+    /// Interactive save with the compare-and-swap skipped, the way the
+    /// conflict prompt's Overwrite button does.
+    pub fn test_begin_session_save_forced(&mut self, path: &Path) -> bool {
+        self.save_project_as_forced(path.to_path_buf(), true).is_ok()
+    }
+
+    pub fn test_session_save_in_flight(&self) -> bool {
+        self.session_save_state.is_some()
+    }
+
+    /// Make the watch report the given document state without waiting for a
+    /// poll interval. Exercises the drain and the banner, not the probe --
+    /// the probe has its own tests in `session_watch`.
+    pub fn test_report_session_changed_on_disk(&mut self, on_disk: &str) {
+        let Some(path) = self.project_path.clone() else {
+            return;
+        };
+        self.session_changed_on_disk = Some(crate::app::types::SessionChangedOnDisk {
+            path,
+            on_disk: on_disk.to_string(),
+            removed: false,
+        });
+    }
+
+    // ---- Referenced-file change tracking --------------------------------
+
+    /// The "changed since you last opened this" report, as
+    /// `(kind, file name)` pairs sorted by name. `None` when nothing was
+    /// reported -- including a first-ever open, which records a baseline
+    /// silently.
+    pub fn test_session_file_changes(&self) -> Option<Vec<(String, String)>> {
+        let report = self.session_file_changes.as_ref()?;
+        let mut rows: Vec<(String, String)> = report
+            .changes
+            .iter()
+            .map(|change| {
+                (
+                    change.kind.label().to_string(),
+                    change
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        rows.sort();
+        Some(rows)
+    }
+
+    /// When the report says the user last opened this session.
+    pub fn test_session_changes_since(&self) -> Option<i64> {
+        self.session_file_changes.as_ref().map(|r| r.since)
+    }
+
+    /// True while the store read or the file scan is still in flight.
+    pub fn test_session_change_check_busy(&self) -> bool {
+        self.session_store_load.is_some()
+            || self.baseline_scan.is_some()
+            || !self.baseline_notes.is_empty()
+    }
+
+    pub fn test_dismiss_session_file_changes(&mut self) {
+        self.session_file_changes = None;
+        self.show_session_changes_window = false;
+    }
+
+    pub fn test_session_open_busy(&self) -> bool {
+        self.session_open_in_progress() || self.project_open_pending.is_some()
+    }
+
+    pub fn test_session_store_enabled(&self) -> bool {
+        self.session_store.is_enabled()
+    }
+
+    /// Ask for the local history of the open session; the reply lands in
+    /// `test_session_history` after a few frames.
+    pub fn test_open_session_history(&mut self) {
+        self.open_session_history_window();
+    }
+
+    /// `(revision, saved_by, byte_len)` newest first.
+    pub fn test_session_history(&self) -> Vec<(Option<u64>, Option<String>, u64)> {
+        self.session_history_entries
+            .iter()
+            .map(|e| (e.revision, e.saved_by.clone(), e.byte_len))
+            .collect()
+    }
+
+    pub fn test_session_history_busy(&self) -> bool {
+        self.session_history_request.is_some() || self.session_history_pending.is_some()
+    }
+
+    /// Restore the nth stored version (0 = newest).
+    pub fn test_restore_session_history(&mut self, index: usize) -> bool {
+        let Some(entry) = self.session_history_entries.get(index) else {
+            return false;
+        };
+        let id = entry.id;
+        self.request_session_history(id, crate::app::types::SessionHistoryIntent::Restore);
+        true
+    }
+
+    pub fn test_note_session_file_changed(&mut self, paths: Vec<PathBuf>) {
+        self.note_session_file_changed(paths);
+    }
+
+    pub fn test_request_session_reload_prompt(&mut self) -> bool {
+        self.request_session_reload_prompt();
+        self.session_reload_prompt
+    }
+
     pub fn test_set_channel_view_mixdown(&mut self) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
