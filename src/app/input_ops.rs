@@ -174,6 +174,14 @@ impl super::WavesPreviewer {
             self.trigger_save_selected();
         }
 
+        if allow_global && self.keymap_consume(ctx, Action::ToggleComments) {
+            if self.show_comments_window {
+                self.show_comments_window = false;
+            } else {
+                self.open_comments_window();
+            }
+        }
+
         if allow_global && self.keymap_consume(ctx, Action::CloseTab) {
             if self.is_effect_graph_workspace_active() {
                 self.request_close_effect_graph_workspace();

@@ -33,6 +33,8 @@ pub mod channel_routing_ops;
 mod cli_ops;
 mod cli_workspace;
 mod clipboard_ops;
+mod comment_ops;
+pub mod comments;
 mod crash_report_ops;
 mod debug_ops;
 pub mod declick;
@@ -1080,6 +1082,78 @@ pub struct WavesPreviewer {
     /// The finished report. Held until the user dismisses it, because a
     /// toast is gone long before they come back to the window.
     session_file_changes: Option<types::SessionFileChanges>,
+    /// The open session's conversation, flat, merged from every writer that
+    /// has touched the document. See `crate::app::comments` for why it is
+    /// flat and how two writers' copies are reconciled.
+    pub(crate) comments: Vec<project::ProjectComment>,
+    /// The document on disk, hashed without its conversation or save stamp.
+    /// The watch compares against this to tell a colleague's comment (merge
+    /// it in and stay quiet) from a colleague's save (stand up the reload
+    /// warning), because posting a comment writes the file like any save.
+    session_comment_free_fingerprint: Option<session_sync::SessionFingerprint>,
+    /// Comment changes this window has but the document does not yet: queued
+    /// behind an in-flight write, or left over from one that could not
+    /// commit. They are already in `comments`, so the user sees them; this is
+    /// what keeps them from being forgotten.
+    comment_outbox: Vec<project::ProjectComment>,
+    comment_write: Option<comment_ops::CommentWriteState>,
+    /// Consecutive failed comment writes, and when the next attempt may
+    /// start. A share that has gone away fails every attempt, and without a
+    /// backoff the outbox would re-spawn a worker the moment the last one
+    /// gave up -- a toast every half second and constant I/O at a dead path.
+    comment_write_failures: u32,
+    comment_retry_after: Option<std::time::Instant>,
+    /// A read of the document's conversation, in flight.
+    comment_pull: Option<std::sync::mpsc::Receiver<Result<comment_ops::CommentPull, String>>>,
+    /// The reload warning the watch wants to raise, held until a comment pull
+    /// says whether the document actually changed in a way worth warning
+    /// about. A colleague's comment must not read as "your session is stale".
+    session_changed_pending: Option<types::SessionChangedOnDisk>,
+    show_comments_window: bool,
+    /// Whether the conversation is in its own OS window. Reviewing means
+    /// reading notes *while* scrubbing what they are about, and a floating
+    /// window over the editor makes you choose between the two.
+    comments_detached: bool,
+    comment_draft: String,
+    /// The comment the composer is answering, or `None` for a new thread.
+    comment_reply_to: Option<String>,
+    comment_editing_id: Option<String>,
+    comment_edit_draft: String,
+    comment_filter: ui::comments::CommentFilter,
+    comment_search: String,
+    /// Threads whose replies are folded away, by root id.
+    comment_collapsed: std::collections::HashSet<String>,
+    /// A reference the reader clicked, waiting for its file to finish
+    /// loading before there is a timeline to seek on.
+    pending_comment_jump: Option<(PathBuf, Option<comments::CommentAnchor>)>,
+    /// Whether the composer's `@` file picker was open last frame. Kept
+    /// across frames because the arrow keys have to be taken away from the
+    /// text field *before* it is drawn, and what the query is can only be
+    /// known after.
+    comment_mention_open: bool,
+    comment_mention_index: usize,
+    /// Where the docked window was drawn last frame, so a file dropped from
+    /// Explorer onto it becomes a reference instead of being loaded into the
+    /// list. `None` while it is closed or detached.
+    comments_window_rect: Option<egui::Rect>,
+    /// The account name this machine posts under, resolved once. It answers
+    /// "is this mine" for every comment on every frame the window is open,
+    /// and the answer cannot change while the process runs.
+    comment_author_id: String,
+    /// Author ids that more than one machine posts under, so the machine name
+    /// is shown for those and nobody else. Rebuilt once per frame the window
+    /// draws, because asking it per comment is quadratic.
+    comment_ambiguous_authors: std::collections::HashSet<String>,
+    /// Comments this person has already seen. Per-user, so it lives in the
+    /// local database beside the file baseline rather than in the shared
+    /// document.
+    comment_reads: std::collections::HashSet<String>,
+    comment_reads_request: Option<u64>,
+    /// What was new when this window was opened, kept for as long as it
+    /// stays open. Marking a comment read the moment it is drawn is what
+    /// "read" means for the topbar count, but it would also erase the dot in
+    /// the same frame it appeared -- so the highlight rides on this instead.
+    comment_unread_shown: std::collections::HashSet<String>,
     show_session_changes_window: bool,
     show_session_history_window: bool,
     session_history_entries: Vec<session_store::HistoryEntry>,

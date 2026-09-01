@@ -53,6 +53,69 @@ pub struct ProjectFile {
     pub active_tab: Option<usize>,
     #[serde(default)]
     pub cached_edits: Vec<ProjectEdit>,
+    /// The shared session's conversation. Held flat, with `parent` naming the
+    /// reply target, because flat is the only shape that merges: two people
+    /// appending to a nested tree fight over the same array positions, while
+    /// two people appending to a flat list of uniquely-named entries do not.
+    #[serde(default)]
+    pub comments: Vec<ProjectComment>,
+}
+
+/// One message in a session's comment thread.
+///
+/// Unlike [`EditorNote`], which is a single author's private annotation in
+/// their own editor buffer's sample space, a comment is written to be read by
+/// somebody else on another machine. Everything here follows from that:
+/// an author, a UTC timestamp, a reply target, and file/time references that
+/// are stored inside `body` (see `crate::app::comments`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectComment {
+    /// 128 random bits as hex. Never a counter: a shared session has more
+    /// than one writer, and two people posting at once would claim the same
+    /// number -- the failure the status/tag slugs and the content-addressed
+    /// sidecars already exist to avoid.
+    pub id: String,
+    /// The comment this one replies to, or `None` for the root of a thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+
+    /// The OS account name, trimmed and lowercased. The primary key for
+    /// "is this mine".
+    pub author_id: String,
+    /// The machine name. A secondary key, shown only to tell two people who
+    /// happen to share an `author_id` apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_host: Option<String>,
+    /// The `display_name=` pref, when set. Display only -- identity is
+    /// decided by `author_id`, so renaming yourself never disowns your posts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_name: Option<String>,
+
+    /// RFC3339 UTC, so two machines in different time zones sort together.
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<String>,
+    /// Edit count. Merging picks the highest `(rev, edited_at)`, so this is
+    /// what settles two edits to the same comment from two processes.
+    #[serde(default)]
+    pub rev: u32,
+
+    /// Markdown subset. File and time references live in here as tokens
+    /// rather than in a parallel array, so the text can never disagree with
+    /// the references it shows.
+    #[serde(default)]
+    pub body: String,
+
+    /// A tombstone. The row stays, because dropping it would let a colleague
+    /// whose copy still has the comment merge it straight back in.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
+
+    /// Roots only. A resolved thread collapses by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -1422,6 +1485,37 @@ pub fn serialize_project(project: &ProjectFile) -> Result<String> {
     toml::to_string_pretty(project).context("serialize session")
 }
 
+/// Hash the document with the conversation, and the save stamp, taken out.
+///
+/// This is what lets a reader tell "somebody commented" from "somebody
+/// saved". Both change the file, but only the second is a reason to stand up
+/// the reload warning -- and a colleague's comment arriving every few minutes
+/// behind an amber "reload me" badge would make the feature unusable.
+///
+/// The stamp has to come out along with the comments: `revision`, `saved_at`
+/// and `saved_by` move on *every* write, comment-only ones included, so
+/// leaving them in would mean nothing ever compared equal.
+///
+/// Takes `&mut` and puts everything back rather than cloning, because a
+/// session here can list a hundred thousand files and this runs on every
+/// change the watch notices.
+pub(crate) fn comment_free_fingerprint(
+    project: &mut ProjectFile,
+) -> Result<crate::app::session_sync::SessionFingerprint> {
+    let comments = std::mem::take(&mut project.comments);
+    let revision = project.revision.take();
+    let saved_at = project.saved_at.take();
+    let saved_by = project.saved_by.take();
+    let text = serialize_project(project);
+    project.comments = comments;
+    project.revision = revision;
+    project.saved_at = saved_at;
+    project.saved_by = saved_by;
+    Ok(crate::app::session_sync::SessionFingerprint::of_bytes(
+        text?.as_bytes(),
+    ))
+}
+
 pub fn deserialize_project(text: &str) -> Result<ProjectFile> {
     toml::from_str(text).context("parse session")
 }
@@ -2160,6 +2254,27 @@ impl super::WavesPreviewer {
         self.cancel_baseline_scan();
         self.session_store_load = None;
         self.session_file_changes = None;
+        self.comments.clear();
+        self.session_comment_free_fingerprint = None;
+        self.comment_outbox.clear();
+        self.comment_write = None;
+        self.comment_write_failures = 0;
+        self.comment_retry_after = None;
+        self.comment_pull = None;
+        self.session_changed_pending = None;
+        self.comment_draft.clear();
+        self.comment_reply_to = None;
+        self.comment_editing_id = None;
+        self.comment_edit_draft.clear();
+        self.comment_search.clear();
+        self.comment_collapsed.clear();
+        self.pending_comment_jump = None;
+        self.comment_mention_open = false;
+        self.comment_mention_index = 0;
+        self.comment_ambiguous_authors.clear();
+        self.comment_reads.clear();
+        self.comment_reads_request = None;
+        self.comment_unread_shown.clear();
         self.show_session_changes_window = false;
         self.show_session_history_window = false;
         self.session_history_entries.clear();
@@ -2784,6 +2899,76 @@ show_note_labels = false
             restored.app.list_columns.order,
             project.app.list_columns.order
         );
+    }
+
+    #[test]
+    fn comments_roundtrip_without_a_session_version_bump() {
+        let mut project = deserialize_project(MINIMAL_TOML).unwrap();
+        let version_before = project.version;
+        project.comments = vec![
+            ProjectComment {
+                id: "0123456789abcdef0123456789abcdef".to_string(),
+                parent: None,
+                author_id: "daishi".to_string(),
+                author_host: Some("WS-01".to_string()),
+                author_name: Some("\u{9234}\u{6728}".to_string()),
+                created_at: "2026-09-01T00:00:00Z".to_string(),
+                edited_at: None,
+                rev: 0,
+                body: "Reverb tail is long @[a.wav|1.25-2.5]".to_string(),
+                deleted: false,
+                resolved_by: None,
+                resolved_at: None,
+            },
+            ProjectComment {
+                id: "fedcba9876543210fedcba9876543210".to_string(),
+                parent: Some("0123456789abcdef0123456789abcdef".to_string()),
+                author_id: "tanaka".to_string(),
+                author_host: None,
+                author_name: None,
+                created_at: "2026-09-01T00:01:00Z".to_string(),
+                edited_at: Some("2026-09-01T00:02:00Z".to_string()),
+                rev: 1,
+                body: "Trimmed it".to_string(),
+                deleted: false,
+                resolved_by: Some("daishi".to_string()),
+                resolved_at: Some("2026-09-01T00:03:00Z".to_string()),
+            },
+        ];
+        let encoded = serialize_project(&project).unwrap();
+        let restored = deserialize_project(&encoded).unwrap();
+        assert_eq!(restored.comments, project.comments);
+        // Comments are an additive `#[serde(default)]` field, so an older
+        // build still opens a document that carries them.
+        assert_eq!(restored.version, version_before);
+    }
+
+    #[test]
+    fn a_session_written_before_comments_existed_loads_with_none() {
+        let project = deserialize_project(MINIMAL_TOML).unwrap();
+        assert!(project.comments.is_empty());
+    }
+
+    #[test]
+    fn a_comment_omits_every_field_it_has_nothing_to_say_about() {
+        let comment = ProjectComment {
+            id: "a".to_string(),
+            parent: None,
+            author_id: "daishi".to_string(),
+            author_host: None,
+            author_name: None,
+            created_at: "2026-09-01T00:00:00Z".to_string(),
+            edited_at: None,
+            rev: 0,
+            body: "hi".to_string(),
+            deleted: false,
+            resolved_by: None,
+            resolved_at: None,
+        };
+        let encoded = toml::to_string_pretty(&comment).unwrap();
+        for absent in ["parent", "author_host", "author_name", "edited_at", "deleted", "resolved"] {
+            assert!(!encoded.contains(absent), "{absent} should be omitted:\n{encoded}");
+        }
     }
 
     #[test]

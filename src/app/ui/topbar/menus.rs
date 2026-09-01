@@ -181,6 +181,20 @@ impl WavesPreviewer {
             if ui
                 .add_enabled(
                     self.project_path.is_some(),
+                    egui::Button::new("Comments..."),
+                )
+                .on_hover_text(
+                    "The conversation stored in this session, shared with everyone who opens it",
+                )
+                .on_disabled_hover_text("Save the session first — comments live in the .nwsess")
+                .clicked()
+            {
+                self.open_comments_window();
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    self.project_path.is_some(),
                     egui::Button::new("Session History..."),
                 )
                 .on_hover_text("Earlier versions of this session saved from this machine")

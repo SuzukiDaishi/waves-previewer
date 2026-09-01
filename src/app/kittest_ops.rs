@@ -3612,6 +3612,281 @@ impl super::WavesPreviewer {
         });
     }
 
+    // ---- Comments -------------------------------------------------------
+
+    /// Post and wait for it to reach the document, so a test can assert on
+    /// what is on disk rather than on what is queued.
+    pub fn test_post_comment_blocking(&mut self, parent: Option<&str>, body: &str) -> Option<String> {
+        let id = self.post_comment(parent.map(str::to_string), body)?;
+        self.test_settle_comment_jobs();
+        Some(id)
+    }
+
+    /// Drive the comment workers to a standstill.
+    pub fn test_settle_comment_jobs(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            self.drain_comment_jobs();
+            if self.comment_write.is_none() && self.comment_pull.is_none() {
+                if self.comment_outbox.is_empty() {
+                    return;
+                }
+                // Queued but idle: a save was in flight when it was written.
+                self.flush_comment_outbox();
+                if self.comment_write.is_none() {
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("comment jobs did not settle");
+    }
+
+    /// Read the conversation back off disk and adopt it, the way the Refresh
+    /// button and the session watch do.
+    pub fn test_pull_comments(&mut self) {
+        self.request_comment_pull();
+        self.test_settle_comment_jobs();
+    }
+
+    /// `(id, author_id, body, deleted)` in stored order.
+    pub fn test_comments(&self) -> Vec<(String, String, String, bool)> {
+        self.comments
+            .iter()
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    c.author_id.clone(),
+                    c.body.clone(),
+                    c.deleted,
+                )
+            })
+            .collect()
+    }
+
+    pub fn test_comment_bodies(&self) -> Vec<String> {
+        self.comments
+            .iter()
+            .filter(|c| !c.deleted)
+            .map(|c| c.body.clone())
+            .collect()
+    }
+
+    /// Comments written here that the document has not accepted yet.
+    pub fn test_comments_pending(&self) -> usize {
+        self.comments_pending()
+    }
+
+    /// Queue a comment without waiting for it to reach disk -- for the case
+    /// where there is no document to reach yet.
+    pub fn post_comment_for_test(&mut self, parent: Option<&str>, body: &str) -> Option<String> {
+        self.post_comment(parent.map(str::to_string), body)
+    }
+
+    pub fn test_delete_comment(&mut self, id: &str) -> bool {
+        self.delete_comment(id)
+    }
+
+    pub fn test_edit_comment(&mut self, id: &str, body: &str) -> bool {
+        self.edit_comment(id, body)
+    }
+
+    pub fn test_set_thread_resolved(&mut self, id: &str, resolved: bool) -> bool {
+        self.set_thread_resolved(id, resolved)
+    }
+
+    /// Post as if from another machine, so a test can build the two-writer
+    /// case without a second harness and a second identity. Built directly
+    /// rather than posted and patched: the write worker starts immediately,
+    /// so patching afterwards would race the bytes it already sent.
+    pub fn test_post_comment_as(
+        &mut self,
+        author_id: &str,
+        parent: Option<&str>,
+        body: &str,
+    ) -> Option<String> {
+        let id = crate::app::comments::new_comment_id();
+        self.enqueue_comment(crate::app::project::ProjectComment {
+            id: id.clone(),
+            parent: parent.map(str::to_string),
+            author_id: author_id.to_string(),
+            author_host: Some("OTHER-PC".to_string()),
+            author_name: None,
+            created_at: crate::app::session_sync::now_rfc3339(),
+            edited_at: None,
+            rev: 0,
+            body: body.to_string(),
+            deleted: false,
+            resolved_by: None,
+            resolved_at: None,
+        });
+        self.test_settle_comment_jobs();
+        Some(id)
+    }
+
+    /// Feed the watch a change the way `tick_session_watch` does, then let
+    /// the pull decide whether it deserves the reload warning.
+    pub fn test_report_session_changed_and_settle(&mut self, on_disk: &str) {
+        let Some(path) = self.project_path.clone() else {
+            return;
+        };
+        self.session_changed_pending = Some(crate::app::types::SessionChangedOnDisk {
+            path,
+            on_disk: on_disk.to_string(),
+            removed: false,
+        });
+        self.request_comment_pull();
+        self.test_settle_comment_jobs();
+    }
+
+    // ---- Comments window ------------------------------------------------
+
+    pub fn test_open_comments_window(&mut self) {
+        self.open_comments_window();
+    }
+
+    pub fn test_comments_window_open(&self) -> bool {
+        self.show_comments_window
+    }
+
+    pub fn test_comments_detached(&self) -> bool {
+        self.comments_detached
+    }
+
+    pub fn test_set_comment_draft(&mut self, body: &str) {
+        self.comment_draft = body.to_string();
+    }
+
+    pub fn test_set_comment_reply_to(&mut self, id: Option<&str>) {
+        self.comment_reply_to = id.map(str::to_string);
+    }
+
+    pub fn test_comment_filter(&self) -> &'static str {
+        self.comment_filter.label()
+    }
+
+    /// The threads the window would draw, as `(body, replies, resolved)`.
+    pub fn test_comment_threads(&self) -> Vec<(String, usize, bool)> {
+        crate::app::comments::build_threads(&self.comments)
+            .iter()
+            .map(|node| {
+                (
+                    node.comment.body.clone(),
+                    node.len() - 1,
+                    node.comment.resolved_at.is_some(),
+                )
+            })
+            .collect()
+    }
+
+    /// How many whole comment writes have failed in a row, and whether the
+    /// outbox is currently holding off before trying again.
+    pub fn test_comment_write_backoff(&self) -> (u32, bool) {
+        (
+            self.comment_write_failures,
+            self.comment_retry_after
+                .is_some_and(|at| std::time::Instant::now() < at),
+        )
+    }
+
+    /// Account names the window would append a machine name to.
+    pub fn test_ambiguous_comment_authors(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.comment_ambiguous_authors.iter().cloned().collect();
+        names.sort();
+        names
+    }
+
+    pub fn test_unread_comment_count(&self) -> usize {
+        self.unread_comment_count()
+    }
+
+    pub fn test_mark_comments_read(&mut self) {
+        self.mark_comments_read();
+    }
+
+    /// The comments the window would still be pointing at as new.
+    pub fn test_highlighted_comment_count(&self) -> usize {
+        self.comments
+            .iter()
+            .filter(|comment| self.comment_is_unread(comment))
+            .count()
+    }
+
+    pub fn test_close_comments_window(&mut self) {
+        self.show_comments_window = false;
+        self.comment_unread_shown.clear();
+    }
+
+    pub fn test_comment_draft(&self) -> String {
+        self.comment_draft.clone()
+    }
+
+    /// Insert a reference token the way the Reference menu and the Alt-drop
+    /// both do, so the spacing rule is exercised rather than reimplemented.
+    pub fn test_insert_comment_reference(&mut self, token: &str) {
+        let Some((_, reference)) = crate::app::comments::find_refs(token).into_iter().next() else {
+            return;
+        };
+        self.insert_comment_reference(&reference);
+    }
+
+    pub fn test_set_comment_filter_this_file(&mut self) {
+        self.comment_filter = crate::app::ui::comments::CommentFilter::ThisFile;
+    }
+
+    /// The thread bodies the window would draw under the current filter.
+    pub fn test_visible_comment_threads(&self) -> Vec<String> {
+        crate::app::comments::build_threads(&self.comments)
+            .iter()
+            .filter(|node| self.comment_thread_matches_filter(node))
+            .map(|node| node.comment.body.clone())
+            .collect()
+    }
+
+    /// Follow a reference the way pressing its chip does, then let the
+    /// pending jump land.
+    pub fn test_jump_to_comment_ref(&mut self, token: &str) -> bool {
+        let Some((_, reference)) = crate::app::comments::find_refs(token).into_iter().next() else {
+            return false;
+        };
+        self.request_comment_ref_jump(&reference);
+        true
+    }
+
+    pub fn test_apply_pending_comment_jump(&mut self) {
+        self.apply_pending_comment_jump();
+    }
+
+    pub fn test_pending_comment_jump(&self) -> Option<PathBuf> {
+        self.pending_comment_jump
+            .as_ref()
+            .map(|(path, _)| path.clone())
+    }
+
+    /// `(start, end)` of the active editor tab's selection, in samples.
+    pub fn test_active_tab_selection(&self) -> Option<(usize, usize)> {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .and_then(|tab| tab.selection)
+    }
+
+    pub fn test_set_active_tab_selection(&mut self, range: Option<(usize, usize)>) {
+        if let Some(tab) = self.active_tab.and_then(|idx| self.tabs.get_mut(idx)) {
+            tab.selection = range;
+            tab.selection_anchor_sample = range.map(|(start, _)| start);
+        }
+    }
+
+    /// Write a reference token for a path the way the composer does.
+    pub fn test_comment_ref_token(&self, path: &Path, start_sec: Option<f64>) -> String {
+        let anchor = start_sec.map(|start_sec| crate::app::comments::CommentAnchor {
+            start_sec,
+            end_sec: None,
+            freq_hz: None,
+        });
+        crate::app::comments::format_ref(&self.comment_ref_for_path(path, anchor))
+    }
+
     // ---- Referenced-file change tracking --------------------------------
 
     /// The "changed since you last opened this" report, as

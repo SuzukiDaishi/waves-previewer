@@ -255,22 +255,30 @@ pub(crate) fn read_session_state(path: &Path) -> io::Result<SessionDiskState> {
     Ok(SessionDiskState::Present { fingerprint, bytes })
 }
 
+/// The OS account name and the machine name, each trimmed and dropped when
+/// empty.
+///
+/// Two callers want these. `saved_by` joins them for a human to read; the
+/// comment layer keeps them apart, because there the account name is the
+/// identity and the machine name only tells two people sharing one apart.
+pub(crate) fn local_user_and_host() -> (Option<String>, Option<String>) {
+    let read = |primary: &str, fallback: &str| {
+        std::env::var(primary)
+            .or_else(|_| std::env::var(fallback))
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    (read("USERNAME", "USER"), read("COMPUTERNAME", "HOSTNAME"))
+}
+
 /// The name written into `saved_by`, so a colleague reading the conflict
 /// message knows whose save they are about to replace.
 ///
 /// This lands in a file the team already shares with each other and goes
 /// nowhere else.
 pub(crate) fn local_display_name() -> String {
-    let user = std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let host = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+    let (user, host) = local_user_and_host();
     match (user, host) {
         (Some(user), Some(host)) => format!("{user}@{host}"),
         (Some(user), None) => user,
