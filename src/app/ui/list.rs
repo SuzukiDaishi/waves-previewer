@@ -1431,7 +1431,20 @@ impl crate::app::WavesPreviewer {
                         }
                         let drag_started =
                             resp.drag_started_by(egui::PointerButton::Primary);
-                        if drag_started
+                        // Alt holds the row inside the app instead of handing
+                        // it to the shell. A plain drag is already spoken for
+                        // -- it drops the file into Explorer or a DAW -- and
+                        // taking that away to gain a comment reference would
+                        // be a bad trade. Alt is bound to nothing else here.
+                        if drag_started && !interacted_with_control && ctx.input(|i| i.modifiers.alt)
+                        {
+                            if let Some(path) = self.path_for_row(row_idx).cloned() {
+                                egui::DragAndDrop::set_payload(
+                                    ctx,
+                                    crate::app::ui::comments::CommentRefDrag(path),
+                                );
+                            }
+                        } else if drag_started
                             && !interacted_with_control
                             && self.queue_external_drag_for_row(row_idx)
                         {

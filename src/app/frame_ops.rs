@@ -249,6 +249,10 @@ impl WavesPreviewer {
         trace_stage!("IPC / tool queue", {
             self.process_ipc_requests();
             self.apply_pending_transcript_seek();
+            // Next to the transcript's, and outside `deferrable!` for the
+            // same reason: somebody clicked a reference and is watching for
+            // the playhead to move.
+            self.apply_pending_comment_jump();
             self.process_tool_results();
             self.process_tool_queue();
         });

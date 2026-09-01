@@ -4748,6 +4748,11 @@ impl super::WavesPreviewer {
         if dropped.is_empty() {
             return;
         }
+        // Dropped onto the comments window, the files are being pointed at,
+        // not opened. Asked first because everything below this loads them.
+        if self.comments_window_absorbs_drop(ctx) {
+            return;
+        }
         let mut project_path: Option<PathBuf> = None;
         let mut external_path: Option<PathBuf> = None;
         let mut paths: Vec<PathBuf> = Vec::new();

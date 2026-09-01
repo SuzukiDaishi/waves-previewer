@@ -14,7 +14,7 @@
 
 use egui::{Align, Color32, RichText};
 
-use crate::app::comments::{self, CommentNode};
+use crate::app::comments::{self, CommentAnchor, CommentNode, CommentRef};
 use crate::app::project::ProjectComment;
 
 /// How much of the conversation the window is showing.
@@ -22,6 +22,9 @@ use crate::app::project::ProjectComment;
 pub enum CommentFilter {
     #[default]
     All,
+    /// Only threads that reference whatever the user is looking at, so the
+    /// window can be left open beside the editor and follow along.
+    ThisFile,
     Unresolved,
     Mine,
 }
@@ -30,15 +33,23 @@ impl CommentFilter {
     pub fn label(self) -> &'static str {
         match self {
             CommentFilter::All => "All",
+            CommentFilter::ThisFile => "This file",
             CommentFilter::Unresolved => "Unresolved",
             CommentFilter::Mine => "Mine",
         }
     }
 }
 
+/// A list row held inside the app rather than handed to the shell.
+///
+/// A plain drag from the list is already the OS file drag that puts a wav
+/// into a DAW, so this rides on Alt instead of taking that away.
+pub struct CommentRefDrag(pub std::path::PathBuf);
+
 /// Something a button asked for, applied once the tree walk is over.
 enum CommentAction {
     Reply(String),
+    Jump(CommentRef),
     StartEdit(String, String),
     SubmitEdit(String),
     CancelEdit,
@@ -54,9 +65,11 @@ const MAX_INDENT_DEPTH: usize = 5;
 impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_comments_window(&mut self, ctx: &egui::Context) {
         if !self.show_comments_window {
+            self.comments_window_rect = None;
             return;
         }
         if self.comments_detached {
+            self.comments_window_rect = None;
             self.ui_comments_viewport(ctx);
             return;
         }
@@ -71,6 +84,7 @@ impl crate::app::WavesPreviewer {
             .resizable(true)
             .show(ctx, |ui| self.ui_comments_body(ui));
         drop(scroll_guard);
+        self.comments_window_rect = shown.as_ref().map(|shown| shown.response.rect);
         if let Some(shown) = shown.as_ref() {
             self.register_scroll_surface(scroll_target, &shown.response);
         }
@@ -155,6 +169,7 @@ impl crate::app::WavesPreviewer {
         ui.horizontal(|ui| {
             for filter in [
                 CommentFilter::All,
+                CommentFilter::ThisFile,
                 CommentFilter::Unresolved,
                 CommentFilter::Mine,
             ] {
@@ -223,6 +238,15 @@ impl crate::app::WavesPreviewer {
             return "No comment matches that search.".to_string();
         }
         match self.comment_filter {
+            CommentFilter::ThisFile => match self.current_active_path() {
+                Some(path) => format!(
+                    "Nothing said about {} yet.",
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string())
+                ),
+                None => "Select a file to see what was said about it.".to_string(),
+            },
             CommentFilter::Unresolved => "Every thread is resolved.".to_string(),
             CommentFilter::Mine => "You have not commented here yet.".to_string(),
             CommentFilter::All => "No comments yet.".to_string(),
@@ -232,10 +256,18 @@ impl crate::app::WavesPreviewer {
     /// A thread is shown when the thread as a whole matches: a reply that
     /// mentions the search term keeps its root visible, because reading a
     /// reply without what it answers is not reading it.
-    fn comment_thread_matches_filter(&self, node: &CommentNode) -> bool {
+    pub(in crate::app) fn comment_thread_matches_filter(&self, node: &CommentNode) -> bool {
         match self.comment_filter {
             CommentFilter::Unresolved if node.comment.resolved_at.is_some() => return false,
             CommentFilter::Mine if !self.comment_subtree_has_mine(node) => return false,
+            CommentFilter::ThisFile => {
+                let Some(path) = self.current_active_path().cloned() else {
+                    return false;
+                };
+                if !self.comment_subtree_mentions(node, &path) {
+                    return false;
+                }
+            }
             _ => {}
         }
         let needle = self.comment_search.trim().to_lowercase();
@@ -248,6 +280,14 @@ impl crate::app::WavesPreviewer {
                 .replies
                 .iter()
                 .any(|reply| self.comment_subtree_has_mine(reply))
+    }
+
+    fn comment_subtree_mentions(&self, node: &CommentNode, path: &std::path::Path) -> bool {
+        self.comment_mentions_path(&node.comment, path)
+            || node
+                .replies
+                .iter()
+                .any(|reply| self.comment_subtree_mentions(reply, path))
     }
 
     fn comment_subtree_matches_text(&self, node: &CommentNode, needle: &str) -> bool {
@@ -300,7 +340,9 @@ impl crate::app::WavesPreviewer {
                     }
                 });
             } else {
-                ui.label(&node.comment.body);
+                if let Some(reference) = self.ui_comment_body(ui, &node.comment.body) {
+                    actions.push(CommentAction::Jump(reference));
+                }
                 self.ui_comment_action_row(ui, node, actions);
             }
         });
@@ -427,15 +469,55 @@ impl crate::app::WavesPreviewer {
         let hint = if replying_to.is_some() {
             "Write a reply..."
         } else {
-            "Write a comment for the team..."
+            "Write a comment for the team...  (@ to point at a file)"
         };
-        ui.add(
-            egui::TextEdit::multiline(&mut self.comment_draft)
-                .desired_rows(3)
-                .desired_width(f32::INFINITY)
-                .hint_text(hint),
+        // The picker's keys have to be taken before the text field is drawn,
+        // or the caret moves instead of the highlight. Whether it is open is
+        // therefore last frame's answer, which is a frame nobody can see.
+        let mut accept_mention = false;
+        if self.comment_mention_open {
+            ui.input_mut(|input| {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    self.comment_mention_index = self.comment_mention_index.saturating_add(1);
+                }
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    self.comment_mention_index = self.comment_mention_index.saturating_sub(1);
+                }
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                    || input.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                {
+                    accept_mention = true;
+                }
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                    self.comment_mention_open = false;
+                }
+            });
+        }
+        let composer_id = egui::Id::new("comment_composer");
+        let mut output = None;
+        // Alt-dragging a row from the list drops a reference in here.
+        let (_, dropped) = ui.dnd_drop_zone::<CommentRefDrag, _>(
+            egui::Frame::new().inner_margin(2.0),
+            |ui| {
+                output = Some(
+                    egui::TextEdit::multiline(&mut self.comment_draft)
+                        .id(composer_id)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(hint)
+                        .show(ui),
+                );
+            },
         );
+        if let Some(payload) = dropped {
+            let reference = self.comment_ref_for_path(&payload.0, None);
+            self.insert_comment_reference(&reference);
+        }
+        if let Some(output) = output {
+            self.ui_comment_mention_picker(ui, &output, composer_id, accept_mention);
+        }
         ui.horizontal(|ui| {
+            self.ui_comment_reference_menu(ui);
             let can_post = !self.comment_draft.trim().is_empty();
             if ui
                 .add_enabled(can_post, egui::Button::new("Post"))
@@ -454,6 +536,270 @@ impl crate::app::WavesPreviewer {
                 );
             }
         });
+    }
+
+    /// The `@` file picker under the composer's caret.
+    ///
+    /// Only opens on an `@` that starts a word, so an address somebody pastes
+    /// stays an address, and never on `@[`, which is a reference already.
+    fn ui_comment_mention_picker(
+        &mut self,
+        ui: &mut egui::Ui,
+        output: &egui::text_edit::TextEditOutput,
+        composer_id: egui::Id,
+        accept: bool,
+    ) {
+        let caret = output
+            .cursor_range
+            .as_ref()
+            .map(|range| range.primary.index)
+            .filter(|_| output.response.has_focus());
+        let Some((span, query)) = caret.and_then(|caret| mention_query(&self.comment_draft, caret))
+        else {
+            self.comment_mention_open = false;
+            self.comment_mention_index = 0;
+            return;
+        };
+
+        let matches = self.comment_mention_matches(&query);
+        if matches.is_empty() {
+            self.comment_mention_open = false;
+            return;
+        }
+        self.comment_mention_open = true;
+        self.comment_mention_index = self.comment_mention_index.min(matches.len() - 1);
+
+        let mut chosen: Option<usize> = accept.then_some(self.comment_mention_index);
+        egui::Area::new(ui.make_persistent_id("comment_mention_picker"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(output.response.rect.left_bottom() + egui::vec2(0.0, 2.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(output.response.rect.width().max(240.0));
+                    for (index, row) in matches.iter().enumerate() {
+                        let selected = index == self.comment_mention_index;
+                        if ui
+                            .selectable_label(selected, &self.items[*row].display_name)
+                            .clicked()
+                        {
+                            chosen = Some(index);
+                        }
+                    }
+                    ui.label(
+                        RichText::new("↑↓ to choose · Enter to insert · Esc to dismiss")
+                            .weak()
+                            .small(),
+                    );
+                });
+            });
+
+        let Some(index) = chosen.and_then(|index| matches.get(index).copied()) else {
+            return;
+        };
+        let path = self.items[index].path.clone();
+        let token = comments::format_ref(&self.comment_ref_for_path(&path, None));
+        self.comment_draft
+            .replace_range(span.clone(), &format!("{token} "));
+        // Put the caret after what was just inserted, so typing continues
+        // where the reader is looking rather than back inside the token.
+        let caret = self.comment_draft[..span.start + token.len() + 1]
+            .chars()
+            .count();
+        let mut state = egui::text_edit::TextEditState::load(ui.ctx(), composer_id)
+            .unwrap_or_default();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(caret),
+        )));
+        state.store(ui.ctx(), composer_id);
+        self.comment_mention_open = false;
+        self.comment_mention_index = 0;
+    }
+
+    /// Rows whose name contains the query, best-anchored first. Capped,
+    /// because this list routinely holds a hundred thousand files and a
+    /// popup that long is not a picker.
+    fn comment_mention_matches(&self, query: &str) -> Vec<usize> {
+        const MAX_SUGGESTIONS: usize = 8;
+        let needle = query.to_lowercase();
+        let mut starts_with = Vec::new();
+        let mut contains = Vec::new();
+        for (index, item) in self.items.iter().enumerate() {
+            let name = item.display_name.to_lowercase();
+            if needle.is_empty() || name.starts_with(&needle) {
+                starts_with.push(index);
+            } else if name.contains(&needle) {
+                contains.push(index);
+            }
+            if starts_with.len() >= MAX_SUGGESTIONS {
+                break;
+            }
+        }
+        starts_with.extend(contains);
+        starts_with.truncate(MAX_SUGGESTIONS);
+        starts_with
+    }
+
+    /// The four references worth one click, in the order they come up.
+    ///
+    /// Typing `@` reaches every file; this is for the ones a person is
+    /// already looking at, where naming them again by hand is busywork.
+    fn ui_comment_reference_menu(&mut self, ui: &mut egui::Ui) {
+        let active = self.current_active_path().cloned();
+        let mut insert: Option<CommentRef> = None;
+        ui.menu_button("🔗 Reference", |ui| {
+            let Some(path) = active.as_deref() else {
+                ui.label(RichText::new("Select a file first.").weak());
+                return;
+            };
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            if ui.button(format!("File — {name}")).clicked() {
+                insert = Some(self.comment_ref_for_path(path, None));
+                ui.close();
+            }
+
+            let playhead = self.playback_current_source_time_sec();
+            if ui
+                .add_enabled(
+                    playhead.is_some(),
+                    egui::Button::new(match playhead {
+                        Some(secs) => format!(
+                            "Playhead — {}",
+                            crate::app::helpers::format_time_s(secs as f32)
+                        ),
+                        None => "Playhead".to_string(),
+                    }),
+                )
+                .on_disabled_hover_text("Nothing is loaded on the transport")
+                .clicked()
+            {
+                if let Some(secs) = playhead {
+                    insert = Some(self.comment_ref_for_path(
+                        path,
+                        Some(CommentAnchor {
+                            start_sec: secs,
+                            end_sec: None,
+                            freq_hz: None,
+                        }),
+                    ));
+                }
+                ui.close();
+            }
+
+            let selection = self.active_tab_selection_anchor();
+            if ui
+                .add_enabled(
+                    selection.is_some(),
+                    egui::Button::new(match selection {
+                        Some(anchor) => format!("Selection — {}", format_anchor(anchor)),
+                        None => "Selection".to_string(),
+                    }),
+                )
+                .on_disabled_hover_text("Select a range in the editor first")
+                .clicked()
+            {
+                if let Some(anchor) = selection {
+                    insert = Some(self.comment_ref_for_path(path, Some(anchor)));
+                }
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("Point at a file, a moment, or a range. Typing @ reaches any file.");
+        if let Some(reference) = insert {
+            self.insert_comment_reference(&reference);
+        }
+    }
+
+    /// The active editor tab's selection as a source-time anchor, carrying
+    /// the spectral band when the selection was drawn on a spectrogram.
+    fn active_tab_selection_anchor(&self) -> Option<CommentAnchor> {
+        let tab = self.active_tab.and_then(|idx| self.tabs.get(idx))?;
+        let (start, end) = tab.selection?;
+        if start == end {
+            return None;
+        }
+        let rate = tab.buffer_sample_rate.max(1) as f64;
+        Some(CommentAnchor {
+            start_sec: start.min(end) as f64 / rate,
+            end_sec: Some(start.max(end) as f64 / rate),
+            freq_hz: tab.freq_selection,
+        })
+    }
+
+    /// Append a reference token, keeping exactly one space in front of it.
+    pub(in crate::app) fn insert_comment_reference(&mut self, reference: &CommentRef) {
+        let token = comments::format_ref(reference);
+        if !self.comment_draft.is_empty() && !self.comment_draft.ends_with(char::is_whitespace) {
+            self.comment_draft.push(' ');
+        }
+        self.comment_draft.push_str(&token);
+        self.comment_draft.push(' ');
+    }
+
+    /// A comment body with its `@[...]` references drawn as chips you can
+    /// press. Returns the one that was pressed, if any.
+    ///
+    /// The chips cannot be part of the surrounding text run: a `LayoutJob`
+    /// paints, it does not take clicks. So the body is split at the token
+    /// ranges and rebuilt as wrapped text and buttons side by side.
+    fn ui_comment_body(&mut self, ui: &mut egui::Ui, body: &str) -> Option<CommentRef> {
+        let refs = comments::find_refs(body);
+        if refs.is_empty() {
+            ui.label(body);
+            return None;
+        }
+        let mut clicked = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            let mut cursor = 0usize;
+            for (range, reference) in &refs {
+                if range.start > cursor {
+                    ui.label(body[cursor..range.start].trim_end_matches('\n'));
+                }
+                if self.ui_comment_ref_chip(ui, reference) {
+                    clicked = Some(reference.clone());
+                }
+                cursor = range.end;
+            }
+            if cursor < body.len() {
+                ui.label(&body[cursor..]);
+            }
+        });
+        clicked
+    }
+
+    fn ui_comment_ref_chip(&self, ui: &mut egui::Ui, reference: &CommentRef) -> bool {
+        let resolved = self.resolve_comment_ref_path(reference);
+        let name = resolved
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| reference.path.clone());
+        let label = match reference.anchor {
+            Some(anchor) => format!("🔗 {name} {}", format_anchor(anchor)),
+            None => format!("🔗 {name}"),
+        };
+        let known = self.row_for_path(&resolved).is_some();
+        let color = if known {
+            ui.visuals().hyperlink_color
+        } else {
+            // Still pressable -- the file may be somewhere this list has not
+            // been pointed at -- but not dressed up as a link that works.
+            ui.visuals().weak_text_color()
+        };
+        let hover = if known {
+            format!("Go to {}", resolved.display())
+        } else {
+            format!(
+                "{} is not in this session's list. Opening it may fail.",
+                resolved.display()
+            )
+        };
+        ui.add(egui::Button::new(RichText::new(label).color(color)).small())
+            .on_hover_text(hover)
+            .clicked()
     }
 
     /// `name`, with `@host` appended only when somebody else in this
@@ -477,6 +823,9 @@ impl crate::app::WavesPreviewer {
 
     fn apply_comment_action(&mut self, action: CommentAction) {
         match action {
+            CommentAction::Jump(reference) => {
+                self.request_comment_ref_jump(&reference);
+            }
             CommentAction::Reply(id) => {
                 self.comment_reply_to = Some(id);
                 self.comment_editing_id = None;
@@ -514,11 +863,94 @@ impl crate::app::WavesPreviewer {
         }
     }
 
+    /// Turn files dropped onto the window into references in the composer.
+    ///
+    /// A drop anywhere else in the app loads the files into the list, which
+    /// is the right answer everywhere except here, where the reader is
+    /// plainly pointing at something rather than opening it.
+    pub(in crate::app) fn comments_window_absorbs_drop(&mut self, ctx: &egui::Context) -> bool {
+        let Some(rect) = self.comments_window_rect else {
+            return false;
+        };
+        let over = ctx.input(|input| {
+            input
+                .pointer
+                .interact_pos()
+                .or_else(|| input.pointer.latest_pos())
+        });
+        if !over.is_some_and(|pos| rect.contains(pos)) {
+            return false;
+        }
+        let paths: Vec<std::path::PathBuf> = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect()
+        });
+        if paths.is_empty() {
+            return false;
+        }
+        for path in paths {
+            let reference = self.comment_ref_for_path(&path, None);
+            self.insert_comment_reference(&reference);
+        }
+        true
+    }
+
     /// Open the window, and read the document while it is coming up so a
     /// colleague's last few minutes are already there.
     pub(in crate::app) fn open_comments_window(&mut self) {
         self.show_comments_window = true;
         self.request_comment_pull();
+    }
+}
+
+/// The `@word` being typed at `caret`, as a byte range over the whole token
+/// and the word itself.
+///
+/// `caret` is a character index, which is what egui reports and not what a
+/// `String` slices by.
+fn mention_query(text: &str, caret: usize) -> Option<(std::ops::Range<usize>, String)> {
+    let caret_byte = text
+        .char_indices()
+        .nth(caret)
+        .map(|(byte, _)| byte)
+        .unwrap_or(text.len());
+    let before = &text[..caret_byte];
+    let at = before.rfind('@')?;
+    // `@[` is a finished reference, not a query.
+    if before[at + 1..].starts_with('[') {
+        return None;
+    }
+    // Only an `@` that begins a word opens the picker.
+    if let Some(previous) = before[..at].chars().next_back() {
+        if !previous.is_whitespace() {
+            return None;
+        }
+    }
+    let word = &before[at + 1..];
+    if word.chars().any(|ch| ch.is_whitespace() || ch == ']') {
+        return None;
+    }
+    Some((at..caret_byte, word.to_string()))
+}
+
+/// A reference's position, as a reader wants to see it: a point, a span, and
+/// the spectral band when the author drew one on a spectrogram.
+fn format_anchor(anchor: CommentAnchor) -> String {
+    let time = match anchor.normalized_range() {
+        Some((start, end)) => format!(
+            "{}–{}",
+            crate::app::helpers::format_time_s(start as f32),
+            crate::app::helpers::format_time_s(end as f32)
+        ),
+        None => crate::app::helpers::format_time_s(anchor.start_sec as f32),
+    };
+    match anchor.freq_hz {
+        Some((low, high)) => format!("{time} · {low:.0}–{high:.0} Hz"),
+        None => time,
     }
 }
 
@@ -542,5 +974,73 @@ fn format_stamp(comment: &ProjectComment) -> String {
         format!("{text} (edited)")
     } else {
         text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query(text: &str) -> Option<(std::ops::Range<usize>, String)> {
+        mention_query(text, text.chars().count())
+    }
+
+    #[test]
+    fn an_at_that_starts_a_word_opens_the_picker() {
+        let (span, word) = query("look at @line").expect("a query");
+        assert_eq!(span, 8..13);
+        assert_eq!(word, "line");
+        // The bare `@` matches everything, which is the right first screen.
+        assert_eq!(query("@").expect("a query").1, "");
+    }
+
+    #[test]
+    fn an_address_stays_an_address() {
+        assert!(query("mail me at name@example.com").is_none());
+    }
+
+    #[test]
+    fn a_finished_reference_is_not_a_query() {
+        assert!(query("see @[voice/line_001.wav]").is_none());
+        assert!(query("see @[voice/line").is_none());
+    }
+
+    #[test]
+    fn the_picker_closes_once_the_word_ends() {
+        assert!(query("@line_001.wav and then").is_none());
+    }
+
+    #[test]
+    fn a_caret_before_the_at_finds_nothing() {
+        // The user moved back; there is no word being typed here.
+        assert!(mention_query("hello @line", 3).is_none());
+    }
+
+    #[test]
+    fn a_multibyte_body_slices_on_character_boundaries() {
+        let text = "これを見て @line";
+        let (span, word) = query(text).expect("a query");
+        assert_eq!(&text[span], "@line");
+        assert_eq!(word, "line");
+    }
+
+    #[test]
+    fn an_anchor_reads_as_a_point_a_span_or_a_band() {
+        let point = CommentAnchor {
+            start_sec: 12.5,
+            end_sec: None,
+            freq_hz: None,
+        };
+        assert!(!format_anchor(point).contains('–'));
+        let span = CommentAnchor {
+            end_sec: Some(14.25),
+            ..point
+        };
+        assert!(format_anchor(span).contains('–'));
+        let band = CommentAnchor {
+            freq_hz: Some((220.0, 880.0)),
+            ..span
+        };
+        assert!(format_anchor(band).contains("220–880 Hz"));
     }
 }

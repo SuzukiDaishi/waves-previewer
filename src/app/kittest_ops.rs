@@ -3779,6 +3779,76 @@ impl super::WavesPreviewer {
             .collect()
     }
 
+    pub fn test_comment_draft(&self) -> String {
+        self.comment_draft.clone()
+    }
+
+    /// Insert a reference token the way the Reference menu and the Alt-drop
+    /// both do, so the spacing rule is exercised rather than reimplemented.
+    pub fn test_insert_comment_reference(&mut self, token: &str) {
+        let Some((_, reference)) = crate::app::comments::find_refs(token).into_iter().next() else {
+            return;
+        };
+        self.insert_comment_reference(&reference);
+    }
+
+    pub fn test_set_comment_filter_this_file(&mut self) {
+        self.comment_filter = crate::app::ui::comments::CommentFilter::ThisFile;
+    }
+
+    /// The thread bodies the window would draw under the current filter.
+    pub fn test_visible_comment_threads(&self) -> Vec<String> {
+        crate::app::comments::build_threads(&self.comments)
+            .iter()
+            .filter(|node| self.comment_thread_matches_filter(node))
+            .map(|node| node.comment.body.clone())
+            .collect()
+    }
+
+    /// Follow a reference the way pressing its chip does, then let the
+    /// pending jump land.
+    pub fn test_jump_to_comment_ref(&mut self, token: &str) -> bool {
+        let Some((_, reference)) = crate::app::comments::find_refs(token).into_iter().next() else {
+            return false;
+        };
+        self.request_comment_ref_jump(&reference);
+        true
+    }
+
+    pub fn test_apply_pending_comment_jump(&mut self) {
+        self.apply_pending_comment_jump();
+    }
+
+    pub fn test_pending_comment_jump(&self) -> Option<PathBuf> {
+        self.pending_comment_jump
+            .as_ref()
+            .map(|(path, _)| path.clone())
+    }
+
+    /// `(start, end)` of the active editor tab's selection, in samples.
+    pub fn test_active_tab_selection(&self) -> Option<(usize, usize)> {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .and_then(|tab| tab.selection)
+    }
+
+    pub fn test_set_active_tab_selection(&mut self, range: Option<(usize, usize)>) {
+        if let Some(tab) = self.active_tab.and_then(|idx| self.tabs.get_mut(idx)) {
+            tab.selection = range;
+            tab.selection_anchor_sample = range.map(|(start, _)| start);
+        }
+    }
+
+    /// Write a reference token for a path the way the composer does.
+    pub fn test_comment_ref_token(&self, path: &Path, start_sec: Option<f64>) -> String {
+        let anchor = start_sec.map(|start_sec| crate::app::comments::CommentAnchor {
+            start_sec,
+            end_sec: None,
+            freq_hz: None,
+        });
+        crate::app::comments::format_ref(&self.comment_ref_for_path(path, anchor))
+    }
+
     // ---- Referenced-file change tracking --------------------------------
 
     /// The "changed since you last opened this" report, as

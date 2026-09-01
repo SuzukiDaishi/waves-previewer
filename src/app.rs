@@ -1117,6 +1117,19 @@ pub struct WavesPreviewer {
     comment_search: String,
     /// Threads whose replies are folded away, by root id.
     comment_collapsed: std::collections::HashSet<String>,
+    /// A reference the reader clicked, waiting for its file to finish
+    /// loading before there is a timeline to seek on.
+    pending_comment_jump: Option<(PathBuf, Option<comments::CommentAnchor>)>,
+    /// Whether the composer's `@` file picker was open last frame. Kept
+    /// across frames because the arrow keys have to be taken away from the
+    /// text field *before* it is drawn, and what the query is can only be
+    /// known after.
+    comment_mention_open: bool,
+    comment_mention_index: usize,
+    /// Where the docked window was drawn last frame, so a file dropped from
+    /// Explorer onto it becomes a reference instead of being loaded into the
+    /// list. `None` while it is closed or detached.
+    comments_window_rect: Option<egui::Rect>,
     show_session_changes_window: bool,
     show_session_history_window: bool,
     session_history_entries: Vec<session_store::HistoryEntry>,

@@ -236,6 +236,117 @@ mod comments_ui {
     }
 
     #[test]
+    fn a_reference_survives_the_round_trip_through_the_document() {
+        let dir = temp_dir("refs");
+        let audio = dir.join("line_001.wav");
+        write_fixture(&audio);
+        let session = dir.join("shared.nwsess");
+        let mut harness = harness_default();
+        harness.state_mut().test_replace_with_files(&[audio.clone()]);
+        harness.run_steps(2);
+        assert!(harness.state_mut().test_save_session_to(&session));
+        harness.run_steps(2);
+        harness.state_mut().test_open_comments_window();
+        harness.run_steps(2);
+
+        let token = harness
+            .state()
+            .test_comment_ref_token(&audio, Some(12.5));
+        post(&mut harness, &format!("listen here {token}"));
+
+        // A colleague on another machine reads the same token back and
+        // resolves it to the same file -- which is the whole reason the path
+        // follows the session's own `path_mode`.
+        let mut theirs = harness_default();
+        assert!(theirs.state_mut().test_open_session_from(&session));
+        theirs.run_steps(8);
+        let body = theirs
+            .state()
+            .test_comment_bodies()
+            .into_iter()
+            .next()
+            .expect("their copy of the comment");
+        assert!(theirs.state_mut().test_jump_to_comment_ref(&body));
+        assert_eq!(
+            theirs.state().test_pending_comment_jump().as_deref(),
+            Some(audio.as_path()),
+            "the reference resolves to the file it named"
+        );
+    }
+
+    #[test]
+    fn the_this_file_filter_follows_what_is_selected() {
+        let dir = temp_dir("thisfile");
+        let one = dir.join("one.wav");
+        let two = dir.join("two.wav");
+        write_fixture(&one);
+        write_fixture(&two);
+        let session = dir.join("shared.nwsess");
+        let mut harness = harness_default();
+        harness
+            .state_mut()
+            .test_replace_with_files(&[one.clone(), two.clone()]);
+        harness.run_steps(2);
+        assert!(harness.state_mut().test_save_session_to(&session));
+        harness.run_steps(2);
+        harness.state_mut().test_open_comments_window();
+        harness.run_steps(2);
+
+        let ref_one = harness.state().test_comment_ref_token(&one, None);
+        let ref_two = harness.state().test_comment_ref_token(&two, None);
+        post(&mut harness, &format!("about one {ref_one}"));
+        post(&mut harness, &format!("about two {ref_two}"));
+        post(&mut harness, "about nothing in particular");
+
+        harness.state_mut().test_set_comment_filter_this_file();
+        harness.state_mut().test_select_row_with_autoscroll(0);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_visible_comment_threads(),
+            vec![format!("about one {ref_one}")],
+            "the filter shows what was said about the selected file"
+        );
+
+        harness.state_mut().test_select_row_with_autoscroll(1);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_visible_comment_threads(),
+            vec![format!("about two {ref_two}")]
+        );
+    }
+
+    #[test]
+    fn the_reference_menu_writes_a_token_the_parser_reads_back() {
+        let dir = temp_dir("insert");
+        let audio = dir.join("line_001.wav");
+        write_fixture(&audio);
+        let session = dir.join("shared.nwsess");
+        let mut harness = harness_default();
+        harness.state_mut().test_replace_with_files(&[audio.clone()]);
+        harness.run_steps(2);
+        assert!(harness.state_mut().test_save_session_to(&session));
+        harness.run_steps(2);
+        harness.state_mut().test_open_comments_window();
+        harness.run_steps(2);
+
+        harness.state_mut().test_set_comment_draft("look at");
+        let token = harness.state().test_comment_ref_token(&audio, None);
+        harness.state_mut().test_insert_comment_reference(&token);
+        harness.run_steps(2);
+
+        let draft = harness.state().test_comment_draft();
+        assert!(
+            draft.starts_with("look at "),
+            "inserting keeps exactly one space in front: {draft:?}"
+        );
+        assert!(draft.contains(&token));
+        post(&mut harness, &draft);
+        assert!(std::fs::read_to_string(&session)
+            .expect("read session")
+            .contains(&token));
+    }
+
+    #[test]
     fn a_withdrawn_comment_leaves_its_replies_readable() {
         let (mut harness, _session) = open_saved_session("withdraw");
         harness.state_mut().test_open_comments_window();

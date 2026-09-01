@@ -24,11 +24,11 @@
 //! messages in the window instead of a warning to reload, whenever the two
 //! documents differ *only* in their conversation.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Instant;
 
-use super::comments::{self, CommentAuthor};
+use super::comments::{self, CommentAnchor, CommentAuthor, CommentRef};
 use super::project::{deserialize_project, serialize_project, ProjectComment};
 use super::session_sync::{self, SessionFingerprint};
 
@@ -263,6 +263,138 @@ impl crate::app::WavesPreviewer {
             crate::ui_wake::wake_ui();
         });
         self.comment_pull = Some(rx);
+    }
+
+    // ---- References ------------------------------------------------------
+
+    /// Turn a stored reference path into one this machine can open.
+    ///
+    /// Comment paths follow the session's own `path_mode` like every other
+    /// stored source, so a relative one resolves against the `.nwsess` -- the
+    /// reason a session on a share is relative by default is that colleagues
+    /// mount it differently, and a comment naming a file is no exception.
+    /// Pure string work: nothing here may touch the filesystem.
+    pub(crate) fn resolve_comment_ref_path(&self, reference: &CommentRef) -> PathBuf {
+        let base = self
+            .project_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        super::project::resolve_path(&reference.path, &base)
+    }
+
+    /// Write a reference to a file the way this session stores paths.
+    pub(crate) fn comment_ref_for_path(
+        &self,
+        path: &Path,
+        anchor: Option<CommentAnchor>,
+    ) -> CommentRef {
+        let base = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        CommentRef {
+            path: super::project::session_path(path, &base, self.session_path_mode),
+            anchor,
+        }
+    }
+
+    /// Go to what a reference points at.
+    ///
+    /// Two phases, like the transcript's seek and for the same reason: the
+    /// file has to finish loading before there is a timeline to seek on, and
+    /// the load is asynchronous. See `apply_pending_comment_jump`.
+    pub(crate) fn request_comment_ref_jump(&mut self, reference: &CommentRef) {
+        let path = self.resolve_comment_ref_path(reference);
+        let anchor = reference.anchor;
+        // A span or a spectral band can only be seen on the editor's canvas,
+        // so those open it. A bare cursor stays in the list, where following
+        // a reference costs nothing.
+        let wants_editor = anchor.is_some_and(|anchor| {
+            anchor.normalized_range().is_some() || anchor.freq_hz.is_some()
+        });
+        self.pending_comment_jump = Some((path.clone(), anchor));
+        if wants_editor {
+            self.open_or_activate_tab(&path);
+            return;
+        }
+        if self.playing_path.as_deref() == Some(path.as_path()) {
+            return;
+        }
+        if let Some(row) = self.row_for_path(&path) {
+            self.select_and_load(row, true);
+            return;
+        }
+        // Not in the list at all -- a colleague pointed at a file this
+        // session no longer carries, or one only they can see.
+        self.open_or_activate_tab(&path);
+    }
+
+    /// Land the jump once the file is actually loaded.
+    pub(crate) fn apply_pending_comment_jump(&mut self) {
+        let Some((path, anchor)) = self.pending_comment_jump.clone() else {
+            return;
+        };
+        let tab_idx = self.tabs.iter().position(|tab| tab.path == path);
+        // Wait for whichever surface is going to answer. Giving up early
+        // would seek the previous file, which is worse than seeking late.
+        if self.playing_path.as_deref() != Some(path.as_path()) && tab_idx.is_none() {
+            return;
+        }
+        self.pending_comment_jump = None;
+        let Some(anchor) = anchor else {
+            return;
+        };
+
+        if let Some(tab_idx) = tab_idx {
+            self.restore_comment_anchor_in_tab(tab_idx, anchor);
+        }
+        if self.playing_path.as_deref() != Some(path.as_path()) {
+            return;
+        }
+        let out_sr = self.audio.shared.out_sample_rate.max(1) as f64;
+        let mut samples = (anchor.start_sec.max(0.0) * out_sr).round() as usize;
+        if let Some(tab) = self.tabs.iter().find(|tab| tab.path == path) {
+            samples = self.map_display_to_audio_sample(tab, samples);
+        }
+        self.audio.seek_to_sample(samples);
+    }
+
+    /// Put the cursor, the selection and the spectral band back the way the
+    /// author had them, the same restore the editor's own note list performs.
+    fn restore_comment_anchor_in_tab(&mut self, tab_idx: usize, anchor: CommentAnchor) {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        // Seconds against the source, converted here rather than stored as
+        // samples: the author's buffer and this one need not agree on a rate.
+        let rate = tab.buffer_sample_rate.max(1) as f64;
+        let to_sample = |secs: f64| (secs.max(0.0) * rate).round() as usize;
+        let start = to_sample(anchor.start_sec);
+        tab.preview_offset_samples = Some(start);
+        match anchor.normalized_range() {
+            Some((from, to)) => {
+                let (from, to) = (to_sample(from), to_sample(to));
+                tab.selection = Some((from, to));
+                tab.selection_anchor_sample = Some(from);
+                tab.freq_selection = anchor.freq_hz;
+            }
+            None => {
+                tab.selection = None;
+                tab.selection_anchor_sample = None;
+                tab.freq_selection = None;
+            }
+        }
+    }
+
+    /// Every file this conversation points at, for the "this file" filter.
+    pub(crate) fn comment_mentions_path(&self, comment: &ProjectComment, path: &Path) -> bool {
+        comments::find_refs(&comment.body)
+            .into_iter()
+            .any(|(_, reference)| self.resolve_comment_ref_path(&reference) == path)
     }
 
     /// Adopt whatever the comment workers finished. Runs every frame.
