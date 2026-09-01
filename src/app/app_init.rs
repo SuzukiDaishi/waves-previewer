@@ -17,6 +17,21 @@ impl WavesPreviewer {
         };
         let (metadata_summary_pool, metadata_summary_rx) =
             crate::metadata::cache::MetadataSummaryPool::new(metadata_cache_path);
+        // Same isolation rule as the metadata cache: under kittest only an
+        // explicit database is used, so tests never read or write the
+        // developer's real session history.
+        let session_store_path = if cfg!(feature = "kittest") {
+            std::env::var_os("NEOWAVES_SESSION_STATE")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+        } else {
+            std::env::var_os("NEOWAVES_SESSION_STATE")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(super::session_store::default_store_path)
+        };
+        let (session_store, session_store_rx) =
+            super::session_store::SessionStore::new(session_store_path);
         let ipc_rx = startup.ipc_rx.clone();
         let startup_state = StartupState::new(startup.clone());
         let debug_state = DebugState::new(startup.debug.clone());
@@ -423,6 +438,20 @@ impl WavesPreviewer {
             session_changed_on_disk: None,
             session_watch: None,
             session_reload_prompt: false,
+            session_store,
+            session_store_rx,
+            session_store_load: None,
+            baseline_scan: None,
+            baseline_scan_generation: 0,
+            baseline_tracked_count: 0,
+            baseline_tracked: Vec::new(),
+            session_file_changes: None,
+            show_session_changes_window: false,
+            show_session_history_window: false,
+            session_history_entries: Vec::new(),
+            session_history_request: None,
+            session_history_pending: None,
+            baseline_notes: Vec::new(),
             theme_mode: ThemeMode::Dark,
             item_bg_mode: ItemBgMode::Standard,
             show_rename_dialog: false,

@@ -2123,6 +2123,16 @@ impl super::WavesPreviewer {
         self.session_conflict = None;
         self.session_changed_on_disk = None;
         self.session_reload_prompt = false;
+        self.cancel_baseline_scan();
+        self.session_store_load = None;
+        self.session_file_changes = None;
+        self.show_session_changes_window = false;
+        self.show_session_history_window = false;
+        self.session_history_entries.clear();
+        self.session_history_request = None;
+        self.session_history_pending = None;
+        self.baseline_notes.clear();
+        self.baseline_tracked.clear();
         self.list_columns_window_pos = self.list_columns_window_global_pos;
     }
 

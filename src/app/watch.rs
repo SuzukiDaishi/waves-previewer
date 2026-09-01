@@ -382,6 +382,16 @@ impl crate::app::WavesPreviewer {
         let mut removed_skipped = 0usize;
         let mut modified = 0usize;
         let mut modified_skipped = 0usize;
+        // Every path the batch touched, including the ones skipped below as
+        // our own writes: the session's baseline has to follow what is on
+        // disk regardless of who put it there, or the next open reports a
+        // change the user already watched happen.
+        let touched: Vec<PathBuf> = batches
+            .iter()
+            .flatten()
+            .map(|event| event.path().to_path_buf())
+            .collect();
+        self.note_session_file_changed(touched);
         for event in batches.into_iter().flatten() {
             if recently_self_written(event.path()) {
                 continue;

@@ -97,6 +97,8 @@ mod resample_ops;
 mod scan_ops;
 mod search_ops;
 mod session_ops;
+mod session_baseline;
+mod session_store;
 mod session_sync;
 mod session_watch;
 mod sort_filter_jobs;
@@ -1039,6 +1041,41 @@ pub struct WavesPreviewer {
     /// `session_changed_on_disk` outlives it -- dismissing the dialog only
     /// postpones the decision.
     session_reload_prompt: bool,
+    /// Per-user record of what this session's referenced files looked like
+    /// the last time this person opened it, plus the local document history.
+    session_store: session_store::SessionStore,
+    session_store_rx: std::sync::mpsc::Receiver<session_store::StoreReply>,
+    /// The store read the change scan is waiting on.
+    session_store_load: Option<(u64, String)>,
+    /// In-flight "what changed since last time" scan.
+    baseline_scan: Option<session_baseline::BaselineScanState>,
+    baseline_scan_generation: u64,
+    /// How many files the last scan looked at, for the log line.
+    baseline_tracked_count: usize,
+    /// What the session referenced when the change check started. Captured
+    /// then rather than read later, because the list drops rows whose file
+    /// has gone -- and those are precisely what the check must report.
+    baseline_tracked: Vec<(PathBuf, session_store::TrackedKind)>,
+    /// The finished report. Held until the user dismisses it, because a
+    /// toast is gone long before they come back to the window.
+    session_file_changes: Option<types::SessionFileChanges>,
+    show_session_changes_window: bool,
+    show_session_history_window: bool,
+    session_history_entries: Vec<session_store::HistoryEntry>,
+    session_history_request: Option<u64>,
+    /// A stored version whose bytes we asked for, and what to do with them.
+    session_history_pending: Option<(u64, types::SessionHistoryIntent)>,
+    /// Re-probes of files that changed while the session was open, in
+    /// flight. Keyed by the session they belong to so a close mid-probe
+    /// cannot write them into the next session's baseline.
+    #[allow(clippy::type_complexity)]
+    baseline_notes: Vec<(
+        String,
+        std::sync::mpsc::Receiver<(
+            Vec<(PathBuf, session_store::FileBaseline)>,
+            Vec<PathBuf>,
+        )>,
+    )>,
     theme_mode: ThemeMode,
     item_bg_mode: ItemBgMode,
     show_rename_dialog: bool,

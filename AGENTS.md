@@ -41,6 +41,8 @@ Repository Layout
     - `session_ops.rs`: session open/save/IPC/drag-drop.
     - `session_sync.rs`: everything a `.nwsess` on a shared file server needs from the filesystem -- content fingerprints, the version stamp parser, the atomic replace, and the retry that keeps a sharing violation from losing a save. All of it blocks; none of it may be called from the UI thread.
     - `session_watch.rs`: polling probe that notices when somebody else saves the open session. Reports only -- reloading is the user's decision, because an automatic reload discards unsaved edits.
+    - `session_store.rs`: per-user SQLite holding what a session's referenced files looked like at this person's last open, and the local history of the session document. It is a cache, never user data -- deleting it must cost nothing but one silent re-baseline. All of it blocks; it lives on its own writer thread.
+    - `session_baseline.rs`: the two-tier "what changed since you last opened this" scan -- stat everything, hash only what moved -- plus the background pass that gives never-hashed files a hash so later comparisons are exact.
     - `theme_ops.rs`: theme + prefs load/save.
     - `scan_ops.rs`: folder scan job orchestration + results apply.
     - `transcript_ops.rs`: transcript seek handling.
@@ -163,6 +165,8 @@ Implementation Principles
 - Preserve original files unless the user explicitly saves destructive edits.
 - A `.nwsess` may have more than one writer (two GUI instances, or a GUI and a `--cli` batch, against a file server). There is deliberately no lock. Any new session write goes through the compare-and-swap in `run_session_save_jobs` / `cli_ops::write_project_file_checked` -- never a bare `fs::write` -- and any new file the session owns is named after its contents, never after an index or a counter, because both of those are shared between writers and collide.
 - Reading a session must not write to it. A repair or migration discovered while opening rides in memory to the next explicit save.
+- Anything per-user about a session -- when this person last opened it, what its files looked like then, their document history -- goes in `session_store`, never in the `.nwsess`. Putting it in the document would make every reader a writer again, and a large session's file hashes would add megabytes to something parsed on every open.
+- Never hash every referenced file to answer "did this change". A list here can hold a hundred thousand files on a share. Stat first; hash only what the stat says moved.
 - Video sources are read-only: there is no video encoder here, so an edit or an export has nowhere to go. Ask `src/media_kind.rs` rather than testing the extension.
 - Prefer progressive loading for long audio (preview first, full decode later).
 

@@ -3344,6 +3344,24 @@ pub struct SessionConflict {
     pub close_when_resolved: bool,
 }
 
+/// The referenced files that changed since this user last opened the
+/// session, held until they act on it.
+#[derive(Clone, Debug)]
+pub struct SessionFileChanges {
+    /// When this user last opened the session -- what the report is "since".
+    pub since: i64,
+    pub changes: Vec<crate::app::session_baseline::FileChange>,
+}
+
+/// What a fetch of a stored session version is for.
+#[derive(Clone, Debug)]
+pub enum SessionHistoryIntent {
+    /// Write it back over the current session.
+    Restore,
+    /// Write it to a file the user picked, leaving the session alone.
+    SaveAs(PathBuf),
+}
+
 /// Another process saved the open session. Held until the user acts, because
 /// a toast expires long before they get back to the window.
 #[derive(Clone, Debug)]
@@ -3362,6 +3380,14 @@ pub enum SessionSaveOutcome {
         fingerprint: crate::app::session_sync::SessionFingerprint,
         session_id: String,
         revision: u64,
+        /// The document this save replaced, when there was one. Already read
+        /// for the conflict check, so keeping it costs nothing extra and
+        /// gives the local history a version to store.
+        previous: Option<Vec<u8>>,
+        /// How that replaced document described itself, for the history list.
+        previous_revision: Option<u64>,
+        previous_saved_by: Option<String>,
+        previous_saved_at: Option<String>,
         /// Where each managed asset actually landed. The UI adopts these
         /// directly instead of re-deriving the path and stat-ing it, which
         /// it may not do on the UI thread anyway.

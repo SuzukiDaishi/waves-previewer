@@ -3539,6 +3539,89 @@ impl super::WavesPreviewer {
         });
     }
 
+    // ---- Referenced-file change tracking --------------------------------
+
+    /// The "changed since you last opened this" report, as
+    /// `(kind, file name)` pairs sorted by name. `None` when nothing was
+    /// reported -- including a first-ever open, which records a baseline
+    /// silently.
+    pub fn test_session_file_changes(&self) -> Option<Vec<(String, String)>> {
+        let report = self.session_file_changes.as_ref()?;
+        let mut rows: Vec<(String, String)> = report
+            .changes
+            .iter()
+            .map(|change| {
+                (
+                    change.kind.label().to_string(),
+                    change
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        rows.sort();
+        Some(rows)
+    }
+
+    /// When the report says the user last opened this session.
+    pub fn test_session_changes_since(&self) -> Option<i64> {
+        self.session_file_changes.as_ref().map(|r| r.since)
+    }
+
+    /// True while the store read or the file scan is still in flight.
+    pub fn test_session_change_check_busy(&self) -> bool {
+        self.session_store_load.is_some()
+            || self.baseline_scan.is_some()
+            || !self.baseline_notes.is_empty()
+    }
+
+    pub fn test_dismiss_session_file_changes(&mut self) {
+        self.session_file_changes = None;
+        self.show_session_changes_window = false;
+    }
+
+    pub fn test_session_open_busy(&self) -> bool {
+        self.session_open_in_progress() || self.project_open_pending.is_some()
+    }
+
+    pub fn test_session_store_enabled(&self) -> bool {
+        self.session_store.is_enabled()
+    }
+
+    /// Ask for the local history of the open session; the reply lands in
+    /// `test_session_history` after a few frames.
+    pub fn test_open_session_history(&mut self) {
+        self.open_session_history_window();
+    }
+
+    /// `(revision, saved_by, byte_len)` newest first.
+    pub fn test_session_history(&self) -> Vec<(Option<u64>, Option<String>, u64)> {
+        self.session_history_entries
+            .iter()
+            .map(|e| (e.revision, e.saved_by.clone(), e.byte_len))
+            .collect()
+    }
+
+    pub fn test_session_history_busy(&self) -> bool {
+        self.session_history_request.is_some() || self.session_history_pending.is_some()
+    }
+
+    /// Restore the nth stored version (0 = newest).
+    pub fn test_restore_session_history(&mut self, index: usize) -> bool {
+        let Some(entry) = self.session_history_entries.get(index) else {
+            return false;
+        };
+        let id = entry.id;
+        self.request_session_history(id, crate::app::types::SessionHistoryIntent::Restore);
+        true
+    }
+
+    pub fn test_note_session_file_changed(&mut self, paths: Vec<PathBuf>) {
+        self.note_session_file_changed(paths);
+    }
+
     pub fn test_request_session_reload_prompt(&mut self) -> bool {
         self.request_session_reload_prompt();
         self.session_reload_prompt

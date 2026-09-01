@@ -2683,6 +2683,10 @@ impl super::WavesPreviewer {
             fingerprint: session_sync::SessionFingerprint::of_bytes(text.as_bytes()),
             session_id,
             revision,
+            previous: disk.bytes().map(|bytes| bytes.to_vec()),
+            previous_revision: stamp.revision,
+            previous_saved_by: stamp.saved_by.clone(),
+            previous_saved_at: stamp.saved_at.clone(),
             committed_assets,
         })
     }
@@ -2693,7 +2697,7 @@ impl super::WavesPreviewer {
 
     /// A temp-name suffix no other writer can produce. The pid alone is not
     /// enough on a share: two machines hand out the same pids.
-    fn save_nonce() -> String {
+    pub(super) fn save_nonce() -> String {
         format!(
             "{}{}.{}.{}",
             Self::SAVE_TEMP_MARKER,
@@ -2890,8 +2894,19 @@ impl super::WavesPreviewer {
                 fingerprint,
                 session_id,
                 revision,
+                previous,
+                previous_revision,
+                previous_saved_by,
+                previous_saved_at,
                 committed_assets,
             } => {
+                self.capture_replaced_session_version(
+                    &path,
+                    previous,
+                    previous_revision,
+                    previous_saved_by,
+                    previous_saved_at,
+                );
                 self.adopt_saved_session(
                     path,
                     fingerprint,
@@ -2979,6 +2994,10 @@ impl super::WavesPreviewer {
                 fingerprint,
                 session_id,
                 revision,
+                previous,
+                previous_revision,
+                previous_saved_by,
+                previous_saved_at,
                 committed_assets,
             }) => {
                 self.debug_log(format!(
@@ -2986,6 +3005,13 @@ impl super::WavesPreviewer {
                     path.display(),
                     fingerprint.short_hex()
                 ));
+                self.capture_replaced_session_version(
+                    &path,
+                    previous,
+                    previous_revision,
+                    previous_saved_by,
+                    previous_saved_at,
+                );
                 self.adopt_saved_session(
                     path,
                     fingerprint,
@@ -4496,6 +4522,10 @@ impl super::WavesPreviewer {
         self.session_changed_on_disk = None;
         self.add_recent_session_path(&project_path);
         self.restart_session_watch();
+        // What changed in the *referenced files* since this user last opened
+        // this session. The session document itself is covered by the watch
+        // above; a colleague replacing a wav never touches it.
+        self.begin_session_change_check();
         Ok(())
     }
 

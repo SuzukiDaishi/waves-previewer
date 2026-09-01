@@ -308,6 +308,122 @@ the repair chain.
 
 ---
 
+## Changed since *you* last opened it
+
+The conflict detection above watches the `.nwsess`. It cannot see the thing
+that actually goes wrong most often on a share: somebody replaces a wav the
+session points at. That touches no byte of the document.
+
+So the app keeps its own record of what every referenced file looked like the
+last time **this person** opened **this session**, and diffs against it on the
+next open.
+
+### Where the record lives, and why not in the session
+
+In a per-user SQLite database beside the metadata cache
+(`.../neowaves/session-state-v1.sqlite3`, override with
+`NEOWAVES_SESSION_STATE`), never in the `.nwsess`.
+
+Two reasons, and the second is the load-bearing one:
+
+1. "Changed since **you** last opened it" is per-person. A shared document has
+   nowhere to put a different answer for each colleague.
+2. Recording a baseline on open would make **every reader a writer again** --
+   exactly the failure the section above exists to remove. A hundred thousand
+   file hashes would also add megabytes to a document that is parsed on every
+   open.
+
+The database is a cache, not user data. Losing it costs one silent
+re-baseline and nothing else.
+
+Sessions are keyed by their `session_id`, so the same session opened as
+`Z:\proj\a.nwsess` one day and `\\server\share\proj\a.nwsess` the next is
+recognised as the same session. Documents older than that field fall back to
+their path.
+
+### Two tiers
+
+A session here can reference a hundred thousand files on a network share.
+Hashing all of them on every open would cost more than the work the user came
+to do, so:
+
+1. **stat everything** for `(size, mtime)`. One syscall each, and it settles
+   the overwhelming majority: nothing moved, nothing to do.
+2. **hash only the files whose stat moved**, with
+   `session_sync::hash_file_content`. The cost is proportional to what
+   actually changed, and it is what separates a real edit from a file that was
+   merely copied back or touched.
+
+| tier 1 | baseline | reported |
+|---|---|---|
+| gone | present | **Removed** |
+| present | absent | **Added** |
+| `(size, mtime)` match | present | nothing -- no hash taken |
+| moved, hash matches | hashed | **nothing** (touched, not changed) |
+| moved, hash differs | hashed | **Changed** |
+| moved | never hashed | **Changed**, conservatively |
+
+`recorded_at` on each row is when the change was noticed, and it is what the
+list shows as "detected".
+
+**The first open of a session reports nothing.** There is no previous visit to
+compare against, and announcing every file as new would be noise. It records a
+baseline and stays quiet.
+
+### Hashes held in advance
+
+A file with no stored hash cannot be compared exactly, so a background pass
+hashes never-hashed files at the lowest priority, capped per open. Because the
+result is persisted, it resumes across runs and the baseline converges toward
+exact comparisons everywhere.
+
+### Changes while the session is open
+
+The folder watch already knows when a listed file's bytes change. Those paths
+are re-probed and re-recorded immediately -- including files this app wrote
+itself -- so a change the user watched happen is not announced back to them on
+the next open as though it were a colleague's.
+
+### What it looks like
+
+A toast once, plus a standing amber `⚠ N source files changed` in the topbar,
+for the same reason the session badge is standing: a toast is gone in seconds
+and the user may be away. Clicking it opens the list -- file, kind, size,
+detected -- with `File > Changed Since Last Open...` as the other way in.
+Clicking a row selects it in the list; **Dismiss** clears the indicator.
+Nothing here reloads anything on its own.
+
+### Session history
+
+Every save that replaces an existing document stores the replaced bytes, which
+the compare-and-swap has already read -- so the only added cost is one write.
+`File > Session History...` lists what is stored: revision, who saved it, when,
+size.
+
+- **Restore** writes that version back over the session. The document it
+  replaces is stored on the way past, so restoring is itself undoable.
+- **Save As...** writes the version elsewhere and leaves the session alone.
+
+History is **per user**: 20 versions per session under a global byte cap, in
+the same local database. A colleague's saves are not in your history, and the
+shared-side insurance stays the single `.nwsess.bak`.
+
+### Known limitations
+
+- **A change that alters neither size nor mtime is invisible.** Tier 1 never
+  fires, so tier 2 never runs. That is the direct cost of not hashing
+  everything on every open.
+- **The first change to a never-hashed file is reported even if the bytes are
+  identical.** There is nothing to compare against, and staying silent would be
+  the wrong way to be wrong. The hash taken then makes every later comparison
+  exact.
+- **A file the session stops referencing is dropped from the baseline
+  silently.** It is a change to the session, not to the file.
+- Personal state in the shared document (theme, selection, active tab) is
+  unchanged by any of this -- see the limitation above.
+
+---
+
 ## Follow-ups (v2)
 - Optional "Save edits" checkbox to avoid sidecar audio.
 - Portable sessions (path remapping dialog).
