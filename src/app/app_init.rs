@@ -454,6 +454,7 @@ impl WavesPreviewer {
             baseline_tracked_count: 0,
             baseline_tracked: Vec::new(),
             session_file_changes: None,
+            comments: Vec::new(),
             show_session_changes_window: false,
             show_session_history_window: false,
             session_history_entries: Vec::new(),

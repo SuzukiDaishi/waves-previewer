@@ -2455,6 +2455,10 @@ impl super::WavesPreviewer {
             tabs,
             active_tab: self.active_tab,
             cached_edits,
+            // Whatever this process knows about. The worker unions in what is
+            // on disk before it writes, so a colleague's comment posted since
+            // we loaded is not dropped by our save.
+            comments: self.comments.clone(),
         };
         Ok((path, project, sidecar_jobs))
     }
@@ -4585,6 +4589,11 @@ impl super::WavesPreviewer {
         self.session_revision = project.revision;
         self.session_conflict = None;
         self.session_changed_on_disk = None;
+        // Replaced outright rather than merged: this is a different document
+        // now, and carrying the previous session's conversation into it would
+        // put comments under files it has never heard of.
+        self.comments = project.comments.clone();
+        super::comments::sort_for_storage(&mut self.comments);
         self.add_recent_session_path(&project_path);
         self.restart_session_watch();
         // What changed in the *referenced files* since this user last opened

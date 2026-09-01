@@ -33,6 +33,7 @@ pub mod channel_routing_ops;
 mod cli_ops;
 mod cli_workspace;
 mod clipboard_ops;
+pub mod comments;
 mod crash_report_ops;
 mod debug_ops;
 pub mod declick;
@@ -1080,6 +1081,10 @@ pub struct WavesPreviewer {
     /// The finished report. Held until the user dismisses it, because a
     /// toast is gone long before they come back to the window.
     session_file_changes: Option<types::SessionFileChanges>,
+    /// The open session's conversation, flat, merged from every writer that
+    /// has touched the document. See `crate::app::comments` for why it is
+    /// flat and how two writers' copies are reconciled.
+    pub(crate) comments: Vec<project::ProjectComment>,
     show_session_changes_window: bool,
     show_session_history_window: bool,
     session_history_entries: Vec<session_store::HistoryEntry>,

@@ -3314,6 +3314,9 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
         tabs: Vec::new(),
         active_tab: None,
         cached_edits: Vec::new(),
+        // A synthetic document built for a render or a query, never written
+        // back over a real session -- so it carries no conversation.
+        comments: Vec::new(),
     })
 }
 
