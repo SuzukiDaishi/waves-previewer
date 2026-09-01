@@ -810,6 +810,7 @@ impl WavesPreviewer {
         self.run_frame_first_save_prompt(ctx);
         self.ui_export_settings_window(ctx);
         self.ui_list_columns_window(ctx);
+        self.ui_status_tags_window(ctx);
         self.ui_shortcuts_window(ctx);
         self.ui_keymap_window(ctx);
         self.ui_licenses_window(ctx);

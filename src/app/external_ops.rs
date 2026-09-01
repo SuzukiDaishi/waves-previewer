@@ -71,6 +71,8 @@ impl WavesPreviewer {
                 note: String::new(),
                 editor_notes: Vec::new(),
                 status: crate::app::types::MediaStatus::Ok,
+                status_id: self.default_status.clone(),
+                tags: None,
                 transcript: None,
                 transcript_document: None,
                 transcript_language: None,

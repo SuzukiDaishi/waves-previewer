@@ -106,6 +106,7 @@ mod spectral_ops;
 mod spectrogram;
 mod spectrogram_jobs;
 mod startup;
+pub(crate) mod status_tags;
 mod tab_ops;
 mod temp_audio_ops;
 mod theme_ops;
@@ -701,6 +702,20 @@ pub struct WavesPreviewer {
     list_columns_window_pos: Option<egui::Pos2>,
     /// Fallback position persisted in prefs for folder/file-only workflows.
     list_columns_window_global_pos: Option<egui::Pos2>,
+    /// Workflow status palette in effect for the open list. Seeded from prefs,
+    /// replaced by a session's own palette when one is opened, so a shared
+    /// `.nwsess` shows its author's labels and colors rather than this
+    /// machine's.
+    pub status_palette: crate::app::status_tags::LabelPalette,
+    /// Workflow tag palette, same lifecycle as `status_palette`.
+    pub tag_palette: crate::app::status_tags::LabelPalette,
+    /// Status stamped on rows as they enter the list (scan, drop, paste).
+    /// `None` leaves new rows unset.
+    pub default_status: Option<std::sync::Arc<str>>,
+    /// Active Statuses & Tags window position, mirrored like the List Columns
+    /// window's.
+    status_tags_window_pos: Option<egui::Pos2>,
+    status_tags_window_global_pos: Option<egui::Pos2>,
     /// User-selected metadata columns. Their keys are stable strings shared
     /// with the metadata CLI and session format.
     metadata_list_columns: Vec<types::MetadataListColumn>,
@@ -973,6 +988,12 @@ pub struct WavesPreviewer {
     export_cfg: ExportConfig,
     show_export_settings: bool,
     show_list_columns_window: bool,
+    show_status_tags_window: bool,
+    /// Which tab the Statuses & Tags window is on (false = Statuses).
+    status_tags_window_on_tags: bool,
+    /// Definition the manager window is asking to delete, with the number of
+    /// rows that would lose it.
+    status_tags_pending_delete: Option<(bool, std::sync::Arc<str>, usize)>,
     show_shortcuts_window: bool,
     show_licenses_window: bool,
     /// Search box contents for the Licenses window, kept across opens.
@@ -1987,6 +2008,11 @@ impl WavesPreviewer {
             note: String::new(),
             editor_notes: Vec::new(),
             status: MediaStatus::Ok,
+            // Every row that enters the list from a scan, a drop or a paste
+            // comes through here, so the default status is stamped once.
+            // Session restore clears it again before applying what was saved.
+            status_id: self.default_status.clone(),
+            tags: None,
             transcript: None,
             transcript_document: None,
             transcript_language: None,
@@ -2172,6 +2198,8 @@ impl WavesPreviewer {
             note: String::new(),
             editor_notes: Vec::new(),
             status: MediaStatus::Ok,
+            status_id: self.default_status.clone(),
+            tags: None,
             transcript: None,
             transcript_document: None,
             transcript_language: None,

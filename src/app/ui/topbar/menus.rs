@@ -409,6 +409,10 @@ impl WavesPreviewer {
                 self.show_list_columns_window = true;
                 ui.close();
             }
+            if ui.button("Statuses & Tags...").clicked() {
+                self.open_status_tags_window(false);
+                ui.close();
+            }
             ui.separator();
             if ui.button("Settings...").clicked() {
                 self.show_export_settings = true;

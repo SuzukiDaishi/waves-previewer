@@ -19,6 +19,7 @@ pub(super) mod regions;
 pub(super) mod session_changes;
 pub(super) mod session_sharing;
 pub(super) mod shortcuts;
+pub(super) mod status_tags;
 pub(super) mod tools;
 pub(super) mod topbar;
 pub(super) mod transcript;

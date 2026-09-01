@@ -137,6 +137,8 @@ struct SessionListEntry {
     path: PathBuf,
     pending_gain_db: f32,
     note: String,
+    status: Option<String>,
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1297,6 +1299,16 @@ fn list_columns(_args: ListColumnsArgs) -> Result<CliCommandOutput> {
             key: "note",
             description: "Session item note",
             enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "status",
+            description: "Workflow status id",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "tags",
+            description: "Workflow tag ids",
+            enabled_by_default: false,
         },
     ];
     Ok(CliCommandOutput {
@@ -3203,6 +3215,8 @@ fn session_entries_from_sources(
                     path,
                     pending_gain_db: 0.0,
                     note: String::new(),
+                    status: None,
+                    tags: Vec::new(),
                 });
             }
         }
@@ -3216,6 +3230,8 @@ fn session_entries_from_sources(
                         path: nested,
                         pending_gain_db: 0.0,
                         note: String::new(),
+                        status: None,
+                        tags: Vec::new(),
                     });
                 }
             }
@@ -3224,6 +3240,8 @@ fn session_entries_from_sources(
                 path,
                 pending_gain_db: 0.0,
                 note: String::new(),
+                status: None,
+                tags: Vec::new(),
             });
         }
     }
@@ -3257,6 +3275,8 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
                     pending_gain_db: entry.pending_gain_db,
                     note: entry.note.clone(),
                     editor_notes: Vec::new(),
+                    status: entry.status.clone(),
+                    tags: entry.tags.clone(),
                 })
                 .collect(),
             sample_rate_overrides: Vec::new(),
@@ -3264,6 +3284,9 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
             format_overrides: Vec::new(),
             virtual_items: Vec::new(),
             transcript_languages: Vec::new(),
+            statuses: Vec::new(),
+            tags: Vec::new(),
+            default_status: None,
         },
         app: ProjectApp {
             theme: "Dark".to_string(),
@@ -3297,10 +3320,12 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
 fn session_list_entries(session: &LoadedSession) -> Vec<SessionListEntry> {
     let mut gains = HashMap::new();
     let mut notes = HashMap::new();
+    let mut labels: HashMap<String, (Option<String>, Vec<String>)> = HashMap::new();
     for item in &session.project.list.items {
         let key = path_key(&project::resolve_path(&item.path, &session.base_dir));
         gains.insert(key.clone(), item.pending_gain_db);
-        notes.insert(key, item.note.clone());
+        notes.insert(key.clone(), item.note.clone());
+        labels.insert(key, (item.status.clone(), item.tags.clone()));
     }
     let raws: Vec<String> = if !session.project.list.items.is_empty() {
         session
@@ -3318,10 +3343,13 @@ fn session_list_entries(session: &LoadedSession) -> Vec<SessionListEntry> {
             let path = project::resolve_path(&raw, &session.base_dir);
             let pending_gain_db = gains.get(&path_key(&path)).copied().unwrap_or(0.0);
             let note = notes.get(&path_key(&path)).cloned().unwrap_or_default();
+            let (status, tags) = labels.get(&path_key(&path)).cloned().unwrap_or_default();
             SessionListEntry {
                 path,
                 pending_gain_db,
                 note,
+                status,
+                tags,
             }
         })
         .collect()
@@ -3537,6 +3565,8 @@ fn list_row_for_entry(
     );
     row.insert("gain".to_string(), json!(entry.pending_gain_db));
     row.insert("note".to_string(), json!(entry.note));
+    row.insert("status".to_string(), json!(entry.status));
+    row.insert("tags".to_string(), json!(entry.tags));
     if let Some(info) = info.as_ref() {
         row.insert("length".to_string(), json!(info.duration_secs));
         row.insert("channels".to_string(), json!(info.channels));
@@ -3591,6 +3621,8 @@ fn project_for_list_render(
                     pending_gain_db: entry.pending_gain_db,
                     note: entry.note.clone(),
                     editor_notes: Vec::new(),
+                    status: entry.status.clone(),
+                    tags: entry.tags.clone(),
                 })
                 .collect();
             session.project.app.list_columns = project_list_columns_from_config(column_config);
@@ -3960,6 +3992,8 @@ fn set_pending_gain_for_session_path(session: &mut LoadedSession, path: &Path, g
         pending_gain_db: gain_db,
         note: String::new(),
         editor_notes: Vec::new(),
+        status: None,
+        tags: Vec::new(),
     });
 }
 
@@ -4799,6 +4833,8 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
         transcript: false,
         transcript_language: false,
         external: false,
+        status: false,
+        tags: false,
         length: false,
         channels: false,
         sample_rate: false,
@@ -4830,6 +4866,8 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
             "folder" => cfg.folder = true,
             "transcript" => cfg.transcript = true,
             "transcript_language" => cfg.transcript_language = true,
+            "status" => cfg.status = true,
+            "tags" => cfg.tags = true,
             "external" => cfg.external = true,
             "length" => cfg.length = true,
             "channels" => cfg.channels = true,
@@ -4868,6 +4906,8 @@ fn project_list_columns_from_config(cfg: ListColumnConfig) -> ProjectListColumns
         transcript: cfg.transcript,
         transcript_language: cfg.transcript_language,
         external: cfg.external,
+        status: cfg.status,
+        tags: cfg.tags,
         length: cfg.length,
         ch: cfg.channels,
         sr: cfg.sample_rate,
@@ -5347,6 +5387,8 @@ fn build_editor_render_session(args: &RenderEditorArgs) -> Result<PathBuf> {
         path: absolute_existing_path(input)?,
         pending_gain_db: 0.0,
         note: String::new(),
+        status: None,
+        tags: Vec::new(),
     }])?;
     let input_path = project
         .list
@@ -5403,6 +5445,8 @@ fn debug_session_target(source: &EditorSourceArgs) -> Result<(PathBuf, bool)> {
         path: absolute_existing_path(input)?,
         pending_gain_db: 0.0,
         note: String::new(),
+        status: None,
+        tags: Vec::new(),
     }])?;
     let input_path = project
         .list

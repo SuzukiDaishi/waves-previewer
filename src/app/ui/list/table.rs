@@ -387,6 +387,8 @@ impl WavesPreviewer {
             "gain" => 80.0,
             "wave" => 150.0,
             "note" => 220.0,
+            "status" => 110.0,
+            "tags" => 160.0,
             _ => 100.0,
         }
     }
@@ -517,6 +519,16 @@ impl WavesPreviewer {
                 C::Wave => {
                     sized_col!("wave", |ui| {
                         ui.label(RichText::new("Wave").strong());
+                    });
+                }
+                C::Status => {
+                    sized_col!("status", |ui| {
+                        ui.label(RichText::new("Status").strong());
+                    });
+                }
+                C::Tags => {
+                    sized_col!("tags", |ui| {
+                        ui.label(RichText::new("Tags").strong());
                     });
                 }
                 C::Note => {

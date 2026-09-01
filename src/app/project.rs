@@ -137,6 +137,27 @@ pub struct ProjectList {
     pub virtual_items: Vec<ProjectVirtualItem>,
     #[serde(default)]
     pub transcript_languages: Vec<ProjectTranscriptLanguage>,
+    /// The status palette this session was authored against. Carried in the
+    /// document so a colleague opening a shared `.nwsess` sees the author's
+    /// labels and colors rather than whatever their own prefs happen to hold.
+    #[serde(default)]
+    pub statuses: Vec<ProjectLabelDef>,
+    /// Tag palette, same reason.
+    #[serde(default)]
+    pub tags: Vec<ProjectLabelDef>,
+    /// Status stamped on rows newly added to this session, by id.
+    #[serde(default)]
+    pub default_status: Option<String>,
+}
+
+/// One status or tag definition as stored in a session.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectLabelDef {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub color: [u8; 3],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -154,6 +175,11 @@ pub struct ProjectListItem {
     pub note: String,
     #[serde(default)]
     pub editor_notes: Vec<EditorNote>,
+    /// Workflow status id, or `None` for a row deliberately left unset.
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -373,6 +399,10 @@ pub struct ProjectListColumns {
     #[serde(default)]
     pub transcript_language: bool,
     pub external: bool,
+    #[serde(default = "default_status_column_visible")]
+    pub status: bool,
+    #[serde(default)]
+    pub tags: bool,
     pub length: bool,
     pub ch: bool,
     pub sr: bool,
@@ -614,6 +644,10 @@ fn default_music_analysis_visible() -> bool {
 }
 
 fn default_note_column_visible() -> bool {
+    true
+}
+
+fn default_status_column_visible() -> bool {
     true
 }
 
@@ -2329,6 +2363,9 @@ files = []
             bit_depth_overrides: Vec::new(),
             format_overrides: Vec::new(),
             transcript_languages: Vec::new(),
+            statuses: Vec::new(),
+            tags: Vec::new(),
+            default_status: None,
             virtual_items: vec![ProjectVirtualItem {
                 path: "virtual://trim_0001".to_string(),
                 display_name: "trim_0001".to_string(),
@@ -2370,6 +2407,9 @@ files = []
             sample_rate_overrides: Vec::new(),
             bit_depth_overrides: Vec::new(),
             format_overrides: Vec::new(),
+            statuses: Vec::new(),
+            tags: Vec::new(),
+            default_status: None,
             transcript_languages: vec![
                 ProjectTranscriptLanguage {
                     path: "a.wav".to_string(),
@@ -2723,6 +2763,8 @@ show_note_labels = false
                     view: Some("Spec".to_string()),
                 },
             ],
+            status: None,
+            tags: Vec::new(),
         });
         project.app.list_columns.order = vec![
             "file".to_string(),
@@ -2753,6 +2795,80 @@ pending_gain_db = 1.5
         let item: ProjectListItem = toml::from_str(raw).expect("legacy list item");
         assert!(item.note.is_empty());
         assert!(item.editor_notes.is_empty());
+    }
+
+    #[test]
+    fn status_and_tag_assignments_and_palettes_roundtrip() {
+        let mut project = deserialize_project(MINIMAL_TOML).unwrap();
+        project.list.statuses = vec![
+            ProjectLabelDef {
+                id: "wip".to_string(),
+                label: "WIP".to_string(),
+                color: [212, 152, 56],
+            },
+            ProjectLabelDef {
+                id: "ok".to_string(),
+                label: "OK".to_string(),
+                color: [76, 160, 96],
+            },
+        ];
+        project.list.tags = vec![ProjectLabelDef {
+            id: "foley".to_string(),
+            label: "Foley".to_string(),
+            color: [78, 132, 210],
+        }];
+        project.list.default_status = Some("wip".to_string());
+        project.list.items.push(ProjectListItem {
+            path: "a.wav".to_string(),
+            pending_gain_db: 0.0,
+            note: String::new(),
+            editor_notes: Vec::new(),
+            status: Some("ok".to_string()),
+            tags: vec!["foley".to_string()],
+        });
+
+        let restored = deserialize_project(&serialize_project(&project).unwrap()).unwrap();
+
+        assert_eq!(restored.list.default_status.as_deref(), Some("wip"));
+        // Palette order is display order, so it has to survive the round trip.
+        let ids: Vec<&str> = restored
+            .list
+            .statuses
+            .iter()
+            .map(|def| def.id.as_str())
+            .collect();
+        assert_eq!(ids, ["wip", "ok"]);
+        assert_eq!(restored.list.statuses[0].label, "WIP");
+        assert_eq!(restored.list.statuses[1].color, [76, 160, 96]);
+        assert_eq!(restored.list.tags[0].id, "foley");
+        let item = &restored.list.items[0];
+        assert_eq!(item.status.as_deref(), Some("ok"));
+        assert_eq!(item.tags, ["foley"]);
+    }
+
+    #[test]
+    fn a_session_written_before_statuses_existed_still_loads() {
+        let item: ProjectListItem = toml::from_str(
+            r#"
+path = "a.wav"
+note = "memo"
+"#,
+        )
+        .expect("legacy list item");
+        assert!(item.status.is_none());
+        assert!(item.tags.is_empty());
+
+        // The whole list block predates the palette too.
+        let list: ProjectList = toml::from_str("files = [\"a.wav\"]").expect("legacy list");
+        assert!(list.statuses.is_empty());
+        assert!(list.tags.is_empty());
+        assert!(list.default_status.is_none());
+
+        // A session saved before the column existed still shows it, the way
+        // `note` was introduced.
+        let columns = &deserialize_project(MINIMAL_TOML).unwrap().app.list_columns;
+        assert!(columns.status);
+        assert!(!columns.tags);
     }
 
     #[test]

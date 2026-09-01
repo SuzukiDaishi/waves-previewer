@@ -137,6 +137,33 @@ impl WavesPreviewer {
         fill: Color32,
         stroke: Color32,
     ) {
+        Self::paint_list_badge(
+            ui,
+            rect,
+            text_height,
+            label,
+            fill,
+            stroke,
+            Color32::WHITE,
+            true,
+        );
+    }
+
+    /// Shared pill used by the Type column and by the Status/Tags columns.
+    /// The type badges are fixed-width codes and read better monospaced;
+    /// status and tag labels are prose the user typed, so they take the
+    /// proportional font and are elided when the column is too narrow.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn paint_list_badge(
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        text_height: f32,
+        label: &str,
+        fill: Color32,
+        stroke: Color32,
+        text: Color32,
+        monospace: bool,
+    ) {
         ui.painter().rect_filled(rect, 5.0, fill);
         ui.painter().rect_stroke(
             rect,
@@ -144,13 +171,28 @@ impl WavesPreviewer {
             egui::Stroke::new(1.0, stroke),
             egui::StrokeKind::Outside,
         );
-        let fid = egui::FontId::monospace((text_height * 0.88).max(9.0));
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            label,
-            fid,
+        let size = (text_height * 0.88).max(9.0);
+        let fid = if monospace {
+            egui::FontId::monospace(size)
+        } else {
+            egui::FontId::proportional(size)
+        };
+        let galley =
+            ui.painter()
+                .layout(label.to_string(), fid, text, (rect.width() - 8.0).max(1.0));
+        ui.painter()
+            .galley(rect.center() - galley.size() * 0.5, galley, text);
+    }
+
+    /// Width one badge needs for `label`, capped so a long label cannot push
+    /// the rest of the row out of view.
+    pub(super) fn list_badge_width(ui: &egui::Ui, text_height: f32, label: &str) -> f32 {
+        let size = (text_height * 0.88).max(9.0);
+        let galley = ui.painter().layout_no_wrap(
+            label.to_string(),
+            egui::FontId::proportional(size),
             Color32::WHITE,
         );
+        (galley.size().x + 12.0).clamp(20.0, 160.0)
     }
 }

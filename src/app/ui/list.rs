@@ -1,5 +1,6 @@
 mod art;
 mod badges;
+mod label_cell;
 mod navigation;
 mod row_menu;
 mod table;
@@ -1304,6 +1305,32 @@ impl crate::app::WavesPreviewer {
                                                 before,
                                             );
                                         }
+                                    }
+                                });
+                            }
+                            C::Status | C::Tags => {
+                                let is_tags = sorted_col == C::Tags;
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let outcome = if is_tags {
+                                        self.ui_list_tags_cell(ui, &path_owned, row_h, text_height)
+                                    } else {
+                                        self.ui_list_status_cell(
+                                            ui,
+                                            &path_owned,
+                                            row_h,
+                                            text_height,
+                                        )
+                                    };
+                                    if outcome.interacted_with_control {
+                                        interacted_with_control = true;
+                                    }
+                                    if let Some(on_tags) = outcome.open_manager {
+                                        self.open_status_tags_window(on_tags);
+                                        interacted_with_control = true;
                                     }
                                 });
                             }

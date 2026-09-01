@@ -69,6 +69,47 @@ missing = true
 error = "Source file missing"
 ```
 
+### Workflow statuses and tags
+
+`[list]` carries the label palettes the session was authored against, and each
+`[[list.items]]` entry carries what that row was assigned. The palettes are in
+the document, not only in app preferences, so a `.nwsess` on a shared drive
+reads correctly on a machine whose own preferences hold a different set.
+
+```toml
+[list]
+default_status = "wip"
+
+[[list.statuses]]
+id = "wip"
+label = "WIP"
+color = [212, 152, 56]
+
+[[list.tags]]
+id = "foley"
+label = "Foley"
+color = [78, 132, 210]
+
+[[list.items]]
+path = "voice\\line_001.wav"
+status = "ok"
+tags = ["foley"]
+```
+
+- `id` is a slug derived from the label when it was created, never a counter:
+  a shared session has more than one writer, and two people adding a label at
+  once would otherwise claim the same number. Renaming a label or changing its
+  color leaves the id, and therefore every assignment, untouched.
+- `status` is absent on a row with no status. A row is only written at all
+  when it has something to say (a gain, a note, an editor note, a status or a
+  tag), and reading a session clears every row's labels before applying what
+  was stored -- so a row deliberately left with no status is not re-stamped
+  with `default_status` on the next open.
+- An `id` that no palette entry defines is kept and re-saved rather than
+  dropped, and shows in the list as a grey badge carrying the raw id.
+- All five fields are optional; a session written before they existed loads
+  with an empty palette and no assignments.
+
 ### Notes
 - `path_mode`: source/user paths use one policy for the entire session:
   `absolute` or `relative`. Per-file mixing is not written. New sessions

@@ -656,6 +656,8 @@ mod tests {
             note: String::new(),
             editor_notes: Vec::new(),
             status: MediaStatus::Ok,
+            status_id: None,
+            tags: None,
             transcript: None,
             transcript_document: None,
             transcript_language: None,

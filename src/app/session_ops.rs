@@ -1893,12 +1893,16 @@ impl super::WavesPreviewer {
             if item.pending_gain_db.abs() > 0.0001
                 || !item.note.is_empty()
                 || !item.editor_notes.is_empty()
+                || item.status_id.is_some()
+                || !item.tags().is_empty()
             {
                 list_items.push(ProjectListItem {
                     path: session_path(&item.path, base_dir, path_mode),
                     pending_gain_db: item.pending_gain_db,
                     note: item.note.clone(),
                     editor_notes: item.editor_notes.clone(),
+                    status: item.status_id.as_deref().map(str::to_string),
+                    tags: item.tags().iter().map(|tag| tag.to_string()).collect(),
                 });
             }
         }
@@ -2127,6 +2131,9 @@ impl super::WavesPreviewer {
             format_overrides,
             virtual_items,
             transcript_languages,
+            statuses: crate::app::status_tags::palette_to_project(&self.status_palette),
+            tags: crate::app::status_tags::palette_to_project(&self.tag_palette),
+            default_status: self.default_status.as_deref().map(str::to_string),
         };
         let key_column = self
             .external_key_index
@@ -2210,6 +2217,8 @@ impl super::WavesPreviewer {
                 transcript: self.list_columns.transcript,
                 transcript_language: self.list_columns.transcript_language,
                 external: self.list_columns.external,
+                status: self.list_columns.status,
+                tags: self.list_columns.tags,
                 length: self.list_columns.length,
                 ch: self.list_columns.channels,
                 sr: self.list_columns.sample_rate,
@@ -3547,6 +3556,8 @@ impl super::WavesPreviewer {
             channels: project.app.list_columns.ch,
             sample_rate: project.app.list_columns.sr,
             bits: project.app.list_columns.bits,
+            status: project.app.list_columns.status,
+            tags: project.app.list_columns.tags,
             bit_rate: project.app.list_columns.bit_rate,
             peak: project.app.list_columns.peak,
             lufs: project.app.list_columns.lufs,
@@ -4051,14 +4062,59 @@ impl super::WavesPreviewer {
             item.audio_asset = descriptor;
         }
 
+        // The rows were built through `make_media_item`, which stamps the
+        // default status on everything it makes. Clear that first: a row the
+        // user deliberately set back to "no status" saves no assignment, and
+        // without this it would come back wearing the default on every open.
+        self.clear_all_row_labels();
         for item in project.list.items.iter() {
             let path = resolve_path(&item.path, &base_dir);
+            let status = item
+                .status
+                .as_deref()
+                .map(|id| std::sync::Arc::<str>::from(id));
+            let tags: Vec<std::sync::Arc<str>> = item
+                .tags
+                .iter()
+                .map(|id| std::sync::Arc::<str>::from(id.as_str()))
+                .collect();
             if let Some(list_item) = self.item_for_path_mut(&path) {
                 list_item.pending_gain_db = item.pending_gain_db;
                 list_item.note = item.note.clone();
                 list_item.editor_notes = item.editor_notes.clone();
+                list_item.status_id = status;
+                list_item.set_tags(tags);
             }
         }
+        // Adopt the session's own palettes, so a shared `.nwsess` shows its
+        // author's labels and colors rather than this machine's.
+        //
+        // A session that carries no palette at all -- every session written
+        // before statuses existed -- deliberately leaves the current one
+        // alone. Replacing it with an empty palette would wipe the set the
+        // user built in their preferences, and the very next `save_prefs`
+        // would make that permanent.
+        if !project.list.statuses.is_empty() {
+            self.adopt_palette(
+                false,
+                crate::app::status_tags::palette_from_project(&project.list.statuses),
+            );
+            self.default_status = project
+                .list
+                .default_status
+                .as_deref()
+                .map(std::sync::Arc::<str>::from);
+        }
+        if !project.list.tags.is_empty() {
+            self.adopt_palette(
+                true,
+                crate::app::status_tags::palette_from_project(&project.list.tags),
+            );
+        }
+        // Every id the rows use must resolve to something: a session that
+        // assigns a label its palette block omitted keeps it rather than
+        // losing it on the next save. Also re-interns the row ids.
+        self.ensure_label_defs_for_rows();
         for item in project.list.transcript_languages.iter() {
             let path = resolve_path(&item.path, &base_dir);
             self.set_transcript_language_for_path(&path, Some(item.language.clone()));
