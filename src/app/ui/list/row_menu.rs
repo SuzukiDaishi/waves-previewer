@@ -50,6 +50,79 @@ impl WavesPreviewer {
             self.trigger_save_selected();
             ui.close();
         }
+        ui.separator();
+        // Bulk assignment: the whole selection at once, which the per-row
+        // dropdown in the Status/Tags cell also does but is easy to miss.
+        let label_targets = selected.clone();
+        let status_defs = self.status_palette.defs.clone();
+        let current_status = self.shared_status_for_paths(&label_targets);
+        let mut status_choice: Option<Option<String>> = None;
+        ui.add_enabled_ui(has_selection, |ui| {
+            ui.menu_button("Status", |ui| {
+                if ui
+                    .selectable_label(has_selection && current_status.is_none(), "— (none)")
+                    .clicked()
+                {
+                    status_choice = Some(None);
+                    ui.close();
+                }
+                if status_defs.is_empty() {
+                    ui.label(egui::RichText::new("No statuses defined yet").weak());
+                }
+                for def in &status_defs {
+                    let selected = current_status.as_deref() == Some(&*def.id);
+                    if Self::label_menu_entry(ui, def, selected).clicked() {
+                        status_choice = Some(Some(def.id.to_string()));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Edit Statuses...").clicked() {
+                    self.open_status_tags_window(false);
+                    ui.close();
+                }
+            });
+        });
+        if let Some(choice) = status_choice {
+            self.set_status_for_paths(&label_targets, choice.as_deref());
+        }
+
+        let tag_defs = self.tag_palette.defs.clone();
+        // "On" means every selected row already has it, so clicking removes it
+        // from all of them; a mixed selection adds it to the rest.
+        let tag_state: Vec<bool> = tag_defs
+            .iter()
+            .map(|def| {
+                !label_targets.is_empty()
+                    && label_targets.iter().all(|path| {
+                        self.item_for_path(path)
+                            .is_some_and(|item| item.has_tag(&def.id))
+                    })
+            })
+            .collect();
+        let mut tag_toggle: Option<(String, bool)> = None;
+        ui.add_enabled_ui(has_selection, |ui| {
+            ui.menu_button("Tags", |ui| {
+                if tag_defs.is_empty() {
+                    ui.label(egui::RichText::new("No tags defined yet").weak());
+                }
+                for (def, on) in tag_defs.iter().zip(&tag_state) {
+                    if Self::label_menu_entry(ui, def, *on).clicked() {
+                        tag_toggle = Some((def.id.to_string(), !*on));
+                    }
+                }
+                ui.separator();
+                if ui.button("Edit Tags...").clicked() {
+                    self.open_status_tags_window(true);
+                    ui.close();
+                }
+            });
+        });
+        if let Some((id, on)) = tag_toggle {
+            self.set_tag_for_paths(&label_targets, &id, on);
+        }
+        ui.separator();
+
         let effect_targets = selected.clone();
         ui.menu_button("Effect", |ui| {
             let entries = self.effect_graph.library.entries.clone();

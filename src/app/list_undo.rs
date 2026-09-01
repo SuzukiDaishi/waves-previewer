@@ -322,6 +322,39 @@ impl crate::app::WavesPreviewer {
         });
     }
 
+    /// Everything an `Update` undo entry has to be able to put back. The two
+    /// recorders below both ask "did any of this move?" before pushing an
+    /// action, so a field missing here is a field whose edit is silently not
+    /// undoable — which is what kept list notes out of the undo stack.
+    fn list_undo_fingerprint(item: &ListUndoItem) -> ListUndoFingerprint<'_> {
+        ListUndoFingerprint {
+            pending_gain_db: item.item.pending_gain_db,
+            lufs_override: item.lufs_override,
+            lufs_deadline: item.lufs_deadline,
+            sample_rate_override: item.sample_rate_override,
+            bit_depth_override: item.bit_depth_override,
+            format_override: item.format_override.as_deref(),
+            status_id: item.item.status_id.as_deref(),
+            tags: item.item.tags().iter().map(|tag| &**tag).collect(),
+        }
+    }
+
+    /// Whether the batch changed anything worth an undo entry. A path that
+    /// only appears on one side counts as a change.
+    fn list_undo_items_differ(before: &[ListUndoItem], after: &[ListUndoItem]) -> bool {
+        use std::collections::HashMap;
+        let before_map: HashMap<&PathBuf, ListUndoFingerprint<'_>> = before
+            .iter()
+            .map(|item| (&item.item.path, Self::list_undo_fingerprint(item)))
+            .collect();
+        after
+            .iter()
+            .any(|item| match before_map.get(&item.item.path) {
+                Some(previous) => previous.differs_from(&Self::list_undo_fingerprint(item)),
+                None => true,
+            })
+    }
+
     pub(super) fn record_list_update_from_paths(
         &mut self,
         paths: &[PathBuf],
@@ -332,52 +365,7 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let after_items = self.capture_list_undo_items_by_paths(paths);
-        use std::collections::HashMap;
-        let mut before_map: HashMap<
-            &PathBuf,
-            (
-                f32,
-                Option<f32>,
-                Option<std::time::Instant>,
-                Option<u32>,
-                Option<crate::wave::WavBitDepth>,
-                Option<String>,
-            ),
-        > = HashMap::new();
-        for item in &before_items {
-            before_map.insert(
-                &item.item.path,
-                (
-                    item.item.pending_gain_db,
-                    item.lufs_override,
-                    item.lufs_deadline,
-                    item.sample_rate_override,
-                    item.bit_depth_override,
-                    item.format_override.clone(),
-                ),
-            );
-        }
-        let mut changed = false;
-        for item in &after_items {
-            if let Some((gain, lufs, dl, sr_override, bit_override, format_override)) =
-                before_map.get(&item.item.path)
-            {
-                if (item.item.pending_gain_db - gain).abs() > 1e-6
-                    || item.lufs_override != *lufs
-                    || item.lufs_deadline != *dl
-                    || item.sample_rate_override != *sr_override
-                    || item.bit_depth_override != *bit_override
-                    || item.format_override.as_ref() != format_override.as_ref()
-                {
-                    changed = true;
-                    break;
-                }
-            } else {
-                changed = true;
-                break;
-            }
-        }
-        if !changed {
+        if !Self::list_undo_items_differ(&before_items, &after_items) {
             return;
         }
         let after = self.capture_list_selection_snapshot();
@@ -400,52 +388,7 @@ impl crate::app::WavesPreviewer {
         if before_items.is_empty() || after_items.is_empty() {
             return;
         }
-        use std::collections::HashMap;
-        let mut before_map: HashMap<
-            &PathBuf,
-            (
-                f32,
-                Option<f32>,
-                Option<std::time::Instant>,
-                Option<u32>,
-                Option<crate::wave::WavBitDepth>,
-                Option<String>,
-            ),
-        > = HashMap::new();
-        for item in &before_items {
-            before_map.insert(
-                &item.item.path,
-                (
-                    item.item.pending_gain_db,
-                    item.lufs_override,
-                    item.lufs_deadline,
-                    item.sample_rate_override,
-                    item.bit_depth_override,
-                    item.format_override.clone(),
-                ),
-            );
-        }
-        let mut changed = false;
-        for item in &after_items {
-            if let Some((gain, lufs, dl, sr_override, bit_override, format_override)) =
-                before_map.get(&item.item.path)
-            {
-                if (item.item.pending_gain_db - gain).abs() > 1e-6
-                    || item.lufs_override != *lufs
-                    || item.lufs_deadline != *dl
-                    || item.sample_rate_override != *sr_override
-                    || item.bit_depth_override != *bit_override
-                    || item.format_override.as_ref() != format_override.as_ref()
-                {
-                    changed = true;
-                    break;
-                }
-            } else {
-                changed = true;
-                break;
-            }
-        }
-        if !changed {
+        if !Self::list_undo_items_differ(&before_items, &after_items) {
             return;
         }
         let after = self.capture_list_selection_snapshot();
@@ -457,5 +400,31 @@ impl crate::app::WavesPreviewer {
             before,
             after,
         });
+    }
+}
+
+/// Snapshot of the per-row fields an `Update` undo entry restores.
+struct ListUndoFingerprint<'a> {
+    pending_gain_db: f32,
+    lufs_override: Option<f32>,
+    lufs_deadline: Option<std::time::Instant>,
+    sample_rate_override: Option<u32>,
+    bit_depth_override: Option<crate::wave::WavBitDepth>,
+    format_override: Option<&'a str>,
+    status_id: Option<&'a str>,
+    tags: Vec<&'a str>,
+}
+
+impl ListUndoFingerprint<'_> {
+    fn differs_from(&self, other: &Self) -> bool {
+        // Gain is the one float, so it gets a tolerance; the rest are exact.
+        (self.pending_gain_db - other.pending_gain_db).abs() > 1e-6
+            || self.lufs_override != other.lufs_override
+            || self.lufs_deadline != other.lufs_deadline
+            || self.sample_rate_override != other.sample_rate_override
+            || self.bit_depth_override != other.bit_depth_override
+            || self.format_override != other.format_override
+            || self.status_id != other.status_id
+            || self.tags != other.tags
     }
 }

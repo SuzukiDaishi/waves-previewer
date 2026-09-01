@@ -830,9 +830,64 @@ impl WavesPreviewer {
             Self::normalize_plugin_search_paths(&mut self.plugin_search_paths);
         }
         self.set_recent_sessions_from_prefs(recent_sessions);
+        self.apply_label_palettes_from_prefs_text(&text);
         self.sanitize_transcript_ai_config();
         self.push_blank_threshold_to_meta_pool();
         self.apply_effective_volume();
+    }
+
+    /// Parse just the status/tag palette lines out of a prefs file and adopt
+    /// them. Shared by the full prefs load and by the manager window's "Load
+    /// global default", so there is one definition of what those lines mean.
+    ///
+    /// A file that names no `status_def=` keeps the built-in starter palette;
+    /// one that names any is authoritative, so a status deleted in the UI
+    /// stays deleted instead of being resurrected on the next launch.
+    pub(super) fn apply_label_palettes_from_prefs_text(&mut self, text: &str) {
+        use crate::app::status_tags::{decode_def, LabelPalette};
+        let mut statuses = LabelPalette::default();
+        let mut tags = LabelPalette::default();
+        let mut saw_status = false;
+        let mut default_status: Option<String> = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("status_def=") {
+                if let Some((id, label, color)) = decode_def(rest) {
+                    saw_status = true;
+                    statuses.insert_stored(&id, &label, color);
+                }
+            } else if let Some(rest) = line.strip_prefix("tag_def=") {
+                if let Some((id, label, color)) = decode_def(rest) {
+                    tags.insert_stored(&id, &label, color);
+                }
+            } else if let Some(rest) = line.strip_prefix("default_status=") {
+                let value = rest.trim();
+                default_status = (!value.is_empty()).then(|| value.to_string());
+            }
+        }
+        if saw_status {
+            self.adopt_palette(false, statuses);
+        }
+        self.adopt_palette(true, tags);
+        // Resolved last: `default_status=` may sit above the `status_def=`
+        // line that defines the id it names.
+        self.default_status = default_status
+            .as_deref()
+            .and_then(|id| self.status_palette.interned(id));
+    }
+
+    /// Replace the in-memory palettes with the ones saved in prefs.
+    pub(super) fn load_label_palettes_from_prefs(&mut self) {
+        let Some(path) = Self::prefs_path() else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        self.apply_label_palettes_from_prefs_text(&text);
+        // Rows may still point at labels the global palette does not define;
+        // keep those visible rather than blanking the column.
+        self.ensure_label_defs_for_rows();
     }
 
     pub(super) fn save_prefs(&self) {
@@ -1210,6 +1265,20 @@ zoo_flip_manual={}\n",
             out.push_str(&line);
             out.push('\n');
         }
+        // Palette order matters, so these go out in order rather than sorted.
+        for def in &self.status_palette.defs {
+            out.push_str("status_def=");
+            out.push_str(&crate::app::status_tags::encode_def(def));
+            out.push('\n');
+        }
+        for def in &self.tag_palette.defs {
+            out.push_str("tag_def=");
+            out.push_str(&crate::app::status_tags::encode_def(def));
+            out.push('\n');
+        }
+        out.push_str("default_status=");
+        out.push_str(self.default_status.as_deref().unwrap_or(""));
+        out.push('\n');
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

@@ -3481,6 +3481,69 @@ impl super::WavesPreviewer {
         self.external_show_unmatched
     }
 
+    // ---- Workflow statuses and tags -------------------------------------
+
+    /// Add a status definition and return the stable id it was given.
+    pub fn test_add_status(&mut self, label: &str, color: [u8; 3]) -> String {
+        self.status_palette.add(label, color).to_string()
+    }
+
+    pub fn test_add_tag(&mut self, label: &str, color: [u8; 3]) -> String {
+        self.tag_palette.add(label, color).to_string()
+    }
+
+    /// Stamp `id` on rows as they enter the list; `None` turns that off.
+    pub fn test_set_default_status(&mut self, id: Option<&str>) {
+        self.default_status = id.and_then(|id| self.status_palette.interned(id));
+    }
+
+    pub fn test_status_for_path(&self, path: &Path) -> Option<String> {
+        self.item_for_path(path)
+            .and_then(|item| item.status_id.as_deref().map(str::to_string))
+    }
+
+    pub fn test_tags_for_path(&self, path: &Path) -> Vec<String> {
+        self.item_for_path(path)
+            .map(|item| item.tags().iter().map(|tag| tag.to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn test_set_status_for_paths(&mut self, paths: &[PathBuf], id: Option<&str>) {
+        self.set_status_for_paths(paths, id);
+    }
+
+    pub fn test_set_tag_for_paths(&mut self, paths: &[PathBuf], id: &str, on: bool) {
+        self.set_tag_for_paths(paths, id, on);
+    }
+
+    pub fn test_remove_status_def(&mut self, id: &str) {
+        self.remove_label_def(false, id);
+    }
+
+    pub fn test_status_label(&self, id: &str) -> String {
+        self.status_palette.label_for(id)
+    }
+
+    pub fn test_status_ids(&self) -> Vec<String> {
+        self.status_palette
+            .defs
+            .iter()
+            .map(|def| def.id.to_string())
+            .collect()
+    }
+
+    pub fn test_open_status_tags_window(&mut self, on_tags: bool) {
+        self.open_status_tags_window(on_tags);
+    }
+
+    pub fn test_set_status_tags_window_tab(&mut self, on_tags: bool) {
+        self.status_tags_window_on_tags = on_tags;
+    }
+
+    pub fn test_default_status(&self) -> Option<String> {
+        self.default_status.as_deref().map(str::to_string)
+    }
+
     pub fn test_save_session_to(&mut self, path: &Path) -> bool {
         self.save_project_as_blocking(path.to_path_buf()).is_ok()
     }

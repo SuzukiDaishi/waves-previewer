@@ -43,6 +43,7 @@ Repository Layout
     - `session_watch.rs`: polling probe that notices when somebody else saves the open session. Reports only -- reloading is the user's decision, because an automatic reload discards unsaved edits.
     - `session_store.rs`: per-user SQLite holding what a session's referenced files looked like at this person's last open, and the local history of the session document. It is a cache, never user data -- deleting it must cost nothing but one silent re-baseline. All of it blocks; it lives on its own writer thread.
     - `session_baseline.rs`: the two-tier "what changed since you last opened this" scan -- stat everything, hash only what moved -- plus the background pass that gives never-hashed files a hash so later comparisons are exact.
+    - `status_tags.rs`: the per-row workflow labels -- one `Status` and any number of `Tags`. Holds the two palettes, the slug ids rows point at (derived from the label, never a counter, because a shared session has more than one writer), and the assignment edits. Rows store `Arc<str>` clones of the palette's ids, so a million rows sharing a status share one allocation. `ui/status_tags.rs` is the manager window; `ui/list/label_cell.rs` is the two list cells.
     - `theme_ops.rs`: theme + prefs load/save.
     - `scan_ops.rs`: folder scan job orchestration + results apply.
     - `transcript_ops.rs`: transcript seek handling.

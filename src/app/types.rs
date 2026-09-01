@@ -294,6 +294,14 @@ pub struct MediaItem {
     /// Timeline annotations authored from the Editor Note inspector tool.
     pub editor_notes: Vec<EditorNote>,
     pub status: MediaStatus,
+    /// The row's workflow status, as a stable id into `status_palette`.
+    /// `Arc<str>` cloned from the palette so every row sharing a status
+    /// shares one allocation, the way `display_folder` is interned.
+    pub status_id: Option<std::sync::Arc<str>>,
+    /// Workflow tags, as stable ids into `tag_palette`. Boxed for the same
+    /// reason `external` is: a bare `Vec` costs 24 bytes on every row, and
+    /// almost none of a freshly loaded 1M-file list is tagged.
+    pub tags: Option<Box<Vec<std::sync::Arc<str>>>>,
     /// Arc so cloning a `MediaItem` (the list view clones one per visible row)
     /// does not deep-copy the full transcript text and segments.
     pub transcript: Option<Arc<Transcript>>,
@@ -321,6 +329,37 @@ impl MediaItem {
 
     pub fn clear_external(&mut self) {
         self.external = None;
+    }
+
+    /// The row's tags, or an empty slice when it has none. Keeps the `Box`
+    /// out of every caller.
+    pub fn tags(&self) -> &[std::sync::Arc<str>] {
+        self.tags.as_deref().map_or(&[], Vec::as_slice)
+    }
+
+    pub fn has_tag(&self, id: &str) -> bool {
+        self.tags().iter().any(|tag| &**tag == id)
+    }
+
+    /// Replace the tag set, dropping the allocation when it ends up empty so
+    /// an untagged row costs the same as one that was never tagged.
+    pub fn set_tags(&mut self, tags: Vec<std::sync::Arc<str>>) {
+        self.tags = (!tags.is_empty()).then(|| Box::new(tags));
+    }
+
+    /// Add or remove one tag. `id` is the palette's own `Arc`, so adding
+    /// shares its allocation rather than copying the string per row.
+    pub fn set_tag(&mut self, id: &std::sync::Arc<str>, on: bool) {
+        let mut tags = self.tags.take().map_or_else(Vec::new, |boxed| *boxed);
+        let at = tags.iter().position(|tag| tag == id);
+        match (on, at) {
+            (true, None) => tags.push(std::sync::Arc::clone(id)),
+            (false, Some(index)) => {
+                tags.remove(index);
+            }
+            _ => {}
+        }
+        self.set_tags(tags);
     }
 }
 
@@ -546,6 +585,8 @@ pub enum ColumnId {
     TranscriptLanguage,
     External,
     TypeBadge,
+    Status,
+    Tags,
     Length,
     Channels,
     SampleRate,
@@ -629,6 +670,8 @@ impl ColumnId {
         ColumnId::TranscriptLanguage,
         ColumnId::External,
         ColumnId::TypeBadge,
+        ColumnId::Status,
+        ColumnId::Tags,
         ColumnId::Length,
         ColumnId::Channels,
         ColumnId::SampleRate,
@@ -663,6 +706,8 @@ impl ColumnId {
             ColumnId::TranscriptLanguage => "transcript_language",
             ColumnId::External => "external",
             ColumnId::TypeBadge => "type_badge",
+            ColumnId::Status => "status",
+            ColumnId::Tags => "tags",
             ColumnId::Length => "length",
             ColumnId::Channels => "channels",
             ColumnId::SampleRate => "sample_rate",
@@ -702,6 +747,8 @@ impl ColumnId {
             ColumnId::TranscriptLanguage => "Language",
             ColumnId::External => "External",
             ColumnId::TypeBadge => "Type",
+            ColumnId::Status => "Status",
+            ColumnId::Tags => "Tags",
             ColumnId::Length => "Length",
             ColumnId::Channels => "Channels",
             ColumnId::SampleRate => "Sample Rate",
@@ -739,6 +786,8 @@ impl ColumnId {
             ColumnId::TranscriptLanguage => cols.transcript_language,
             ColumnId::External => cols.external,
             ColumnId::TypeBadge => cols.type_badge,
+            ColumnId::Status => cols.status,
+            ColumnId::Tags => cols.tags,
             ColumnId::Length => cols.length,
             ColumnId::Channels => cols.channels,
             ColumnId::SampleRate => cols.sample_rate,
@@ -774,6 +823,8 @@ impl ColumnId {
             ColumnId::TranscriptLanguage => cols.transcript_language = enabled,
             ColumnId::External => cols.external = enabled,
             ColumnId::TypeBadge => cols.type_badge = enabled,
+            ColumnId::Status => cols.status = enabled,
+            ColumnId::Tags => cols.tags = enabled,
             ColumnId::Length => cols.length = enabled,
             ColumnId::Channels => cols.channels = enabled,
             ColumnId::SampleRate => cols.sample_rate = enabled,
@@ -822,6 +873,10 @@ pub struct ListColumnConfig {
     pub transcript: bool,
     pub transcript_language: bool,
     pub external: bool,
+    /// Single workflow status per row, chosen from `status_palette`.
+    pub status: bool,
+    /// Any number of workflow tags per row, from `tag_palette`.
+    pub tags: bool,
     pub length: bool,
     pub channels: bool,
     pub sample_rate: bool,
@@ -859,6 +914,8 @@ impl Default for ListColumnConfig {
             transcript: false,
             transcript_language: false,
             external: true,
+            status: true,
+            tags: false,
             length: true,
             channels: true,
             sample_rate: true,

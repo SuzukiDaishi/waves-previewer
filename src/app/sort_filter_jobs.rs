@@ -589,6 +589,8 @@ mod tests {
             note: note.to_string(),
             editor_notes: Vec::new(),
             status: super::super::types::MediaStatus::Ok,
+            status_id: None,
+            tags: None,
             transcript: None,
             transcript_document: None,
             transcript_language: None,
