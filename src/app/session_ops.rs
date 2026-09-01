@@ -36,6 +36,11 @@ pub(super) struct ParsedSession {
     /// commit unless the file still matches, so another person's save in the
     /// meantime is reported rather than overwritten.
     pub fingerprint: session_sync::SessionFingerprint,
+    /// The same document hashed without its conversation or its save stamp,
+    /// so a later change on disk can be classified as "somebody commented"
+    /// rather than "somebody saved". Computed here because the alternative
+    /// is a full re-serialize on the UI thread.
+    pub comment_free_fingerprint: session_sync::SessionFingerprint,
     pub path_repair: SessionPathRepair,
     pub session_path_mode: SessionPathMode,
     pub base_dir: PathBuf,
@@ -2485,6 +2490,7 @@ impl super::WavesPreviewer {
         project: &mut ProjectFile,
         jobs: &[crate::app::types::SessionSidecarJob],
         expected: Option<session_sync::SessionFingerprint>,
+        expected_comment_free: Option<session_sync::SessionFingerprint>,
     ) -> Result<crate::app::types::SessionSaveOutcome, String> {
         use crate::app::types::{SessionSaveOutcome, SidecarSlot};
 
@@ -2494,7 +2500,9 @@ impl super::WavesPreviewer {
         // is already going to be refused.
         let disk = session_sync::read_session_state(path)
             .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
-        if let Some(conflict) = Self::session_conflict_from(path, &disk, expected) {
+        if let Some(conflict) =
+            Self::session_conflict_from(path, &disk, expected, expected_comment_free)
+        {
             return Ok(SessionSaveOutcome::Conflict(conflict));
         }
 
@@ -2632,9 +2640,27 @@ impl super::WavesPreviewer {
         // on the document is replaced.
         let disk = session_sync::read_session_state(path)
             .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
-        if let Some(conflict) = Self::session_conflict_from(path, &disk, expected) {
+        if let Some(conflict) =
+            Self::session_conflict_from(path, &disk, expected, expected_comment_free)
+        {
             cleanup(&staged);
             return Ok(SessionSaveOutcome::Conflict(conflict));
+        }
+
+        // Take the conversation on disk with us. The bytes are already in
+        // hand for the check above, and comments merge as a set union, so a
+        // colleague's post since we loaded costs nothing to carry -- while
+        // dropping it would be silent data loss on exactly the path a user
+        // reaches by choosing Overwrite. A document we cannot parse (only
+        // possible on a deliberate overwrite, since the check above refuses
+        // everything else) has nothing to contribute, and is not a reason to
+        // fail a save.
+        if let Some(bytes) = disk.bytes() {
+            if let Ok(theirs) = std::str::from_utf8(bytes).map_err(|_| ()).and_then(|text| {
+                super::project::deserialize_project(text).map_err(|_| ())
+            }) {
+                super::comments::merge_into(&mut project.comments, theirs.comments);
+            }
         }
 
         // Stamp the document against what is actually on disk, so the
@@ -2691,6 +2717,8 @@ impl super::WavesPreviewer {
 
         Self::sweep_stale_session_temps(path);
 
+        let comment_free_fingerprint =
+            super::project::comment_free_fingerprint(project).map_err(|e| e.to_string())?;
         Ok(SessionSaveOutcome::Saved {
             path: path.to_path_buf(),
             fingerprint: session_sync::SessionFingerprint::of_bytes(text.as_bytes()),
@@ -2701,6 +2729,8 @@ impl super::WavesPreviewer {
             previous_saved_by: stamp.saved_by.clone(),
             previous_saved_at: stamp.saved_at.clone(),
             committed_assets,
+            comments: std::mem::take(&mut project.comments),
+            comment_free_fingerprint,
         })
     }
 
@@ -2733,10 +2763,20 @@ impl super::WavesPreviewer {
 
     /// Decide whether the document on disk is still the one this save is
     /// based on. `None` means "go ahead".
+    ///
+    /// `expected_comment_free` is the same document hashed without its
+    /// conversation, and it is what keeps a colleague's comment from turning
+    /// the author's next Ctrl+S into a conflict prompt. Posting rewrites the
+    /// shared file, so without this every comment would leave everyone else's
+    /// save refused until they reloaded -- and reloading discards unsaved
+    /// edits. A document that differs from ours *only* in what people said is
+    /// not a document to be afraid of overwriting: the save merges the
+    /// conversation in rather than replacing it.
     fn session_conflict_from(
         path: &Path,
         disk: &session_sync::SessionDiskState,
         expected: Option<session_sync::SessionFingerprint>,
+        expected_comment_free: Option<session_sync::SessionFingerprint>,
     ) -> Option<crate::app::types::SessionConflict> {
         let expected = expected?;
         match disk.fingerprint() {
@@ -2745,6 +2785,9 @@ impl super::WavesPreviewer {
             None => None,
             Some(actual) if actual == expected => None,
             Some(_) => {
+                if Self::disk_differs_only_by_comments(disk, expected_comment_free) {
+                    return None;
+                }
                 let stamp = disk.stamp();
                 Some(crate::app::types::SessionConflict {
                     path: path.to_path_buf(),
@@ -2754,6 +2797,32 @@ impl super::WavesPreviewer {
                 })
             }
         }
+    }
+
+    /// Whether the only thing that moved on disk is the conversation.
+    ///
+    /// Deliberately conservative: a document we cannot read, or a caller with
+    /// no comment-free hash to compare against, answers "no" and the save is
+    /// refused as before. Being wrong in that direction costs a prompt; being
+    /// wrong the other way costs somebody's work.
+    fn disk_differs_only_by_comments(
+        disk: &session_sync::SessionDiskState,
+        expected_comment_free: Option<session_sync::SessionFingerprint>,
+    ) -> bool {
+        let Some(expected_comment_free) = expected_comment_free else {
+            return false;
+        };
+        let Some(bytes) = disk.bytes() else {
+            return false;
+        };
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return false;
+        };
+        let Ok(mut theirs) = deserialize_project(text) else {
+            return false;
+        };
+        super::project::comment_free_fingerprint(&mut theirs)
+            .is_ok_and(|actual| actual == expected_comment_free)
     }
 
     /// Remove staging leftovers from a save that died before it could clean
@@ -2863,11 +2932,20 @@ impl super::WavesPreviewer {
         let (path, mut project, jobs) = self.build_session_save_plan(path)?;
         let job_count = jobs.len();
         let expected = self.expected_fingerprint_for(&path, force);
+        // Only meaningful alongside an expectation: a deliberate overwrite
+        // has nothing to compare against and wants none.
+        let expected_comment_free = expected.and(self.session_comment_free_fingerprint);
         let (tx, rx) = std::sync::mpsc::channel();
         let worker_path = path.clone();
         std::thread::spawn(move || {
             crate::app::threading::lower_current_thread_priority();
-            let result = Self::run_session_save_jobs(&worker_path, &mut project, &jobs, expected);
+            let result = Self::run_session_save_jobs(
+                &worker_path,
+                &mut project,
+                &jobs,
+                expected,
+                expected_comment_free,
+            );
             let _ = tx.send(result);
             // The frame loop sleeps when idle; without this the save result
             // sits in the channel until the user moves the mouse.
@@ -2901,7 +2979,10 @@ impl super::WavesPreviewer {
     ) -> Result<(), String> {
         let (path, mut project, jobs) = self.build_session_save_plan(path)?;
         let expected = self.expected_fingerprint_for(&path, force);
-        match Self::run_session_save_jobs(&path, &mut project, &jobs, expected)? {
+        // Only meaningful alongside an expectation: a deliberate overwrite
+        // has nothing to compare against and wants none.
+        let expected_comment_free = expected.and(self.session_comment_free_fingerprint);
+        match Self::run_session_save_jobs(&path, &mut project, &jobs, expected, expected_comment_free)? {
             crate::app::types::SessionSaveOutcome::Saved {
                 path,
                 fingerprint,
@@ -2912,6 +2993,8 @@ impl super::WavesPreviewer {
                 previous_saved_by,
                 previous_saved_at,
                 committed_assets,
+                comments,
+                comment_free_fingerprint,
             } => {
                 let replaced = path.clone();
                 self.adopt_saved_session(
@@ -2920,6 +3003,8 @@ impl super::WavesPreviewer {
                     session_id,
                     revision,
                     &committed_assets,
+                    comments,
+                    comment_free_fingerprint,
                 );
                 // After adopting, not before: a Save As clears `session_id`
                 // while it builds the plan, so capturing first would file the
@@ -2974,6 +3059,7 @@ impl super::WavesPreviewer {
 
     /// Record what we just wrote, so the watch does not report our own save
     /// as somebody else's and the next save has something to compare with.
+    #[allow(clippy::too_many_arguments)]
     fn adopt_saved_session(
         &mut self,
         path: PathBuf,
@@ -2981,13 +3067,24 @@ impl super::WavesPreviewer {
         session_id: String,
         revision: u64,
         committed_assets: &[(crate::audio_asset::AudioAssetId, PathBuf)],
+        comments: Vec<super::project::ProjectComment>,
+        comment_free_fingerprint: session_sync::SessionFingerprint,
     ) {
         self.session_disk_fingerprint = Some(fingerprint);
+        self.session_comment_free_fingerprint = Some(comment_free_fingerprint);
+        // What was committed, not what we set out to commit: the worker
+        // unioned in whatever the document had gained since we loaded it.
+        self.comments = comments;
         self.session_id = Some(session_id);
         self.session_revision = Some(revision);
         self.session_paths_repaired = false;
         self.session_changed_on_disk = None;
+        self.session_changed_pending = None;
         self.session_conflict = None;
+        // Everything queued went out inside this document: the save plan
+        // copies `self.comments`, which the outbox has already been folded
+        // into. Leaving them queued would post each of them a second time.
+        self.comment_outbox.clear();
         self.finish_session_save(path, committed_assets);
         // Re-arm the watch against what we just wrote, so our own save is
         // never reported back as somebody else's.
@@ -3018,6 +3115,8 @@ impl super::WavesPreviewer {
                 previous_saved_by,
                 previous_saved_at,
                 committed_assets,
+                comments,
+                comment_free_fingerprint,
             }) => {
                 self.debug_log(format!(
                     "session saved: {} (revision {revision}, {})",
@@ -3031,6 +3130,8 @@ impl super::WavesPreviewer {
                     session_id,
                     revision,
                     &committed_assets,
+                    comments,
+                    comment_free_fingerprint,
                 );
                 // See the blocking path: the key has to be the session that
                 // now lives at this path, which a Save As only settles here.
@@ -3125,10 +3226,13 @@ impl super::WavesPreviewer {
             .map(|raw| resolve_path(raw, &base_dir).is_file())
             .collect();
         let other_exists = Self::probe_session_paths(&project, &base_dir);
+        let comment_free_fingerprint = super::project::comment_free_fingerprint(&mut project)
+            .map_err(|e| e.to_string())?;
         Ok(ParsedSession {
             path,
             project: Box::new(project),
             fingerprint,
+            comment_free_fingerprint,
             path_repair,
             session_path_mode,
             base_dir,
@@ -3495,6 +3599,7 @@ impl super::WavesPreviewer {
             path,
             project,
             fingerprint: session_fingerprint,
+            comment_free_fingerprint,
             path_repair,
             session_path_mode,
             base_dir,
@@ -4585,6 +4690,7 @@ impl super::WavesPreviewer {
             ));
         }
         self.session_disk_fingerprint = Some(session_fingerprint);
+        self.session_comment_free_fingerprint = Some(comment_free_fingerprint);
         self.session_id = project.session_id.clone();
         self.session_revision = project.revision;
         self.session_conflict = None;

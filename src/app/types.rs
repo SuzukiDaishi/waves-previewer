@@ -3449,6 +3449,15 @@ pub enum SessionSaveOutcome {
         /// directly instead of re-deriving the path and stat-ing it, which
         /// it may not do on the UI thread anyway.
         committed_assets: Vec<(crate::audio_asset::AudioAssetId, PathBuf)>,
+        /// The conversation as committed -- ours unioned with whatever the
+        /// document on disk had gained since we loaded it. Handed back so the
+        /// window shows what was actually written rather than what we set out
+        /// to write.
+        comments: Vec<crate::app::project::ProjectComment>,
+        /// The same bytes hashed with the comments removed. It is what lets
+        /// the watch tell "a colleague commented" (merge it in quietly) from
+        /// "a colleague saved" (stand up the reload warning).
+        comment_free_fingerprint: crate::app::session_sync::SessionFingerprint,
     },
     /// The document changed since it was read. Nothing was committed.
     Conflict(SessionConflict),

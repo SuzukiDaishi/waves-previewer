@@ -3612,6 +3612,123 @@ impl super::WavesPreviewer {
         });
     }
 
+    // ---- Comments -------------------------------------------------------
+
+    /// Post and wait for it to reach the document, so a test can assert on
+    /// what is on disk rather than on what is queued.
+    pub fn test_post_comment_blocking(&mut self, parent: Option<&str>, body: &str) -> Option<String> {
+        let id = self.post_comment(parent.map(str::to_string), body)?;
+        self.test_settle_comment_jobs();
+        Some(id)
+    }
+
+    /// Drive the comment workers to a standstill.
+    pub fn test_settle_comment_jobs(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            self.drain_comment_jobs();
+            if self.comment_write.is_none() && self.comment_pull.is_none() {
+                if self.comment_outbox.is_empty() {
+                    return;
+                }
+                // Queued but idle: a save was in flight when it was written.
+                self.flush_comment_outbox();
+                if self.comment_write.is_none() {
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("comment jobs did not settle");
+    }
+
+    /// Read the conversation back off disk and adopt it, the way the Refresh
+    /// button and the session watch do.
+    pub fn test_pull_comments(&mut self) {
+        self.request_comment_pull();
+        self.test_settle_comment_jobs();
+    }
+
+    /// `(id, author_id, body, deleted)` in stored order.
+    pub fn test_comments(&self) -> Vec<(String, String, String, bool)> {
+        self.comments
+            .iter()
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    c.author_id.clone(),
+                    c.body.clone(),
+                    c.deleted,
+                )
+            })
+            .collect()
+    }
+
+    pub fn test_comment_bodies(&self) -> Vec<String> {
+        self.comments
+            .iter()
+            .filter(|c| !c.deleted)
+            .map(|c| c.body.clone())
+            .collect()
+    }
+
+    /// Comments written here that the document has not accepted yet.
+    pub fn test_comments_pending(&self) -> usize {
+        self.comments_pending()
+    }
+
+    /// Queue a comment without waiting for it to reach disk -- for the case
+    /// where there is no document to reach yet.
+    pub fn post_comment_for_test(&mut self, parent: Option<&str>, body: &str) -> Option<String> {
+        self.post_comment(parent.map(str::to_string), body)
+    }
+
+    pub fn test_delete_comment(&mut self, id: &str) -> bool {
+        self.delete_comment(id)
+    }
+
+    pub fn test_edit_comment(&mut self, id: &str, body: &str) -> bool {
+        self.edit_comment(id, body)
+    }
+
+    pub fn test_set_thread_resolved(&mut self, id: &str, resolved: bool) -> bool {
+        self.set_thread_resolved(id, resolved)
+    }
+
+    /// Post as if from another machine, so a test can build the two-writer
+    /// case without a second harness and a second identity.
+    pub fn test_post_comment_as(
+        &mut self,
+        author_id: &str,
+        parent: Option<&str>,
+        body: &str,
+    ) -> Option<String> {
+        let id = self.post_comment(parent.map(str::to_string), body)?;
+        if let Some(comment) = self.comments.iter_mut().find(|c| c.id == id) {
+            comment.author_id = author_id.to_string();
+        }
+        if let Some(comment) = self.comment_outbox.iter_mut().find(|c| c.id == id) {
+            comment.author_id = author_id.to_string();
+        }
+        self.test_settle_comment_jobs();
+        Some(id)
+    }
+
+    /// Feed the watch a change the way `tick_session_watch` does, then let
+    /// the pull decide whether it deserves the reload warning.
+    pub fn test_report_session_changed_and_settle(&mut self, on_disk: &str) {
+        let Some(path) = self.project_path.clone() else {
+            return;
+        };
+        self.session_changed_pending = Some(crate::app::types::SessionChangedOnDisk {
+            path,
+            on_disk: on_disk.to_string(),
+            removed: false,
+        });
+        self.request_comment_pull();
+        self.test_settle_comment_jobs();
+    }
+
     // ---- Referenced-file change tracking --------------------------------
 
     /// The "changed since you last opened this" report, as

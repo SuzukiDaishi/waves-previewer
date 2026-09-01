@@ -1485,6 +1485,37 @@ pub fn serialize_project(project: &ProjectFile) -> Result<String> {
     toml::to_string_pretty(project).context("serialize session")
 }
 
+/// Hash the document with the conversation, and the save stamp, taken out.
+///
+/// This is what lets a reader tell "somebody commented" from "somebody
+/// saved". Both change the file, but only the second is a reason to stand up
+/// the reload warning -- and a colleague's comment arriving every few minutes
+/// behind an amber "reload me" badge would make the feature unusable.
+///
+/// The stamp has to come out along with the comments: `revision`, `saved_at`
+/// and `saved_by` move on *every* write, comment-only ones included, so
+/// leaving them in would mean nothing ever compared equal.
+///
+/// Takes `&mut` and puts everything back rather than cloning, because a
+/// session here can list a hundred thousand files and this runs on every
+/// change the watch notices.
+pub(crate) fn comment_free_fingerprint(
+    project: &mut ProjectFile,
+) -> Result<crate::app::session_sync::SessionFingerprint> {
+    let comments = std::mem::take(&mut project.comments);
+    let revision = project.revision.take();
+    let saved_at = project.saved_at.take();
+    let saved_by = project.saved_by.take();
+    let text = serialize_project(project);
+    project.comments = comments;
+    project.revision = revision;
+    project.saved_at = saved_at;
+    project.saved_by = saved_by;
+    Ok(crate::app::session_sync::SessionFingerprint::of_bytes(
+        text?.as_bytes(),
+    ))
+}
+
 pub fn deserialize_project(text: &str) -> Result<ProjectFile> {
     toml::from_str(text).context("parse session")
 }
@@ -2224,6 +2255,11 @@ impl super::WavesPreviewer {
         self.session_store_load = None;
         self.session_file_changes = None;
         self.comments.clear();
+        self.session_comment_free_fingerprint = None;
+        self.comment_outbox.clear();
+        self.comment_write = None;
+        self.comment_pull = None;
+        self.session_changed_pending = None;
         self.show_session_changes_window = false;
         self.show_session_history_window = false;
         self.session_history_entries.clear();

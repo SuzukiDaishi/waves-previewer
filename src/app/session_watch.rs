@@ -234,6 +234,23 @@ impl super::WavesPreviewer {
         self.session_watch = Some(spawn_session_watch(path, fingerprint, interval));
     }
 
+    /// Raise the standing reload warning.
+    ///
+    /// Split out from the probe because noticing the change and deciding to
+    /// warn about it are no longer the same moment: a comment pull gets to
+    /// rule the warning out first when the only difference is what somebody
+    /// said.
+    pub(super) fn announce_session_changed_on_disk(
+        &mut self,
+        changed: super::types::SessionChangedOnDisk,
+    ) {
+        self.push_toast(
+            super::types::ToastSeverity::Warning,
+            format!("Session changed on disk — {}", changed.on_disk),
+        );
+        self.session_changed_on_disk = Some(changed);
+    }
+
     pub(super) fn stop_session_watch(&mut self) {
         self.session_watch = None;
     }
@@ -246,7 +263,12 @@ impl super::WavesPreviewer {
             return;
         };
         // Never diff against the file while we are the ones writing it.
-        let busy = self.session_save_state.is_some() || self.session_open_in_progress();
+        // A comment write replaces the document like any save does, so it
+        // counts here too -- otherwise our own post comes back as somebody
+        // else's.
+        let busy = self.session_save_state.is_some()
+            || self.session_open_in_progress()
+            || self.comment_write.is_some();
         watch.set_suspended(busy);
         if busy {
             return;
@@ -264,17 +286,25 @@ impl super::WavesPreviewer {
                         "session changed on disk: {who} ({})",
                         fingerprint.short_hex()
                     ));
-                    self.push_toast(
-                        super::types::ToastSeverity::Warning,
-                        format!("Session changed on disk — {who}"),
-                    );
-                    self.session_changed_on_disk = Some(super::types::SessionChangedOnDisk {
+                    // Held, not raised. Posting a comment rewrites the
+                    // document, so every colleague talking would otherwise
+                    // stand up "your session is stale, reload it" -- and a
+                    // reload discards unsaved edits, which makes that the
+                    // most expensive false alarm this app can produce. The
+                    // pull compares the two documents with their
+                    // conversations removed and decides; see
+                    // `drain_comment_pull`.
+                    self.session_changed_pending = Some(super::types::SessionChangedOnDisk {
                         path: path.clone(),
                         on_disk: who,
                         removed: false,
                     });
+                    self.request_comment_pull();
                 }
                 SessionWatchEvent::Removed => {
+                    // A missing file is never "they just commented", so it
+                    // does not wait on a pull that could only fail.
+                    self.session_changed_pending = None;
                     self.debug_log(format!("session removed on disk: {}", path.display()));
                     self.push_toast(
                         super::types::ToastSeverity::Warning,

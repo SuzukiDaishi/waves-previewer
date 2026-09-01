@@ -46,6 +46,11 @@ impl WavesPreviewer {
         self.tabs.iter().any(|t| t.dirty)
             || !self.edited_cache.is_empty()
             || self.pending_gain_count_throttled() > 0
+            // A comment posts itself, so it is normally on disk seconds after
+            // it is written and never shows up here. One still in the outbox
+            // is one the document never received -- quitting on it would drop
+            // something the author has every reason to think they sent.
+            || self.comments_pending() > 0
     }
 
     fn run_frame_quit_prompt(&mut self, ctx: &egui::Context) {
@@ -294,6 +299,10 @@ impl WavesPreviewer {
         }));
         deferrable!(trace_stage!("folder watch", self.tick_folder_watch(ctx)));
         deferrable!(trace_stage!("session watch", self.tick_session_watch()));
+        // Not deferrable: a comment the user just posted is a message they
+        // are waiting to see land, and the drain is a channel poll plus a
+        // vector merge.
+        trace_stage!("comment jobs", self.drain_comment_jobs());
         trace_stage!("session store results", self.drain_session_store());
         deferrable!(trace_stage!(
             "session baseline scan",

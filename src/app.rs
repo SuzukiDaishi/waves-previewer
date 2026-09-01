@@ -33,6 +33,7 @@ pub mod channel_routing_ops;
 mod cli_ops;
 mod cli_workspace;
 mod clipboard_ops;
+mod comment_ops;
 pub mod comments;
 mod crash_report_ops;
 mod debug_ops;
@@ -1085,6 +1086,23 @@ pub struct WavesPreviewer {
     /// has touched the document. See `crate::app::comments` for why it is
     /// flat and how two writers' copies are reconciled.
     pub(crate) comments: Vec<project::ProjectComment>,
+    /// The document on disk, hashed without its conversation or save stamp.
+    /// The watch compares against this to tell a colleague's comment (merge
+    /// it in and stay quiet) from a colleague's save (stand up the reload
+    /// warning), because posting a comment writes the file like any save.
+    session_comment_free_fingerprint: Option<session_sync::SessionFingerprint>,
+    /// Comment changes this window has but the document does not yet: queued
+    /// behind an in-flight write, or left over from one that could not
+    /// commit. They are already in `comments`, so the user sees them; this is
+    /// what keeps them from being forgotten.
+    comment_outbox: Vec<project::ProjectComment>,
+    comment_write: Option<comment_ops::CommentWriteState>,
+    /// A read of the document's conversation, in flight.
+    comment_pull: Option<std::sync::mpsc::Receiver<Result<comment_ops::CommentPull, String>>>,
+    /// The reload warning the watch wants to raise, held until a comment pull
+    /// says whether the document actually changed in a way worth warning
+    /// about. A colleague's comment must not read as "your session is stale".
+    session_changed_pending: Option<types::SessionChangedOnDisk>,
     show_session_changes_window: bool,
     show_session_history_window: bool,
     session_history_entries: Vec<session_store::HistoryEntry>,
