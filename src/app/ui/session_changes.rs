@@ -24,8 +24,6 @@ fn human_bytes(bytes: u64) -> String {
 impl crate::app::WavesPreviewer {
     /// The files this session points at that are not what they were when
     /// this user last opened it.
-    /// The files this session points at that are not what they were when
-    /// this user last opened it.
     pub(in crate::app) fn ui_session_changes_window(&mut self, ctx: &egui::Context) {
         if !self.show_session_changes_window {
             return;
@@ -49,6 +47,7 @@ impl crate::app::WavesPreviewer {
         let changed_color = Color32::from_rgb(240, 190, 90);
         let added_color = Color32::from_rgb(150, 200, 150);
         let removed_color = Color32::from_rgb(230, 140, 140);
+        let unreadable_color = Color32::from_rgb(170, 170, 175);
         let shown = egui::Window::new("Changed Since Last Open")
             .open(&mut open)
             .collapsible(false)
@@ -90,6 +89,9 @@ impl crate::app::WavesPreviewer {
                                     ChangeKind::Changed => (change.kind.label(), changed_color),
                                     ChangeKind::Added => (change.kind.label(), added_color),
                                     ChangeKind::Removed => (change.kind.label(), removed_color),
+                                    ChangeKind::Unreadable => {
+                                        (change.kind.label(), unreadable_color)
+                                    }
                                 };
                                 ui.add_sized(
                                     [70.0, row_height],
@@ -98,11 +100,16 @@ impl crate::app::WavesPreviewer {
                                 .on_hover_text(change.tracked.label());
                                 ui.add_sized(
                                     [80.0, row_height],
-                                    egui::Label::new(if change.kind == ChangeKind::Removed {
-                                        "—".to_string()
-                                    } else {
-                                        human_bytes(change.size)
-                                    }),
+                                    egui::Label::new(
+                                        if matches!(
+                                            change.kind,
+                                            ChangeKind::Removed | ChangeKind::Unreadable
+                                        ) {
+                                            "—".to_string()
+                                        } else {
+                                            human_bytes(change.size)
+                                        },
+                                    ),
                                 );
                                 ui.add_sized(
                                     [120.0, row_height],

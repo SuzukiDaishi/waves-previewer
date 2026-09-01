@@ -50,6 +50,11 @@ pub enum ChangeKind {
     Added,
     /// Was there at the last scan, and is not now.
     Removed,
+    /// Still referenced, but this scan could not read it -- a permission
+    /// error, or a share that went away. Deliberately not `Changed`: we did
+    /// not establish that anything changed, and saying so would be asserting
+    /// something we never checked.
+    Unreadable,
 }
 
 impl ChangeKind {
@@ -58,6 +63,7 @@ impl ChangeKind {
             Self::Changed => "Changed",
             Self::Added => "Added",
             Self::Removed => "Removed",
+            Self::Unreadable => "Unreadable",
         }
     }
 }
@@ -89,8 +95,8 @@ struct Job {
 struct Probe {
     path: PathBuf,
     tracked: TrackedKind,
-    /// `None` when the file is gone.
-    stat: Option<(u64, u128)>,
+    /// What the probe established: present, gone, or unreadable.
+    probe: FileProbe,
     /// The row to store, or `None` to leave the existing row alone.
     ///
     /// Leaving it alone is not the same as storing nothing: a baseline row
@@ -141,19 +147,41 @@ impl BaselineScanState {
 /// call already established.
 const SCAN_RETRY_DELAYS_MS: [u64; 1] = [50];
 
-fn stat_of(path: &Path) -> Option<(u64, u128)> {
-    let meta =
-        super::session_sync::retry_shared_io_with(&SCAN_RETRY_DELAYS_MS, || {
-            std::fs::metadata(path)
-        })
-        .ok()?;
+/// What one look at a referenced file established.
+///
+/// "Could not read it" and "it is not there" are different answers and must
+/// not be collapsed. Treating an unreadable file as missing reports it as
+/// removed -- which is false, it is still there -- and drops its baseline
+/// row, so the next open reports it a second time as newly added and its
+/// hash is gone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileProbe {
+    /// Size and mtime.
+    Present(u64, u128),
+    /// The file is genuinely gone.
+    Missing,
+    /// Still there as far as we know, but this scan could not read it.
+    Unreadable,
+}
+
+fn stat_of(path: &Path) -> FileProbe {
+    let meta = match super::session_sync::retry_shared_io_with(&SCAN_RETRY_DELAYS_MS, || {
+        std::fs::metadata(path)
+    }) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return FileProbe::Missing,
+        // Anything else -- no permission, a share that dropped, a path that
+        // stopped making sense -- means we did not find out. Say so rather
+        // than declaring the file gone.
+        Err(_) => return FileProbe::Unreadable,
+    };
     let mtime = meta
         .modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    Some((meta.len(), mtime))
+    FileProbe::Present(meta.len(), mtime)
 }
 
 /// The whole decision, in one place.
@@ -162,17 +190,19 @@ fn stat_of(path: &Path) -> Option<(u64, u128)> {
 /// free of I/O so every branch is testable without a filesystem.
 fn classify(
     previous: Option<&FileBaseline>,
-    stat: Option<(u64, u128)>,
+    probe: FileProbe,
     hash: Option<&str>,
 ) -> Option<ChangeKind> {
-    match (previous, stat) {
+    match (previous, probe) {
+        // We could not look. Report that, and nothing stronger.
+        (_, FileProbe::Unreadable) => Some(ChangeKind::Unreadable),
         // Gone, and we knew about it.
-        (Some(_), None) => Some(ChangeKind::Removed),
+        (Some(_), FileProbe::Missing) => Some(ChangeKind::Removed),
         // Gone, and we never knew about it: nothing to say.
-        (None, None) => None,
+        (None, FileProbe::Missing) => None,
         // New reference since the last scan.
-        (None, Some(_)) => Some(ChangeKind::Added),
-        (Some(previous), Some((size, mtime))) => {
+        (None, FileProbe::Present(..)) => Some(ChangeKind::Added),
+        (Some(previous), FileProbe::Present(size, mtime)) => {
             if previous.size == size && previous.mtime_ns == mtime {
                 // Tier 1 settled it: untouched.
                 return None;
@@ -205,13 +235,19 @@ fn classify(
 fn next_baseline_row(
     previous: Option<&FileBaseline>,
     tracked: TrackedKind,
-    stat: Option<(u64, u128)>,
+    probe: FileProbe,
     wanted_hash: bool,
     hash: Option<String>,
     now: i64,
 ) -> Option<FileBaseline> {
-    // Gone: handled as a removal, not a row.
-    let (size, mtime_ns) = stat?;
+    let (size, mtime_ns) = match probe {
+        FileProbe::Present(size, mtime_ns) => (size, mtime_ns),
+        // Gone: handled as a removal, not a row.
+        FileProbe::Missing => return None,
+        // We learned nothing, so there is nothing to record. Advancing the
+        // row here would throw away a hash that may still be true.
+        FileProbe::Unreadable => return None,
+    };
 
     if !wanted_hash {
         // Tier 1 said nothing moved, so tier 2 never ran. The stored hash
@@ -442,9 +478,9 @@ impl super::WavesPreviewer {
                         }
                         let job = queue.lock().ok().and_then(|mut q| q.pop_front());
                         let Some(job) = job else { break };
-                        let stat = stat_of(&job.path);
-                        let stat_moved = match (job.previous.as_ref(), stat) {
-                            (Some(prev), Some((size, mtime))) => {
+                        let probe = stat_of(&job.path);
+                        let stat_moved = match (job.previous.as_ref(), probe) {
+                            (Some(prev), FileProbe::Present(size, mtime)) => {
                                 prev.size != size || prev.mtime_ns != mtime
                             }
                             _ => false,
@@ -452,17 +488,18 @@ impl super::WavesPreviewer {
                         // Tier 2 only runs when tier 1 found a difference, or
                         // when this file has never been hashed and the
                         // backfill budget covered it.
-                        let wanted_hash = stat.is_some() && (stat_moved || job.backfill);
+                        let wanted_hash = matches!(probe, FileProbe::Present(..))
+                            && (stat_moved || job.backfill);
                         let hash = if wanted_hash {
                             super::session_sync::hash_file_content(&job.path).ok()
                         } else {
                             None
                         };
-                        let change = classify(job.previous.as_ref(), stat, hash.as_deref());
+                        let change = classify(job.previous.as_ref(), probe, hash.as_deref());
                         let row = next_baseline_row(
                             job.previous.as_ref(),
                             job.tracked,
-                            stat,
+                            probe,
                             wanted_hash,
                             hash,
                             now_unix(),
@@ -471,7 +508,7 @@ impl super::WavesPreviewer {
                             .send(Probe {
                                 path: job.path,
                                 tracked: job.tracked,
-                                stat,
+                                probe,
                                 row,
                                 change,
                             })
@@ -527,35 +564,28 @@ impl super::WavesPreviewer {
                 Ok(probe) => {
                     applied += 1;
                     state.done += 1;
-                    match probe.stat {
-                        Some((size, _)) => {
-                            // `None` here means "leave the stored row as it
-                            // is" -- see `next_baseline_row`.
-                            if let Some(row) = probe.row {
-                                state.rows.push((probe.path.clone(), row));
-                            }
-                            if let Some(kind) = probe.change {
-                                state.changes.push(FileChange {
-                                    path: probe.path,
-                                    kind,
-                                    tracked: probe.tracked,
-                                    size,
-                                    detected_at: now,
-                                });
-                            }
-                        }
-                        None => {
-                            state.removed.push(probe.path.clone());
-                            if let Some(kind) = probe.change {
-                                state.changes.push(FileChange {
-                                    path: probe.path,
-                                    kind,
-                                    tracked: probe.tracked,
-                                    size: 0,
-                                    detected_at: now,
-                                });
-                            }
-                        }
+                    // Only a file we established to be gone leaves the
+                    // baseline. One we merely could not read keeps its row,
+                    // so the next scan still has something to compare with.
+                    if probe.probe == FileProbe::Missing {
+                        state.removed.push(probe.path.clone());
+                    } else if let Some(row) = probe.row {
+                        // `None` means "leave the stored row as it is" --
+                        // see `next_baseline_row`.
+                        state.rows.push((probe.path.clone(), row));
+                    }
+                    if let Some(kind) = probe.change {
+                        let size = match probe.probe {
+                            FileProbe::Present(size, _) => size,
+                            _ => 0,
+                        };
+                        state.changes.push(FileChange {
+                            path: probe.path,
+                            kind,
+                            tracked: probe.tracked,
+                            size,
+                            detected_at: now,
+                        });
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -678,20 +708,33 @@ impl super::WavesPreviewer {
                 let mut removed = Vec::new();
                 for (path, kind) in jobs {
                     match stat_of(&path) {
-                        Some((size, mtime_ns)) => {
-                            let hash = super::session_sync::hash_file_content(&path).ok();
+                        FileProbe::Missing => removed.push(path),
+                        // We learned nothing about it, so there is nothing
+                        // worth writing. Whatever the store holds is at
+                        // least as good as what we could put there.
+                        FileProbe::Unreadable => {}
+                        FileProbe::Present(size, mtime_ns) => {
+                            // Same rule as the scan: only advance the row
+                            // when the new content is actually known. A row
+                            // with no hash would replace one that may still
+                            // carry a good one, and nothing would re-hash it
+                            // because the stat would then match.
+                            let Some(hash) =
+                                super::session_sync::hash_file_content(&path).ok()
+                            else {
+                                continue;
+                            };
                             rows.push((
                                 path,
                                 FileBaseline {
                                     kind,
                                     size,
                                     mtime_ns,
-                                    content_hash: hash,
+                                    content_hash: Some(hash),
                                     recorded_at: now,
                                 },
                             ));
                         }
-                        None => removed.push(path),
                     }
                 }
                 let _ = tx.send((rows, removed));
@@ -867,6 +910,7 @@ pub(super) fn summarize(changes: &[FileChange]) -> String {
     let changed = count(ChangeKind::Changed);
     let added = count(ChangeKind::Added);
     let removed = count(ChangeKind::Removed);
+    let unreadable = count(ChangeKind::Unreadable);
     let mut parts = Vec::new();
     if changed > 0 {
         parts.push(format!("{changed} changed"));
@@ -876,6 +920,9 @@ pub(super) fn summarize(changes: &[FileChange]) -> String {
     }
     if removed > 0 {
         parts.push(format!("{removed} removed"));
+    }
+    if unreadable > 0 {
+        parts.push(format!("{unreadable} unreadable"));
     }
     if parts.is_empty() {
         return "No referenced files changed".to_string();
@@ -911,7 +958,7 @@ mod tests {
     #[test]
     fn an_untouched_file_is_not_reported_and_needs_no_hash() {
         let previous = base(100, 5, Some("abc"));
-        assert_eq!(classify(Some(&previous), Some((100, 5)), None), None);
+        assert_eq!(classify(Some(&previous), FileProbe::Present(100, 5), None), None);
     }
 
     #[test]
@@ -919,14 +966,14 @@ mod tests {
         // The point of the second tier: copied back, restored from a backup,
         // or re-exported byte-identically. The mtime moved; the audio did not.
         let previous = base(100, 5, Some("abc"));
-        assert_eq!(classify(Some(&previous), Some((100, 9)), Some("abc")), None);
+        assert_eq!(classify(Some(&previous), FileProbe::Present(100, 9), Some("abc")), None);
     }
 
     #[test]
     fn a_file_whose_bytes_changed_is_reported() {
         let previous = base(100, 5, Some("abc"));
         assert_eq!(
-            classify(Some(&previous), Some((120, 9)), Some("def")),
+            classify(Some(&previous), FileProbe::Present(120, 9), Some("def")),
             Some(ChangeKind::Changed)
         );
     }
@@ -937,21 +984,21 @@ mod tests {
         // same. Saying nothing would be the wrong way to be wrong.
         let previous = base(100, 5, None);
         assert_eq!(
-            classify(Some(&previous), Some((100, 9)), Some("abc")),
+            classify(Some(&previous), FileProbe::Present(100, 9), Some("abc")),
             Some(ChangeKind::Changed)
         );
     }
 
     #[test]
     fn a_new_reference_is_added_and_a_vanished_one_is_removed() {
-        assert_eq!(classify(None, Some((10, 1)), None), Some(ChangeKind::Added));
+        assert_eq!(classify(None, FileProbe::Present(10, 1), None), Some(ChangeKind::Added));
         let previous = base(10, 1, Some("abc"));
-        assert_eq!(classify(Some(&previous), None, None), Some(ChangeKind::Removed));
+        assert_eq!(classify(Some(&previous), FileProbe::Missing, None), Some(ChangeKind::Removed));
     }
 
     #[test]
     fn a_file_that_was_never_there_and_still_is_not_says_nothing() {
-        assert_eq!(classify(None, None, None), None);
+        assert_eq!(classify(None, FileProbe::Missing, None), None);
     }
 
     // ---- Which baseline row gets stored -----------------------------
@@ -965,7 +1012,7 @@ mod tests {
         let row = next_baseline_row(
             Some(&previous),
             TrackedKind::Audio,
-            Some((100, 5)),
+            FileProbe::Present(100, 5),
             false, // tier 1 settled it; no hash was taken
             None,
             999,
@@ -991,7 +1038,7 @@ mod tests {
         let row = next_baseline_row(
             Some(&previous),
             TrackedKind::Audio,
-            Some((120, 9)),
+            FileProbe::Present(120, 9),
             true, // we wanted a hash
             None, // ...and did not get one
             999,
@@ -1008,7 +1055,7 @@ mod tests {
         let row = next_baseline_row(
             Some(&previous),
             TrackedKind::Audio,
-            Some((120, 9)),
+            FileProbe::Present(120, 9),
             true,
             Some("def".to_string()),
             999,
@@ -1023,7 +1070,7 @@ mod tests {
     #[test]
     fn a_new_file_is_recorded_even_when_it_could_not_be_hashed() {
         // Nothing to preserve, so recording the stat is still progress.
-        let row = next_baseline_row(None, TrackedKind::Audio, Some((10, 1)), true, None, 999)
+        let row = next_baseline_row(None, TrackedKind::Audio, FileProbe::Present(10, 1), true, None, 999)
             .expect("row");
         assert_eq!(row.content_hash, None);
         assert_eq!(row.size, 10);
@@ -1033,7 +1080,7 @@ mod tests {
     fn a_missing_file_produces_no_row() {
         let previous = base(100, 5, Some("abc"));
         assert!(
-            next_baseline_row(Some(&previous), TrackedKind::Audio, None, false, None, 999)
+            next_baseline_row(Some(&previous), TrackedKind::Audio, FileProbe::Missing, false, None, 999)
                 .is_none(),
             "a vanished file is a removal, not a row"
         );
@@ -1047,7 +1094,7 @@ mod tests {
         let row = next_baseline_row(
             Some(&previous),
             TrackedKind::Audio,
-            Some((100, 5)),
+            FileProbe::Present(100, 5),
             true,
             Some("abc".to_string()),
             999,
@@ -1055,9 +1102,79 @@ mod tests {
         .expect("row");
         assert_eq!(row.content_hash.as_deref(), Some("abc"));
         assert_eq!(
-            classify(Some(&previous), Some((100, 5)), Some("abc")),
+            classify(Some(&previous), FileProbe::Present(100, 5), Some("abc")),
             None,
             "backfilling a hash is not a change"
+        );
+    }
+
+    // ---- A file we could not read is not a file that was deleted -------
+
+    #[test]
+    fn an_unreadable_file_is_not_reported_as_removed() {
+        // Collapsing every stat error into "gone" claimed a file had been
+        // deleted when it was only unreadable -- a permission error, or a
+        // share that dropped mid-scan.
+        let previous = base(100, 5, Some("abc"));
+        assert_eq!(
+            classify(Some(&previous), FileProbe::Unreadable, None),
+            Some(ChangeKind::Unreadable),
+            "we did not establish it was gone, and must not say so"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_file_keeps_its_baseline_row() {
+        // The follow-on damage: being treated as removed dropped the row, so
+        // the next open reported the same file again as newly added, with
+        // its hash gone.
+        let previous = base(100, 5, Some("abc"));
+        assert!(
+            next_baseline_row(
+                Some(&previous),
+                TrackedKind::Audio,
+                FileProbe::Unreadable,
+                false,
+                None,
+                999,
+            )
+            .is_none(),
+            "nothing was learned, so the stored row must be left alone"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_file_is_reported_even_when_it_is_new_to_us() {
+        // No baseline to protect, but the user still wants to know a file
+        // this session points at cannot be read.
+        assert_eq!(
+            classify(None, FileProbe::Unreadable, None),
+            Some(ChangeKind::Unreadable)
+        );
+    }
+
+    #[test]
+    fn a_genuinely_missing_file_is_still_reported_as_removed() {
+        // The case the three-way split must not regress.
+        let previous = base(100, 5, Some("abc"));
+        assert_eq!(
+            classify(Some(&previous), FileProbe::Missing, None),
+            Some(ChangeKind::Removed)
+        );
+    }
+
+    #[test]
+    fn the_summary_counts_unreadable_files_separately() {
+        let change = |kind| FileChange {
+            path: PathBuf::from("/a.wav"),
+            kind,
+            tracked: TrackedKind::Audio,
+            size: 1,
+            detected_at: 0,
+        };
+        assert_eq!(
+            summarize(&[change(ChangeKind::Unreadable)]),
+            "1 referenced file: 1 unreadable"
         );
     }
 
@@ -1098,10 +1215,27 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::write(&path, b"twelve bytes").expect("write fixture");
-        let (size, mtime) = stat_of(&path).expect("stat");
+        let FileProbe::Present(size, mtime) = stat_of(&path) else {
+            panic!("a readable file must probe as present");
+        };
         assert_eq!(size, 12);
         assert!(mtime > 0);
+
+        // A path *below* a plain file: not found, and not readable either.
+        // The distinction that matters is that it is not reported as a file
+        // that used to be there and has been deleted.
+        let under_a_file = path.join("child.wav");
+        assert_eq!(
+            stat_of(&under_a_file),
+            FileProbe::Unreadable,
+            "an error that is not NotFound must not be read as a deletion"
+        );
+
         std::fs::remove_file(&path).expect("cleanup");
-        assert!(stat_of(&path).is_none(), "a missing file has no stat");
+        assert_eq!(
+            stat_of(&path),
+            FileProbe::Missing,
+            "a genuinely absent file is missing, not unreadable"
+        );
     }
 }

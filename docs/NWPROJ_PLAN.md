@@ -356,7 +356,8 @@ to do, so:
 
 | tier 1 | baseline | reported |
 |---|---|---|
-| gone | present | **Removed** |
+| gone (`NotFound`) | present | **Removed** |
+| could not be read | either | **Unreadable** |
 | present | absent | **Added** |
 | `(size, mtime)` match | present | nothing -- no hash taken |
 | moved, hash matches | hashed | **nothing** (touched, not changed) |
@@ -378,6 +379,14 @@ That rule matters more than it looks:
   the row is left exactly as it was. Advancing it would trade a known-good
   hash for nothing, and since the stored stat would then match the file,
   nothing would ever hash it again.
+- We could not even stat it → same: nothing was learned, so nothing is
+  written, and the row survives for the next scan to compare against.
+
+**"Could not read it" and "it is not there" are different answers.** Only a
+`NotFound` drops a file from the baseline. Any other error means we failed to
+find out, and reporting that as a deletion would be false twice over: the
+file is still there, and dropping its row makes the *next* open report it
+again as newly added, with its hash gone.
 
 **The first open of a session reports nothing.** There is no previous visit to
 compare against, and announcing every file as new would be noise. It records a
@@ -432,9 +441,10 @@ shared-side insurance stays the single `.nwsess.bak`.
   exact.
 - **A file the session stops referencing is dropped from the baseline
   silently.** It is a change to the session, not to the file.
-- **A file that could not be read is reported as changed.** There is no way
-  to prove otherwise, and its baseline row is left alone so the next scan
-  re-decides.
+- **A file that could not be read is reported as `Unreadable`, not
+  `Changed`.** Nothing was established about its contents, and saying
+  "changed" would assert something never checked. Its baseline row is left
+  alone so the next scan re-decides.
 - Personal state in the shared document (theme, selection, active tab) is
   unchanged by any of this -- see the limitation above.
 
