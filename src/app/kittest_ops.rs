@@ -3779,6 +3779,16 @@ impl super::WavesPreviewer {
             .collect()
     }
 
+    /// How many whole comment writes have failed in a row, and whether the
+    /// outbox is currently holding off before trying again.
+    pub fn test_comment_write_backoff(&self) -> (u32, bool) {
+        (
+            self.comment_write_failures,
+            self.comment_retry_after
+                .is_some_and(|at| std::time::Instant::now() < at),
+        )
+    }
+
     pub fn test_unread_comment_count(&self) -> usize {
         self.unread_comment_count()
     }

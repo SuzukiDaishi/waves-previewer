@@ -2258,6 +2258,8 @@ impl super::WavesPreviewer {
         self.session_comment_free_fingerprint = None;
         self.comment_outbox.clear();
         self.comment_write = None;
+        self.comment_write_failures = 0;
+        self.comment_retry_after = None;
         self.comment_pull = None;
         self.session_changed_pending = None;
         self.comment_draft.clear();

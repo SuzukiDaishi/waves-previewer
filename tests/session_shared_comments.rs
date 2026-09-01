@@ -358,6 +358,39 @@ mod session_shared_comments {
     }
 
     #[test]
+    fn a_write_that_cannot_land_backs_off_instead_of_hammering_the_share() {
+        let dir = temp_dir("backoff");
+        let mut mine = harness_default();
+        let session = open_session_with_one_file(&mut mine, &dir, "shared.nwsess");
+
+        // The share went away -- or somebody moved the session out from under
+        // us. Every attempt will fail for as long as that is true.
+        std::fs::remove_file(&session).expect("remove session");
+
+        mine.state_mut()
+            .post_comment_for_test(None, "into the void");
+        mine.state_mut().test_settle_comment_jobs();
+        mine.step();
+
+        assert_eq!(
+            mine.state().test_comments_pending(),
+            1,
+            "the comment is kept, not dropped"
+        );
+        let (failures, holding) = mine.state().test_comment_write_backoff();
+        assert_eq!(failures, 1);
+        assert!(
+            holding,
+            "a dead path fails every attempt, so the outbox must wait rather \
+             than start a new worker the instant the last one gave up"
+        );
+
+        // Settling again must not spend another attempt while the hold is on.
+        mine.state_mut().test_settle_comment_jobs();
+        assert_eq!(mine.state().test_comment_write_backoff().0, 1);
+    }
+
+    #[test]
     fn a_comment_written_before_the_session_has_a_file_goes_out_with_the_save() {
         let dir = temp_dir("unsaved-session");
         let audio = dir.join("source.wav");

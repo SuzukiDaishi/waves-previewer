@@ -458,6 +458,8 @@ impl WavesPreviewer {
             session_comment_free_fingerprint: None,
             comment_outbox: Vec::new(),
             comment_write: None,
+            comment_write_failures: 0,
+            comment_retry_after: None,
             comment_pull: None,
             session_changed_pending: None,
             show_comments_window: false,

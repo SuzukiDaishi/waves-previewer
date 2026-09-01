@@ -1097,6 +1097,12 @@ pub struct WavesPreviewer {
     /// what keeps them from being forgotten.
     comment_outbox: Vec<project::ProjectComment>,
     comment_write: Option<comment_ops::CommentWriteState>,
+    /// Consecutive failed comment writes, and when the next attempt may
+    /// start. A share that has gone away fails every attempt, and without a
+    /// backoff the outbox would re-spawn a worker the moment the last one
+    /// gave up -- a toast every half second and constant I/O at a dead path.
+    comment_write_failures: u32,
+    comment_retry_after: Option<std::time::Instant>,
     /// A read of the document's conversation, in flight.
     comment_pull: Option<std::sync::mpsc::Receiver<Result<comment_ops::CommentPull, String>>>,
     /// The reload warning the watch wants to raise, held until a comment pull

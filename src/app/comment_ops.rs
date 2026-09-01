@@ -44,6 +44,14 @@ const WRITE_ATTEMPTS: usize = 5;
 /// colleague's save landing in the same second, and waiting helps nobody.
 const RETRY_DELAYS_MS: [u64; 4] = [0, 50, 150, 400];
 
+/// How long the outbox waits after a whole write job failed, by how many have
+/// failed in a row.
+///
+/// The retries inside a job answer "somebody committed first", which resolves
+/// in milliseconds. This answers "the share is gone", which does not. Without
+/// it the outbox would start a new worker the instant the last one gave up.
+const FAILURE_BACKOFF_SECS: [u64; 4] = [5, 15, 60, 300];
+
 /// What a committed comment write leaves behind.
 pub(super) struct CommentWriteResult {
     /// The conversation as it now stands on disk -- ours unioned with theirs.
@@ -215,6 +223,12 @@ impl crate::app::WavesPreviewer {
     /// `self.comments` like every other part of the session.
     pub(crate) fn flush_comment_outbox(&mut self) {
         if self.comment_outbox.is_empty() || self.comment_write.is_some() {
+            return;
+        }
+        if self
+            .comment_retry_after
+            .is_some_and(|at| Instant::now() < at)
+        {
             return;
         }
         // A save rewrites the whole document, comments included; letting a
@@ -471,6 +485,8 @@ impl crate::app::WavesPreviewer {
         let state = self.comment_write.take().expect("checked above");
         match result {
             Ok(written) => {
+                self.comment_write_failures = 0;
+                self.comment_retry_after = None;
                 self.debug_log(format!(
                     "comments written: {} in the document (revision {}, {})",
                     written.comments.len(),
@@ -497,12 +513,22 @@ impl crate::app::WavesPreviewer {
                 let mut restored = state.sent;
                 restored.append(&mut self.comment_outbox);
                 self.comment_outbox = restored;
-                self.push_toast(
-                    crate::app::types::ToastSeverity::Warning,
-                    format!(
-                        "Comment not shared yet — {error}. It stays here and will be retried."
-                    ),
-                );
+                let backoff = FAILURE_BACKOFF_SECS[(self.comment_write_failures as usize)
+                    .min(FAILURE_BACKOFF_SECS.len() - 1)];
+                self.comment_write_failures = self.comment_write_failures.saturating_add(1);
+                self.comment_retry_after =
+                    Some(Instant::now() + std::time::Duration::from_secs(backoff));
+                // Said once per outage, not once per attempt. The window
+                // already carries a standing "not shared yet" count, which is
+                // the right place for a state that persists.
+                if self.comment_write_failures == 1 {
+                    self.push_toast(
+                        crate::app::types::ToastSeverity::Warning,
+                        format!(
+                            "Comment not shared yet — {error}. It stays here and will be retried."
+                        ),
+                    );
+                }
             }
         }
     }
