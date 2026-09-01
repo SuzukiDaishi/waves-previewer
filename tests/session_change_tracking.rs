@@ -190,6 +190,42 @@ mod session_change_tracking {
     }
 
     #[test]
+    fn a_stored_hash_survives_an_open_that_changed_nothing() {
+        // The second tier can only tell "touched" from "changed" if the
+        // hash it recorded is still there. An open where nothing happened
+        // must not throw that away -- otherwise the guarantee holds for
+        // exactly one open and then quietly turns into a false alarm.
+        let dir = temp_dir("hash_survives");
+        let _store_guard = use_isolated_store(&dir);
+        let audio = dir.join("a.wav");
+        write_tone(&audio, 440.0);
+
+        let mut harness = harness_default();
+        let session = make_session(&mut harness, &dir, &[audio.clone()]);
+
+        // 1. First open: records the baseline, including a hash.
+        open_session(&mut harness, &session);
+        // 2. An open where absolutely nothing changed.
+        open_session(&mut harness, &session);
+        assert_eq!(harness.state().test_session_file_changes(), None);
+
+        // 3. Rewrite with byte-identical content: mtime moves, audio does not.
+        let bytes = std::fs::read(&audio).expect("read");
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::remove_file(&audio).expect("remove");
+        std::fs::write(&audio, &bytes).expect("rewrite identical bytes");
+
+        open_session(&mut harness, &session);
+        assert_eq!(
+            harness.state().test_session_file_changes(),
+            None,
+            "the hash from the first open must still be there to prove the \
+             bytes are unchanged; an idle open must not wipe it"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_deleted_file_is_reported_as_removed() {
         let dir = temp_dir("deleted");
         let _store_guard = use_isolated_store(&dir);

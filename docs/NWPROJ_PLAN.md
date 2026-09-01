@@ -366,6 +366,19 @@ to do, so:
 `recorded_at` on each row is when the change was noticed, and it is what the
 list shows as "detected".
 
+**A baseline row is only advanced when the new content is actually known.**
+That rule matters more than it looks:
+
+- Tier 1 said nothing moved → the stored hash still describes these bytes, so
+  it is carried forward along with its original detection time. Overwriting it
+  with "no hash" would leave tier 2 nothing to compare against on the next
+  real change, and the whole distinction between *touched* and *changed*
+  would quietly decay into a false alarm.
+- We meant to hash and could not (unreadable file, a share that dropped) →
+  the row is left exactly as it was. Advancing it would trade a known-good
+  hash for nothing, and since the stored stat would then match the file,
+  nothing would ever hash it again.
+
 **The first open of a session reports nothing.** There is no previous visit to
 compare against, and announcing every file as new would be noise. It records a
 baseline and stays quiet.
@@ -419,6 +432,9 @@ shared-side insurance stays the single `.nwsess.bak`.
   exact.
 - **A file the session stops referencing is dropped from the baseline
   silently.** It is a change to the session, not to the file.
+- **A file that could not be read is reported as changed.** There is no way
+  to prove otherwise, and its baseline row is left alone so the next scan
+  re-decides.
 - Personal state in the shared document (theme, selection, active tab) is
   unchanged by any of this -- see the limitation above.
 

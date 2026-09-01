@@ -144,6 +144,37 @@ mod session_shared_editing {
     }
 
     #[test]
+    fn backing_out_of_the_save_as_picker_keeps_the_conflict_prompt() {
+        // Choosing "Save As..." and then cancelling the file picker answers
+        // nothing: no document was written, so the question has to stay. The
+        // old code cleared the conflict before the picker ran, leaving the
+        // user with no prompt, no save, and no sign anything had happened.
+        let dir = temp_dir("save_as_cancelled");
+        let mut harness = harness_default();
+        let session = open_session_with_one_file(&mut harness, &dir, "shared.nwsess");
+        let theirs = someone_else_saves(&session, "tanaka", 7);
+
+        assert!(harness.state_mut().test_begin_session_save(&session));
+        settle_save(&mut harness);
+        assert!(harness.state().test_session_conflict().is_some());
+
+        // Under kittest the picker always cancels, which is the case at issue.
+        assert!(harness.state_mut().test_conflict_choose_save_as());
+        harness.step();
+
+        assert!(
+            harness.state().test_session_conflict().is_some(),
+            "cancelling the picker must leave the conflict prompt up"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&session).expect("read"),
+            theirs,
+            "and must not have written anything"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn overwriting_after_a_conflict_commits_and_leaves_a_backup() {
         let dir = temp_dir("overwrite");
         let mut harness = harness_default();

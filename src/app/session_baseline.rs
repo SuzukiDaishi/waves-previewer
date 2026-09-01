@@ -91,8 +91,13 @@ struct Probe {
     tracked: TrackedKind,
     /// `None` when the file is gone.
     stat: Option<(u64, u128)>,
-    /// Set when the worker hashed the file (stat moved, or backfill).
-    hash: Option<String>,
+    /// The row to store, or `None` to leave the existing row alone.
+    ///
+    /// Leaving it alone is not the same as storing nothing: a baseline row
+    /// is only advanced when the worker actually established what the file
+    /// contains now. Overwriting it otherwise throws away a hash that is
+    /// still true, and the second tier has nothing left to compare against.
+    row: Option<FileBaseline>,
     change: Option<ChangeKind>,
 }
 
@@ -127,8 +132,21 @@ impl BaselineScanState {
     }
 }
 
+/// Retry delays for the bulk scan.
+///
+/// The save path retries a sharing violation over most of a second, which is
+/// right when losing the race means losing a save. Here it is wrong: this
+/// stats every file the session references, and a permission error is
+/// usually permanent, so a long backoff would spend minutes proving what one
+/// call already established.
+const SCAN_RETRY_DELAYS_MS: [u64; 1] = [50];
+
 fn stat_of(path: &Path) -> Option<(u64, u128)> {
-    let meta = super::session_sync::retry_shared_io(|| std::fs::metadata(path)).ok()?;
+    let meta =
+        super::session_sync::retry_shared_io_with(&SCAN_RETRY_DELAYS_MS, || {
+            std::fs::metadata(path)
+        })
+        .ok()?;
     let mtime = meta
         .modified()
         .ok()
@@ -174,6 +192,57 @@ fn classify(
     }
 }
 
+/// The baseline row to store after probing one file, or `None` to leave the
+/// stored row untouched.
+///
+/// The rule is: **only advance a row when the new content is actually
+/// known.** Storing what we merely observed instead loses information --
+/// a hash that is still true gets replaced by "no hash", the second tier
+/// is left with nothing to compare against, and a byte-identical rewrite
+/// starts reporting as a change.
+///
+/// Pure, so every branch is testable without touching a filesystem.
+fn next_baseline_row(
+    previous: Option<&FileBaseline>,
+    tracked: TrackedKind,
+    stat: Option<(u64, u128)>,
+    wanted_hash: bool,
+    hash: Option<String>,
+    now: i64,
+) -> Option<FileBaseline> {
+    // Gone: handled as a removal, not a row.
+    let (size, mtime_ns) = stat?;
+
+    if !wanted_hash {
+        // Tier 1 said nothing moved, so tier 2 never ran. The stored hash
+        // still describes these bytes -- carry it, and its original
+        // detection time, forward untouched.
+        return previous.map(|prev| FileBaseline {
+            kind: tracked,
+            size,
+            mtime_ns,
+            content_hash: prev.content_hash.clone(),
+            recorded_at: prev.recorded_at,
+        });
+    }
+
+    if hash.is_none() && previous.is_some_and(|prev| prev.content_hash.is_some()) {
+        // We meant to hash and could not -- an unreadable file, a share that
+        // dropped. Advancing the row here would trade a known-good hash for
+        // nothing and, because the stored stat would then match the file,
+        // nothing would ever hash it again. Leave it for the next scan.
+        return None;
+    }
+
+    Some(FileBaseline {
+        kind: tracked,
+        size,
+        mtime_ns,
+        content_hash: hash,
+        recorded_at: now,
+    })
+}
+
 impl super::WavesPreviewer {
     /// Ask the store what this user knew about the session last time. The
     /// scan starts when the answer lands in `drain_session_store`.
@@ -184,6 +253,12 @@ impl super::WavesPreviewer {
         let Some(path) = self.project_path.clone() else {
             return;
         };
+        if !self.session_store.is_enabled() {
+            // Nothing can answer "since you last opened it", so skip the
+            // snapshot below -- on a large list it is a six-figure clone and
+            // sort on the UI thread, for an answer nobody will read.
+            return;
+        }
         // Snapshot what the session references *now*, before the store's
         // reply arrives a frame or more later. By then the list may have
         // pruned rows whose file is gone -- and a file that vanished is
@@ -377,18 +452,27 @@ impl super::WavesPreviewer {
                         // Tier 2 only runs when tier 1 found a difference, or
                         // when this file has never been hashed and the
                         // backfill budget covered it.
-                        let hash = if stat.is_some() && (stat_moved || job.backfill) {
+                        let wanted_hash = stat.is_some() && (stat_moved || job.backfill);
+                        let hash = if wanted_hash {
                             super::session_sync::hash_file_content(&job.path).ok()
                         } else {
                             None
                         };
                         let change = classify(job.previous.as_ref(), stat, hash.as_deref());
+                        let row = next_baseline_row(
+                            job.previous.as_ref(),
+                            job.tracked,
+                            stat,
+                            wanted_hash,
+                            hash,
+                            now_unix(),
+                        );
                         if tx
                             .send(Probe {
                                 path: job.path,
                                 tracked: job.tracked,
                                 stat,
-                                hash,
+                                row,
                                 change,
                             })
                             .is_err()
@@ -444,17 +528,12 @@ impl super::WavesPreviewer {
                     applied += 1;
                     state.done += 1;
                     match probe.stat {
-                        Some((size, mtime_ns)) => {
-                            state.rows.push((
-                                probe.path.clone(),
-                                FileBaseline {
-                                    kind: probe.tracked,
-                                    size,
-                                    mtime_ns,
-                                    content_hash: probe.hash,
-                                    recorded_at: now,
-                                },
-                            ));
+                        Some((size, _)) => {
+                            // `None` here means "leave the stored row as it
+                            // is" -- see `next_baseline_row`.
+                            if let Some(row) = probe.row {
+                                state.rows.push((probe.path.clone(), row));
+                            }
                             if let Some(kind) = probe.change {
                                 state.changes.push(FileChange {
                                     path: probe.path,
@@ -873,6 +952,113 @@ mod tests {
     #[test]
     fn a_file_that_was_never_there_and_still_is_not_says_nothing() {
         assert_eq!(classify(None, None, None), None);
+    }
+
+    // ---- Which baseline row gets stored -----------------------------
+
+    #[test]
+    fn an_unchanged_file_keeps_the_hash_it_already_had() {
+        // The regression that made the second tier useless: an open where
+        // nothing moved used to overwrite the row with "no hash", so the
+        // next byte-identical rewrite had nothing to compare against.
+        let previous = base(100, 5, Some("abc"));
+        let row = next_baseline_row(
+            Some(&previous),
+            TrackedKind::Audio,
+            Some((100, 5)),
+            false, // tier 1 settled it; no hash was taken
+            None,
+            999,
+        )
+        .expect("an existing file still gets a row");
+        assert_eq!(
+            row.content_hash.as_deref(),
+            Some("abc"),
+            "the stored hash still describes these bytes and must survive"
+        );
+        assert_eq!(
+            row.recorded_at, previous.recorded_at,
+            "nothing was detected, so the detection time must not move"
+        );
+    }
+
+    #[test]
+    fn a_file_that_could_not_be_hashed_keeps_its_known_hash() {
+        // Unreadable file, or a share that dropped mid-scan. Advancing the
+        // row would swap a good hash for nothing -- and because the stored
+        // stat would then match, nothing would ever hash it again.
+        let previous = base(100, 5, Some("abc"));
+        let row = next_baseline_row(
+            Some(&previous),
+            TrackedKind::Audio,
+            Some((120, 9)),
+            true, // we wanted a hash
+            None, // ...and did not get one
+            999,
+        );
+        assert!(
+            row.is_none(),
+            "a failed read must leave the stored row alone for the next scan"
+        );
+    }
+
+    #[test]
+    fn a_successful_hash_advances_the_row() {
+        let previous = base(100, 5, Some("abc"));
+        let row = next_baseline_row(
+            Some(&previous),
+            TrackedKind::Audio,
+            Some((120, 9)),
+            true,
+            Some("def".to_string()),
+            999,
+        )
+        .expect("row");
+        assert_eq!(row.content_hash.as_deref(), Some("def"));
+        assert_eq!(row.size, 120);
+        assert_eq!(row.mtime_ns, 9);
+        assert_eq!(row.recorded_at, 999, "this is a fresh detection");
+    }
+
+    #[test]
+    fn a_new_file_is_recorded_even_when_it_could_not_be_hashed() {
+        // Nothing to preserve, so recording the stat is still progress.
+        let row = next_baseline_row(None, TrackedKind::Audio, Some((10, 1)), true, None, 999)
+            .expect("row");
+        assert_eq!(row.content_hash, None);
+        assert_eq!(row.size, 10);
+    }
+
+    #[test]
+    fn a_missing_file_produces_no_row() {
+        let previous = base(100, 5, Some("abc"));
+        assert!(
+            next_baseline_row(Some(&previous), TrackedKind::Audio, None, false, None, 999)
+                .is_none(),
+            "a vanished file is a removal, not a row"
+        );
+    }
+
+    #[test]
+    fn a_backfilled_hash_is_stored_without_claiming_a_change() {
+        // The "hold hashes in advance" pass: stat unchanged, but this file
+        // had never been hashed.
+        let previous = base(100, 5, None);
+        let row = next_baseline_row(
+            Some(&previous),
+            TrackedKind::Audio,
+            Some((100, 5)),
+            true,
+            Some("abc".to_string()),
+            999,
+        )
+        .expect("row");
+        assert_eq!(row.content_hash.as_deref(), Some("abc"));
+        assert_eq!(
+            classify(Some(&previous), Some((100, 5)), Some("abc")),
+            None,
+            "backfilling a hash is not a change"
+        );
     }
 
     #[test]

@@ -24,25 +24,36 @@ fn human_bytes(bytes: u64) -> String {
 impl crate::app::WavesPreviewer {
     /// The files this session points at that are not what they were when
     /// this user last opened it.
+    /// The files this session points at that are not what they were when
+    /// this user last opened it.
     pub(in crate::app) fn ui_session_changes_window(&mut self, ctx: &egui::Context) {
         if !self.show_session_changes_window {
             return;
         }
-        let Some(report) = self.session_file_changes.clone() else {
+        if self.session_file_changes.is_none() {
             self.show_session_changes_window = false;
             return;
-        };
+        }
+        // Taken rather than cloned: a colleague re-rendering a folder can
+        // put thousands of rows in here, and this runs every frame the
+        // window is open. Put back before returning.
+        let report = self
+            .session_file_changes
+            .take()
+            .expect("checked just above");
         let mut open = true;
         let scroll_target = self.begin_floating_scroll_surface("session_changes_window");
         let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
         let mut select: Option<std::path::PathBuf> = None;
         let mut dismiss = false;
+        let changed_color = Color32::from_rgb(240, 190, 90);
+        let added_color = Color32::from_rgb(150, 200, 150);
+        let removed_color = Color32::from_rgb(230, 140, 140);
         let shown = egui::Window::new("Changed Since Last Open")
             .open(&mut open)
             .collapsible(false)
             .default_width(680.0)
             .default_height(420.0)
-            .vscroll(true)
             .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.label(format!(
@@ -51,51 +62,6 @@ impl crate::app::WavesPreviewer {
                     format_stamp(report.since)
                 ));
                 ui.add_space(6.0);
-                egui::Grid::new("session_changes_grid")
-                    .striped(true)
-                    .num_columns(4)
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("File").strong());
-                        ui.label(RichText::new("Change").strong());
-                        ui.label(RichText::new("Size").strong());
-                        ui.label(RichText::new("Detected").strong());
-                        ui.end_row();
-                        for change in &report.changes {
-                            let name = change
-                                .path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| change.path.to_string_lossy().to_string());
-                            if ui
-                                .add(egui::Label::new(name).truncate().sense(egui::Sense::click()))
-                                .on_hover_text(change.path.display().to_string())
-                                .clicked()
-                            {
-                                select = Some(change.path.clone());
-                            }
-                            let (label, color) = match change.kind {
-                                ChangeKind::Changed => {
-                                    (change.kind.label(), Color32::from_rgb(240, 190, 90))
-                                }
-                                ChangeKind::Added => {
-                                    (change.kind.label(), Color32::from_rgb(150, 200, 150))
-                                }
-                                ChangeKind::Removed => {
-                                    (change.kind.label(), Color32::from_rgb(230, 140, 140))
-                                }
-                            };
-                            ui.label(RichText::new(label).color(color))
-                                .on_hover_text(change.tracked.label());
-                            ui.label(if change.kind == ChangeKind::Removed {
-                                "—".to_string()
-                            } else {
-                                human_bytes(change.size)
-                            });
-                            ui.label(format_stamp(change.detected_at));
-                            ui.end_row();
-                        }
-                    });
-                ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui
                         .button("Dismiss")
@@ -105,12 +71,66 @@ impl crate::app::WavesPreviewer {
                         dismiss = true;
                     }
                     ui.label(
-                        RichText::new(
-                            "Reload the file in the list to pick up a changed source.",
-                        )
-                        .weak(),
+                        RichText::new("Click a row to select it in the list.").weak(),
                     );
                 });
+                ui.add_space(6.0);
+                ui.separator();
+                // Only the visible rows are built. A `Grid` here would build
+                // a widget per cell for every change, every frame.
+                let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
+                    ui,
+                    row_height,
+                    report.changes.len(),
+                    |ui, range| {
+                        for change in &report.changes[range] {
+                            ui.horizontal(|ui| {
+                                let (label, color) = match change.kind {
+                                    ChangeKind::Changed => (change.kind.label(), changed_color),
+                                    ChangeKind::Added => (change.kind.label(), added_color),
+                                    ChangeKind::Removed => (change.kind.label(), removed_color),
+                                };
+                                ui.add_sized(
+                                    [70.0, row_height],
+                                    egui::Label::new(RichText::new(label).color(color)),
+                                )
+                                .on_hover_text(change.tracked.label());
+                                ui.add_sized(
+                                    [80.0, row_height],
+                                    egui::Label::new(if change.kind == ChangeKind::Removed {
+                                        "—".to_string()
+                                    } else {
+                                        human_bytes(change.size)
+                                    }),
+                                );
+                                ui.add_sized(
+                                    [120.0, row_height],
+                                    egui::Label::new(format_stamp(change.detected_at)),
+                                )
+                                .on_hover_text("When this was detected");
+                                let name = change
+                                    .path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| {
+                                        change.path.to_string_lossy().to_string()
+                                    });
+                                if ui
+                                    .add(
+                                        egui::Label::new(name)
+                                            .truncate()
+                                            .sense(egui::Sense::click()),
+                                    )
+                                    .on_hover_text(change.path.display().to_string())
+                                    .clicked()
+                                {
+                                    select = Some(change.path.clone());
+                                }
+                            });
+                        }
+                    },
+                );
             });
         drop(scroll_guard);
         if let Some(shown) = shown.as_ref() {
@@ -119,12 +139,15 @@ impl crate::app::WavesPreviewer {
         if !open {
             self.show_session_changes_window = false;
         }
+        if dismiss {
+            self.show_session_changes_window = false;
+        } else {
+            // Nothing else writes this field while the window is drawing, so
+            // putting it back cannot clobber a newer report.
+            self.session_file_changes = Some(report);
+        }
         if let Some(path) = select {
             self.select_list_path(&path);
-        }
-        if dismiss {
-            self.session_file_changes = None;
-            self.show_session_changes_window = false;
         }
     }
 

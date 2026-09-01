@@ -88,25 +88,8 @@ impl crate::app::WavesPreviewer {
                 self.close_after_session_save = false;
             }
             ConflictAction::SaveAs => {
-                let Some(mut picked) = self.pick_project_save_dialog() else {
-                    return;
-                };
-                let needs_ext = picked
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| !s.eq_ignore_ascii_case("nwsess"))
-                    .unwrap_or(true);
-                if needs_ext {
-                    picked.set_extension("nwsess");
-                }
-                self.close_after_session_save = conflict.close_when_resolved;
-                if let Err(err) = self.save_project_as(picked) {
-                    self.close_after_session_save = false;
-                    self.push_toast(
-                        crate::app::types::ToastSeverity::Error,
-                        format!("Session save failed: {err}"),
-                    );
-                }
+                self.session_conflict = Some(conflict);
+                self.resolve_session_conflict_save_as();
             }
             ConflictAction::Overwrite => {
                 self.close_after_session_save = conflict.close_when_resolved;
@@ -123,6 +106,39 @@ impl crate::app::WavesPreviewer {
                 self.session_changed_on_disk = None;
                 self.queue_project_open(conflict.path.clone());
             }
+        }
+    }
+
+    /// "Save As..." out of a conflict: keep both documents by writing ours
+    /// somewhere new.
+    ///
+    /// Takes the conflict only once a destination is settled. Backing out of
+    /// the file picker is not an answer -- nothing has been written, so the
+    /// question has to stay on screen rather than leaving the user with no
+    /// prompt and no save.
+    pub(in crate::app) fn resolve_session_conflict_save_as(&mut self) {
+        let Some(conflict) = self.session_conflict.clone() else {
+            return;
+        };
+        let Some(mut picked) = self.pick_project_save_dialog() else {
+            return;
+        };
+        let needs_ext = picked
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| !s.eq_ignore_ascii_case("nwsess"))
+            .unwrap_or(true);
+        if needs_ext {
+            picked.set_extension("nwsess");
+        }
+        self.session_conflict = None;
+        self.close_after_session_save = conflict.close_when_resolved;
+        if let Err(err) = self.save_project_as(picked) {
+            self.close_after_session_save = false;
+            self.push_toast(
+                crate::app::types::ToastSeverity::Error,
+                format!("Session save failed: {err}"),
+            );
         }
     }
 

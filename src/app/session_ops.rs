@@ -2900,19 +2900,25 @@ impl super::WavesPreviewer {
                 previous_saved_at,
                 committed_assets,
             } => {
-                self.capture_replaced_session_version(
-                    &path,
-                    previous,
-                    previous_revision,
-                    previous_saved_by,
-                    previous_saved_at,
-                );
+                let replaced = path.clone();
                 self.adopt_saved_session(
                     path,
                     fingerprint,
                     session_id,
                     revision,
                     &committed_assets,
+                );
+                // After adopting, not before: a Save As clears `session_id`
+                // while it builds the plan, so capturing first would file the
+                // document under a key the history window never asks for --
+                // and "undo the Save As I just did" is exactly what somebody
+                // opens that window for.
+                self.capture_replaced_session_version(
+                    &replaced,
+                    previous,
+                    previous_revision,
+                    previous_saved_by,
+                    previous_saved_at,
                 );
                 Ok(())
             }
@@ -3005,19 +3011,22 @@ impl super::WavesPreviewer {
                     path.display(),
                     fingerprint.short_hex()
                 ));
-                self.capture_replaced_session_version(
-                    &path,
-                    previous,
-                    previous_revision,
-                    previous_saved_by,
-                    previous_saved_at,
-                );
+                let replaced = path.clone();
                 self.adopt_saved_session(
                     path,
                     fingerprint,
                     session_id,
                     revision,
                     &committed_assets,
+                );
+                // See the blocking path: the key has to be the session that
+                // now lives at this path, which a Save As only settles here.
+                self.capture_replaced_session_version(
+                    &replaced,
+                    previous,
+                    previous_revision,
+                    previous_saved_by,
+                    previous_saved_at,
                 );
                 if close_when_done {
                     self.close_project();

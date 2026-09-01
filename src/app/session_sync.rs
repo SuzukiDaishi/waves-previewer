@@ -48,7 +48,7 @@ pub(crate) fn is_transient_share_error(err: &io::Error) -> bool {
     }
 }
 
-fn retry_shared_io_with<T>(
+pub(crate) fn retry_shared_io_with<T>(
     delays: &[u64],
     mut op: impl FnMut() -> io::Result<T>,
 ) -> io::Result<T> {

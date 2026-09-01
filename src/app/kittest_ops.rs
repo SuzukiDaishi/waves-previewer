@@ -3499,6 +3499,16 @@ impl super::WavesPreviewer {
             .map(|conflict| conflict.on_disk.clone())
     }
 
+    /// Answer the conflict prompt with "Save As...". Under kittest the file
+    /// picker always cancels, so this exercises the back-out path.
+    pub fn test_conflict_choose_save_as(&mut self) -> bool {
+        if self.session_conflict.is_none() {
+            return false;
+        }
+        self.resolve_session_conflict_save_as();
+        true
+    }
+
     /// The standing "someone else saved this" banner, if it is showing.
     pub fn test_session_changed_on_disk(&self) -> Option<String> {
         self.session_changed_on_disk
