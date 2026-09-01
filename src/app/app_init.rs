@@ -475,6 +475,8 @@ impl WavesPreviewer {
             comment_mention_open: false,
             comment_mention_index: 0,
             comments_window_rect: None,
+            comment_author_id: crate::app::comments::CommentAuthor::local(None).id,
+            comment_ambiguous_authors: Default::default(),
             comment_reads: Default::default(),
             comment_reads_request: None,
             comment_unread_shown: Default::default(),

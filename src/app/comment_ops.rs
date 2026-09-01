@@ -87,9 +87,11 @@ impl crate::app::WavesPreviewer {
         CommentAuthor::local(self.session_display_name.as_deref())
     }
 
-    /// Whether `comment` was written by whoever is sitting here.
+    /// Whether `comment` was written by whoever is sitting here. Compares
+    /// against the id resolved at startup rather than rebuilding it: this is
+    /// asked once per comment per frame.
     pub(crate) fn comment_is_mine(&self, comment: &ProjectComment) -> bool {
-        comment.author_id == self.comment_author().id
+        comment.author_id == self.comment_author_id
     }
 
     /// True while a comment is on its way to disk, or waiting to be.
@@ -284,12 +286,12 @@ impl crate::app::WavesPreviewer {
     /// Comments this person has not seen. Their own never count: you do not
     /// need telling about what you just wrote.
     pub(crate) fn unread_comment_count(&self) -> usize {
-        let me = self.comment_author().id;
+        let me = &self.comment_author_id;
         self.comments
             .iter()
             .filter(|comment| {
                 !comment.deleted
-                    && comment.author_id != me
+                    && &comment.author_id != me
                     && !self.comment_reads.contains(&comment.id)
             })
             .count()
@@ -301,11 +303,11 @@ impl crate::app::WavesPreviewer {
     /// here. The record is per-user and lives in the local database; losing
     /// it costs a re-read, never any of anybody's work.
     pub(crate) fn mark_comments_read(&mut self) {
-        let me = self.comment_author().id;
+        let me = &self.comment_author_id;
         let unseen: Vec<String> = self
             .comments
             .iter()
-            .filter(|comment| comment.author_id != me && !self.comment_reads.contains(&comment.id))
+            .filter(|comment| &comment.author_id != me && !self.comment_reads.contains(&comment.id))
             .map(|comment| comment.id.clone())
             .collect();
         if unseen.is_empty() {

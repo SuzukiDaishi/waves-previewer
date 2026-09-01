@@ -2271,6 +2271,7 @@ impl super::WavesPreviewer {
         self.pending_comment_jump = None;
         self.comment_mention_open = false;
         self.comment_mention_index = 0;
+        self.comment_ambiguous_authors.clear();
         self.comment_reads.clear();
         self.comment_reads_request = None;
         self.comment_unread_shown.clear();

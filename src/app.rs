@@ -1136,6 +1136,14 @@ pub struct WavesPreviewer {
     /// Explorer onto it becomes a reference instead of being loaded into the
     /// list. `None` while it is closed or detached.
     comments_window_rect: Option<egui::Rect>,
+    /// The account name this machine posts under, resolved once. It answers
+    /// "is this mine" for every comment on every frame the window is open,
+    /// and the answer cannot change while the process runs.
+    comment_author_id: String,
+    /// Author ids that more than one machine posts under, so the machine name
+    /// is shown for those and nobody else. Rebuilt once per frame the window
+    /// draws, because asking it per comment is quadratic.
+    comment_ambiguous_authors: std::collections::HashSet<String>,
     /// Comments this person has already seen. Per-user, so it lives in the
     /// local database beside the file baseline rather than in the shared
     /// document.

@@ -136,6 +136,7 @@ impl crate::app::WavesPreviewer {
         let mut actions: Vec<CommentAction> = Vec::new();
         // Showing them is what reading them means.
         self.mark_comments_read();
+        self.rebuild_ambiguous_comment_authors();
         self.ui_comments_header(ui);
         ui.separator();
 
@@ -895,13 +896,36 @@ impl crate::app::WavesPreviewer {
             .as_deref()
             .unwrap_or(&comment.author_id)
             .to_string();
-        let ambiguous = self.comments.iter().any(|other| {
-            other.author_id == comment.author_id && other.author_host != comment.author_host
-        });
-        match (ambiguous, comment.author_host.as_deref()) {
+        match (
+            self.comment_ambiguous_authors.contains(&comment.author_id),
+            comment.author_host.as_deref(),
+        ) {
             (true, Some(host)) => format!("{label}@{host}"),
             _ => label,
         }
+    }
+
+    /// The account names posted under from more than one machine.
+    ///
+    /// Rebuilt once per frame the window draws rather than asked per comment,
+    /// which was quadratic in the length of the conversation.
+    fn rebuild_ambiguous_comment_authors(&mut self) {
+        let mut host_of: std::collections::HashMap<&str, Option<&str>> =
+            std::collections::HashMap::new();
+        let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for comment in &self.comments {
+            let host = comment.author_host.as_deref();
+            match host_of.get(comment.author_id.as_str()) {
+                Some(seen) if *seen != host => {
+                    ambiguous.insert(comment.author_id.clone());
+                }
+                Some(_) => {}
+                None => {
+                    host_of.insert(comment.author_id.as_str(), host);
+                }
+            }
+        }
+        self.comment_ambiguous_authors = ambiguous;
     }
 
     fn apply_comment_action(&mut self, action: CommentAction) {

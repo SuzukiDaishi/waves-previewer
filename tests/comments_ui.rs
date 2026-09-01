@@ -216,6 +216,33 @@ mod comments_ui {
     }
 
     #[test]
+    fn the_machine_name_shows_only_when_two_people_share_an_account_name() {
+        let (mut harness, _session) = open_saved_session("hosts");
+        harness.state_mut().test_open_comments_window();
+        harness.run_steps(2);
+        post(&mut harness, "just me");
+        harness.run_steps(2);
+        assert!(
+            harness.state().test_ambiguous_comment_authors().is_empty(),
+            "one machine per account name needs no disambiguation"
+        );
+
+        // The same account name, posting from somewhere else.
+        let me = harness.state().test_comments()[0].1.clone();
+        harness
+            .state_mut()
+            .test_post_comment_as(&me, None, "also me, elsewhere")
+            .expect("their post");
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_ambiguous_comment_authors(),
+            vec![me],
+            "two machines under one account name is a real shape on a share, \
+             and the only time the machine name earns its space"
+        );
+    }
+
+    #[test]
     fn detaching_and_docking_keeps_the_same_conversation() {
         let (mut harness, _session) = open_saved_session("detach");
         harness.state_mut().test_open_comments_window();

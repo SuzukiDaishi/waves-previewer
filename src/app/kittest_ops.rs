@@ -3789,6 +3789,13 @@ impl super::WavesPreviewer {
         )
     }
 
+    /// Account names the window would append a machine name to.
+    pub fn test_ambiguous_comment_authors(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.comment_ambiguous_authors.iter().cloned().collect();
+        names.sort();
+        names
+    }
+
     pub fn test_unread_comment_count(&self) -> usize {
         self.unread_comment_count()
     }
