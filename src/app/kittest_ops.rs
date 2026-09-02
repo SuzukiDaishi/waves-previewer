@@ -9,6 +9,35 @@ use crate::app::types::{
     SampleValueKind, SortDir, SortKey, ToolKind, ToolState, ViewMode,
 };
 
+/// Counters for the work a UI surface must not repeat per frame.
+///
+/// Both of these are O(selection): building the selection's paths, and the
+/// pass that answers a menu's enabled states. A menu closure runs every frame
+/// it is open, so "how often" is the whole property under test -- and the only
+/// way to observe it from a test is to count. Compiled out of release builds
+/// with the rest of the kittest surface.
+#[cfg(feature = "kittest")]
+pub(crate) static SELECTED_PATHS_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "kittest")]
+pub(crate) static SELECTION_SUMMARY_COMPUTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "kittest")]
+pub(crate) fn note_selected_paths_built() {
+    SELECTED_PATHS_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(feature = "kittest")]
+pub(crate) fn note_selection_summary_computed() {
+    SELECTION_SUMMARY_COMPUTES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The worker's end of a job a test installed, kept opaque so a test hook
+/// does not widen the visibility of what the channel carries.
+#[cfg(feature = "kittest")]
+pub struct TestJobHandle(#[allow(dead_code)] Box<dyn std::any::Any>);
+
 #[cfg(feature = "kittest")]
 impl super::WavesPreviewer {
     pub fn test_playing_path(&self) -> Option<&PathBuf> {
@@ -707,6 +736,136 @@ impl super::WavesPreviewer {
 
     pub fn test_csv_export_active(&self) -> bool {
         self.csv_export_state.is_some()
+    }
+
+    /// Install a modal job whose worker is already gone.
+    ///
+    /// This is what a panicked or silently-returning worker leaves behind: a
+    /// state that blocks every input, and a channel whose sender was dropped
+    /// without a message. Nothing else can produce it on purpose, and what it
+    /// used to produce -- an application that never comes back -- is exactly
+    /// what the drains must now survive.
+    pub fn test_wedge_session_save_with_dead_worker(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(tx);
+        self.session_save_state = Some(crate::app::types::SessionSaveState {
+            msg: "Saving session...".into(),
+            rx,
+            started_at: std::time::Instant::now(),
+        });
+    }
+
+    pub fn test_wedge_export_with_dead_worker(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(tx);
+        self.export_state = Some(crate::app::types::ExportState {
+            msg: "Saving...".into(),
+            rx,
+            started_at: std::time::Instant::now(),
+        });
+    }
+
+    pub fn test_wedge_clipboard_prep_with_dead_worker(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(tx);
+        self.clipboard_prep_state = Some(crate::app::types::ClipboardPrepState {
+            rx,
+            started_at: std::time::Instant::now(),
+        });
+    }
+
+    /// A modal job that is alive but has been working for `secs`, for the
+    /// stall escape the overlay grows after a while.
+    ///
+    /// The returned handle owns the worker's end of the channel: hold it and
+    /// the job stays in flight, drop it and the job reads as one whose worker
+    /// went away.
+    pub fn test_wedge_session_save_started_secs_ago(&mut self, secs: u64) -> TestJobHandle {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.session_save_state = Some(crate::app::types::SessionSaveState {
+            msg: "Saving session...".into(),
+            rx,
+            started_at: std::time::Instant::now() - std::time::Duration::from_secs(secs),
+        });
+        TestJobHandle(Box::new(tx))
+    }
+
+    /// How many times the selection's paths have been built, process-wide.
+    ///
+    /// Tests read the delta across a span of frames: what matters is that it
+    /// does not grow with the frame count while a menu sits open.
+    pub fn test_selected_paths_builds() -> usize {
+        SELECTED_PATHS_BUILDS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn test_selection_summary_computes() -> usize {
+        SELECTION_SUMMARY_COMPUTES.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn test_selection_menu_summary_shared_status(&mut self) -> Option<String> {
+        self.selection_menu_summary().shared_status
+    }
+
+    pub fn test_can_paste_into_list(&mut self) -> bool {
+        self.can_paste_into_list()
+    }
+
+    /// A CSV export waiting on one row, as if the user had asked for a
+    /// column that needs a full decode.
+    pub fn test_wedge_csv_export_on(&mut self, target: &Path, out: std::path::PathBuf) {
+        let mut pending = std::collections::HashSet::new();
+        pending.insert(target.to_path_buf());
+        self.csv_export_state = Some(crate::app::types::CsvExportState {
+            path: out,
+            ids: Vec::new(),
+            cols: self.list_columns,
+            external_cols: Vec::new(),
+            total: 1,
+            done: 0,
+            pending,
+            queue: vec![target.to_path_buf()],
+            needs_peak: true,
+            needs_lufs: false,
+            attempts: std::collections::HashMap::new(),
+            unmeasured: 0,
+            started_at: std::time::Instant::now(),
+        });
+    }
+
+    /// Report that a metadata job landed for `path` and produced nothing --
+    /// the shape of a row that cannot be satisfied. Mirrors the production
+    /// order in `meta_ops`: the job leaves the inflight set, then the export
+    /// is told.
+    pub fn test_csv_export_meta_landed(&mut self, path: &Path) {
+        self.meta_inflight.remove(path);
+        self.update_csv_export_progress_for_path(path);
+    }
+
+    pub fn test_csv_export_pending_len(&self) -> usize {
+        self.csv_export_state
+            .as_ref()
+            .map(|state| state.pending.len())
+            .unwrap_or(0)
+    }
+
+    pub fn test_busy_overlay_released(&self) -> bool {
+        self.busy_overlay_released
+    }
+
+    pub fn test_export_in_flight(&self) -> bool {
+        self.export_state.is_some()
+    }
+
+    pub fn test_clipboard_prep_in_flight(&self) -> bool {
+        self.clipboard_prep_state.is_some()
+    }
+
+    pub fn test_show_quit_prompt(&self) -> bool {
+        self.show_quit_prompt
+    }
+
+    pub fn test_set_show_quit_prompt(&mut self, show: bool) {
+        self.show_quit_prompt = show;
     }
 
     pub fn test_auto_play_list_nav(&self) -> bool {

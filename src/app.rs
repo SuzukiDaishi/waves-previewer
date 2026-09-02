@@ -128,6 +128,7 @@ mod world_edit_ops;
 mod zoo_assets;
 mod zoo_ops;
 pub use self::cli_ops::run_cli;
+use self::list_state_ops::SelectionMenuSummary;
 #[cfg(feature = "kittest")]
 use self::dialogs::TestDialogQueue;
 use self::input_focus::{InputScope, UiInputFocusState};
@@ -990,6 +991,20 @@ pub struct WavesPreviewer {
     export_state: Option<ExportState>,
     // blocking CSV export (waits for full metadata)
     csv_export_state: Option<CsvExportState>,
+    /// The selection facts the menus ask for every frame they are open, and
+    /// when they were gathered. See `selection_menu_summary`.
+    selection_summary_cache: Option<(std::time::Instant, SelectionMenuSummary)>,
+    /// The tools config path and whether it exists, with the time of the
+    /// answer. See `tools_config_probe`.
+    tools_config_probe: Option<(std::time::Instant, Option<PathBuf>, bool)>,
+    /// The last answer to "is there anything to paste", and when it was
+    /// asked. See `can_paste_into_list`: the question costs an OS clipboard
+    /// open, and a menu asks it every frame it is open.
+    clipboard_paste_probe: Option<(std::time::Instant, bool)>,
+    /// The user asked the modal overlay to stop blocking a job that stopped
+    /// answering. Cleared when nothing blocks any more, so the next job is
+    /// modal again -- this is an escape hatch, not a preference.
+    pub(crate) busy_overlay_released: bool,
     // currently loaded/playing file path (for effective volume calc)
     playing_path: Option<PathBuf>,
     // export/save settings (simple, in-memory)
@@ -2803,6 +2818,8 @@ impl WavesPreviewer {
             queue,
             needs_peak,
             needs_lufs,
+            attempts: HashMap::new(),
+            unmeasured: 0,
             started_at: std::time::Instant::now(),
         });
     }
@@ -2829,9 +2846,21 @@ impl WavesPreviewer {
         } else if !self.meta_inflight.contains(path) {
             // A finished job (e.g. a header-only pass queued by a visible
             // row) did not produce what the export needs; put the row back
-            // so the streaming top-up retries it with a full task.
+            // so the streaming top-up retries it with a full task -- but only
+            // so many times. Retrying forever is how one unreadable file
+            // turns a CSV export into an application that never comes back.
+            const MAX_CSV_META_ATTEMPTS: u32 = 4;
             if let Some(state) = &mut self.csv_export_state {
-                state.queue.push(path.to_path_buf());
+                let attempts = state.attempts.entry(path.to_path_buf()).or_insert(0);
+                *attempts += 1;
+                if *attempts >= MAX_CSV_META_ATTEMPTS {
+                    if state.pending.remove(path) {
+                        state.done = state.done.saturating_add(1);
+                        state.unmeasured = state.unmeasured.saturating_add(1);
+                    }
+                } else {
+                    state.queue.push(path.to_path_buf());
+                }
             }
         }
     }
@@ -2849,6 +2878,15 @@ impl WavesPreviewer {
         let Some(state) = self.csv_export_state.take() else {
             return;
         };
+        if state.unmeasured > 0 {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Warning,
+                format!(
+                    "{} row(s) could not be measured — their columns are blank in the CSV.",
+                    state.unmeasured
+                ),
+            );
+        }
         if let Err(err) =
             self.export_list_csv(&state.path, &state.ids, state.cols, &state.external_cols)
         {

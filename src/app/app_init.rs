@@ -399,6 +399,10 @@ impl WavesPreviewer {
             edited_cache: HashMap::new(),
             export_state: None,
             csv_export_state: None,
+            selection_summary_cache: None,
+            tools_config_probe: None,
+            clipboard_paste_probe: None,
+            busy_overlay_released: false,
             playing_path: None,
 
             export_cfg: ExportConfig {

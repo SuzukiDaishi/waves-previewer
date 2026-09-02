@@ -6,6 +6,41 @@ use super::types::{
 };
 use super::WavesPreviewer;
 
+/// Everything the menus need to know about the selection, gathered in one
+/// pass.
+///
+/// A menu closure runs every frame it is open, and every question it asks --
+/// is anything selected, do they all share a status, can they all be
+/// converted, does any of them have unsaved edits -- is a pass over the
+/// selection. Asked one at a time, per frame, over a select-all of a large
+/// folder, that is a right-click that freezes the application. They are asked
+/// together instead, and cached (`selection_menu_summary`) for as long as a
+/// menu can be open without the selection changing under it.
+#[derive(Clone, Default)]
+pub(crate) struct SelectionMenuSummary {
+    /// Selected rows that still resolve to an item.
+    pub count: usize,
+    /// Rows that are not virtual, counted no further than 2 -- every question
+    /// asked of it is "one" or "more than one".
+    pub real_capped: usize,
+    /// Rows that can be renamed, counted no further than 2.
+    pub renameable_capped: usize,
+    /// The first renameable row's path, for the single-row rename entries.
+    pub first_renameable: Option<PathBuf>,
+    /// Any row carrying unsaved edits.
+    pub has_edits: bool,
+    /// Every row is a real WAV file that can be rewritten in place.
+    pub can_convert_bits: bool,
+    /// Every row is something this app can write back out at all.
+    pub can_convert_format: bool,
+    /// Rows the transcript job could run on.
+    pub transcript_targets: usize,
+    /// The status every row carries, when they all carry the same one.
+    pub shared_status: Option<String>,
+    /// Per tag definition, in palette order: whether every row already has it.
+    pub tags_on: Vec<bool>,
+}
+
 /// Verdict for the QA list columns. `Pass` renders an empty cell — only
 /// problems are worth the reader's attention.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -506,6 +541,8 @@ impl WavesPreviewer {
     }
 
     pub(super) fn selected_paths(&self) -> Vec<PathBuf> {
+        #[cfg(feature = "kittest")]
+        crate::app::kittest_ops::note_selected_paths_built();
         let mut rows: Vec<usize> = self.selected_multi.iter().copied().collect();
         if rows.is_empty() {
             if let Some(sel) = self.selected {
@@ -538,6 +575,219 @@ impl WavesPreviewer {
     pub(super) fn list_clear_selection(&mut self) {
         self.selected_multi.clear();
         self.select_anchor = None;
+    }
+
+    /// How many of the selection's paths satisfy `keep`, counting no further
+    /// than `limit`.
+    ///
+    /// Menus ask about the selection, not for it: is there one, does it have
+    /// two rows, is exactly one of them renameable. They ask once per frame
+    /// for as long as they are open, and `selected_paths` answers by cloning
+    /// every selected path and sorting them -- on a select-all over a large
+    /// folder, the whole list, sixty times a second, to decide whether a
+    /// button is grey. Counting with a ceiling answers all of those in
+    /// constant time whatever the selection's size. The source of paths is
+    /// the same one `selected_paths` walks, so the answers agree.
+    fn count_selection(&self, limit: usize, keep: impl Fn(&Self, &Path) -> bool) -> usize {
+        let mut count = 0usize;
+        if !self.selected_multi.is_empty() {
+            for &row in &self.selected_multi {
+                let Some(path) = self.path_for_row(row) else {
+                    continue;
+                };
+                if keep(self, path) {
+                    count += 1;
+                    if count >= limit {
+                        break;
+                    }
+                }
+            }
+            return count;
+        }
+        if let Some(sel) = self.selected {
+            if let Some(path) = self.path_for_row(sel) {
+                if keep(self, path) {
+                    count += 1;
+                }
+            }
+            return count;
+        }
+        if let Some(tab) = self.active_tab.and_then(|idx| self.tabs.get(idx)) {
+            if keep(self, &tab.path) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Whether the next list-wide action would have at least `n` rows to work
+    /// on. Costs `n`, not the selection.
+    pub(super) fn selection_has_at_least(&self, n: usize) -> bool {
+        n == 0 || self.count_selection(n, |_, _| true) >= n
+    }
+
+    /// What the menus need to know about the selection, recomputed at most
+    /// every `SELECTION_SUMMARY_TTL`.
+    ///
+    /// The cache is what makes this affordable: a menu asks every frame it is
+    /// open, and the answer costs a pass over a selection that can be the
+    /// whole list. Nothing can change the selection while a menu is up, so a
+    /// cached answer is the same answer -- and anything inside a menu that
+    /// *does* change it calls `invalidate_selection_summary`.
+    pub(crate) fn selection_menu_summary(&mut self) -> SelectionMenuSummary {
+        const SELECTION_SUMMARY_TTL: std::time::Duration = std::time::Duration::from_millis(250);
+        if let Some((computed_at, summary)) = &self.selection_summary_cache {
+            if computed_at.elapsed() < SELECTION_SUMMARY_TTL {
+                return summary.clone();
+            }
+        }
+        let summary = self.compute_selection_menu_summary();
+        self.selection_summary_cache = Some((std::time::Instant::now(), summary.clone()));
+        summary
+    }
+
+    /// Drop the cached summary, for the edits that make it wrong before it
+    /// expires -- a menu that just set a status must not go on showing the
+    /// old one.
+    pub(crate) fn invalidate_selection_summary(&mut self) {
+        self.selection_summary_cache = None;
+    }
+
+    fn compute_selection_menu_summary(&mut self) -> SelectionMenuSummary {
+        #[cfg(feature = "kittest")]
+        crate::app::kittest_ops::note_selection_summary_computed();
+        // One collect per refresh, not per frame -- which is the whole point:
+        // what used to happen here happened sixty times a second.
+        let paths = self.selected_paths();
+        let tag_ids: Vec<std::sync::Arc<str>> = self
+            .tag_palette
+            .defs
+            .iter()
+            .map(|def| def.id.clone())
+            .collect();
+        if paths.is_empty() {
+            // "Every row satisfies it" is vacuously true over nothing, which
+            // would enable every one of these actions on an empty selection.
+            return SelectionMenuSummary {
+                tags_on: vec![false; tag_ids.len()],
+                ..SelectionMenuSummary::default()
+            };
+        }
+        let mut summary = SelectionMenuSummary {
+            can_convert_bits: true,
+            can_convert_format: true,
+            tags_on: vec![true; tag_ids.len()],
+            ..SelectionMenuSummary::default()
+        };
+        let mut shared_status: Option<std::sync::Arc<str>> = None;
+        let mut status_mixed = false;
+        for path in &paths {
+            let path = path.as_path();
+            let Some((source, status_id, tags_present)) = self.item_for_path(path).map(|item| {
+                (
+                    item.source,
+                    item.status_id.clone(),
+                    tag_ids
+                        .iter()
+                        .map(|id| item.has_tag(id))
+                        .collect::<Vec<bool>>(),
+                )
+            }) else {
+                continue;
+            };
+            summary.count += 1;
+            if !matches!(source, MediaSource::Virtual | MediaSource::External) {
+                summary.real_capped = (summary.real_capped + 1).min(2);
+            }
+            if source != MediaSource::External {
+                summary.renameable_capped = (summary.renameable_capped + 1).min(2);
+                if summary.first_renameable.is_none() {
+                    summary.first_renameable = Some(path.to_path_buf());
+                }
+            }
+            if !summary.has_edits && self.has_edits_for_path(path) {
+                summary.has_edits = true;
+            }
+            // No `exists()` anywhere here: this walks the whole selection, and
+            // a stat per file would be one blocking syscall per file on a
+            // share. The background service already took them.
+            let on_disk = source == MediaSource::File && self.path_is_file_cached(path);
+            if on_disk && crate::audio_io::is_supported_audio_path(path) {
+                summary.transcript_targets += 1;
+            }
+            let is_wav = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case("wav"));
+            let exportable = crate::media_kind::source_allows_export(path);
+            if !(is_wav && on_disk && exportable) {
+                summary.can_convert_bits = false;
+            }
+            if !exportable {
+                summary.can_convert_format = false;
+            }
+            if !status_mixed {
+                match (&shared_status, status_id.as_ref()) {
+                    (_, None) => status_mixed = true,
+                    (None, Some(current)) => shared_status = Some(current.clone()),
+                    (Some(existing), Some(current)) if **existing != **current => {
+                        status_mixed = true;
+                    }
+                    _ => {}
+                }
+            }
+            for (idx, present) in tags_present.iter().enumerate() {
+                if !present {
+                    summary.tags_on[idx] = false;
+                }
+            }
+        }
+        if summary.count == 0 {
+            return SelectionMenuSummary {
+                tags_on: vec![false; tag_ids.len()],
+                ..SelectionMenuSummary::default()
+            };
+        }
+        if !status_mixed {
+            summary.shared_status = shared_status.map(|id| id.to_string());
+        }
+        summary
+    }
+
+    /// The selection's rows the transcript job can actually run on: real
+    /// audio files the background service has already seen on disk.
+    ///
+    /// Built by the click, never by the menu's enabled state -- that reads
+    /// `SelectionMenuSummary::transcript_targets`, counted in the same pass
+    /// as everything else the menu asks.
+    pub(super) fn transcript_targets_in_selection(&mut self) -> Vec<PathBuf> {
+        let paths = self.selected_paths();
+        paths
+            .into_iter()
+            .filter(|path| {
+                self.item_for_path(path)
+                    .is_some_and(|item| item.source == MediaSource::File)
+                    && crate::audio_io::is_supported_audio_path(path)
+                    && self.path_is_file_cached(path)
+            })
+            .collect()
+    }
+
+    /// The first path a list-wide action would touch, in the order
+    /// `selected_paths` yields, without building the rest.
+    pub(super) fn first_selected_path(&self) -> Option<PathBuf> {
+        if !self.selected_multi.is_empty() {
+            return self
+                .selected_multi
+                .iter()
+                .find_map(|&row| self.path_for_row(row).cloned());
+        }
+        if let Some(sel) = self.selected {
+            return self.path_for_row(sel).cloned();
+        }
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .map(|tab| tab.path.clone())
     }
 
     pub(super) fn selected_real_paths(&self) -> Vec<PathBuf> {

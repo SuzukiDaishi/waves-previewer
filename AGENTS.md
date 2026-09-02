@@ -27,6 +27,7 @@ Repository Layout
     - `ui/`: UI panels/windows (top bar, list, editor, debug, export settings).
       - `ui/topbar/`: top bar sections (`menus`, `transport`, `status`).
       - `ui/list/`: list focus/keyboard and table-building helpers, plus the cells that are more than text -- `label_cell.rs` (Status/Tags) and `comment_cell.rs` (the Comments badge and the thread popup it opens).
+      - `ui/list/row_menu.rs`: the row context menu. Reads `selection_menu_summary()` and builds nothing per frame -- see the menu rule under Implementation Principles.
       - `ui/list/navigation.rs`: the list's own keys. Two rules there are load-bearing and easy to undo by accident: a key press is *counted*, not tested (a frame that ran long carries every auto-repeat the keyboard produced, and dropping them is what makes a held arrow stall on a row), and the list never re-takes focus it already holds (`Memory::set_focus_lock_filter` only binds to a widget that held focus on the previous frame, so a fresh `request_focus` hands egui's arrow-key *focus navigation* a frame in which to walk the focus into the search box or a topbar drag value -- both text entry, both of which then own every key the list needs).
     - `render/`: waveform/spectrogram rendering helpers.
     - `*_ops.rs`: operation logic split by domain (input, clipboard, session, loading, editor apply, loudnorm, resample, meta, preview, export, external load).
@@ -35,6 +36,7 @@ Repository Layout
     - `frame_budget.rs`: the shared per-frame deadline the deferrable drains in `frame_ops.rs` consult.
     - `path_status.rs`: background "does this path exist" service. UI code asks this, never the filesystem.
     - `frame_ops.rs`: per-frame `eframe::App::update` orchestration.
+    - `loading_ops.rs`: the modal busy overlay and `poll_job`/`JobPoll`, the three-way channel poll every job drain uses so a dead worker cannot become a job that never ends. The overlay blocks all input, so it also owns the two escapes from that: it steps aside for the quit prompt, and after `BUSY_OVERLAY_STALL_SECS` it offers to stop waiting on a job that is alive but wedged.
     - `tab_ops.rs`: open/activate tab helpers.
     - `editor_decode_ops.rs`: background editor decode spawn/drain helpers.
     - `logic.rs`: per-frame update logic.
@@ -53,7 +55,7 @@ Repository Layout
     - `transcript_ops.rs`: transcript seek handling.
     - `cli_ops.rs`: `--cli` headless command handlers and JSON/render helpers.
     - `gain_ops.rs`: unified per-file gain framework: pending gain lookup/set for list items, plus routing list gain changes into open editor tabs as destructive edits (and baking pending gain on tab open).
-    - `list_state_ops.rs`: list accessors, selection helpers, and sort-key visibility guard.
+    - `list_state_ops.rs`: list accessors, selection helpers, and sort-key visibility guard. `SelectionMenuSummary` lives here: the one cached pass that answers every question a menu asks about the selection, because asking them one at a time per frame is what a menu closure would otherwise do.
     - `temp_audio_ops.rs`: clipboard temp wav export + virtual audio decode helpers.
     - `rename_ops.rs`: rename dialogs + path replacement and batch rename.
     - `audio_ops.rs`: output volume + per-file gain application.
@@ -165,6 +167,8 @@ Implementation Principles
 - Avoid blocking the UI thread; heavy work should run in background tasks.
 - Size per-frame work from `perf_profile.rs`, not from a new constant: the same number that is fine on an 8-core workstation is seconds of frozen window on a 2-core laptop.
 - A new per-frame drain belongs behind the `deferrable!` guard in `frame_ops.rs` unless the user is synchronously waiting on it, and needs a cap on how much it applies per frame.
+- **A worker channel's `Disconnected` is not "not yet".** A worker that returns or panics without sending drops its sender, and every later `try_recv` answers `Disconnected` forever -- so `Err(_) => None` turns a dead worker into a job that never finishes: a spinner that never stops, a repaint cadence pinned at 60fps for the rest of the session, a feature that refuses to run again because its state says it is already running. Poll through `loading_ops::poll_job`, and give `JobPoll::Gone` its own arm that clears the state and says so. For the states behind the modal overlay this is not a nicety: the overlay eats every input and draws over the quit prompt, so a lost worker there is an application that can only be killed, with the unsaved work still in it.
+- **A menu closure runs every frame it is open.** Nothing inside one may cost the size of the selection or the list -- no `selected_paths()`, no pass over the selection per tag, no clipboard read, no `exists()`. The selection can be the whole list, and a right-click that clones a hundred thousand paths sixty times a second is a frozen window. Ask `selection_menu_summary()` (one cached pass answering every enabled-state question), count with `selection_has_at_least`, and build the paths inside the arm that was clicked.
 - **Never call the filesystem from the UI thread** — no `is_file`, `exists`, `metadata`, `read`, or `walkdir` on any path the user supplied. On a network share one of those blocks for the SMB timeout, which is a hung window on its own; a per-frame budget does not help. Ask `path_status.rs` for existence, and put anything else on a worker. (Paths the app owns — its own prefs and config — are the only exception.)
 - Background sweeps against a user path must back off from their own measured cost, and check `perf_profile.rs` for whether the root is remote before choosing a concurrency.
 - Preserve original files unless the user explicitly saves destructive edits.

@@ -2,13 +2,19 @@ use crate::app::WavesPreviewer;
 
 impl WavesPreviewer {
     fn list_row_context_menu_contents(&mut self, ui: &mut egui::Ui) {
-        let selected = self.selected_paths();
-        let has_selection = !selected.is_empty();
+        // This closure runs every frame the menu is open, so nothing here may
+        // cost the size of the selection: the selection can be the whole list,
+        // and a context menu that has to clone it sixty times a second is a
+        // right-click that freezes the application. Paths are built inside the
+        // arm that was clicked; the enabled states are counted; the label
+        // summary is one cached pass (`selection_label_summary`).
+        let has_selection = self.selection_has_at_least(1);
+        let selection = self.selection_menu_summary();
         if ui
             .add_enabled(has_selection, egui::Button::new("Open in Editor"))
             .clicked()
         {
-            if let Some(path) = selected.first().cloned() {
+            if let Some(path) = self.first_selected_path() {
                 self.open_or_activate_tab(&path);
             }
             ui.close();
@@ -17,8 +23,8 @@ impl WavesPreviewer {
             .add_enabled(has_selection, egui::Button::new("Reveal in Folder"))
             .clicked()
         {
-            if let Some(path) = selected.first() {
-                if let Err(err) = crate::app::helpers::open_folder_with_file_selected(path) {
+            if let Some(path) = self.first_selected_path() {
+                if let Err(err) = crate::app::helpers::open_folder_with_file_selected(&path) {
                     self.push_toast(
                         crate::app::types::ToastSeverity::Warning,
                         format!("Reveal in folder failed: {err}"),
@@ -33,7 +39,7 @@ impl WavesPreviewer {
             .add_enabled(has_selection, egui::Button::new("Comments..."))
             .clicked()
         {
-            if let Some(path) = selected.first().cloned() {
+            if let Some(path) = self.first_selected_path() {
                 self.open_comments_window_for_path(&path);
             }
             ui.close();
@@ -64,9 +70,8 @@ impl WavesPreviewer {
         ui.separator();
         // Bulk assignment: the whole selection at once, which the per-row
         // dropdown in the Status/Tags cell also does but is easy to miss.
-        let label_targets = selected.clone();
         let status_defs = self.status_palette.defs.clone();
-        let current_status = self.shared_status_for_paths(&label_targets);
+        let current_status = selection.shared_status.clone();
         let mut status_choice: Option<Option<String>> = None;
         ui.add_enabled_ui(has_selection, |ui| {
             ui.menu_button("Status", |ui| {
@@ -95,22 +100,19 @@ impl WavesPreviewer {
             });
         });
         if let Some(choice) = status_choice {
+            let label_targets = self.selected_paths();
             self.set_status_for_paths(&label_targets, choice.as_deref());
+            self.invalidate_selection_summary();
         }
 
         let tag_defs = self.tag_palette.defs.clone();
         // "On" means every selected row already has it, so clicking removes it
         // from all of them; a mixed selection adds it to the rest.
-        let tag_state: Vec<bool> = tag_defs
-            .iter()
-            .map(|def| {
-                !label_targets.is_empty()
-                    && label_targets.iter().all(|path| {
-                        self.item_for_path(path)
-                            .is_some_and(|item| item.has_tag(&def.id))
-                    })
-            })
-            .collect();
+        let tag_state: Vec<bool> = if selection.tags_on.len() == tag_defs.len() {
+            selection.tags_on.clone()
+        } else {
+            vec![false; tag_defs.len()]
+        };
         let mut tag_toggle: Option<(String, bool)> = None;
         ui.add_enabled_ui(has_selection, |ui| {
             ui.menu_button("Tags", |ui| {
@@ -130,11 +132,12 @@ impl WavesPreviewer {
             });
         });
         if let Some((id, on)) = tag_toggle {
+            let label_targets = self.selected_paths();
             self.set_tag_for_paths(&label_targets, &id, on);
+            self.invalidate_selection_summary();
         }
         ui.separator();
 
-        let effect_targets = selected.clone();
         ui.menu_button("Effect", |ui| {
             let entries = self.effect_graph.library.entries.clone();
             if entries.is_empty() {
@@ -143,6 +146,7 @@ impl WavesPreviewer {
             for entry in entries {
                 let resp = ui.add_enabled(entry.valid, egui::Button::new(entry.name.clone()));
                 if resp.clicked() {
+                    let effect_targets = self.selected_paths();
                     if let Err(err) = self
                         .apply_effect_graph_template_to_paths(&entry.template_id, &effect_targets)
                     {
@@ -163,7 +167,7 @@ impl WavesPreviewer {
                 .add_enabled(can_open, egui::Button::new("Open"))
                 .clicked()
             {
-                if let Some(path) = selected.first().cloned() {
+                if let Some(path) = self.first_selected_path() {
                     self.open_effect_graph_workspace();
                     self.effect_graph.tester.target_path = Some(path.clone());
                     self.effect_graph.tester.target_path_input = path.display().to_string();
@@ -176,26 +180,15 @@ impl WavesPreviewer {
                 ui.close();
             }
         });
-        // The menu re-runs this every frame it is open, over the whole
-        // selection. Statting here would be one blocking syscall per
-        // selected file per frame — on a share, a hung menu. Resolve
-        // existence through the background service instead.
-        let mut transcript_targets: Vec<std::path::PathBuf> = Vec::new();
-        for path in selected.iter() {
-            let is_file_source = self
-                .item_for_path(path)
-                .map(|item| item.source == crate::app::types::MediaSource::File)
-                .unwrap_or(false);
-            if is_file_source
-                && crate::audio_io::is_supported_audio_path(path)
-                && self.path_is_file_cached(path)
-            {
-                transcript_targets.push(path.clone());
-            }
-        }
+        // Whether there is anything to transcribe comes from the cached
+        // summary; the list of targets is built by the click. The menu
+        // re-runs this every frame it is open, over the whole selection, and
+        // statting here would be one blocking syscall per selected file per
+        // frame — on a share, a hung menu. Existence comes from the
+        // background service either way.
         let transcript_running = self.transcript_ai_is_running();
         let transcript_ready = self.transcript_ai_menu_enabled();
-        let has_transcript_targets = !transcript_targets.is_empty();
+        let has_transcript_targets = selection.transcript_targets > 0;
         let transcript_enabled = transcript_running || (transcript_ready && has_transcript_targets);
         let transcript_label = if transcript_running {
             "Transcript (AI) - Cancel"
@@ -208,7 +201,8 @@ impl WavesPreviewer {
             if transcript_running {
                 self.cancel_transcript_ai_run();
             } else {
-                self.run_transcript_ai_for_selected(transcript_targets);
+                let targets = self.transcript_targets_in_selection();
+                self.run_transcript_ai_for_selected(targets);
             }
             ui.close();
         }
@@ -221,81 +215,49 @@ impl WavesPreviewer {
             };
             transcript_resp.on_hover_text(reason);
         }
-        let renameable_selected = self.selected_renameable_paths();
-        if renameable_selected.len() == 1 {
-            if ui.button("Rename (F2, inline)").clicked() {
-                self.begin_inline_rename(renameable_selected[0].clone());
-                ui.close();
-            }
-            if ui.button("Rename...").clicked() {
-                self.open_rename_dialog(renameable_selected[0].clone());
-                ui.close();
+        if selection.renameable_capped == 1 {
+            if let Some(target) = selection.first_renameable.clone() {
+                if ui.button("Rename (F2, inline)").clicked() {
+                    self.begin_inline_rename(target.clone());
+                    ui.close();
+                }
+                if ui.button("Rename...").clicked() {
+                    self.open_rename_dialog(target);
+                    ui.close();
+                }
             }
         }
-        let mut can_convert_bits = !selected.is_empty();
-        for p in selected.iter() {
-            if !can_convert_bits {
-                break;
-            }
-            let is_wav = p
-                .extension()
-                .and_then(|s| s.to_str())
-                .map(|s| s.eq_ignore_ascii_case("wav"))
-                .unwrap_or(false);
-            let is_file_source = self
-                .item_for_path(p)
-                .map(|item| item.source == crate::app::types::MediaSource::File)
-                .unwrap_or(false);
-            // Same reasoning as the transcript targets above: no stat here.
-            can_convert_bits = is_wav
-                && is_file_source
-                && crate::media_kind::source_allows_export(p)
-                && self.path_is_file_cached(p);
-        }
-        let convert_targets = if can_convert_bits {
-            selected.clone()
-        } else {
-            Vec::new()
-        };
+        let can_convert_bits = selection.can_convert_bits;
         ui.menu_button("Convert Bits", |ui| {
             if ui
                 .add_enabled(can_convert_bits, egui::Button::new("16-bit PCM"))
                 .clicked()
             {
-                self.spawn_convert_bits_selected(
-                    convert_targets.clone(),
-                    crate::wave::WavBitDepth::Pcm16,
-                );
+                let targets = self.selected_paths();
+                self.spawn_convert_bits_selected(targets, crate::wave::WavBitDepth::Pcm16);
                 ui.close();
             }
             if ui
                 .add_enabled(can_convert_bits, egui::Button::new("24-bit PCM"))
                 .clicked()
             {
-                self.spawn_convert_bits_selected(
-                    convert_targets.clone(),
-                    crate::wave::WavBitDepth::Pcm24,
-                );
+                let targets = self.selected_paths();
+                self.spawn_convert_bits_selected(targets, crate::wave::WavBitDepth::Pcm24);
                 ui.close();
             }
             if ui
                 .add_enabled(can_convert_bits, egui::Button::new("32-bit float"))
                 .clicked()
             {
-                self.spawn_convert_bits_selected(
-                    convert_targets.clone(),
-                    crate::wave::WavBitDepth::Float32,
-                );
+                let targets = self.selected_paths();
+                self.spawn_convert_bits_selected(targets, crate::wave::WavBitDepth::Float32);
                 ui.close();
             }
         });
         // A video source has no encodable form — the app can read its audio but
         // has no video encoder to write one back — so converting it is refused
         // rather than silently producing an audio-only file with a .mp4 name.
-        let can_convert_format = has_selection
-            && selected
-                .iter()
-                .all(|p| crate::media_kind::source_allows_export(p));
+        let can_convert_format = selection.can_convert_format;
         let convert_format_disabled_reason =
             "Video sources are read-only in this version — their audio can be played and previewed, but not written back out.";
         ui.menu_button("Convert Format", |ui| {
@@ -319,7 +281,8 @@ impl WavesPreviewer {
                     (false, None) => button.on_disabled_hover_text(convert_format_disabled_reason),
                 };
                 if button.clicked() {
-                    self.spawn_convert_format_selected(selected.clone(), ext);
+                    let targets = self.selected_paths();
+                    self.spawn_convert_format_selected(targets, ext);
                     ui.close();
                 }
             }
@@ -328,14 +291,15 @@ impl WavesPreviewer {
             .add_enabled(has_selection, egui::Button::new("Remove from List"))
             .clicked()
         {
+            let selected = self.selected_paths();
             self.remove_paths_from_list_with_undo(&selected);
             ui.close();
         }
-        let has_edits = self.has_edits_for_paths(&selected);
         if ui
-            .add_enabled(has_edits, egui::Button::new("Clear Edits"))
+            .add_enabled(selection.has_edits, egui::Button::new("Clear Edits"))
             .clicked()
         {
+            let selected = self.selected_paths();
             self.clear_edits_for_paths(&selected);
             ui.close();
         }
@@ -343,7 +307,8 @@ impl WavesPreviewer {
             .add_enabled(has_selection, egui::Button::new("Sample Rate Convert..."))
             .clicked()
         {
-            self.open_resample_dialog(selected.clone());
+            let selected = self.selected_paths();
+            self.open_resample_dialog(selected);
             ui.close();
         }
         if ui

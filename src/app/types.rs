@@ -5017,6 +5017,9 @@ pub enum EditOp {
 pub struct ExportState {
     pub msg: String,
     pub rx: std::sync::mpsc::Receiver<ExportResult>,
+    /// When the job started. The modal overlay needs it to tell "slow" from
+    /// "not coming back" -- see `busy_overlay_elapsed`.
+    pub started_at: Instant,
 }
 
 pub struct ExportResult {
@@ -5042,6 +5045,17 @@ pub struct CsvExportState {
     pub queue: Vec<PathBuf>,
     pub needs_peak: bool,
     pub needs_lufs: bool,
+    /// How often each row has been handed back to the metadata pool without
+    /// producing what the export needs. A row is retried because the pool
+    /// rejects tasks past its backlog cap on large lists -- but a row that
+    /// can *never* be satisfied (its worker died, the file went away
+    /// mid-export) would otherwise be re-queued forever, and this export
+    /// blocks every input in the application until its last row lands.
+    pub attempts: HashMap<PathBuf, u32>,
+    /// Rows given up on. Their columns are written blank, and the count is
+    /// worth saying out loud: a silently short measurement is worse than a
+    /// slow one.
+    pub unmeasured: usize,
     pub started_at: Instant,
 }
 

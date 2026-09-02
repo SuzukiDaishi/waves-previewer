@@ -3095,10 +3095,29 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn drain_session_save(&mut self, ctx: &egui::Context) {
+        use crate::app::loading_ops::{poll_job, JobPoll};
         let result = match &self.session_save_state {
-            Some(state) => match state.rx.try_recv() {
-                Ok(result) => Some(result),
-                Err(_) => None,
+            Some(state) => match poll_job(&state.rx) {
+                JobPoll::Ready(result) => Some(result),
+                JobPoll::Waiting => None,
+                JobPoll::Gone => {
+                    // The worst of the modal states to lose: it blocks input,
+                    // so the quit prompt behind it cannot be answered, and the
+                    // save it is waiting for has already stopped happening.
+                    // Nothing was written -- the document on disk is whatever
+                    // it was -- so the only wrong move is to keep pretending.
+                    self.session_save_state = None;
+                    self.close_after_session_save = false;
+                    self.push_toast(
+                        crate::app::types::ToastSeverity::Error,
+                        "Save did not finish — the session file was not written. \
+                         Try saving again."
+                            .to_string(),
+                    );
+                    self.debug_log("session save worker stopped without a result".to_string());
+                    ctx.request_repaint();
+                    return;
+                }
             },
             None => None,
         };

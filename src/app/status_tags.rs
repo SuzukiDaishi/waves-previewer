@@ -449,18 +449,6 @@ impl crate::app::WavesPreviewer {
 
     /// The status all of `paths` share, or `None` when they disagree or none
     /// is set. Drives the check mark in the bulk menu.
-    pub(crate) fn shared_status_for_paths(&self, paths: &[std::path::PathBuf]) -> Option<String> {
-        let mut shared: Option<&str> = None;
-        for path in paths {
-            let current = self.item_for_path(path)?.status_id.as_deref()?;
-            match shared {
-                Some(existing) if existing != current => return None,
-                _ => shared = Some(current),
-            }
-        }
-        shared.map(str::to_string)
-    }
-
     /// Set (or clear, with `None`) the status of every path in `paths`, as one
     /// undoable step.
     pub(crate) fn set_status_for_paths(&mut self, paths: &[std::path::PathBuf], id: Option<&str>) {
