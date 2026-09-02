@@ -911,9 +911,12 @@ impl WavesPreviewer {
         {
             if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
                 let t = ((pos.x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
-                let next = -80.0 + t * 86.0;
-                if (next - self.volume_db).abs() >= 0.05 {
-                    self.volume_db = next.clamp(-80.0, 6.0);
+                // Not linear in dB: see `helpers::VOLUME_TAPER`. The range this
+                // control is used in -- unity down to -24 -- owns most of the
+                // track, and the tail to silence is compressed.
+                let next = crate::app::helpers::volume_db_from_fader(t);
+                if (next - self.volume_db).abs() >= 0.02 {
+                    self.volume_db = next;
                     changed = true;
                 }
             }
@@ -925,7 +928,10 @@ impl WavesPreviewer {
                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight));
             if left || right {
                 let delta = if right { 1.0 } else { -1.0 };
-                let next = (self.volume_db + delta).clamp(-80.0, 6.0);
+                let next = (self.volume_db + delta).clamp(
+                    crate::app::helpers::VOLUME_DB_MIN,
+                    crate::app::helpers::VOLUME_DB_MAX,
+                );
                 if (next - self.volume_db).abs() >= f32::EPSILON {
                     self.volume_db = next;
                     changed = true;
@@ -970,7 +976,7 @@ impl WavesPreviewer {
             text_col,
         );
         painter.rect_filled(track_rect, 3.0, palette.slider_track);
-        let t = ((self.volume_db + 80.0) / 86.0).clamp(0.0, 1.0);
+        let t = crate::app::helpers::volume_fader_from_db(self.volume_db);
         let fill_rect = egui::Rect::from_min_max(
             track_rect.min,
             egui::pos2(
@@ -992,6 +998,17 @@ impl WavesPreviewer {
             egui::Stroke::new(1.0, stroke_col),
             egui::StrokeKind::Inside,
         );
+        // Unity is no longer where a linear fader would put it, so it is
+        // marked: the one value on this control a user aims for exactly.
+        let unity_x =
+            track_rect.left() + track_rect.width() * crate::app::helpers::volume_fader_from_db(0.0);
+        painter.line_segment(
+            [
+                egui::pos2(unity_x, track_rect.top() - 2.0),
+                egui::pos2(unity_x, track_rect.bottom() + 2.0),
+            ],
+            egui::Stroke::new(1.0, palette.slider_knob_stroke),
+        );
         let knob_x = track_rect.left() + track_rect.width() * t;
         painter.circle_filled(
             egui::pos2(knob_x, track_rect.center().y),
@@ -1006,7 +1023,14 @@ impl WavesPreviewer {
         painter.text(
             egui::pos2(rect.right(), rect.center().y),
             egui::Align2::RIGHT_CENTER,
-            format!("{:.0} dB", self.volume_db),
+            // One decimal where there is room for it: the taper exists so
+            // small moves near unity are possible, and a readout that rounds
+            // them away would deny they happened.
+            if compact {
+                format!("{:.0} dB", self.volume_db)
+            } else {
+                format!("{:.1} dB", self.volume_db)
+            },
             mono_font,
             text_col,
         );

@@ -2903,6 +2903,37 @@ impl super::WavesPreviewer {
             .unwrap_or(false)
     }
 
+    /// How much of the loading overview carries samples, and how much of the
+    /// file has been decoded, as fractions of the whole.
+    ///
+    /// The two have to track each other. They did not: the overview used to be
+    /// the decoded prefix spread across every bin, so the first fraction was
+    /// always 1.0 while the second was still climbing -- the waveform drawn
+    /// over the whole canvas when only its head existed.
+    pub fn test_active_tab_loading_overview_progress(&self) -> Option<(f32, f32)> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        if tab.loading_waveform_minmax.is_empty() {
+            return None;
+        }
+        let bins = tab.loading_waveform_minmax.len().max(1);
+        let filled = tab
+            .loading_waveform_minmax
+            .iter()
+            .filter(|(mn, mx)| mn.abs() > 1.0e-5 || mx.abs() > 1.0e-5)
+            .count();
+        let decoded = self
+            .editor_decode_state
+            .as_ref()
+            .filter(|state| state.path == tab.path)
+            .map(|state| state.decoded_frames)
+            .unwrap_or(0);
+        let total = tab.samples_len_visual.max(1);
+        Some((
+            filled as f32 / bins as f32,
+            (decoded as f32 / total as f32).clamp(0.0, 1.0),
+        ))
+    }
+
     pub fn test_request_workspace_play_toggle(&mut self) {
         self.request_workspace_play_toggle();
     }

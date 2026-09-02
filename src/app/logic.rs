@@ -1043,6 +1043,65 @@ impl super::WavesPreviewer {
         )
     }
 
+    /// How long the file is in *source* frames, for sizing a loading overview
+    /// whose canvas is `visual_total_frames` output frames.
+    ///
+    /// Derived from the canvas length rather than taken as a second estimate:
+    /// the picture and the playhead have to agree, and two numbers that were
+    /// rounded independently do not. With no canvas length known yet there is
+    /// nothing to reserve, so the decoded prefix is the whole of it.
+    pub(super) fn editor_loading_overview_total_source_frames(
+        visual_total_frames: Option<usize>,
+        decoded_source_frames: usize,
+        source_sr: u32,
+        out_sr: u32,
+    ) -> usize {
+        visual_total_frames
+            .filter(|frames| *frames > 0)
+            .map(|frames| {
+                Self::convert_source_frames_to_output_frames(
+                    frames,
+                    out_sr.max(1),
+                    source_sr.max(1),
+                )
+            })
+            .unwrap_or(decoded_source_frames)
+    }
+
+    /// The loading overview for a decoded *prefix*, laid out over the file's
+    /// whole length.
+    ///
+    /// What arrives during a progressive decode is the head of the file, and
+    /// spreading it across every bin draws that head at the wrong scale -- then
+    /// at a different wrong scale on the next emit, and the next. On screen the
+    /// waveform stretches out from the left and keeps shrinking back into place
+    /// while it loads, and nothing on it stays where the audio says it is,
+    /// because the canvas is the whole file (`samples_len_visual`) while the
+    /// picture drawn onto it is only the part decoded so far.
+    ///
+    /// Sized to the whole file instead, the decoded head lands at its real
+    /// position and stays there; the rest of the canvas is space already
+    /// reserved for it, left flat until the samples arrive.
+    ///
+    /// `total_frames` is in the same units as the samples in `channels`.
+    pub(super) fn build_loading_overview_over_total(
+        channels: &[Vec<f32>],
+        total_frames: usize,
+    ) -> Vec<(f32, f32)> {
+        let decoded = channels.first().map(|ch| ch.len()).unwrap_or(0);
+        if decoded == 0 {
+            return Vec::new();
+        }
+        // A total that turned out to be short is not a reason to draw past the
+        // end of the canvas: the file is at least what has been decoded.
+        let mut overview = crate::app::render::waveform_pyramid::StreamingWaveformOverview::new(
+            total_frames.max(decoded),
+            crate::app::render::waveform_pyramid::DEFAULT_LOADING_OVERVIEW_BINS,
+        );
+        overview.append_mixdown_chunk(0, channels);
+        overview.snapshot_minmax()
+    }
+
     pub(crate) fn editor_decode_ui_status(
         &self,
         path_filter: Option<&Path>,
@@ -3214,5 +3273,122 @@ impl super::WavesPreviewer {
             let _ = tx.send(ScanMessage::Done);
         });
         rx
+    }
+}
+
+#[cfg(test)]
+mod loading_overview_tests {
+    use crate::app::WavesPreviewer;
+
+    fn ramp(frames: usize) -> Vec<Vec<f32>> {
+        // Full-scale so a filled bin is unmistakable next to an empty one.
+        vec![(0..frames)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect()]
+    }
+
+    #[test]
+    fn a_decoded_prefix_lands_in_its_own_part_of_the_canvas() {
+        // A quarter of the file has arrived. It has to occupy a quarter of the
+        // overview -- the rest of the canvas is reserved, not shrunk away.
+        let overview = WavesPreviewer::build_loading_overview_over_total(&ramp(1_000), 4_000);
+        assert!(!overview.is_empty());
+        let bins = overview.len();
+        let quarter = bins / 4;
+        let filled = overview[..quarter.saturating_sub(1)]
+            .iter()
+            .all(|(lo, hi)| *lo < -0.5 && *hi > 0.5);
+        assert!(filled, "the decoded quarter should be drawn");
+        let rest_empty = overview[quarter + 1..]
+            .iter()
+            .all(|(lo, hi)| lo.abs() < 1.0e-6 && hi.abs() < 1.0e-6);
+        assert!(rest_empty, "the undecoded rest must stay flat, not stretch");
+    }
+
+    #[test]
+    fn the_head_does_not_move_as_more_arrives() {
+        // The complaint this exists for: on every progress emit the picture
+        // used to be redrawn at a different scale, so nothing stayed where the
+        // audio said it was. Over a fixed total, an early bin keeps its value.
+        let quarter = WavesPreviewer::build_loading_overview_over_total(&ramp(1_000), 4_000);
+        let half = WavesPreviewer::build_loading_overview_over_total(&ramp(2_000), 4_000);
+        let full = WavesPreviewer::build_loading_overview_over_total(&ramp(4_000), 4_000);
+        let bin = quarter.len() / 8;
+        assert_eq!(quarter.len(), half.len());
+        assert!((quarter[bin].0 - half[bin].0).abs() < 1.0e-6);
+        assert!((half[bin].1 - full[bin].1).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn a_total_shorter_than_what_arrived_does_not_draw_past_the_end() {
+        // A duration estimate can be wrong. The file is at least what was
+        // decoded, and the overview must still fit the canvas.
+        let overview = WavesPreviewer::build_loading_overview_over_total(&ramp(4_000), 1_000);
+        assert!(overview
+            .iter()
+            .all(|(lo, hi)| lo.is_finite() && hi.is_finite()));
+        let last = overview.last().copied().expect("bins");
+        assert!(last.0 < -0.5 && last.1 > 0.5, "the tail should be filled");
+    }
+
+    #[test]
+    fn nothing_decoded_yet_is_not_a_picture() {
+        assert!(WavesPreviewer::build_loading_overview_over_total(&[], 4_000).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod loading_overview_total_tests {
+    use crate::app::WavesPreviewer;
+
+    #[test]
+    fn the_total_comes_back_in_source_frames() {
+        // 10s at 44.1k arriving into a 48k transport: the canvas is 480_000
+        // output frames, so the overview has to span 441_000 source frames.
+        // Sizing it in the canvas's own units would leave the picture ~9%
+        // short of the end -- a drift that grows with the file.
+        let total = WavesPreviewer::editor_loading_overview_total_source_frames(
+            Some(480_000),
+            10_000,
+            44_100,
+            48_000,
+        );
+        assert!(
+            (total as i64 - 441_000).abs() <= 1,
+            "expected ~441000 source frames, got {total}"
+        );
+    }
+
+    #[test]
+    fn matching_rates_pass_the_length_through() {
+        let total = WavesPreviewer::editor_loading_overview_total_source_frames(
+            Some(480_000),
+            10_000,
+            48_000,
+            48_000,
+        );
+        assert_eq!(total, 480_000);
+    }
+
+    #[test]
+    fn without_a_canvas_length_the_prefix_is_the_whole_of_it() {
+        // No duration known: there is nothing to reserve, so the overview
+        // covers what has arrived -- the old behaviour, kept for the only case
+        // that still needs it.
+        assert_eq!(
+            WavesPreviewer::editor_loading_overview_total_source_frames(
+                None, 10_000, 44_100, 48_000
+            ),
+            10_000
+        );
+        assert_eq!(
+            WavesPreviewer::editor_loading_overview_total_source_frames(
+                Some(0),
+                10_000,
+                44_100,
+                48_000
+            ),
+            10_000
+        );
     }
 }
