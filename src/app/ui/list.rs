@@ -1,5 +1,6 @@
 mod art;
 mod badges;
+mod comment_cell;
 mod label_cell;
 mod navigation;
 mod row_menu;
@@ -10,7 +11,6 @@ use egui::{Color32, RichText, Sense};
 use std::path::PathBuf;
 pub(super) struct ListInteractionState {
     pub(super) key_moved: bool,
-    pub(super) list_focus_id: egui::Id,
     pub(super) list_has_focus: bool,
 }
 #[derive(Default)]
@@ -126,7 +126,6 @@ impl crate::app::WavesPreviewer {
         let row_count = metrics.row_count;
         let external_cols = &metrics.external_cols;
         let mut interaction = self.handle_list_focus_and_keyboard(ui, ctx, &metrics);
-        let list_focus_id = interaction.list_focus_id;
         let mut list_has_focus = interaction.list_has_focus;
         let key_moved = interaction.key_moved;
 
@@ -1334,6 +1333,22 @@ impl crate::app::WavesPreviewer {
                                     }
                                 });
                             }
+                            C::Comments => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    if self.ui_list_comment_cell(
+                                        ui,
+                                        &path_owned,
+                                        row_h,
+                                        text_height,
+                                    ) {
+                                        interacted_with_control = true;
+                                    }
+                                });
+                            }
                             C::Note => {
                                 row.col(|ui| {
                                     if let Some(bg) = row_bg {
@@ -1406,7 +1421,7 @@ impl crate::app::WavesPreviewer {
                                     interacted_with_control = true;
                                 }
                                 if outcome.focus_list {
-                                    ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                                    Self::focus_list_widget(ctx);
                                     list_has_focus = true;
                                     self.search_has_focus = false;
                                 }
@@ -1448,7 +1463,7 @@ impl crate::app::WavesPreviewer {
                             && !interacted_with_control
                             && self.queue_external_drag_for_row(row_idx)
                         {
-                            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                            Self::focus_list_widget(ctx);
                             list_has_focus = true;
                             self.search_has_focus = false;
                             return;
@@ -1463,7 +1478,7 @@ impl crate::app::WavesPreviewer {
                             self.selected_multi.clear();
                             self.selected_multi.insert(row_idx);
                             self.select_anchor = Some(row_idx);
-                            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                            Self::focus_list_widget(ctx);
                             list_has_focus = true;
                             self.search_has_focus = false;
                         } else if clicked_any {
@@ -1475,7 +1490,7 @@ impl crate::app::WavesPreviewer {
                                     self.request_list_autoplay();
                                 }
                             }
-                            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                            Self::focus_list_widget(ctx);
                             list_has_focus = true;
                             self.search_has_focus = false;
                         }

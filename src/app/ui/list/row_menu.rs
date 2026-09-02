@@ -27,6 +27,17 @@ impl WavesPreviewer {
             }
             ui.close();
         }
+        // The Comments column opens the same conversation in place; this is
+        // the way to it with that column hidden.
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Comments..."))
+            .clicked()
+        {
+            if let Some(path) = selected.first().cloned() {
+                self.open_comments_window_for_path(&path);
+            }
+            ui.close();
+        }
         ui.separator();
         if ui
             .add_enabled(has_selection, egui::Button::new("Copy to Clipboard"))

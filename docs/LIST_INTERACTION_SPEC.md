@@ -30,6 +30,17 @@ Keyboard Behavior
 - PageUp/PageDown: move selection by visible rows.
 - Home/End: jump to start/end.
 - Enter: open in editor.
+- A held key moves by however many presses the frame received, not by one.
+  Auto-repeat outruns a frame that is sorting or decoding, and acting on one
+  press while dropping the rest is what makes a held arrow stall on a row.
+  Only the row actually landed on is loaded.
+- The keys stay with the list. egui reads arrows as focus navigation whenever
+  the focused widget has no lock filter claiming them, and that filter only
+  binds to a widget that already held focus for a frame -- so the list never
+  re-takes focus it holds, asks for a frame when it does take it, and takes
+  focus back if an arrow it acted on moved it somewhere no pointer press or
+  chord asked for. Where it otherwise lands is the search box or a topbar
+  drag value, and a live caret there owns every key the list needs.
 
 Auto Scroll
 - When selection changes by keyboard, ensure row is visible.

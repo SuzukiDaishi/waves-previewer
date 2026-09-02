@@ -412,6 +412,122 @@ mod comments_ui {
         assert!(session.is_file());
     }
 
+    // ---- The list's Comments column -------------------------------------
+
+    /// The file `open_saved_session` put in the list.
+    fn session_audio(session: &Path) -> PathBuf {
+        session.with_file_name("source.wav")
+    }
+
+    #[test]
+    fn the_row_column_counts_the_whole_thread_about_that_file() {
+        let (mut harness, session) = open_saved_session("column_counts");
+        let audio = session_audio(&session);
+        let token = harness.state().test_comment_ref_token(&audio, None);
+        assert_eq!(
+            harness.state_mut().test_comment_summary_for_path(&audio),
+            (0, 0, 0),
+            "a file nobody has mentioned carries no badge"
+        );
+
+        harness
+            .state_mut()
+            .test_post_comment_blocking(None, &format!("the tail is long {token}"))
+            .expect("post");
+        assert_eq!(
+            harness.state_mut().test_comment_summary_for_path(&audio),
+            (1, 1, 0)
+        );
+
+        // A reply carries no reference of its own -- it does not need one,
+        // and the badge counts the conversation the row's popup shows.
+        let root = harness.state().test_comments()[0].0.clone();
+        harness
+            .state_mut()
+            .test_post_comment_blocking(Some(&root), "shortened it")
+            .expect("reply");
+        assert_eq!(
+            harness.state_mut().test_comment_summary_for_path(&audio),
+            (2, 2, 0)
+        );
+
+        // Settling the root settles the file: still two comments, nothing
+        // still asking.
+        assert!(harness.state_mut().test_set_thread_resolved(&root, true));
+        harness.state_mut().test_settle_comment_jobs();
+        assert_eq!(
+            harness.state_mut().test_comment_summary_for_path(&audio),
+            (2, 0, 0)
+        );
+    }
+
+    #[test]
+    fn writing_from_a_row_points_the_comment_at_that_row() {
+        let (mut harness, session) = open_saved_session("row_compose");
+        let audio = session_audio(&session);
+        // The harness window is narrower than a real one; the default layout
+        // would put this column past its right edge.
+        harness
+            .state_mut()
+            .test_show_only_columns(&["file", "comments"]);
+        harness.run_steps(2);
+
+        // The badge is the whole affordance: click it, type, post.
+        harness.get_by_label("Comments: none").click();
+        harness.run_steps(2);
+        harness
+            .state_mut()
+            .test_set_comment_row_draft(&audio, "check the tail");
+        harness.run_steps(2);
+        harness.get_by_label("Post").click();
+        harness.run_steps(2);
+        harness.state_mut().test_settle_comment_jobs();
+        harness.run_steps(2);
+
+        let bodies = harness.state().test_comment_bodies();
+        assert_eq!(bodies.len(), 1, "one comment, from the row");
+        let token = harness.state().test_comment_ref_token(&audio, None);
+        assert!(
+            bodies[0].starts_with("check the tail") && bodies[0].contains(&token),
+            "a comment written from a row says which file it is about: {}",
+            bodies[0]
+        );
+        assert_eq!(
+            harness.state_mut().test_comment_summary_for_path(&audio),
+            (1, 1, 0),
+            "and the row it was written from now counts it"
+        );
+    }
+
+    #[test]
+    fn a_colleagues_comment_shows_as_new_on_the_row_until_it_is_opened() {
+        let (mut harness, session) = open_saved_session("row_unread");
+        let audio = session_audio(&session);
+        let token = harness.state().test_comment_ref_token(&audio, None);
+        harness
+            .state_mut()
+            .test_post_comment_as("tanaka", None, &format!("please check {token}"))
+            .expect("their post");
+        harness
+            .state_mut()
+            .test_show_only_columns(&["file", "comments"]);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state_mut().test_comment_summary_for_path(&audio),
+            (1, 1, 1)
+        );
+
+        // Opening the row's conversation is reading it, exactly as opening
+        // the window is.
+        harness.get_by_label("Comments: 1, 1 unread").click();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state_mut().test_comment_summary_for_path(&audio),
+            (1, 1, 0)
+        );
+        assert_eq!(harness.state().test_unread_comment_count(), 0);
+    }
+
     #[test]
     fn a_withdrawn_comment_leaves_its_replies_readable() {
         let (mut harness, _session) = open_saved_session("withdraw");

@@ -853,6 +853,12 @@ pub struct WavesPreviewer {
     list_click_audition: bool,
     suppress_list_enter: bool,
     list_has_focus: bool,
+    /// Set on a frame the list moved its selection with an arrow key, read on
+    /// the next one. egui decides its own arrow-key focus navigation after
+    /// the list has drawn, so a focus that walked out of the list is only
+    /// visible a frame later -- and where it lands is usually a text field,
+    /// which then owns every key the list needs.
+    list_arrow_focus_guard: bool,
     search_has_focus: bool,
     /// Runtime-only ownership of wheel/trackpad and keyboard input.
     ui_input_focus: UiInputFocusState,
@@ -1154,6 +1160,22 @@ pub struct WavesPreviewer {
     /// "read" means for the topbar count, but it would also erase the dot in
     /// the same frame it appeared -- so the highlight rides on this instead.
     comment_unread_shown: std::collections::HashSet<String>,
+    /// The conversation seen from the list: how many comments each file is
+    /// the subject of. Rebuilt when the conversation (or what has been read
+    /// of it) moves, never per row -- the Comments column asks this for every
+    /// visible row of every frame, and the answer is a scan of every body for
+    /// reference tokens.
+    comment_path_index: rustc_hash::FxHashMap<PathBuf, comment_ops::CommentPathSummary>,
+    comment_path_index_dirty: bool,
+    /// `(comments, reads)` the index was built from. The dirty flag is what
+    /// normally triggers a rebuild; this is the backstop for a mutation that
+    /// forgot to raise it.
+    comment_path_index_stamp: (usize, usize),
+    /// The composer under a list row's Comments cell, and the file it belongs
+    /// to. Separate from the window's draft so opening a row does not disturb
+    /// a comment being written there, and cleared when another row is opened.
+    comment_row_draft: String,
+    comment_row_draft_path: Option<PathBuf>,
     show_session_changes_window: bool,
     show_session_history_window: bool,
     session_history_entries: Vec<session_store::HistoryEntry>,

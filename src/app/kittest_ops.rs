@@ -611,6 +611,22 @@ impl super::WavesPreviewer {
         self.pending_gain_count()
     }
 
+    pub fn test_selected_row(&self) -> Option<usize> {
+        self.selected
+    }
+
+    /// Whether the list widget currently holds egui's keyboard focus.
+    pub fn test_list_widget_has_focus(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.has_focus(Self::list_focus_id()))
+    }
+
+    /// Move focus out of the list the way egui's own arrow-key navigation
+    /// does when the list's lock filter is not in place -- onto the search
+    /// box, which is the widget directly above it.
+    pub fn test_move_focus_to_search_box(&mut self, ctx: &egui::Context) {
+        ctx.memory_mut(|m| m.request_focus(Self::search_box_id()));
+    }
+
     pub fn test_selected_multi_len(&self) -> usize {
         self.selected_multi.len()
     }
@@ -1269,6 +1285,7 @@ impl super::WavesPreviewer {
             SortKey::Bpm => "Bpm",
             SortKey::CreatedAt => "CreatedAt",
             SortKey::ModifiedAt => "ModifiedAt",
+            SortKey::Comments => "Comments",
             SortKey::External(_) => "External",
             SortKey::Metadata(_) => "Metadata",
         }
@@ -3875,6 +3892,41 @@ impl super::WavesPreviewer {
             tab.selection = range;
             tab.selection_anchor_sample = range.map(|(start, _)| start);
         }
+    }
+
+    // ---- Comments column ------------------------------------------------
+
+    /// Show only these built-in columns, by their stable names.
+    ///
+    /// The harness window is narrower than a real one, and a column near the
+    /// right of the default layout lands off-screen -- where it lays out and
+    /// reports a rect but can never be clicked.
+    pub fn test_show_only_columns(&mut self, keep: &[&str]) {
+        for column in crate::app::types::ColumnId::ALL {
+            column.set_enabled(&mut self.list_columns, keep.contains(&column.name()));
+        }
+        self.sanitize_list_column_layout();
+        self.ensure_sort_key_visible();
+    }
+
+    /// What the list's Comments cell for `path` is showing, as
+    /// `(total, open, unread)`.
+    pub fn test_comment_summary_for_path(&mut self, path: &Path) -> (usize, usize, usize) {
+        // The index is refreshed by the frame loop; a test that posts and
+        // asserts in the same breath should not have to run a frame first.
+        self.refresh_comment_path_index();
+        let summary = self.comment_summary_for_path(path);
+        (summary.total, summary.open, summary.unread)
+    }
+
+    /// Type into the composer under a row's Comments cell.
+    pub fn test_set_comment_row_draft(&mut self, path: &Path, body: &str) {
+        self.comment_row_draft_path = Some(path.to_path_buf());
+        self.comment_row_draft = body.to_string();
+    }
+
+    pub fn test_comments_column_visible(&self) -> bool {
+        self.list_columns.comments
     }
 
     /// Write a reference token for a path the way the composer does.

@@ -1012,6 +1012,192 @@ impl crate::app::WavesPreviewer {
         self.show_comments_window = true;
         self.request_comment_pull();
     }
+
+    /// Open the window on one file: the row's own conversation, in the place
+    /// with room for it.
+    ///
+    /// The `This file` filter follows the selection rather than taking an
+    /// argument -- it is what lets the window sit open beside the editor and
+    /// keep up -- so pointing it at a row means selecting the row.
+    pub(in crate::app) fn open_comments_window_for_path(&mut self, path: &std::path::Path) {
+        if let Some(row) = self.row_for_path(path) {
+            self.update_selection_on_click(row, egui::Modifiers::NONE);
+        }
+        self.comment_filter = CommentFilter::ThisFile;
+        self.open_comments_window();
+    }
+
+    /// The conversation about one file, as the list's Comments column opens
+    /// it.
+    ///
+    /// Deliberately the window's own thread renderer rather than a smaller
+    /// second one: two of them would have drifted apart within a release, and
+    /// what a reviewer wants from a row is the same thing they want from the
+    /// window. What differs is the composer, which always points at this file
+    /// -- pointing at it is the entire reason to write from the row, so it is
+    /// not left as something to remember.
+    pub(in crate::app) fn ui_comment_row_popup(
+        &mut self,
+        ui: &mut egui::Ui,
+        path: &std::path::Path,
+    ) {
+        ui.set_min_width(340.0);
+        ui.set_max_width(460.0);
+        let mut actions: Vec<CommentAction> = Vec::new();
+        let threads: Vec<CommentNode> = comments::build_threads(&self.comments)
+            .into_iter()
+            .filter(|node| self.comment_subtree_mentions(node, path))
+            .collect();
+        // Opening a row's conversation is reading it, exactly as opening the
+        // window is -- so this row's badge stops claiming it is new.
+        let shown: Vec<String> = threads.iter().flat_map(subtree_ids).collect();
+        self.record_comments_read(shown);
+
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let mut open_window = false;
+        ui.horizontal(|ui| {
+            ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .small_button("⧉")
+                    .on_hover_text("Open the Comments window on this file")
+                    .clicked()
+                {
+                    open_window = true;
+                    ui.close();
+                }
+            });
+        });
+        ui.separator();
+        if threads.is_empty() {
+            ui.label(RichText::new(self.comments_row_empty_hint()).weak());
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt(("comment_row_threads", path))
+                .max_height(260.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for node in &threads {
+                        self.ui_comment_node(ui, node, 0, &mut actions);
+                        ui.add_space(4.0);
+                    }
+                });
+        }
+        ui.separator();
+        self.ui_comment_row_composer(ui, path, &threads, &mut actions);
+
+        for action in actions {
+            self.apply_comment_action(action);
+        }
+        if open_window {
+            self.open_comments_window_for_path(path);
+        }
+    }
+
+    fn comments_row_empty_hint(&self) -> &'static str {
+        if self.project_path.is_none() {
+            "Save this session first — comments live in the .nwsess, so there \
+             is nowhere to share them yet."
+        } else {
+            "Nothing said about this file yet."
+        }
+    }
+
+    /// The row popup's composer.
+    ///
+    /// A new comment is given this file's reference token, because the token
+    /// in the body is the only record of what a comment is about (see
+    /// `docs/COMMENTS_SPEC.md`). A reply is not: its thread already says so,
+    /// and a second token would only repeat it.
+    fn ui_comment_row_composer(
+        &mut self,
+        ui: &mut egui::Ui,
+        path: &std::path::Path,
+        threads: &[CommentNode],
+        actions: &mut Vec<CommentAction>,
+    ) {
+        // Only a reply to something in *this* file's threads: the window's
+        // composer shares the field, and the row must not silently answer a
+        // thread it is not showing.
+        let replying_to = self
+            .comment_reply_to
+            .clone()
+            .filter(|id| threads.iter().any(|node| subtree_contains(node, id)));
+        if self.comment_row_draft_path.as_deref() != Some(path) {
+            self.comment_row_draft.clear();
+            self.comment_row_draft_path = Some(path.to_path_buf());
+        }
+        if let Some(target) = replying_to.clone() {
+            ui.horizontal(|ui| {
+                let who = self
+                    .comment_by_id(&target)
+                    .map(|comment| self.comment_author_label(comment))
+                    .unwrap_or_else(|| "a comment".to_string());
+                ui.label(RichText::new(format!("Replying to {who}")).small().weak());
+                if ui
+                    .small_button("✕")
+                    .on_hover_text("Comment on the file instead")
+                    .clicked()
+                {
+                    actions.push(CommentAction::CancelEdit);
+                }
+            });
+        }
+        let hint = if replying_to.is_some() {
+            "Write a reply..."
+        } else {
+            "Comment on this file..."
+        };
+        ui.add(
+            egui::TextEdit::multiline(&mut self.comment_row_draft)
+                .id(egui::Id::new(("comment_row_composer", path)))
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .hint_text(hint),
+        );
+        ui.horizontal(|ui| {
+            let can_post = !self.comment_row_draft.trim().is_empty();
+            if ui
+                .add_enabled(can_post, egui::Button::new("Post"))
+                .on_disabled_hover_text("Write something first")
+                .clicked()
+            {
+                let mut body = std::mem::take(&mut self.comment_row_draft);
+                if replying_to.is_none() {
+                    let token = comments::format_ref(&self.comment_ref_for_path(path, None));
+                    if !body.ends_with(char::is_whitespace) {
+                        body.push(' ');
+                    }
+                    body.push_str(&token);
+                }
+                self.post_comment(replying_to.clone(), &body);
+                self.comment_reply_to = None;
+            }
+            if self.project_path.is_none() {
+                ui.label(
+                    RichText::new("Not shared until the session is saved")
+                        .small()
+                        .weak(),
+                );
+            }
+        });
+    }
+}
+
+/// Every comment id in a thread, root first.
+fn subtree_ids(node: &CommentNode) -> Vec<String> {
+    let mut ids = vec![node.comment.id.clone()];
+    for reply in &node.replies {
+        ids.extend(subtree_ids(reply));
+    }
+    ids
+}
+
+fn subtree_contains(node: &CommentNode, id: &str) -> bool {
+    node.comment.id == id || node.replies.iter().any(|reply| subtree_contains(reply, id))
 }
 
 /// The `@word` being typed at `caret`, as a byte range over the whole token

@@ -516,6 +516,8 @@ pub enum SortKey {
     ModifiedAt,
     External(usize),
     Metadata(usize),
+    /// How many comments the session's conversation has about the row.
+    Comments,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -607,6 +609,8 @@ pub enum ColumnId {
     ModifiedAt,
     Gain,
     Wave,
+    /// How much of the shared session's conversation is about this row.
+    Comments,
     Note,
 }
 
@@ -692,6 +696,7 @@ impl ColumnId {
         ColumnId::ModifiedAt,
         ColumnId::Gain,
         ColumnId::Wave,
+        ColumnId::Comments,
         ColumnId::Note,
     ];
 
@@ -728,6 +733,7 @@ impl ColumnId {
             ColumnId::ModifiedAt => "modified_at",
             ColumnId::Gain => "gain",
             ColumnId::Wave => "wave",
+            ColumnId::Comments => "comments",
             ColumnId::Note => "note",
         }
     }
@@ -769,6 +775,7 @@ impl ColumnId {
             ColumnId::ModifiedAt => "Modified",
             ColumnId::Gain => "Gain",
             ColumnId::Wave => "Wave",
+            ColumnId::Comments => "Comments",
             ColumnId::Note => "Note",
         }
     }
@@ -808,6 +815,7 @@ impl ColumnId {
             ColumnId::ModifiedAt => cols.modified_at,
             ColumnId::Gain => cols.gain,
             ColumnId::Wave => cols.wave,
+            ColumnId::Comments => cols.comments,
             ColumnId::Note => cols.note,
         }
     }
@@ -845,6 +853,7 @@ impl ColumnId {
             ColumnId::ModifiedAt => cols.modified_at = enabled,
             ColumnId::Gain => cols.gain = enabled,
             ColumnId::Wave => cols.wave = enabled,
+            ColumnId::Comments => cols.comments = enabled,
             ColumnId::Note => cols.note = enabled,
         }
     }
@@ -892,6 +901,8 @@ pub struct ListColumnConfig {
     pub modified_at: bool,
     pub gain: bool,
     pub wave: bool,
+    /// The team's conversation about the row: a count that opens the thread.
+    pub comments: bool,
     pub note: bool,
     // Leading/trailing silence columns (full-decode metadata; default off).
     pub silence_lead: bool,
@@ -931,6 +942,7 @@ impl Default for ListColumnConfig {
             modified_at: false,
             gain: true,
             wave: true,
+            comments: true,
             note: true,
             silence_lead: false,
             silence_tail: false,

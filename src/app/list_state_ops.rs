@@ -599,6 +599,7 @@ impl WavesPreviewer {
             SortKey::BlankPad => cols.blank_pad,
             SortKey::CreatedAt => cols.created_at,
             SortKey::ModifiedAt => cols.modified_at,
+            SortKey::Comments => cols.comments,
             SortKey::External(idx) => external_visible && idx < self.external_visible_columns.len(),
             SortKey::Metadata(index) => self
                 .metadata_list_columns

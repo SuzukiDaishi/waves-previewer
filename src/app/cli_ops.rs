@@ -1296,6 +1296,11 @@ fn list_columns(_args: ListColumnsArgs) -> Result<CliCommandOutput> {
             enabled_by_default: true,
         },
         ColumnDescriptor {
+            key: "comments",
+            description: "Shared session comments about the file",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
             key: "note",
             description: "Session item note",
             enabled_by_default: true,
@@ -4853,6 +4858,7 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
         modified_at: false,
         gain: false,
         wave: false,
+        comments: false,
         note: false,
         silence_lead: false,
         silence_tail: false,
@@ -4892,6 +4898,7 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
             "modified_at" => cfg.modified_at = true,
             "gain" => cfg.gain = true,
             "wave" => cfg.wave = true,
+            "comments" => cfg.comments = true,
             "note" => cfg.note = true,
             other => bail!("unknown list column key: {other}"),
         }
@@ -4926,6 +4933,7 @@ fn project_list_columns_from_config(cfg: ListColumnConfig) -> ProjectListColumns
         modified_at: cfg.modified_at,
         gain: cfg.gain,
         wave: cfg.wave,
+        comments: cfg.comments,
         note: cfg.note,
         silence_lead: cfg.silence_lead,
         silence_tail: cfg.silence_tail,
