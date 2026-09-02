@@ -54,13 +54,15 @@ mod p7_pipeline {
         let length_x = harness.get_by_label("Length").rect().left();
         let bits_x = harness.get_by_label("Bits").rect().left();
         assert!(length_x < bits_x, "default order: Length left of Bits");
-        // Move Bits before Length and re-render.
-        let mut order = harness.state().list_column_order.clone();
-        let bi = order.iter().position(|c| *c == ColumnId::Bits).unwrap();
-        let li = order.iter().position(|c| *c == ColumnId::Length).unwrap();
-        let bits_col = order.remove(bi);
-        order.insert(li, bits_col);
-        harness.state_mut().list_column_order = order.clone();
+        // Move Bits before Length and re-render, the way the List Columns
+        // window does. `list_column_order` is a *derived* projection of
+        // `list_column_layout` (see `sanitize_list_column_layout`), so writing
+        // to it moves nothing and is overwritten on the next frame -- which is
+        // what this test used to do.
+        assert!(harness
+            .state_mut()
+            .test_move_column_before(ColumnId::Bits, ColumnId::Length));
+        let order = harness.state().list_column_order.clone();
         harness.run_steps(3);
         let length_x = harness.get_by_label("Length").rect().left();
         let bits_x = harness.get_by_label("Bits").rect().left();
@@ -68,12 +70,18 @@ mod p7_pipeline {
             bits_x < length_x,
             "reordered: Bits ({bits_x}) must sit left of Length ({length_x})"
         );
-        // Round-trip through a session file.
+        // Round-trip through a session file. The layout is what is written and
+        // restored; the order follows from it.
         let sess = dir.join("order.nwsess");
+        let layout = harness.state().test_list_column_layout();
         assert!(harness.state_mut().test_save_session_to(&sess));
-        harness.state_mut().list_column_order = ColumnId::ALL.to_vec();
+        assert!(harness
+            .state_mut()
+            .test_move_column_before(ColumnId::Length, ColumnId::Bits));
+        assert_ne!(harness.state().test_list_column_layout(), layout);
         assert!(harness.state_mut().test_open_session_from(&sess));
         harness.run_steps(3);
+        assert_eq!(harness.state().test_list_column_layout(), layout);
         assert_eq!(harness.state().list_column_order, order);
         let _ = std::fs::remove_dir_all(&dir);
     }

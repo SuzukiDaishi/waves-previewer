@@ -70,7 +70,9 @@ fn harness_with_files(tag: &str, count: usize) -> (PathBuf, Harness<'static, Wav
 fn a_save_worker_that_dies_gives_the_window_back() {
     let (dir, mut harness) = harness_with_files("dead_save", 2);
 
-    harness.state_mut().test_wedge_session_save_with_dead_worker();
+    harness
+        .state_mut()
+        .test_wedge_session_save_with_dead_worker();
     assert!(
         harness.state().test_busy_overlay_blocking(),
         "the wedge should start out blocking, or the test proves nothing"
@@ -108,10 +110,7 @@ fn an_export_worker_that_dies_gives_the_window_back() {
     );
     assert!(!harness.state().test_busy_overlay_blocking());
     let toasts = harness.state().test_toast_messages().join("\n");
-    assert!(
-        toasts.contains("Export did not finish"),
-        "got: {toasts}"
-    );
+    assert!(toasts.contains("Export did not finish"), "got: {toasts}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -258,13 +257,17 @@ mod menus_do_not_pay_for_the_selection_every_frame {
         // A cache that returns the wrong answer is worse than the cost it
         // saves, so the assertion is on the answer, not the counter.
         assert_eq!(
-            harness.state_mut().test_selection_menu_summary_shared_status(),
+            harness
+                .state_mut()
+                .test_selection_menu_summary_shared_status(),
             None,
             "nothing has a status yet"
         );
         let computes_before = WavesPreviewer::test_selection_summary_computes();
         for _ in 0..5 {
-            let _ = harness.state_mut().test_selection_menu_summary_shared_status();
+            let _ = harness
+                .state_mut()
+                .test_selection_menu_summary_shared_status();
         }
         assert_eq!(
             WavesPreviewer::test_selection_summary_computes(),

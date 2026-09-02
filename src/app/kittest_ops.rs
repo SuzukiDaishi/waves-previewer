@@ -848,6 +848,44 @@ impl super::WavesPreviewer {
             .unwrap_or(0)
     }
 
+    /// Move a built-in column so it sits where another one is, the way the
+    /// List Columns window does it.
+    ///
+    /// The rendered order is `list_column_layout` (which also carries the
+    /// metadata columns); `list_column_order` is a *derived* projection of it,
+    /// so setting that one moves nothing. The layout revision has to be bumped
+    /// with it, or the table keeps the widths and order it already laid out.
+    pub fn test_move_column_before(
+        &mut self,
+        moved: crate::app::types::ColumnId,
+        before: crate::app::types::ColumnId,
+    ) -> bool {
+        use crate::app::types::ColumnKey;
+        let from = self
+            .list_column_layout
+            .iter()
+            .position(|key| *key == ColumnKey::Builtin(moved));
+        let to = self
+            .list_column_layout
+            .iter()
+            .position(|key| *key == ColumnKey::Builtin(before));
+        let (Some(from), Some(to)) = (from, to) else {
+            return false;
+        };
+        if from == to {
+            return false;
+        }
+        let key = self.list_column_layout.remove(from);
+        self.list_column_layout.insert(to, key);
+        self.list_table_layout_revision = self.list_table_layout_revision.wrapping_add(1);
+        self.sanitize_list_column_layout();
+        true
+    }
+
+    pub fn test_list_column_layout(&self) -> Vec<crate::app::types::ColumnKey> {
+        self.list_column_layout.clone()
+    }
+
     pub fn test_busy_overlay_released(&self) -> bool {
         self.busy_overlay_released
     }
