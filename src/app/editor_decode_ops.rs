@@ -82,6 +82,15 @@ impl super::WavesPreviewer {
                                 out_sr.max(1),
                             ))
                         });
+                        // The canvas spans `visual_total_frames` of output
+                        // frames; these samples are source frames.
+                        let overview_total_source_frames =
+                            Self::editor_loading_overview_total_source_frames(
+                                visual_total_frames,
+                                decoded_source_frames,
+                                in_sr,
+                                out_sr,
+                            );
                         if is_final {
                             let chans = Self::process_editor_decode_channels(
                                 chans,
@@ -126,8 +135,13 @@ impl super::WavesPreviewer {
                                 channels_arc: None,
                                 waveform_minmax: Vec::new(),
                                 waveform_pyramid: None,
-                                loading_waveform_minmax: Self::build_loading_overview_from_channels(
+                                // Over the whole file, not over what has been
+                                // decoded: the head has to be drawn where it
+                                // belongs, in space already reserved for the
+                                // rest. See `build_loading_overview_over_total`.
+                                loading_waveform_minmax: Self::build_loading_overview_over_total(
                                     &chans,
+                                    overview_total_source_frames,
                                 ),
                                 buffer_sample_rate: out_sr.max(1),
                                 job_id,
@@ -289,9 +303,27 @@ impl super::WavesPreviewer {
                         }
                         source_sr = in_sr.max(1);
                         if overview.is_none() {
+                            // The total may still be unknown here: the header
+                            // did not say, and up above there was no source
+                            // rate to convert the estimate with. The first
+                            // chunk brings that rate, so the estimate can size
+                            // the overview after all -- and it has to, because
+                            // the canvas is already the estimate's length.
+                            // Sized to the decoded prefix instead, the picture
+                            // and the timeline would disagree by whatever is
+                            // left to decode.
+                            let total_frames = total_source_frames.or_else(|| {
+                                estimated_total_frames.filter(|v| *v > 0).map(|frames| {
+                                    Self::convert_source_frames_to_output_frames(
+                                        frames,
+                                        out_sr.max(1),
+                                        in_sr.max(1),
+                                    )
+                                })
+                            });
                             overview = Some(
                                 crate::app::render::waveform_pyramid::StreamingWaveformOverview::new(
-                                    total_source_frames
+                                    total_frames
                                         .unwrap_or(decoded_source_frames.max(1))
                                         .max(1),
                                     crate::app::render::waveform_pyramid::DEFAULT_LOADING_OVERVIEW_BINS,

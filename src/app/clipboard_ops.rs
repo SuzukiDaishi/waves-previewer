@@ -295,10 +295,25 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn drain_clipboard_prep(&mut self, ctx: &egui::Context) {
+        use crate::app::loading_ops::{poll_job, JobPoll};
         let done = match &self.clipboard_prep_state {
-            Some(state) => match state.rx.try_recv() {
-                Ok(done) => Some(done),
-                Err(_) => None,
+            Some(state) => match poll_job(&state.rx) {
+                JobPoll::Ready(done) => Some(done),
+                JobPoll::Waiting => None,
+                JobPoll::Gone => {
+                    // This state blocks every input in the application, so a
+                    // worker that died without a word would leave the window
+                    // dark and deaf until the process is killed. Say what
+                    // happened and give the window back.
+                    self.clipboard_prep_state = None;
+                    self.push_toast(
+                        crate::app::types::ToastSeverity::Error,
+                        "Copy did not finish — the clipboard was left unchanged.".to_string(),
+                    );
+                    self.debug_log("clipboard prep worker stopped without a result".to_string());
+                    ctx.request_repaint();
+                    return;
+                }
             },
             None => None,
         };
@@ -346,7 +361,30 @@ impl super::WavesPreviewer {
     /// Asks the same three sources, in the same order, that the paste itself
     /// does, so the menu item is never greyed out over a clipboard that would
     /// in fact have worked.
-    pub(super) fn can_paste_into_list(&self) -> bool {
+    /// Whether the clipboard holds something the list could take.
+    ///
+    /// Throttled, because this is a menu item's enabled state: it is asked
+    /// once per frame for as long as that menu is open, and on Windows each
+    /// ask opens the OS clipboard twice -- a global lock that every other
+    /// application's copy and paste needs too. Sixty of those a second is
+    /// enough to make a colleague's paste fail in another program, and to
+    /// copy a large clipboard text out of the OS on every frame. The cost of
+    /// the cache is a menu item that enables a fraction of a second late.
+    pub(super) fn can_paste_into_list(&mut self) -> bool {
+        const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+        if let Some((probed_at, answer)) = self.clipboard_paste_probe {
+            if probed_at.elapsed() < PROBE_INTERVAL {
+                return answer;
+            }
+        }
+        let answer = self.probe_clipboard_for_paste();
+        self.clipboard_paste_probe = Some((std::time::Instant::now(), answer));
+        answer
+    }
+
+    /// The un-throttled question. Everything that asks goes through
+    /// `can_paste_into_list`; this is what it caches.
+    fn probe_clipboard_for_paste(&self) -> bool {
         if self
             .clipboard_payload
             .as_ref()

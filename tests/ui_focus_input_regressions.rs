@@ -738,6 +738,117 @@ mod ui_focus_input_regressions {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Deliver several presses of one key inside a single frame, the way
+    /// auto-repeat stacks up while a frame runs long.
+    ///
+    /// `Harness::key_press` cannot: it queues events, and the harness gives
+    /// every queued event a frame of its own -- which is exactly the case
+    /// that never had the bug.
+    fn press_key_times_in_one_frame(
+        harness: &mut Harness<'static, WavesPreviewer>,
+        key: Key,
+        times: usize,
+    ) {
+        for _ in 0..times {
+            harness.input_mut().events.push(egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers: Modifiers::default(),
+                repeat: true,
+                physical_key: None,
+            });
+        }
+        harness.step();
+    }
+
+    fn list_of_fixtures(tag: &str, count: usize) -> (PathBuf, Harness<'static, WavesPreviewer>) {
+        let dir = make_temp_dir(tag);
+        for i in 0..count {
+            write_fixture_wav(&dir.join(format!("row_{i:02}.wav")), 48_000, 0.2);
+        }
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_and_load_row(0));
+        harness.run_steps(2);
+        (dir, harness)
+    }
+
+    #[test]
+    fn a_held_arrow_does_not_lose_rows_to_a_slow_frame() {
+        let (dir, mut harness) = list_of_fixtures("arrow_repeat", 8);
+
+        // Three repeats in one frame: what the keyboard produced while the
+        // previous frame was busy. Acting on one and dropping the rest is
+        // what makes a held arrow stall on a row.
+        press_key_times_in_one_frame(&mut harness, Key::ArrowDown, 3);
+        assert_eq!(
+            harness.state().test_selected_row(),
+            Some(3),
+            "a frame carrying three repeats moves three rows"
+        );
+
+        press_key_times_in_one_frame(&mut harness, Key::ArrowUp, 2);
+        assert_eq!(harness.state().test_selected_row(), Some(1));
+
+        // The ends still clamp rather than wrapping or overshooting.
+        press_key_times_in_one_frame(&mut harness, Key::ArrowUp, 12);
+        assert_eq!(harness.state().test_selected_row(), Some(0));
+        press_key_times_in_one_frame(&mut harness, Key::ArrowDown, 40);
+        assert_eq!(harness.state().test_selected_row(), Some(7));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn focus_that_left_the_list_under_an_arrow_comes_straight_back() {
+        let (dir, mut harness) = list_of_fixtures("arrow_focus_guard", 5);
+
+        press_key_times_in_one_frame(&mut harness, Key::ArrowDown, 1);
+        assert_eq!(harness.state().test_selected_row(), Some(1));
+
+        // What egui's own arrow-key focus navigation does when the list's
+        // lock filter is not yet in place: it resolves after the list has
+        // drawn, and focus lands on a widget outside it. A caret there owns
+        // every key the list needs, and nothing in the list may ask for the
+        // focus back -- the row stops moving until it is clicked.
+        let ctx = harness.ctx.clone();
+        harness.state_mut().test_move_focus_to_search_box(&ctx);
+        harness.step();
+
+        assert!(
+            harness.state().test_list_widget_has_focus(&ctx),
+            "a focus that moved with no pointer press belongs back in the list"
+        );
+        press_key_times_in_one_frame(&mut harness, Key::ArrowDown, 1);
+        assert_eq!(
+            harness.state().test_selected_row(),
+            Some(2),
+            "and the next arrow moves the selection, not a caret"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chord_that_moves_focus_on_purpose_keeps_it() {
+        let (dir, mut harness) = list_of_fixtures("arrow_then_search", 5);
+        let ctx = harness.ctx.clone();
+
+        press_key_times_in_one_frame(&mut harness, Key::ArrowDown, 1);
+        // Ctrl+F is the search box, one frame after an arrow as much as at
+        // any other time: taking focus back from a chord the user typed
+        // would be the same bug from the other side.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::F);
+        harness.run_steps(2);
+
+        assert!(
+            !harness.state().test_list_widget_has_focus(&ctx),
+            "the search box asked for focus and should still have it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn list_arrow_navigation_recovers_after_topbar_focus() {
         let dir = make_temp_dir("arrow_focus_recover");

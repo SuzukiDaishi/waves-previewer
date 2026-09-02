@@ -267,11 +267,14 @@ impl WavesPreviewer {
                 ui.close();
             }
             ui.separator();
-            let selected = self.selected_paths();
-            let real_selected = self.selected_real_paths();
-            let renameable_selected = self.selected_renameable_paths();
-            let has_selection = !selected.is_empty();
-            let can_rename_selected = renameable_selected.len() == 1 || real_selected.len() > 1;
+            // Counted, never collected: this closure runs every frame the
+            // menu is open, and the selection it is asking about can be the
+            // whole list. The paths themselves are built inside the arm that
+            // was actually clicked.
+            let has_selection = self.selection_has_at_least(1);
+            let selection = self.selection_menu_summary();
+            let can_rename_selected =
+                selection.renameable_capped == 1 || selection.real_capped >= 2;
             if ui
                 .add_enabled(
                     has_selection,
@@ -294,10 +297,11 @@ impl WavesPreviewer {
                 .add_enabled(can_rename_selected, egui::Button::new("Rename Selected..."))
                 .clicked()
             {
+                let renameable_selected = self.selected_renameable_paths();
                 if renameable_selected.len() == 1 {
                     self.open_rename_dialog(renameable_selected[0].clone());
                 } else {
-                    self.open_batch_rename_dialog(real_selected.clone());
+                    self.open_batch_rename_dialog(self.selected_real_paths());
                 }
                 ui.close();
             }
@@ -308,14 +312,16 @@ impl WavesPreviewer {
                 )
                 .clicked()
             {
+                let selected = self.selected_paths();
                 self.remove_paths_from_list_with_undo(&selected);
                 ui.close();
             }
-            let has_edits = self.has_edits_for_paths(&selected);
+            let has_edits = selection.has_edits;
             if ui
                 .add_enabled(has_edits, egui::Button::new("Clear Edits for Selected"))
                 .clicked()
             {
+                let selected = self.selected_paths();
                 self.clear_edits_for_paths(&selected);
                 ui.close();
             }
@@ -359,7 +365,7 @@ impl WavesPreviewer {
                 ui.close();
             }
             ui.separator();
-            let multi = self.selected_paths().len() >= 2;
+            let multi = self.selection_has_at_least(2);
             if ui
                 .add_enabled(
                     multi,

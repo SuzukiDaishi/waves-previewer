@@ -128,6 +128,7 @@ mod world_edit_ops;
 mod zoo_assets;
 mod zoo_ops;
 pub use self::cli_ops::run_cli;
+use self::list_state_ops::SelectionMenuSummary;
 #[cfg(feature = "kittest")]
 use self::dialogs::TestDialogQueue;
 use self::input_focus::{InputScope, UiInputFocusState};
@@ -853,6 +854,12 @@ pub struct WavesPreviewer {
     list_click_audition: bool,
     suppress_list_enter: bool,
     list_has_focus: bool,
+    /// Set on a frame the list moved its selection with an arrow key, read on
+    /// the next one. egui decides its own arrow-key focus navigation after
+    /// the list has drawn, so a focus that walked out of the list is only
+    /// visible a frame later -- and where it lands is usually a text field,
+    /// which then owns every key the list needs.
+    list_arrow_focus_guard: bool,
     search_has_focus: bool,
     /// Runtime-only ownership of wheel/trackpad and keyboard input.
     ui_input_focus: UiInputFocusState,
@@ -984,6 +991,20 @@ pub struct WavesPreviewer {
     export_state: Option<ExportState>,
     // blocking CSV export (waits for full metadata)
     csv_export_state: Option<CsvExportState>,
+    /// The selection facts the menus ask for every frame they are open, and
+    /// when they were gathered. See `selection_menu_summary`.
+    selection_summary_cache: Option<(std::time::Instant, SelectionMenuSummary)>,
+    /// The tools config path and whether it exists, with the time of the
+    /// answer. See `tools_config_probe`.
+    tools_config_probe: Option<(std::time::Instant, Option<PathBuf>, bool)>,
+    /// The last answer to "is there anything to paste", and when it was
+    /// asked. See `can_paste_into_list`: the question costs an OS clipboard
+    /// open, and a menu asks it every frame it is open.
+    clipboard_paste_probe: Option<(std::time::Instant, bool)>,
+    /// The user asked the modal overlay to stop blocking a job that stopped
+    /// answering. Cleared when nothing blocks any more, so the next job is
+    /// modal again -- this is an escape hatch, not a preference.
+    pub(crate) busy_overlay_released: bool,
     // currently loaded/playing file path (for effective volume calc)
     playing_path: Option<PathBuf>,
     // export/save settings (simple, in-memory)
@@ -1154,6 +1175,22 @@ pub struct WavesPreviewer {
     /// "read" means for the topbar count, but it would also erase the dot in
     /// the same frame it appeared -- so the highlight rides on this instead.
     comment_unread_shown: std::collections::HashSet<String>,
+    /// The conversation seen from the list: how many comments each file is
+    /// the subject of. Rebuilt when the conversation (or what has been read
+    /// of it) moves, never per row -- the Comments column asks this for every
+    /// visible row of every frame, and the answer is a scan of every body for
+    /// reference tokens.
+    comment_path_index: rustc_hash::FxHashMap<PathBuf, comment_ops::CommentPathSummary>,
+    comment_path_index_dirty: bool,
+    /// `(comments, reads)` the index was built from. The dirty flag is what
+    /// normally triggers a rebuild; this is the backstop for a mutation that
+    /// forgot to raise it.
+    comment_path_index_stamp: (usize, usize),
+    /// The composer under a list row's Comments cell, and the file it belongs
+    /// to. Separate from the window's draft so opening a row does not disturb
+    /// a comment being written there, and cleared when another row is opened.
+    comment_row_draft: String,
+    comment_row_draft_path: Option<PathBuf>,
     show_session_changes_window: bool,
     show_session_history_window: bool,
     session_history_entries: Vec<session_store::HistoryEntry>,
@@ -2781,6 +2818,8 @@ impl WavesPreviewer {
             queue,
             needs_peak,
             needs_lufs,
+            attempts: HashMap::new(),
+            unmeasured: 0,
             started_at: std::time::Instant::now(),
         });
     }
@@ -2807,9 +2846,21 @@ impl WavesPreviewer {
         } else if !self.meta_inflight.contains(path) {
             // A finished job (e.g. a header-only pass queued by a visible
             // row) did not produce what the export needs; put the row back
-            // so the streaming top-up retries it with a full task.
+            // so the streaming top-up retries it with a full task -- but only
+            // so many times. Retrying forever is how one unreadable file
+            // turns a CSV export into an application that never comes back.
+            const MAX_CSV_META_ATTEMPTS: u32 = 4;
             if let Some(state) = &mut self.csv_export_state {
-                state.queue.push(path.to_path_buf());
+                let attempts = state.attempts.entry(path.to_path_buf()).or_insert(0);
+                *attempts += 1;
+                if *attempts >= MAX_CSV_META_ATTEMPTS {
+                    if state.pending.remove(path) {
+                        state.done = state.done.saturating_add(1);
+                        state.unmeasured = state.unmeasured.saturating_add(1);
+                    }
+                } else {
+                    state.queue.push(path.to_path_buf());
+                }
             }
         }
     }
@@ -2827,6 +2878,15 @@ impl WavesPreviewer {
         let Some(state) = self.csv_export_state.take() else {
             return;
         };
+        if state.unmeasured > 0 {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Warning,
+                format!(
+                    "{} row(s) could not be measured — their columns are blank in the CSV.",
+                    state.unmeasured
+                ),
+            );
+        }
         if let Err(err) =
             self.export_list_csv(&state.path, &state.ids, state.cols, &state.external_cols)
         {

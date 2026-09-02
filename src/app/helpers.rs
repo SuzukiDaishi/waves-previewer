@@ -6,6 +6,69 @@ use super::types::{SortDir, SortKey};
 pub const GAIN_DB_MIN: f32 = -80.0;
 pub const GAIN_DB_MAX: f32 = 24.0;
 
+/// Monitor volume range, in dB. A little above unity so a quiet file can be
+/// pushed up without leaving the fader.
+pub const VOLUME_DB_MIN: f32 = -80.0;
+pub const VOLUME_DB_MAX: f32 = 6.0;
+
+/// Where each dB value sits along the volume fader, bottom to top.
+///
+/// A fader that is linear in dB spends nearly two thirds of its travel below
+/// -24 dB, where the only decision left is "off", and squeezes the range
+/// people actually monitor in -- unity down to -24 -- into a quarter of it.
+/// Every small adjustment then lands in a few pixels. These anchors give that
+/// range a bit under half the fader and compress the tail toward silence, the
+/// way a console fader's taper does.
+///
+/// The mapping stays continuous and strictly increasing, so the fader remains
+/// stepless: every position resolves to exactly one dB value, and every dB
+/// value to exactly one position.
+const VOLUME_TAPER: &[(f32, f32)] = &[
+    (0.00, VOLUME_DB_MIN),
+    (0.22, -48.0),
+    (0.45, -24.0),
+    (0.90, 0.0),
+    (1.00, VOLUME_DB_MAX),
+];
+
+/// The dB value at fader position `t` (0 at the bottom, 1 at the top).
+pub fn volume_db_from_fader(t: f32) -> f32 {
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    for pair in VOLUME_TAPER.windows(2) {
+        let (t0, db0) = pair[0];
+        let (t1, db1) = pair[1];
+        if t <= t1 {
+            let span = t1 - t0;
+            let frac = if span > 0.0 { (t - t0) / span } else { 0.0 };
+            return db0 + (db1 - db0) * frac;
+        }
+    }
+    VOLUME_DB_MAX
+}
+
+/// The fader position for `db`. The inverse of [`volume_db_from_fader`].
+pub fn volume_fader_from_db(db: f32) -> f32 {
+    let db = if db.is_finite() {
+        db.clamp(VOLUME_DB_MIN, VOLUME_DB_MAX)
+    } else {
+        VOLUME_DB_MIN
+    };
+    for pair in VOLUME_TAPER.windows(2) {
+        let (t0, db0) = pair[0];
+        let (t1, db1) = pair[1];
+        if db <= db1 {
+            let span = db1 - db0;
+            let frac = if span > 0.0 { (db - db0) / span } else { 0.0 };
+            return (t0 + (t1 - t0) * frac).clamp(0.0, 1.0);
+        }
+    }
+    1.0
+}
+
 pub fn db_to_amp(db: f32) -> f32 {
     if db <= GAIN_DB_MIN {
         0.0
@@ -107,6 +170,66 @@ pub fn amp_to_color(a: f32) -> Color32 {
 
 /// Rec.601 perceived luminance, 0..255. Only used to hold the waveform ramp
 /// to a brightness floor in tests.
+#[cfg(test)]
+mod volume_taper_tests {
+    use super::*;
+
+    #[test]
+    fn the_fader_is_continuous_and_strictly_increasing() {
+        let mut previous = f32::NEG_INFINITY;
+        for step in 0..=1000 {
+            let db = volume_db_from_fader(step as f32 / 1000.0);
+            assert!(
+                db > previous - 1.0e-4,
+                "the fader must never go backwards: {db} after {previous}"
+            );
+            // A jump would mean values the fader cannot reach.
+            if previous > f32::NEG_INFINITY {
+                assert!(db - previous < 1.0, "step too coarse at {db}");
+            }
+            previous = db;
+        }
+        assert!((volume_db_from_fader(0.0) - VOLUME_DB_MIN).abs() < 1.0e-4);
+        assert!((volume_db_from_fader(1.0) - VOLUME_DB_MAX).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn a_position_and_its_db_value_round_trip() {
+        for step in 0..=200 {
+            let t = step as f32 / 200.0;
+            let round_tripped = volume_fader_from_db(volume_db_from_fader(t));
+            assert!(
+                (round_tripped - t).abs() < 1.0e-3,
+                "position {t} came back as {round_tripped}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_monitoring_range_gets_the_room() {
+        // The point of the taper: unity down to -24 dB is where the adjustment
+        // actually happens, and it must not be a sliver of the fader. Linear
+        // in dB it would be 24/86 -- under a third.
+        let span = volume_fader_from_db(0.0) - volume_fader_from_db(-24.0);
+        assert!(
+            span > 0.40,
+            "0..-24 dB should own most of the fader, got {span}"
+        );
+        // ...without pushing unity so far up that the top is unreachable.
+        assert!(volume_fader_from_db(0.0) < 0.95);
+    }
+
+    #[test]
+    fn out_of_range_and_nonsense_values_are_pinned() {
+        assert!((volume_db_from_fader(-1.0) - VOLUME_DB_MIN).abs() < 1.0e-4);
+        assert!((volume_db_from_fader(2.0) - VOLUME_DB_MAX).abs() < 1.0e-4);
+        assert!((volume_db_from_fader(f32::NAN) - VOLUME_DB_MIN).abs() < 1.0e-4);
+        assert!(volume_fader_from_db(-200.0) < 1.0e-4);
+        assert!(volume_fader_from_db(200.0) > 1.0 - 1.0e-4);
+        assert!(volume_fader_from_db(f32::NAN) < 1.0e-4);
+    }
+}
+
 #[cfg(test)]
 fn perceived_luminance(c: Color32) -> f32 {
     0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32

@@ -5,6 +5,74 @@ use crate::app::WavesPreviewer;
 
 use super::{ListInteractionState, ListViewMetrics};
 
+/// How many times `key` was pressed this frame, auto-repeat included.
+///
+/// One step per frame is not the same thing as one step per key press. A
+/// frame that ran long -- a sort landing, a preview decode, a folder of
+/// metadata arriving -- carries every repeat the keyboard produced while it
+/// was busy, and acting on one of them while dropping the rest is what makes
+/// a held arrow stall on a row. Stepping by the count keeps the selection at
+/// the speed the keyboard is going, and costs one `select_and_load` for the
+/// row actually landed on rather than one per row passed over.
+fn key_presses(ctx: &egui::Context, key: egui::Key) -> usize {
+    // `Modifiers::NONE` matches logically here, which lets Shift and Alt
+    // through -- exactly what keeps Shift+Arrow range selection arriving as
+    // an arrow.
+    let consumed = ctx.input_mut(|i| i.count_and_consume_key(egui::Modifiers::NONE, key));
+    // Presses another widget consumed first never reach `consume_key`, and
+    // the list still owns the arrows in that case (a focused topbar
+    // DragValue hands them straight back). The raw log is where those are
+    // still visible.
+    let raw = ctx.input(|i| {
+        i.raw
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: pressed,
+                        pressed: true,
+                        ..
+                    } if *pressed == key
+                )
+            })
+            .count()
+    });
+    consumed.max(raw)
+}
+
+/// Whether a chord was typed this frame.
+///
+/// A chord is how focus moves on purpose without the pointer -- Ctrl+F is the
+/// search box -- and egui's own arrow navigation never fires for a modified
+/// arrow, so one of these is reason enough to leave a focus change alone.
+/// Read from the raw log: a shortcut that already fired has consumed its
+/// event out of `events` by the time the list draws.
+fn modified_key_pressed(ctx: &egui::Context) -> bool {
+    ctx.input(|i| {
+        i.raw.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.any()
+            )
+        })
+    })
+}
+
+/// Where `steps` rows from `cur` lands, clamped to the list.
+fn step_row(cur: usize, steps: isize, last: usize) -> usize {
+    if steps >= 0 {
+        cur.saturating_add(steps as usize).min(last)
+    } else {
+        cur.saturating_sub(steps.unsigned_abs())
+    }
+}
+
 impl WavesPreviewer {
     pub(super) fn handle_list_focus_and_keyboard(
         &mut self,
@@ -13,6 +81,28 @@ impl WavesPreviewer {
         metrics: &ListViewMetrics,
     ) -> ListInteractionState {
         let list_focus_id = crate::app::WavesPreviewer::list_focus_id();
+        // egui resolves its own arrow-key focus navigation in `end_pass`,
+        // after this ran, so a steal is only visible on the frame after the
+        // arrow that caused it. Nothing but a pointer press or a chord the
+        // user typed should move focus out of a list they are arrowing
+        // through -- and where it lands is usually a text field, which owns
+        // every key the list needs from then on. Take it back; one key press
+        // is lost, where the alternative is a list that stops answering until
+        // it is clicked.
+        if std::mem::take(&mut self.list_arrow_focus_guard)
+            && self.is_list_workspace_active()
+            && !ctx.input(|i| i.pointer.any_pressed())
+            && !modified_key_pressed(ctx)
+            && ctx.memory(|m| m.focused().is_some_and(|id| id != list_focus_id))
+        {
+            ctx.memory_mut(|m| {
+                m.stop_text_input();
+                m.request_focus(list_focus_id);
+            });
+            self.search_has_focus = false;
+            self.list_has_focus = true;
+            ctx.request_repaint();
+        }
         let list_focus_now = ctx.memory(|m| m.has_focus(list_focus_id));
         let focused_id = ctx.memory(|m| m.focused());
         let search_focused =
@@ -23,7 +113,7 @@ impl WavesPreviewer {
         let allow_focus_reclaim = list_owns_keys && !search_focused && !has_non_list_focus;
         let focus_resp = ui.interact(metrics.list_rect, list_focus_id, Sense::click());
         if self.list_has_focus && !list_focus_now && allow_focus_reclaim {
-            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+            Self::focus_list_widget(ctx);
         }
         let _ = focus_resp;
 
@@ -34,7 +124,7 @@ impl WavesPreviewer {
             && !self.search_has_focus
             && allow_focus_reclaim
         {
-            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+            Self::focus_list_widget(ctx);
             list_has_focus = true;
             self.list_has_focus = true;
         }
@@ -85,7 +175,7 @@ impl WavesPreviewer {
             false
         };
         if allow_list_keys && list_key_intent {
-            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+            Self::focus_list_widget(ctx);
             list_has_focus = true;
             self.list_has_focus = true;
         }
@@ -103,37 +193,22 @@ impl WavesPreviewer {
             });
         }
 
-        let mut pressed_down = if allow_list_keys {
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
+        // Counted rather than tested: see `key_presses`. A held arrow must
+        // not lose steps to a frame that took longer than the repeat rate.
+        let (down_steps, up_steps, pgdown_steps, pgup_steps) = if allow_list_keys {
+            (
+                key_presses(ctx, egui::Key::ArrowDown),
+                key_presses(ctx, egui::Key::ArrowUp),
+                key_presses(ctx, egui::Key::PageDown),
+                key_presses(ctx, egui::Key::PageUp),
+            )
         } else {
-            false
+            (0, 0, 0, 0)
         };
-        let mut pressed_up = if allow_list_keys {
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
-        } else {
-            false
-        };
-        if allow_list_keys && (!pressed_down || !pressed_up) {
-            let raw_arrow = ctx.input(|i| {
-                let mut down = false;
-                let mut up = false;
-                for ev in &i.raw.events {
-                    if let egui::Event::Key {
-                        key, pressed: true, ..
-                    } = ev
-                    {
-                        if *key == egui::Key::ArrowDown {
-                            down = true;
-                        } else if *key == egui::Key::ArrowUp {
-                            up = true;
-                        }
-                    }
-                }
-                (down, up)
-            });
-            pressed_down |= raw_arrow.0;
-            pressed_up |= raw_arrow.1;
-        }
+        let pressed_down = down_steps > 0;
+        let pressed_up = up_steps > 0;
+        let pressed_pgdown = pgdown_steps > 0;
+        let pressed_pgup = pgup_steps > 0;
         let pressed_enter = if allow_list_keys && !has_non_list_focus {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
         } else {
@@ -158,16 +233,6 @@ impl WavesPreviewer {
         };
         let pressed_right = if allow_list_keys {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
-        } else {
-            false
-        };
-        let pressed_pgdown = if allow_list_keys {
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown))
-        } else {
-            false
-        };
-        let pressed_pgup = if allow_list_keys {
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp))
         } else {
             false
         };
@@ -205,7 +270,7 @@ impl WavesPreviewer {
                 || pressed_left
                 || pressed_right
             {
-                ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                Self::focus_list_widget(ctx);
                 list_has_focus = true;
                 self.search_has_focus = false;
             }
@@ -218,37 +283,25 @@ impl WavesPreviewer {
                     self.selected = Some(0);
                 }
             }
-            if pressed_home || pressed_end {
-                let len = self.files.len();
-                let target = if pressed_home {
-                    0
-                } else {
-                    len.saturating_sub(1)
-                };
-                let mods = ctx.input(|i| i.modifiers);
-                self.update_selection_on_click(target, mods);
-                self.select_and_load(target, true);
-                key_moved = true;
+            let last = self.files.len().saturating_sub(1);
+            // Clamped, not trusted: a filter or a removal can leave `selected`
+            // past the end, and stepping from there lands past the end too --
+            // where `update_selection_on_click` and `select_and_load` both
+            // refuse the row and the arrows stop doing anything at all.
+            let cur = self.selected.unwrap_or(0).min(last);
+            let target = if pressed_home || pressed_end {
+                Some(if pressed_home { 0 } else { last })
             } else if pressed_pgdown || pressed_pgup {
-                let len = self.files.len();
-                let cur = self.selected.unwrap_or(0);
-                let target = if pressed_pgdown {
-                    (cur + metrics.visible_rows).min(len.saturating_sub(1))
-                } else {
-                    cur.saturating_sub(metrics.visible_rows)
-                };
-                let mods = ctx.input(|i| i.modifiers);
-                self.update_selection_on_click(target, mods);
-                self.select_and_load(target, true);
-                key_moved = true;
+                let page = metrics.visible_rows.max(1) as isize;
+                let steps = (pgdown_steps as isize - pgup_steps as isize) * page;
+                Some(step_row(cur, steps, last))
             } else if pressed_down || pressed_up {
-                let len = self.files.len();
-                let cur = self.selected.unwrap_or(0);
-                let target = if pressed_down {
-                    (cur + 1).min(len.saturating_sub(1))
-                } else {
-                    cur.saturating_sub(1)
-                };
+                let steps = down_steps as isize - up_steps as isize;
+                Some(step_row(cur, steps, last))
+            } else {
+                None
+            };
+            if let Some(target) = target {
                 let mods = ctx.input(|i| i.modifiers);
                 self.update_selection_on_click(target, mods);
                 self.select_and_load(target, true);
@@ -291,9 +344,16 @@ impl WavesPreviewer {
             }
         }
 
+        // Armed for the check at the top of the next frame: an arrow the list
+        // acted on, with no pointer press to explain a focus change, means
+        // any focus that has moved by the time we look again was egui's own
+        // navigation and belongs back here.
+        self.list_arrow_focus_guard = (pressed_down || pressed_up)
+            && list_has_focus
+            && !ctx.input(|i| i.pointer.any_pressed());
+
         ListInteractionState {
             key_moved,
-            list_focus_id,
             list_has_focus,
         }
     }

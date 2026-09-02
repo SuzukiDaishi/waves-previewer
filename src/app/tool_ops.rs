@@ -16,6 +16,32 @@ impl WavesPreviewer {
         Some(path)
     }
 
+    /// The tools config path and whether it exists, asked at most once a
+    /// second.
+    ///
+    /// The palette's body runs every frame it is open, and it needs both.
+    /// Resolving the path *creates the directory*, and the existence check is
+    /// a stat, so asking per frame was two filesystem calls per frame for the
+    /// enabled state of one button. The only thing that changes the answer
+    /// from inside the application is writing the sample config, which clears
+    /// this.
+    pub(super) fn tools_config_probe(&mut self) -> (Option<PathBuf>, bool) {
+        const TOOLS_CONFIG_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+        if let Some((probed_at, path, exists)) = &self.tools_config_probe {
+            if probed_at.elapsed() < TOOLS_CONFIG_PROBE_TTL {
+                return (path.clone(), *exists);
+            }
+        }
+        let path = Self::tools_config_path();
+        let exists = path.as_ref().is_some_and(|path| path.is_file());
+        self.tools_config_probe = Some((std::time::Instant::now(), path.clone(), exists));
+        (path, exists)
+    }
+
+    pub(super) fn tools_config_exists_cached(&mut self) -> bool {
+        self.tools_config_probe().1
+    }
+
     pub(super) fn tools_log_path() -> Option<PathBuf> {
         let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("LOCALAPPDATA"))?;
         let mut path = PathBuf::from(base);

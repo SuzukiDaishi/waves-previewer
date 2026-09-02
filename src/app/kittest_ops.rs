@@ -9,6 +9,35 @@ use crate::app::types::{
     SampleValueKind, SortDir, SortKey, ToolKind, ToolState, ViewMode,
 };
 
+/// Counters for the work a UI surface must not repeat per frame.
+///
+/// Both of these are O(selection): building the selection's paths, and the
+/// pass that answers a menu's enabled states. A menu closure runs every frame
+/// it is open, so "how often" is the whole property under test -- and the only
+/// way to observe it from a test is to count. Compiled out of release builds
+/// with the rest of the kittest surface.
+#[cfg(feature = "kittest")]
+pub(crate) static SELECTED_PATHS_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "kittest")]
+pub(crate) static SELECTION_SUMMARY_COMPUTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "kittest")]
+pub(crate) fn note_selected_paths_built() {
+    SELECTED_PATHS_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(feature = "kittest")]
+pub(crate) fn note_selection_summary_computed() {
+    SELECTION_SUMMARY_COMPUTES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The worker's end of a job a test installed, kept opaque so a test hook
+/// does not widen the visibility of what the channel carries.
+#[cfg(feature = "kittest")]
+pub struct TestJobHandle(#[allow(dead_code)] Box<dyn std::any::Any>);
+
 #[cfg(feature = "kittest")]
 impl super::WavesPreviewer {
     pub fn test_playing_path(&self) -> Option<&PathBuf> {
@@ -611,6 +640,22 @@ impl super::WavesPreviewer {
         self.pending_gain_count()
     }
 
+    pub fn test_selected_row(&self) -> Option<usize> {
+        self.selected
+    }
+
+    /// Whether the list widget currently holds egui's keyboard focus.
+    pub fn test_list_widget_has_focus(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.has_focus(Self::list_focus_id()))
+    }
+
+    /// Move focus out of the list the way egui's own arrow-key navigation
+    /// does when the list's lock filter is not in place -- onto the search
+    /// box, which is the widget directly above it.
+    pub fn test_move_focus_to_search_box(&mut self, ctx: &egui::Context) {
+        ctx.memory_mut(|m| m.request_focus(Self::search_box_id()));
+    }
+
     pub fn test_selected_multi_len(&self) -> usize {
         self.selected_multi.len()
     }
@@ -691,6 +736,174 @@ impl super::WavesPreviewer {
 
     pub fn test_csv_export_active(&self) -> bool {
         self.csv_export_state.is_some()
+    }
+
+    /// Install a modal job whose worker is already gone.
+    ///
+    /// This is what a panicked or silently-returning worker leaves behind: a
+    /// state that blocks every input, and a channel whose sender was dropped
+    /// without a message. Nothing else can produce it on purpose, and what it
+    /// used to produce -- an application that never comes back -- is exactly
+    /// what the drains must now survive.
+    pub fn test_wedge_session_save_with_dead_worker(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(tx);
+        self.session_save_state = Some(crate::app::types::SessionSaveState {
+            msg: "Saving session...".into(),
+            rx,
+            started_at: std::time::Instant::now(),
+        });
+    }
+
+    pub fn test_wedge_export_with_dead_worker(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(tx);
+        self.export_state = Some(crate::app::types::ExportState {
+            msg: "Saving...".into(),
+            rx,
+            started_at: std::time::Instant::now(),
+        });
+    }
+
+    pub fn test_wedge_clipboard_prep_with_dead_worker(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(tx);
+        self.clipboard_prep_state = Some(crate::app::types::ClipboardPrepState {
+            rx,
+            started_at: std::time::Instant::now(),
+        });
+    }
+
+    /// A modal job that is alive but has been working for `secs`, for the
+    /// stall escape the overlay grows after a while.
+    ///
+    /// The returned handle owns the worker's end of the channel: hold it and
+    /// the job stays in flight, drop it and the job reads as one whose worker
+    /// went away.
+    pub fn test_wedge_session_save_started_secs_ago(&mut self, secs: u64) -> TestJobHandle {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.session_save_state = Some(crate::app::types::SessionSaveState {
+            msg: "Saving session...".into(),
+            rx,
+            started_at: std::time::Instant::now() - std::time::Duration::from_secs(secs),
+        });
+        TestJobHandle(Box::new(tx))
+    }
+
+    /// How many times the selection's paths have been built, process-wide.
+    ///
+    /// Tests read the delta across a span of frames: what matters is that it
+    /// does not grow with the frame count while a menu sits open.
+    pub fn test_selected_paths_builds() -> usize {
+        SELECTED_PATHS_BUILDS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn test_selection_summary_computes() -> usize {
+        SELECTION_SUMMARY_COMPUTES.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn test_selection_menu_summary_shared_status(&mut self) -> Option<String> {
+        self.selection_menu_summary().shared_status
+    }
+
+    pub fn test_can_paste_into_list(&mut self) -> bool {
+        self.can_paste_into_list()
+    }
+
+    /// A CSV export waiting on one row, as if the user had asked for a
+    /// column that needs a full decode.
+    pub fn test_wedge_csv_export_on(&mut self, target: &Path, out: std::path::PathBuf) {
+        let mut pending = std::collections::HashSet::new();
+        pending.insert(target.to_path_buf());
+        self.csv_export_state = Some(crate::app::types::CsvExportState {
+            path: out,
+            ids: Vec::new(),
+            cols: self.list_columns,
+            external_cols: Vec::new(),
+            total: 1,
+            done: 0,
+            pending,
+            queue: vec![target.to_path_buf()],
+            needs_peak: true,
+            needs_lufs: false,
+            attempts: std::collections::HashMap::new(),
+            unmeasured: 0,
+            started_at: std::time::Instant::now(),
+        });
+    }
+
+    /// Report that a metadata job landed for `path` and produced nothing --
+    /// the shape of a row that cannot be satisfied. Mirrors the production
+    /// order in `meta_ops`: the job leaves the inflight set, then the export
+    /// is told.
+    pub fn test_csv_export_meta_landed(&mut self, path: &Path) {
+        self.meta_inflight.remove(path);
+        self.update_csv_export_progress_for_path(path);
+    }
+
+    pub fn test_csv_export_pending_len(&self) -> usize {
+        self.csv_export_state
+            .as_ref()
+            .map(|state| state.pending.len())
+            .unwrap_or(0)
+    }
+
+    /// Move a built-in column so it sits where another one is, the way the
+    /// List Columns window does it.
+    ///
+    /// The rendered order is `list_column_layout` (which also carries the
+    /// metadata columns); `list_column_order` is a *derived* projection of it,
+    /// so setting that one moves nothing. The layout revision has to be bumped
+    /// with it, or the table keeps the widths and order it already laid out.
+    pub fn test_move_column_before(
+        &mut self,
+        moved: crate::app::types::ColumnId,
+        before: crate::app::types::ColumnId,
+    ) -> bool {
+        use crate::app::types::ColumnKey;
+        let from = self
+            .list_column_layout
+            .iter()
+            .position(|key| *key == ColumnKey::Builtin(moved));
+        let to = self
+            .list_column_layout
+            .iter()
+            .position(|key| *key == ColumnKey::Builtin(before));
+        let (Some(from), Some(to)) = (from, to) else {
+            return false;
+        };
+        if from == to {
+            return false;
+        }
+        let key = self.list_column_layout.remove(from);
+        self.list_column_layout.insert(to, key);
+        self.list_table_layout_revision = self.list_table_layout_revision.wrapping_add(1);
+        self.sanitize_list_column_layout();
+        true
+    }
+
+    pub fn test_list_column_layout(&self) -> Vec<crate::app::types::ColumnKey> {
+        self.list_column_layout.clone()
+    }
+
+    pub fn test_busy_overlay_released(&self) -> bool {
+        self.busy_overlay_released
+    }
+
+    pub fn test_export_in_flight(&self) -> bool {
+        self.export_state.is_some()
+    }
+
+    pub fn test_clipboard_prep_in_flight(&self) -> bool {
+        self.clipboard_prep_state.is_some()
+    }
+
+    pub fn test_show_quit_prompt(&self) -> bool {
+        self.show_quit_prompt
+    }
+
+    pub fn test_set_show_quit_prompt(&mut self, show: bool) {
+        self.show_quit_prompt = show;
     }
 
     pub fn test_auto_play_list_nav(&self) -> bool {
@@ -1269,6 +1482,7 @@ impl super::WavesPreviewer {
             SortKey::Bpm => "Bpm",
             SortKey::CreatedAt => "CreatedAt",
             SortKey::ModifiedAt => "ModifiedAt",
+            SortKey::Comments => "Comments",
             SortKey::External(_) => "External",
             SortKey::Metadata(_) => "Metadata",
         }
@@ -2689,6 +2903,37 @@ impl super::WavesPreviewer {
             .unwrap_or(false)
     }
 
+    /// How much of the loading overview carries samples, and how much of the
+    /// file has been decoded, as fractions of the whole.
+    ///
+    /// The two have to track each other. They did not: the overview used to be
+    /// the decoded prefix spread across every bin, so the first fraction was
+    /// always 1.0 while the second was still climbing -- the waveform drawn
+    /// over the whole canvas when only its head existed.
+    pub fn test_active_tab_loading_overview_progress(&self) -> Option<(f32, f32)> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        if tab.loading_waveform_minmax.is_empty() {
+            return None;
+        }
+        let bins = tab.loading_waveform_minmax.len().max(1);
+        let filled = tab
+            .loading_waveform_minmax
+            .iter()
+            .filter(|(mn, mx)| mn.abs() > 1.0e-5 || mx.abs() > 1.0e-5)
+            .count();
+        let decoded = self
+            .editor_decode_state
+            .as_ref()
+            .filter(|state| state.path == tab.path)
+            .map(|state| state.decoded_frames)
+            .unwrap_or(0);
+        let total = tab.samples_len_visual.max(1);
+        Some((
+            filled as f32 / bins as f32,
+            (decoded as f32 / total as f32).clamp(0.0, 1.0),
+        ))
+    }
+
     pub fn test_request_workspace_play_toggle(&mut self) {
         self.request_workspace_play_toggle();
     }
@@ -3875,6 +4120,41 @@ impl super::WavesPreviewer {
             tab.selection = range;
             tab.selection_anchor_sample = range.map(|(start, _)| start);
         }
+    }
+
+    // ---- Comments column ------------------------------------------------
+
+    /// Show only these built-in columns, by their stable names.
+    ///
+    /// The harness window is narrower than a real one, and a column near the
+    /// right of the default layout lands off-screen -- where it lays out and
+    /// reports a rect but can never be clicked.
+    pub fn test_show_only_columns(&mut self, keep: &[&str]) {
+        for column in crate::app::types::ColumnId::ALL {
+            column.set_enabled(&mut self.list_columns, keep.contains(&column.name()));
+        }
+        self.sanitize_list_column_layout();
+        self.ensure_sort_key_visible();
+    }
+
+    /// What the list's Comments cell for `path` is showing, as
+    /// `(total, open, unread)`.
+    pub fn test_comment_summary_for_path(&mut self, path: &Path) -> (usize, usize, usize) {
+        // The index is refreshed by the frame loop; a test that posts and
+        // asserts in the same breath should not have to run a frame first.
+        self.refresh_comment_path_index();
+        let summary = self.comment_summary_for_path(path);
+        (summary.total, summary.open, summary.unread)
+    }
+
+    /// Type into the composer under a row's Comments cell.
+    pub fn test_set_comment_row_draft(&mut self, path: &Path, body: &str) {
+        self.comment_row_draft_path = Some(path.to_path_buf());
+        self.comment_row_draft = body.to_string();
+    }
+
+    pub fn test_comments_column_visible(&self) -> bool {
+        self.list_columns.comments
     }
 
     /// Write a reference token for a path the way the composer does.

@@ -3,6 +3,43 @@ use egui::{Color32, RichText};
 use super::types::{ProcessingResult, ProcessingTarget};
 use super::BULK_RESAMPLE_BLOCK_SECS;
 
+/// How long a job may hold the modal overlay before it offers a way out.
+///
+/// An export of a thousand files to a shared drive is slow, not stuck, so this
+/// is generous. It is still finite because a job that will never answer is
+/// indistinguishable, from the other side of the overlay, from an application
+/// that has died.
+const BUSY_OVERLAY_STALL_SECS: u64 = 30;
+
+/// What a job's channel says this frame.
+///
+/// The third case is the one worth naming. A worker that returns or panics
+/// without sending drops its sender, and every `try_recv` after that answers
+/// `Disconnected` -- forever. Folded into "nothing yet" (`Err(_) => None`,
+/// which is how these drains used to read) it becomes a job that never
+/// completes: the modal overlay stays up with input blocked, the repaint
+/// cadence stays pinned at 50ms or 60fps, and the quit prompt sits
+/// underneath the overlay where it cannot be clicked. The state has to be
+/// cleared by whoever polls it, so the poll has to be able to say so.
+pub(in crate::app) enum JobPoll<T> {
+    /// Still working. Ask again next frame.
+    Waiting,
+    /// The worker's answer.
+    Ready(T),
+    /// The sender is gone: nothing will ever arrive on this channel.
+    Gone,
+}
+
+/// Poll a worker channel without losing the difference between "not yet" and
+/// "never" -- see [`JobPoll`].
+pub(in crate::app) fn poll_job<T>(rx: &std::sync::mpsc::Receiver<T>) -> JobPoll<T> {
+    match rx.try_recv() {
+        Ok(value) => JobPoll::Ready(value),
+        Err(std::sync::mpsc::TryRecvError::Empty) => JobPoll::Waiting,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => JobPoll::Gone,
+    }
+}
+
 impl super::WavesPreviewer {
     pub(super) fn tick_playback_fx_state(&mut self, ctx: &egui::Context) {
         let mut ready_result: Option<super::PlaybackFxResult> = None;
@@ -56,11 +93,26 @@ impl super::WavesPreviewer {
     pub(super) fn tick_processing_state(&mut self, ctx: &egui::Context) {
         let mut processing_done: Option<(ProcessingResult, bool)> = None;
         let mut source_time_sec = None;
+        let mut worker_gone = false;
         if let Some(state) = &mut self.processing {
-            if let Ok(res) = state.rx.try_recv() {
-                source_time_sec = state.source_time_sec;
-                processing_done = Some((res, state.autoplay_when_ready));
+            match poll_job(&state.rx) {
+                JobPoll::Ready(res) => {
+                    source_time_sec = state.source_time_sec;
+                    processing_done = Some((res, state.autoplay_when_ready));
+                }
+                JobPoll::Waiting => {}
+                JobPoll::Gone => worker_gone = true,
             }
+        }
+        if worker_gone {
+            // Nothing to show the user: this is a preview decode, and the next
+            // selection starts a new one. What matters is that the state does
+            // not sit here holding the frame rate at 60fps and refusing every
+            // later decode of the same target.
+            self.debug_log("processing worker stopped without a result".to_string());
+            self.processing = None;
+            ctx.request_repaint();
+            return;
         }
         if let Some((res, autoplay_when_ready)) = processing_done {
             if let Some(reason) = self
@@ -176,12 +228,56 @@ impl super::WavesPreviewer {
             || bulk_blocking
     }
 
+    /// How long the modal overlay has been up, or zero when nothing blocks.
+    ///
+    /// The longest-running job wins: what the user is waiting on is whichever
+    /// one has kept them waiting.
+    fn busy_overlay_elapsed(&self) -> std::time::Duration {
+        let mut longest = std::time::Duration::ZERO;
+        let mut consider = |started: std::time::Instant| {
+            longest = longest.max(started.elapsed());
+        };
+        if let Some(state) = &self.export_state {
+            consider(state.started_at);
+        }
+        if let Some(state) = &self.csv_export_state {
+            consider(state.started_at);
+        }
+        if let Some(state) = &self.session_save_state {
+            consider(state.started_at);
+        }
+        if let Some(state) = &self.clipboard_prep_state {
+            consider(state.started_at);
+        }
+        if let Some(state) = &self.bulk_resample_state {
+            consider(state.started_at);
+        }
+        longest
+    }
+
     pub(super) fn ui_busy_overlay(&mut self, ctx: &egui::Context) {
         if !self.busy_overlay_blocking() {
+            // Nothing is blocking, so a release from the last job that stalled
+            // has nothing left to release. Re-arming it here means the next
+            // job starts modal again, which is what it is for.
+            self.busy_overlay_released = false;
+            return;
+        }
+        if self.busy_overlay_released {
+            return;
+        }
+        // The quit prompt is a plain window, so it draws *under* everything
+        // below and would be dimmed and unclickable. Whatever this job is, the
+        // user asking to close the application outranks it -- and a job that
+        // never answers must never be the reason they cannot leave.
+        if self.show_quit_prompt {
             return;
         }
         // Block input and show a modal spinner for operations that must not be interrupted.
         use egui::{Id, LayerId, Order};
+        let elapsed = self.busy_overlay_elapsed();
+        let stalled = elapsed.as_secs() >= BUSY_OVERLAY_STALL_SECS;
+        let mut release = false;
         let screen = ctx.viewport_rect();
         // block input
         egui::Area::new("busy_block_input".into())
@@ -238,8 +334,43 @@ impl super::WavesPreviewer {
                                 );
                             }
                         }
+                        // The way out of a job that stopped answering. A
+                        // worker that dies without a word is caught by its own
+                        // drain within a frame; this is for the other kind --
+                        // alive, but wedged on a share that stopped
+                        // responding -- where nothing will arrive to clear the
+                        // overlay and the application otherwise reads as hung,
+                        // with no way to save, to quit, or even to see what is
+                        // behind the dimming.
+                        if stalled {
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new(format!(
+                                    "Still working after {}s.",
+                                    elapsed.as_secs()
+                                ))
+                                .weak(),
+                            );
+                            if ui
+                                .button("Stop waiting")
+                                .on_hover_text(
+                                    "Give the window back. The job keeps running -- \
+                                     this only stops it from blocking the application.",
+                                )
+                                .clicked()
+                            {
+                                release = true;
+                            }
+                        }
                     });
                 });
             });
+        if release {
+            self.busy_overlay_released = true;
+            self.push_toast(
+                crate::app::types::ToastSeverity::Warning,
+                "Stopped waiting. The job is still running in the background.".to_string(),
+            );
+        }
     }
 }

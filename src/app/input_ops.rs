@@ -14,9 +14,32 @@ impl super::WavesPreviewer {
     pub(super) fn request_list_focus(&mut self, ctx: &egui::Context) {
         self.list_has_focus = true;
         self.search_has_focus = false;
-        ctx.memory_mut(|m| {
-            m.request_focus(Self::list_focus_id());
-        });
+        Self::focus_list_widget(ctx);
+    }
+
+    /// Give the list keyboard focus without disturbing the lock filter it
+    /// already holds.
+    ///
+    /// egui only lets a widget keep the arrow keys through
+    /// `Memory::set_focus_lock_filter`, and that refuses unless the widget
+    /// also held focus on the *previous* frame. A fresh `request_focus`
+    /// therefore resets the filter to the default one, and for the frame that
+    /// follows, egui reads the list's arrows as focus *navigation* instead:
+    /// focus walks out of the list into whatever widget sits above or below
+    /// it -- the search box, a topbar drag value -- and both of those are text
+    /// entry, which stands every list key down until the user clicks back.
+    /// That is the row the selection appears to stick on.
+    ///
+    /// Two rules close it: never re-take focus that is already ours, and when
+    /// we do take it, ask for one more frame so the lock is in place *before*
+    /// the next key rather than one frame after it.
+    pub(super) fn focus_list_widget(ctx: &egui::Context) {
+        let id = Self::list_focus_id();
+        if ctx.memory(|m| m.has_focus(id)) {
+            return;
+        }
+        ctx.memory_mut(|m| m.request_focus(id));
+        ctx.request_repaint();
     }
 
     pub(super) fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {

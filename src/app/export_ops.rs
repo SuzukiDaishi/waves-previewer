@@ -192,6 +192,7 @@ impl super::WavesPreviewer {
         self.export_state = Some(ExportState {
             msg: "Exporting gains".into(),
             rx,
+            started_at: std::time::Instant::now(),
         });
     }
 
@@ -1111,6 +1112,7 @@ impl super::WavesPreviewer {
         self.export_state = Some(ExportState {
             msg: "Saving...".into(),
             rx,
+            started_at: std::time::Instant::now(),
         });
     }
 
@@ -1193,15 +1195,37 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn drain_export_results(&mut self, ctx: &egui::Context) {
+        use crate::app::loading_ops::{poll_job, JobPoll};
         let received = {
             let Some(state) = &self.export_state else {
                 return;
             };
-            state
-                .rx
-                .try_recv()
-                .ok()
-                .map(|res| (res, state.msg.starts_with("Saving")))
+            match poll_job(&state.rx) {
+                JobPoll::Ready(res) => Some((res, state.msg.starts_with("Saving"))),
+                JobPoll::Waiting => None,
+                JobPoll::Gone => {
+                    // Whatever the worker managed to write is on disk; what is
+                    // gone is the report of it. Clearing the bookkeeping
+                    // matters as much as clearing the overlay: left behind, it
+                    // would be applied to the *next* export's results.
+                    self.export_state = None;
+                    self.saving_sources.clear();
+                    self.saving_virtual.clear();
+                    self.saving_format_targets.clear();
+                    self.saving_edit_sources.clear();
+                    self.saving_edit_annotations.clear();
+                    self.saving_mode = None;
+                    self.push_toast(
+                        crate::app::types::ToastSeverity::Error,
+                        "Export did not finish — the worker stopped. Check the output \
+                         folder before running it again."
+                            .to_string(),
+                    );
+                    self.debug_log("export worker stopped without a result".to_string());
+                    ctx.request_repaint();
+                    return;
+                }
+            }
         };
         if let Some((res, msg_is_saving)) = received {
             eprintln!("save/export done: ok={}, failed={}", res.ok, res.failed);

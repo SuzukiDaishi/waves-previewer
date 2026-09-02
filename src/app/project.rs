@@ -488,6 +488,10 @@ pub struct ProjectListColumns {
     pub modified_at: bool,
     pub gain: bool,
     pub wave: bool,
+    /// The conversation column. Defaults visible like `note`: a session that
+    /// predates it is still a session somebody may be discussing.
+    #[serde(default = "default_comments_column_visible")]
+    pub comments: bool,
     #[serde(default = "default_note_column_visible")]
     pub note: bool,
     #[serde(default)]
@@ -707,6 +711,10 @@ fn default_music_analysis_visible() -> bool {
 }
 
 fn default_note_column_visible() -> bool {
+    true
+}
+
+fn default_comments_column_visible() -> bool {
     true
 }
 
@@ -2255,6 +2263,7 @@ impl super::WavesPreviewer {
         self.session_store_load = None;
         self.session_file_changes = None;
         self.comments.clear();
+        self.mark_comment_index_dirty();
         self.session_comment_free_fingerprint = None;
         self.comment_outbox.clear();
         self.comment_write = None;

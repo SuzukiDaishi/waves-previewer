@@ -14,7 +14,7 @@ impl crate::app::WavesPreviewer {
             .resizable(true)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                if let Some(path) = Self::tools_config_path() {
+                if let Some(path) = self.tools_config_probe().0 {
                     ui.label(format!("Config: {}", path.display()));
                 }
                 ui.horizontal(|ui| {
@@ -22,15 +22,14 @@ impl crate::app::WavesPreviewer {
                         self.load_tools_config();
                         self.tool_config_error = None;
                     }
-                    let has_cfg = Self::tools_config_path()
-                        .map(|p| p.exists())
-                        .unwrap_or(false);
+                    let has_cfg = self.tools_config_exists_cached();
                     if ui
                         .add_enabled(!has_cfg, egui::Button::new("Create Sample"))
                         .clicked()
                     {
                         match self.write_sample_tools_config() {
                             Ok(_) => {
+                                self.tools_config_probe = None;
                                 self.load_tools_config();
                                 self.tool_config_error = None;
                             }
@@ -51,8 +50,11 @@ impl crate::app::WavesPreviewer {
                 });
 
                 let filter = self.tool_search.trim().to_ascii_lowercase();
-                let selected_paths = self.selected_paths();
-                let has_selection = !selected_paths.is_empty();
+                // Counted, not collected: this window's body runs every frame
+                // it is open, and the selection it asks about can be the whole
+                // list. The paths are built by the Run button.
+                let has_selection = self.selection_has_at_least(1);
+                let preview_target = self.first_selected_path();
                 let tools = self.tool_defs.clone();
                 let mut grouped: BTreeMap<String, Vec<crate::app::tooling::ToolDef>> =
                     BTreeMap::new();
@@ -147,7 +149,6 @@ impl crate::app::WavesPreviewer {
                                 ui.separator();
                                 ui.label("Command");
                                 ui.monospace(&tool.command);
-                                let preview_target = selected_paths.first().cloned();
                                 let preview_args = args.clone();
                                 let preview_cmd = crate::app::WavesPreviewer::expand_tool_command(
                                     &tool.command,
@@ -168,7 +169,8 @@ impl crate::app::WavesPreviewer {
                                 }
                             }
                             if let Some(run_args) = run_args {
-                                self.enqueue_tool_runs(&tool, &selected_paths, &run_args);
+                                let targets = self.selected_paths();
+                                self.enqueue_tool_runs(&tool, &targets, &run_args);
                             }
                         } else {
                             ui.label("No tools available.");

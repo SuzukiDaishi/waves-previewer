@@ -183,6 +183,12 @@ impl WavesPreviewer {
                 None => OwnedKey::Missing,
             },
             SortKey::Metadata(index) => self.metadata_owned_sort_key(&item.path, index),
+            // Zero and "no comments" are the same answer here, and a numeric
+            // key sorts them together at one end -- which is what a reviewer
+            // clicking this header is after.
+            SortKey::Comments => {
+                OwnedKey::Num(Some(self.comment_summary_for_path(&item.path).total as f64))
+            }
         }
     }
 

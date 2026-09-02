@@ -509,12 +509,27 @@ impl WavesPreviewer {
         let Some(pending) = self.list_seek_pending.clone() else {
             return;
         };
-        // A different row took over the transport; the seek is stale.
         if self.list_sounding_path() != Some(pending.path.as_path()) {
-            if self.playing_path.as_deref() != Some(pending.path.as_path()) {
+            // A different row took over the transport: the seek is stale.
+            let taken_over = self.list_sounding_path().is_some()
+                || self
+                    .playing_path
+                    .as_deref()
+                    .is_some_and(|playing| playing != pending.path.as_path());
+            if taken_over {
                 self.clear_list_seek_pending();
+                return;
             }
-            return;
+            // Nobody owns the transport yet -- this row's buffer simply has
+            // not landed. That is a "not yet", not a "somebody else took it",
+            // and dropping the seek here is how a click at 50% on a row that
+            // is still decoding ends up armed at the start of the file. The
+            // whole point of parking is to wait for exactly this. Waiting is
+            // bounded: with no decode in flight, fall through to the
+            // termination case at the end.
+            if self.list_preview_rx.is_some() || self.list_preview_pending_path.is_some() {
+                return;
+            }
         }
         let decoded = self.list_decoded_source_secs();
         let covered = self.list_transport_is_whole_file()

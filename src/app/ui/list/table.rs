@@ -386,6 +386,7 @@ impl WavesPreviewer {
             "created_at" | "modified_at" => 120.0,
             "gain" => 80.0,
             "wave" => 150.0,
+            "comments" => 64.0,
             "note" => 220.0,
             "status" => 110.0,
             "tags" => 160.0,
@@ -460,6 +461,9 @@ impl WavesPreviewer {
                 C::Bpm => Some(("BPM", SortKey::Bpm, false)),
                 C::CreatedAt => Some(("Created", SortKey::CreatedAt, true)),
                 C::ModifiedAt => Some(("Modified", SortKey::ModifiedAt, true)),
+                // Descending first: one click brings the rows somebody has
+                // said something about to the top.
+                C::Comments => Some(("\u{1F4AC}", SortKey::Comments, false)),
                 _ => None,
             };
             if let Some((label, key, asc)) = sortable {

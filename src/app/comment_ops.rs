@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Instant;
 
-use super::comments::{self, CommentAnchor, CommentAuthor, CommentRef};
+use super::comments::{self, CommentAnchor, CommentAuthor, CommentNode, CommentRef};
 use super::project::{deserialize_project, serialize_project, ProjectComment};
 use super::session_sync::{self, SessionFingerprint};
 
@@ -69,6 +69,24 @@ pub(super) struct CommentWriteState {
     /// What went out. Returned to the outbox if the write could not commit,
     /// so nothing the user typed is lost to a dropped share.
     pub sent: Vec<ProjectComment>,
+}
+
+/// One file's share of the conversation, as the list's Comments column reads
+/// it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CommentPathSummary {
+    /// Comments pointing at this file that have not been withdrawn.
+    pub total: usize,
+    /// Of those, the ones in a thread nobody has resolved yet.
+    pub open: usize,
+    /// Of those, the ones this person has not read. Their own never count.
+    pub unread: usize,
+}
+
+impl CommentPathSummary {
+    pub fn is_empty(self) -> bool {
+        self.total == 0
+    }
 }
 
 /// What a read of the document's conversation found.
@@ -205,6 +223,7 @@ impl crate::app::WavesPreviewer {
     /// Show it here now, and get it to the document when the worker is free.
     pub(crate) fn enqueue_comment(&mut self, comment: ProjectComment) {
         comments::merge_into(&mut self.comments, [comment.clone()]);
+        self.mark_comment_index_dirty();
         // Replace rather than append: several quick edits to one comment
         // should send the last of them, not each keystroke's worth in turn.
         match self
@@ -310,9 +329,28 @@ impl crate::app::WavesPreviewer {
             .filter(|comment| &comment.author_id != me && !self.comment_reads.contains(&comment.id))
             .map(|comment| comment.id.clone())
             .collect();
+        self.record_comments_read(unseen);
+    }
+
+    /// Remember that these particular comments were seen.
+    ///
+    /// The window marks the whole conversation; a list row's popup marks the
+    /// threads it just showed, which is the same promise made about less.
+    /// Ids that are already read, or this person's own, are dropped here so
+    /// no caller has to filter them first.
+    pub(crate) fn record_comments_read(&mut self, ids: Vec<String>) {
+        let unseen: Vec<String> = ids
+            .into_iter()
+            .filter(|id| !self.comment_reads.contains(id))
+            .filter(|id| {
+                self.comment_by_id(id)
+                    .is_some_and(|comment| comment.author_id != self.comment_author_id)
+            })
+            .collect();
         if unseen.is_empty() {
             return;
         }
+        self.mark_comment_index_dirty();
         for id in &unseen {
             self.comment_reads.insert(id.clone());
             // Also remembered as "was new while this window was open", so the
@@ -470,11 +508,105 @@ impl crate::app::WavesPreviewer {
             .any(|(_, reference)| self.resolve_comment_ref_path(&reference) == path)
     }
 
+    // ---- The per-file view the list column reads --------------------------
+
+    /// Note that the conversation, or what has been read of it, moved.
+    ///
+    /// Cheaper than watching for it: the index is rebuilt from this flag, and
+    /// a rebuild that is one frame late would show a stale count on a row.
+    pub(crate) fn mark_comment_index_dirty(&mut self) {
+        self.comment_path_index_dirty = true;
+    }
+
+    /// Rebuild the per-file counts, if anything moved since the last one.
+    ///
+    /// The list asks "how many comments are about this row" for every visible
+    /// row of every frame. Answering that from the conversation would re-scan
+    /// every body for reference tokens each time -- rows times comments, per
+    /// frame. Walking the threads once per *change* instead costs the number
+    /// of comments, which is the small number here, and leaves the row lookup
+    /// a hash probe.
+    pub(crate) fn refresh_comment_path_index(&mut self) {
+        // The flag is the trigger; the two lengths are the safety net, so a
+        // mutation that forgot to raise it still cannot leave a wrong count
+        // on screen for longer than the frame it lands in.
+        let stamp = (self.comments.len(), self.comment_reads.len());
+        if !self.comment_path_index_dirty && stamp == self.comment_path_index_stamp {
+            return;
+        }
+        self.comment_path_index_dirty = false;
+        self.comment_path_index_stamp = stamp;
+        self.comment_path_index.clear();
+        if self.comments.is_empty() {
+            return;
+        }
+        // Counted by thread, not by comment. A reply rarely repeats the
+        // reference its root already carries, and a badge that said "1" over
+        // a conversation of four would be lying about the same thing the
+        // window's `This file` filter and the row's own popup both show.
+        // "Resolved" is a property of the root for the same reason.
+        for root in comments::build_threads(&self.comments) {
+            let paths = self.subtree_ref_paths(&root);
+            if paths.is_empty() {
+                continue;
+            }
+            let mut counted = CommentPathSummary::default();
+            self.count_subtree(&root, root.comment.resolved_at.is_none(), &mut counted);
+            for path in paths {
+                let entry = self.comment_path_index.entry(path).or_default();
+                entry.total += counted.total;
+                entry.open += counted.open;
+                entry.unread += counted.unread;
+            }
+        }
+    }
+
+    /// Every file a thread points at. Deduplicated, so a thread naming one
+    /// file five times is still one thread about it.
+    fn subtree_ref_paths(&self, node: &CommentNode) -> std::collections::HashSet<PathBuf> {
+        let mut paths: std::collections::HashSet<PathBuf> = comments::find_refs(&node.comment.body)
+            .into_iter()
+            .map(|(_, reference)| self.resolve_comment_ref_path(&reference))
+            .collect();
+        for reply in &node.replies {
+            paths.extend(self.subtree_ref_paths(reply));
+        }
+        paths
+    }
+
+    fn count_subtree(&self, node: &CommentNode, thread_open: bool, into: &mut CommentPathSummary) {
+        if !node.comment.deleted {
+            into.total += 1;
+            if thread_open {
+                into.open += 1;
+            }
+            if node.comment.author_id != self.comment_author_id
+                && !self.comment_reads.contains(&node.comment.id)
+            {
+                into.unread += 1;
+            }
+        }
+        for reply in &node.replies {
+            self.count_subtree(reply, thread_open, into);
+        }
+    }
+
+    /// What the conversation says about one file. Empty until something does.
+    pub(crate) fn comment_summary_for_path(&self, path: &Path) -> CommentPathSummary {
+        self.comment_path_index
+            .get(path)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// Adopt whatever the comment workers finished. Runs every frame.
     pub(crate) fn drain_comment_jobs(&mut self) {
         self.drain_comment_write();
         self.drain_comment_pull();
         self.flush_comment_outbox();
+        // After the drains, so a comment that arrived this frame is already
+        // counted by the time the list draws it.
+        self.refresh_comment_path_index();
     }
 
     fn drain_comment_write(&mut self) {
@@ -500,6 +632,7 @@ impl crate::app::WavesPreviewer {
                 // just read knows nothing about it -- assigning would drop it
                 // from the window while it sat in the outbox waiting its turn.
                 comments::merge_into(&mut self.comments, written.comments);
+                self.mark_comment_index_dirty();
                 // Adopt what we just wrote as the baseline. Without this the
                 // watch reports our own post back to us as "someone else
                 // saved", and the next real save would see a false conflict.
@@ -547,6 +680,7 @@ impl crate::app::WavesPreviewer {
         match result {
             Ok(pull) => {
                 let added = comments::merge_into(&mut self.comments, pull.comments);
+                self.mark_comment_index_dirty();
                 // The whole point of the comparison: a document that differs
                 // from ours *only* in its conversation is a colleague talking,
                 // not a colleague saving. Take their words and stay quiet.
