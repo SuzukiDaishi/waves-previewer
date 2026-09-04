@@ -2733,38 +2733,49 @@ impl crate::app::WavesPreviewer {
                 label_col,
             );
 
-            painter.text(
-                stereo_rect.left_top() + egui::vec2(4.0, 2.0),
-                egui::Align2::LEFT_TOP,
-                "STEREO",
-                label_font.clone(),
+            // Title row: the pane name on the left, then the channel badge and
+            // the numeric correlation packed in from the right.
+            //
+            // Measured rather than estimated. This font is nominally
+            // `monospace`, but `theme_ops::init_egui_style` puts the bundled
+            // CJK face at the head of the Monospace family and the system font
+            // upgrade swaps it again while the app is running, so the ASCII
+            // glyphs here are proportional and their widths change mid-session.
+            // A per-character width would be wrong from the start and wrong in
+            // a different way later.
+            let label_top = stereo_rect.top() + 2.0;
+            let title = painter.layout_no_wrap("STEREO".to_string(), label_font.clone(), label_col);
+            let title_right = stereo_rect.left() + 4.0 + title.size().x;
+            painter.galley(
+                egui::pos2(stereo_rect.left() + 4.0, label_top),
+                title,
                 label_col,
             );
-            // Numeric correlation next to the pane title (same smoothed value
-            // as the bar below).
-            painter.text(
-                stereo_rect.right_top() + egui::vec2(-4.0, 2.0),
-                egui::Align2::RIGHT_TOP,
-                format!("{corr:+.2}"),
-                label_font.clone(),
-                fill_col,
-            );
+            let mut right_x = stereo_rect.right() - 4.0;
+            let mut place_right = |text: String, color: Color32| {
+                let galley = painter.layout_no_wrap(text, label_font.clone(), color);
+                let left = right_x - galley.size().x;
+                // Anything that would reach the title is dropped instead of
+                // drawn over it: the pane floors at 56 px wide, which is not
+                // always enough for all three.
+                if left < title_right + 4.0 {
+                    return;
+                }
+                painter.galley(egui::pos2(left, label_top), galley, color);
+                right_x = left - 4.0;
+            };
+            let badge_col = Color32::from_rgb(150, 162, 184);
             if n_ch == 1 {
-                painter.text(
-                    egui::pos2(stereo_rect.right() - 4.0, stereo_rect.top() + 2.0),
-                    egui::Align2::RIGHT_TOP,
-                    "MONO",
-                    label_font.clone(),
-                    Color32::from_rgb(150, 162, 184),
-                );
+                place_right("MONO".to_string(), badge_col);
             } else if n_ch > 2 {
-                painter.text(
-                    egui::pos2(stereo_rect.right() - 4.0, stereo_rect.top() + 2.0),
-                    egui::Align2::RIGHT_TOP,
-                    "CH1+2",
-                    label_font.clone(),
-                    Color32::from_rgb(150, 162, 184),
-                );
+                place_right("CH1+2".to_string(), badge_col);
+            }
+            // Same smoothed value as the bar below. Mono has no correlation to
+            // report -- `target_corr` is hard-wired to 1.0 up there -- and a
+            // constant `+1.00` under the MONO badge is what used to render the
+            // two on top of each other.
+            if n_ch >= 2 {
+                place_right(format!("{corr:+.2}"), fill_col);
             }
         }
 
@@ -3837,7 +3848,13 @@ impl crate::app::WavesPreviewer {
         } else {
             0.0
         };
-        if self.surface_keys_allowed(UiSurface::Editor) && tab_samples_len > 0 {
+        // A focused topbar volume fader owns the arrows outright. Consumption
+        // is not enough to keep them out of here: `key_down` below reads the
+        // held-key set, which `consume_key` does not touch.
+        if self.surface_keys_allowed(UiSurface::Editor)
+            && tab_samples_len > 0
+            && !self.topbar_volume_owns_arrows(ctx)
+        {
             let mods = ctx.input(|i| i.modifiers);
             let ctrl = mods.ctrl || mods.command;
             let shift = mods.shift;
@@ -4063,7 +4080,20 @@ impl crate::app::WavesPreviewer {
         let virtual_keys = chord_label(self, Action::EditorVirtualTrim);
 
         let avail = ui.available_size();
+        // Transport time, read before the tab borrow below: the canvas's
+        // context menu needs it and cannot ask `self` for anything once
+        // `let tab = &mut self.tabs[..]` is live. `None` while nothing is
+        // loaded, which is why the menu falls back to the drawn playhead.
+        let transport_source_sec = self.playback_current_source_time_sec();
+        let tab_path = self
+            .tabs
+            .get(tab_idx)
+            .map(|tab| tab.path.clone())
+            .unwrap_or_default();
+        let tab_file_name = crate::app::ui::comments::file_label(&tab_path);
         // pending actions to perform after UI borrows end
+        let mut pending_comment_ref: Option<(PathBuf, Option<crate::app::comments::CommentAnchor>)> =
+            None;
         let mut do_set_loop_from: Option<(usize, usize)> = None;
         let mut do_trim: Option<(usize, usize)> = None; // keep-only (optional)
         let mut do_trim_multi: Option<Vec<(usize, usize)>> = None;
@@ -7120,6 +7150,52 @@ impl crate::app::WavesPreviewer {
                         }
                     }
                 }
+            }
+
+            // Right-click the canvas to point a comment at what is on screen.
+            //
+            // This does not fight the right-button gestures above. egui opens a
+            // context menu on `secondary_clicked` -- a click, not a drag -- so
+            // right-drag still seeks and Shift+right-drag still selects, and
+            // neither opens this. The two right-button gestures that *are*
+            // clicks (the WORLD F0 pencil's erase and Spectral Warp's
+            // delete-nearest-point) are shut out by the same pair of flags the
+            // seek block uses.
+            //
+            // The closure runs every frame the menu is open, so it only reads
+            // values already computed for this frame and hands the choice back
+            // through `pending_comment_ref`; the work happens once, after the
+            // tab borrow ends (see the note at the top of this function).
+            if !world_f0_editing && !tool_gesture_active {
+                let rate = tab.buffer_sample_rate.max(1) as f64;
+                let selection_anchor = tab
+                    .selection
+                    .filter(|(a, b)| a != b)
+                    .map(|(a, b)| crate::app::comments::CommentAnchor {
+                        start_sec: a.min(b) as f64 / rate,
+                        end_sec: Some(a.max(b) as f64 / rate),
+                        freq_hz: tab.freq_selection,
+                    });
+                // The editor draws a playhead whether or not the transport is
+                // loaded, so a reference to "here" must not go dead just
+                // because nothing is playing.
+                let playhead_sec =
+                    transport_source_sec.or(Some(playhead_display_now as f64 / rate));
+                // `tab_path` and `tab_file_name` were built once, before the
+                // tab borrow: naming the file here would allocate on every
+                // frame the canvas draws, not just while the menu is open.
+                let path = &tab_path;
+                resp.context_menu(|ui| {
+                    ui.label(egui::RichText::new("Comment reference").small().weak());
+                    if let Some(anchor) = crate::app::ui::comments::ui_comment_reference_items(
+                        ui,
+                        &tab_file_name,
+                        playhead_sec,
+                        selection_anchor,
+                    ) {
+                        pending_comment_ref = Some((path.clone(), anchor));
+                    }
+                });
             }
 
             let spp = tab.samples_per_px.max(0.0001);
@@ -14820,6 +14896,15 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
             self.clear_preview_if_any(tab_idx);
             self.cancel_editor_apply_for_tab(tab_idx);
             self.clear_edit_in_tab(tab_idx);
+        }
+        // The canvas's right-click menu, applied now that the tab borrow is
+        // gone. Opening the window puts the token where it can be typed after:
+        // `insert_comment_reference` writes the window composer's draft, which
+        // is a different buffer from the list row popup's.
+        if let Some((path, anchor)) = pending_comment_ref {
+            let reference = self.comment_ref_for_path(&path, anchor);
+            self.insert_comment_reference(&reference);
+            self.open_comments_window_for_path(&path);
         }
         if let Some((s, e)) = do_set_loop_from {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {

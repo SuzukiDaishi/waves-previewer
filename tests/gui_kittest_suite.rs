@@ -2391,7 +2391,7 @@ mod kittest_suite {
         );
         assert!(
             harness
-                .query_all_by_label("✕ Cisco OpenH264")
+                .query_all_by_label("× Cisco OpenH264")
                 .next()
                 .is_some(),
             "a default build should show OpenH264 as absent"
@@ -12270,7 +12270,7 @@ mod kittest_suite {
     }
 
     #[test]
-    fn double_clicking_the_volume_control_returns_it_to_unity() {
+    fn double_clicking_the_volume_control_steps_through_the_presets() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         harness.run_steps(2);
@@ -12282,20 +12282,32 @@ mod kittest_suite {
             .state()
             .test_topbar_volume_rect()
             .expect("volume control rect");
-        // Deliberately off the knob: the whole control resets, and the first
-        // click of the pair would otherwise set the volume from the pointer
-        // position and hide a reset that never happened.
-        double_click_at(&mut harness, egui::pos2(rect.left() + 6.0, rect.center().y));
+        // Deliberately off the knob: the whole control takes the gesture, and
+        // the first click of each pair would otherwise set the volume from the
+        // pointer position and hide a step that never happened. That opening
+        // click is also why the cycle is anchored to the level it found rather
+        // than to the live value.
+        let pos = egui::pos2(rect.left() + 6.0, rect.center().y);
 
+        double_click_at(&mut harness, pos);
         assert_eq!(
             harness.state().test_volume_db(),
             0.0,
-            "double click should put the monitor back at unity"
+            "the first double click should put the monitor back at unity"
         );
         assert!(
             (harness.state().test_audio_output_volume_linear() - 1.0).abs() < 1.0e-4,
-            "the reset has to reach the engine, not just the readout"
+            "the step has to reach the engine, not just the readout"
         );
+
+        for expected in [-6.0, -18.0, -24.0, 0.0] {
+            double_click_at(&mut harness, pos);
+            assert_eq!(
+                harness.state().test_volume_db(),
+                expected,
+                "the presets must keep cycling, not fall back to unity"
+            );
+        }
     }
 
     #[test]
@@ -12321,6 +12333,166 @@ mod kittest_suite {
             boosted > unity * 1.9,
             "+6 dB should roughly double the monitor gain, got {boosted}"
         );
+    }
+
+    /// Right-click the canvas and point a comment at the selection.
+    ///
+    /// The token is checked by running it back through the real parser rather
+    /// than by string equality: what matters is that the anchor a colleague
+    /// reads is the range and band that were on screen.
+    #[test]
+    fn editor_right_click_references_the_selection_with_its_spectral_band() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.25, 0.5));
+        assert!(harness
+            .state_mut()
+            .test_set_freq_selection(Some((200.0, 4000.0))));
+        harness.run_steps(2);
+        let (sel_start, sel_end) = harness
+            .state()
+            .test_tab_selection()
+            .expect("a selection to reference");
+        let rate = 48_000.0f64;
+
+        let click_pos = editor_canvas_pos_at_frac(&harness, 0.4);
+        right_click_at(&mut harness, click_pos);
+        // Matched on the prefix: the exact label carries the fixture's own
+        // times, and pinning those would break on a different fixture without
+        // saying anything about the reference.
+        harness.get_by_label_contains("Selection — ").click();
+        harness.run_steps(3);
+
+        assert!(
+            harness.state().test_comments_window_open(),
+            "choosing a reference should open the conversation to write in"
+        );
+        let draft = harness.state().test_comment_draft();
+        let refs = neowaves::app::comments::find_refs(&draft);
+        assert_eq!(refs.len(), 1, "expected one reference token in {draft:?}");
+        let anchor = refs[0].1.anchor.expect("the token must carry an anchor");
+        let (start, end) = anchor.normalized_range().expect("a range, not a point");
+        assert!(
+            (start - sel_start as f64 / rate).abs() < 0.01
+                && (end - sel_end as f64 / rate).abs() < 0.01,
+            "reference {start}..{end} should match the selection"
+        );
+        let (lo, hi) = anchor.freq_hz.expect("the spectral band must ride along");
+        assert!((lo - 200.0).abs() < 1.0 && (hi - 4000.0).abs() < 1.0);
+    }
+
+    /// The menu must not cost the canvas its right-button gestures.
+    #[test]
+    fn editor_right_drag_still_seeks_instead_of_opening_the_menu() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(2);
+
+        let start = editor_canvas_pos_at_frac(&harness, 0.2);
+        let end = editor_canvas_pos_at_frac(&harness, 0.7);
+        harness.hover_at(start);
+        harness.event(egui::Event::PointerButton {
+            pos: start,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerMoved(end));
+        harness.run_steps(2);
+        harness.event(egui::Event::PointerButton {
+            pos: end,
+            button: egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+
+        assert!(
+            harness
+                .query_all_by_label("Comment reference")
+                .next()
+                .is_none(),
+            "a right drag is the seek gesture; it must not leave a menu open"
+        );
+        assert!(
+            harness.state().test_playhead_display_now().unwrap_or(0) > 0,
+            "the right drag should still have moved the playhead"
+        );
+    }
+
+    /// Visual evidence for the two comment affordances: the detach button that
+    /// used to be a replacement box, and the canvas's reference menu.
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_comment_detach_and_reference_menu_evidence() {
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("comment_refs");
+        std::fs::create_dir_all(&out_dir).expect("create comment evidence dir");
+
+        let mut harness = harness_with_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+
+        // The row popup first -- this is the one that showed a replacement box.
+        harness
+            .state_mut()
+            .test_show_only_columns(&["file", "comments"]);
+        harness.run_steps(2);
+        harness.get_by_label("Comments: none").click();
+        harness.run_steps(3);
+        harness
+            .render()
+            .expect("render row comment popup")
+            .save(out_dir.join("00_row_popup.png"))
+            .expect("save row popup screenshot");
+        harness.get_by_label("Comments: none").click();
+        harness.run_steps(2);
+
+        harness.state_mut().test_open_comments_window();
+        harness.run_steps(4);
+        harness
+            .render()
+            .expect("render comments window header")
+            .save(out_dir.join("01_detach_button.png"))
+            .expect("save detach button screenshot");
+
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.25, 0.5));
+        assert!(harness
+            .state_mut()
+            .test_set_freq_selection(Some((200.0, 4000.0))));
+        harness.run_steps(2);
+        let click_pos = editor_canvas_pos_at_frac(&harness, 0.4);
+        right_click_at(&mut harness, click_pos);
+        harness
+            .render()
+            .expect("render editor reference menu")
+            .save(out_dir.join("02_reference_menu.png"))
+            .expect("save reference menu screenshot");
+    }
+
+    fn right_click_at(harness: &mut Harness<'static, WavesPreviewer>, pos: egui::Pos2) {
+        harness.hover_at(pos);
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(3);
     }
 
     #[test]

@@ -48,6 +48,10 @@ impl super::WavesPreviewer {
         self.is_editor_workspace_active()
     }
 
+    pub fn test_is_list_workspace_active(&self) -> bool {
+        self.is_list_workspace_active()
+    }
+
     pub fn test_selected_path(&self) -> Option<&PathBuf> {
         self.selected.and_then(|row| self.path_for_row(row))
     }
@@ -227,7 +231,7 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_inspection_run_active(&self) -> bool {
-        self.inspection_run_state.is_some()
+        self.inspection_run_state.is_some() || self.inspection_finalize_rx.is_some()
     }
 
     pub fn test_inspection_report_rows(&self) -> usize {
@@ -1987,6 +1991,24 @@ impl super::WavesPreviewer {
     pub fn test_tab_selection(&self) -> Option<(usize, usize)> {
         let tab_idx = self.active_tab?;
         self.tabs.get(tab_idx).and_then(|tab| tab.selection)
+    }
+
+    /// The spectral band a spectrogram drag would have set. `None` is the
+    /// whole band, which is what a time-only selection carries.
+    pub fn test_set_freq_selection(&mut self, band: Option<(f32, f32)>) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.freq_selection = band;
+        true
+    }
+
+    pub fn test_tab_freq_selection(&self) -> Option<(f32, f32)> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).and_then(|tab| tab.freq_selection)
     }
 
     pub fn test_set_extra_selections_frac(&mut self, ranges: &[(f32, f32)]) -> bool {
@@ -3836,7 +3858,8 @@ impl super::WavesPreviewer {
     /// Interactive save with the compare-and-swap skipped, the way the
     /// conflict prompt's Overwrite button does.
     pub fn test_begin_session_save_forced(&mut self, path: &Path) -> bool {
-        self.save_project_as_forced(path.to_path_buf(), true).is_ok()
+        self.save_project_as_forced(path.to_path_buf(), true)
+            .is_ok()
     }
 
     pub fn test_session_save_in_flight(&self) -> bool {
@@ -3861,7 +3884,11 @@ impl super::WavesPreviewer {
 
     /// Post and wait for it to reach the document, so a test can assert on
     /// what is on disk rather than on what is queued.
-    pub fn test_post_comment_blocking(&mut self, parent: Option<&str>, body: &str) -> Option<String> {
+    pub fn test_post_comment_blocking(
+        &mut self,
+        parent: Option<&str>,
+        body: &str,
+    ) -> Option<String> {
         let id = self.post_comment(parent.map(str::to_string), body)?;
         self.test_settle_comment_jobs();
         Some(id)
@@ -3898,14 +3925,7 @@ impl super::WavesPreviewer {
     pub fn test_comments(&self) -> Vec<(String, String, String, bool)> {
         self.comments
             .iter()
-            .map(|c| {
-                (
-                    c.id.clone(),
-                    c.author_id.clone(),
-                    c.body.clone(),
-                    c.deleted,
-                )
-            })
+            .map(|c| (c.id.clone(), c.author_id.clone(), c.body.clone(), c.deleted))
             .collect()
     }
 
@@ -3994,6 +4014,10 @@ impl super::WavesPreviewer {
         self.show_comments_window
     }
 
+    pub fn test_comments_window_rect(&self) -> Option<egui::Rect> {
+        self.comments_window_rect
+    }
+
     pub fn test_comments_detached(&self) -> bool {
         self.comments_detached
     }
@@ -4004,6 +4028,10 @@ impl super::WavesPreviewer {
 
     pub fn test_set_comment_reply_to(&mut self, id: Option<&str>) {
         self.comment_reply_to = id.map(str::to_string);
+    }
+
+    pub fn test_comment_reply_target(&self) -> Option<&str> {
+        self.comment_reply_to.as_deref()
     }
 
     pub fn test_comment_filter(&self) -> &'static str {
@@ -4034,6 +4062,41 @@ impl super::WavesPreviewer {
         )
     }
 
+    /// Install a receiver whose worker has vanished, carrying one comment as
+    /// the in-flight payload. This exercises the channel-disconnect path that
+    /// cannot be reached reliably by making a real worker panic in a test.
+    pub fn test_disconnect_comment_write_worker(&mut self) -> bool {
+        let Some(sent) = self.comments.last().cloned() else {
+            return false;
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<
+            Result<crate::app::comment_ops::CommentWriteResult, String>,
+        >();
+        drop(tx);
+        self.comment_outbox.clear();
+        self.comment_write = Some(crate::app::comment_ops::CommentWriteState {
+            rx,
+            started_at: std::time::Instant::now(),
+            sent: vec![sent],
+        });
+        true
+    }
+
+    pub fn test_disconnect_comment_pull_worker(&mut self) {
+        let (tx, rx) =
+            std::sync::mpsc::channel::<Result<crate::app::comment_ops::CommentPull, String>>();
+        drop(tx);
+        self.comment_pull = Some(rx);
+    }
+
+    pub fn test_drain_comment_jobs_once(&mut self) {
+        self.drain_comment_jobs();
+    }
+
+    pub fn test_comment_workers_active(&self) -> (bool, bool) {
+        (self.comment_write.is_some(), self.comment_pull.is_some())
+    }
+
     /// Account names the window would append a machine name to.
     pub fn test_ambiguous_comment_authors(&self) -> Vec<String> {
         let mut names: Vec<String> = self.comment_ambiguous_authors.iter().cloned().collect();
@@ -4043,10 +4106,6 @@ impl super::WavesPreviewer {
 
     pub fn test_unread_comment_count(&self) -> usize {
         self.unread_comment_count()
-    }
-
-    pub fn test_mark_comments_read(&mut self) {
-        self.mark_comments_read();
     }
 
     /// The comments the window would still be pointing at as new.
