@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-29",
+  "generated_at": "2026-09-04",
   "generator": "cargo-about + gen-licenses",
   "licenses": [
     {
@@ -7699,7 +7699,7 @@
     },
     {
       "name": "neowaves",
-      "version": "0.20260830.1",
+      "version": "0.20260904.0",
       "kind": "crate",
       "license_expr": "MIT",
       "license_ids": [
