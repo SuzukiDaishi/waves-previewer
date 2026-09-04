@@ -15,8 +15,8 @@
 use egui::{Align, Color32, RichText};
 
 use crate::app::comments::{self, CommentAnchor, CommentNode, CommentRef};
-use crate::app::ui::comment_markdown::{self, Block, Span};
 use crate::app::project::ProjectComment;
+use crate::app::ui::comment_markdown::{self, Block, Span};
 
 /// How much of the conversation the window is showing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -54,6 +54,7 @@ enum CommentAction {
     StartEdit(String, String),
     SubmitEdit(String),
     CancelEdit,
+    CancelReply,
     Delete(String),
     SetResolved(String, bool),
     ToggleCollapsed(String),
@@ -134,8 +135,6 @@ impl crate::app::WavesPreviewer {
 
     fn ui_comments_body(&mut self, ui: &mut egui::Ui) {
         let mut actions: Vec<CommentAction> = Vec::new();
-        // Showing them is what reading them means.
-        self.mark_comments_read();
         self.rebuild_ambiguous_comment_authors();
         self.ui_comments_header(ui);
         ui.separator();
@@ -145,9 +144,33 @@ impl crate::app::WavesPreviewer {
             .iter()
             .filter(|node| self.comment_thread_matches_filter(node))
             .collect();
+        // Only comments that will actually be painted count as read. A
+        // filtered-out thread, or a reply hidden under a collapsed root, has
+        // not been shown to the reader and must keep its unread badge.
+        let mut shown = Vec::new();
+        for node in &visible {
+            collect_visible_subtree_ids(node, &self.comment_collapsed, &mut shown);
+        }
+        self.record_comments_read(shown);
 
-        let composer_height = 116.0;
-        let list_height = (ui.available_height() - composer_height).max(96.0);
+        // Reserve the composer from the bottom using its own measured panel.
+        // A fixed subtraction is unstable: replying adds a banner above the
+        // text box, so the body becomes taller than the estimate and the
+        // excess feeds back into the resizable Window on every frame.
+        egui::Panel::bottom(ui.make_persistent_id("comments_composer_panel"))
+            // Reply mode adds a context row above the editor. Keeping one
+            // fixed slot for the whole composer prevents the floating window
+            // from changing height when that row appears or disappears.
+            .exact_size(140.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::new())
+            .show_inside(ui, |ui| {
+                ui.separator();
+                self.ui_comment_composer(ui, &mut actions);
+            });
+
+        let list_height = ui.available_height().max(96.0);
         egui::ScrollArea::vertical()
             .id_salt("comments_threads")
             .max_height(list_height)
@@ -165,9 +188,6 @@ impl crate::app::WavesPreviewer {
                     ui.add_space(6.0);
                 }
             });
-
-        ui.separator();
-        self.ui_comment_composer(ui, &mut actions);
 
         for action in actions {
             self.apply_comment_action(action);
@@ -189,6 +209,15 @@ impl crate::app::WavesPreviewer {
                     self.comment_filter = filter;
                 }
             }
+            let unread = self.unread_comment_count();
+            if unread > 0
+                && ui
+                    .small_button(format!("● {unread}"))
+                    .on_hover_text("Show all unread comments")
+                    .clicked()
+            {
+                self.comment_filter = CommentFilter::All;
+            }
             ui.separator();
             if ui
                 .button("⟳")
@@ -200,17 +229,20 @@ impl crate::app::WavesPreviewer {
             {
                 self.request_comment_pull();
             }
-            let detach_label = if self.comments_detached { "⧉ Dock" } else { "⧉" };
-            if ui
-                .button(detach_label)
-                .on_hover_text(if self.comments_detached {
+            let detached = self.comments_detached;
+            if comment_detach_button(
+                ui,
+                detached.then_some("Dock"),
+                if detached {
                     "Put the conversation back in this window"
                 } else {
                     "Open the conversation in its own window, so it can sit beside the editor"
-                })
-                .clicked()
+                },
+                if detached { "Dock" } else { "Open in window" },
+            )
+            .clicked()
             {
-                self.comments_detached = !self.comments_detached;
+                self.comments_detached = !detached;
             }
         });
         ui.horizontal(|ui| {
@@ -223,11 +255,9 @@ impl crate::app::WavesPreviewer {
         let pending = self.comments_pending();
         if pending > 0 {
             ui.label(
-                RichText::new(format!(
-                    "{pending} comment(s) not shared yet — retrying"
-                ))
-                .small()
-                .color(Color32::from_rgb(240, 190, 90)),
+                RichText::new(format!("{pending} comment(s) not shared yet — retrying"))
+                    .small()
+                    .color(Color32::from_rgb(240, 190, 90)),
             );
         }
     }
@@ -402,14 +432,14 @@ impl crate::app::WavesPreviewer {
                     .strong()
                     .small(),
             );
-            ui.label(
-                RichText::new(format_stamp(&node.comment))
-                    .weak()
-                    .small(),
-            );
+            ui.label(RichText::new(format_stamp(&node.comment)).weak().small());
             if self.comment_is_unread(&node.comment) {
-                ui.label(RichText::new("●").small().color(Color32::from_rgb(140, 190, 240)))
-                    .on_hover_text("New since you last looked");
+                ui.label(
+                    RichText::new("●")
+                        .small()
+                        .color(Color32::from_rgb(140, 190, 240)),
+                )
+                .on_hover_text("New since you last looked");
             }
             if self.comment_is_unsent(&node.comment.id) {
                 ui.label(
@@ -474,10 +504,14 @@ impl crate::app::WavesPreviewer {
                     .map(|comment| self.comment_author_label(comment))
                     .unwrap_or_else(|| "a comment".to_string());
                 ui.label(RichText::new(format!("Replying to {who}")).small().weak());
-                if ui.small_button("✕").on_hover_text("Post as a new thread instead").clicked() {
-                    actions.push(CommentAction::CancelEdit);
+                if comment_cancel_button(ui, "Post as a new thread instead").clicked() {
+                    actions.push(CommentAction::CancelReply);
                 }
             });
+        } else {
+            // The composer keeps this context row in both modes so entering
+            // or leaving a reply cannot resize the surrounding window.
+            ui.label(RichText::new("New thread").small().weak());
         }
         let hint = if replying_to.is_some() {
             "Write a reply..."
@@ -509,19 +543,27 @@ impl crate::app::WavesPreviewer {
         let composer_id = egui::Id::new("comment_composer");
         let mut output = None;
         // Alt-dragging a row from the list drops a reference in here.
-        let (_, dropped) = ui.dnd_drop_zone::<CommentRefDrag, _>(
-            egui::Frame::new().inner_margin(2.0),
-            |ui| {
-                output = Some(
-                    egui::TextEdit::multiline(&mut self.comment_draft)
-                        .id(composer_id)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY)
-                        .hint_text(hint)
-                        .show(ui),
-                );
-            },
-        );
+        let (_, dropped) =
+            ui.dnd_drop_zone::<CommentRefDrag, _>(egui::Frame::new().inner_margin(2.0), |ui| {
+                // A reference token can be much wider than this window and
+                // wrap to several visual rows. Keep that growth inside the
+                // editor; otherwise it pushes Post below the fixed composer
+                // panel and makes a long comment impossible to submit.
+                egui::ScrollArea::vertical()
+                    .id_salt("comment_composer_text_scroll")
+                    .max_height(76.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        output = Some(
+                            egui::TextEdit::multiline(&mut self.comment_draft)
+                                .id(composer_id)
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY)
+                                .hint_text(hint)
+                                .show(ui),
+                        );
+                    });
+            });
         if let Some(payload) = dropped {
             let reference = self.comment_ref_for_path(&payload.0, None);
             self.insert_comment_reference(&reference);
@@ -618,11 +660,13 @@ impl crate::app::WavesPreviewer {
         let caret = self.comment_draft[..span.start + token.len() + 1]
             .chars()
             .count();
-        let mut state = egui::text_edit::TextEditState::load(ui.ctx(), composer_id)
-            .unwrap_or_default();
-        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-            egui::text::CCursor::new(caret),
-        )));
+        let mut state =
+            egui::text_edit::TextEditState::load(ui.ctx(), composer_id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(caret),
+            )));
         state.store(ui.ctx(), composer_id);
         self.comment_mention_open = false;
         self.comment_mention_index = 0;
@@ -658,70 +702,20 @@ impl crate::app::WavesPreviewer {
     /// already looking at, where naming them again by hand is busywork.
     fn ui_comment_reference_menu(&mut self, ui: &mut egui::Ui) {
         let active = self.current_active_path().cloned();
-        let mut insert: Option<CommentRef> = None;
+        let playhead = self.playback_current_source_time_sec();
+        let selection = self.active_tab_selection_anchor();
+        let mut chosen: Option<Option<CommentAnchor>> = None;
         ui.menu_button("🔗 Reference", |ui| {
             let Some(path) = active.as_deref() else {
                 ui.label(RichText::new("Select a file first.").weak());
                 return;
             };
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
-            if ui.button(format!("File — {name}")).clicked() {
-                insert = Some(self.comment_ref_for_path(path, None));
-                ui.close();
-            }
-
-            let playhead = self.playback_current_source_time_sec();
-            if ui
-                .add_enabled(
-                    playhead.is_some(),
-                    egui::Button::new(match playhead {
-                        Some(secs) => format!(
-                            "Playhead — {}",
-                            crate::app::helpers::format_time_s(secs as f32)
-                        ),
-                        None => "Playhead".to_string(),
-                    }),
-                )
-                .on_disabled_hover_text("Nothing is loaded on the transport")
-                .clicked()
-            {
-                if let Some(secs) = playhead {
-                    insert = Some(self.comment_ref_for_path(
-                        path,
-                        Some(CommentAnchor {
-                            start_sec: secs,
-                            end_sec: None,
-                            freq_hz: None,
-                        }),
-                    ));
-                }
-                ui.close();
-            }
-
-            let selection = self.active_tab_selection_anchor();
-            if ui
-                .add_enabled(
-                    selection.is_some(),
-                    egui::Button::new(match selection {
-                        Some(anchor) => format!("Selection — {}", format_anchor(anchor)),
-                        None => "Selection".to_string(),
-                    }),
-                )
-                .on_disabled_hover_text("Select a range in the editor first")
-                .clicked()
-            {
-                if let Some(anchor) = selection {
-                    insert = Some(self.comment_ref_for_path(path, Some(anchor)));
-                }
-                ui.close();
-            }
+            chosen = ui_comment_reference_items(ui, &file_label(path), playhead, selection);
         })
         .response
         .on_hover_text("Point at a file, a moment, or a range. Typing @ reaches any file.");
-        if let Some(reference) = insert {
+        if let (Some(anchor), Some(path)) = (chosen, active.as_deref()) {
+            let reference = self.comment_ref_for_path(path, anchor);
             self.insert_comment_reference(&reference);
         }
     }
@@ -830,9 +824,9 @@ impl crate::app::WavesPreviewer {
                             rich = rich.strikethrough();
                         }
                         if style.code {
-                            rich = rich.monospace().background_color(
-                                ui.visuals().extreme_bg_color,
-                            );
+                            rich = rich
+                                .monospace()
+                                .background_color(ui.visuals().extreme_bg_color);
                         }
                         if let Some(size) = size {
                             rich = rich.size(size);
@@ -950,6 +944,8 @@ impl crate::app::WavesPreviewer {
             CommentAction::CancelEdit => {
                 self.comment_editing_id = None;
                 self.comment_edit_draft.clear();
+            }
+            CommentAction::CancelReply => {
                 self.comment_reply_to = None;
             }
             CommentAction::Delete(id) => {
@@ -1050,7 +1046,10 @@ impl crate::app::WavesPreviewer {
             .collect();
         // Opening a row's conversation is reading it, exactly as opening the
         // window is -- so this row's badge stops claiming it is new.
-        let shown: Vec<String> = threads.iter().flat_map(subtree_ids).collect();
+        let mut shown = Vec::new();
+        for node in &threads {
+            collect_visible_subtree_ids(node, &self.comment_collapsed, &mut shown);
+        }
         self.record_comments_read(shown);
 
         let name = path
@@ -1061,10 +1060,13 @@ impl crate::app::WavesPreviewer {
         ui.horizontal(|ui| {
             ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .small_button("⧉")
-                    .on_hover_text("Open the Comments window on this file")
-                    .clicked()
+                if comment_detach_button(
+                    ui,
+                    None,
+                    "Open the Comments window on this file",
+                    "Open in window",
+                )
+                .clicked()
                 {
                     open_window = true;
                     ui.close();
@@ -1137,12 +1139,8 @@ impl crate::app::WavesPreviewer {
                     .map(|comment| self.comment_author_label(comment))
                     .unwrap_or_else(|| "a comment".to_string());
                 ui.label(RichText::new(format!("Replying to {who}")).small().weak());
-                if ui
-                    .small_button("✕")
-                    .on_hover_text("Comment on the file instead")
-                    .clicked()
-                {
-                    actions.push(CommentAction::CancelEdit);
+                if comment_cancel_button(ui, "Comment on the file instead").clicked() {
+                    actions.push(CommentAction::CancelReply);
                 }
             });
         }
@@ -1187,13 +1185,184 @@ impl crate::app::WavesPreviewer {
     }
 }
 
-/// Every comment id in a thread, root first.
-fn subtree_ids(node: &CommentNode) -> Vec<String> {
-    let mut ids = vec![node.comment.id.clone()];
-    for reply in &node.replies {
-        ids.extend(subtree_ids(reply));
+/// A close affordance that does not depend on a font glyph and does not put
+/// a square button face around the X. This matches the window close control:
+/// the hit target stays comfortably square while only the two strokes show.
+fn comment_cancel_button(ui: &mut egui::Ui, hover: &'static str) -> egui::Response {
+    let side = (ui.text_style_height(&egui::TextStyle::Small)
+        + ui.spacing().button_padding.y * 2.0)
+        .max(16.0);
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Cancel reply")
+    });
+
+    let visuals = ui.style().interact(&response);
+    let half = (side * 0.22 + visuals.expansion).max(3.0);
+    let center = rect.center();
+    ui.painter().line_segment(
+        [
+            center + egui::vec2(-half, -half),
+            center + egui::vec2(half, half),
+        ],
+        visuals.fg_stroke,
+    );
+    ui.painter().line_segment(
+        [
+            center + egui::vec2(half, -half),
+            center + egui::vec2(-half, half),
+        ],
+        visuals.fg_stroke,
+    );
+    response.on_hover_text(hover)
+}
+
+/// The "open this in its own window" affordance, drawn rather than typed.
+///
+/// This used to be U+29C9 `⧉`, and it came out as a replacement box: that
+/// codepoint is in none of the fonts this app installs -- not the bundled
+/// NotoSansJP, not any of epaint's four defaults, and not one of the system
+/// faces `theme_ops` looks for. The emoji fallbacks are still in the chain and
+/// still work (`⟳`, `🔗`, `💬` all render); nothing anywhere simply has this
+/// character. So draw what the glyph depicts -- two offset rectangles -- the
+/// same way `comment_cancel_button` above draws its X.
+///
+/// `label` puts a word after the icon; `None` leaves it icon-only.
+fn comment_detach_button(
+    ui: &mut egui::Ui,
+    label: Option<&str>,
+    hover: &'static str,
+    accessible_name: &'static str,
+) -> egui::Response {
+    let icon = (ui.text_style_height(&egui::TextStyle::Body) * 0.72).max(9.0);
+    let pad = ui.spacing().button_padding;
+    let text = label.map(|label| {
+        ui.painter().layout_no_wrap(
+            label.to_owned(),
+            egui::TextStyle::Body.resolve(ui.style()),
+            ui.visuals().text_color(),
+        )
+    });
+    let text_w = text.as_ref().map_or(0.0, |galley| galley.size().x + 4.0);
+    let size = egui::vec2(
+        icon + text_w + pad.x * 2.0,
+        (icon.max(ui.text_style_height(&egui::TextStyle::Body)) + pad.y * 2.0).max(18.0),
+    );
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), accessible_name)
+    });
+
+    let visuals = ui.style().interact(&response);
+    ui.painter()
+        .rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+    // The two squares: a back one up-and-right, a front one down-and-left, so
+    // the pair reads as a window lifted out of another.
+    let step = (icon * 0.26).max(2.0);
+    let body = egui::Vec2::splat(icon - step);
+    let icon_left = rect.left() + pad.x;
+    let icon_top = rect.center().y - icon * 0.5;
+    let back = egui::Rect::from_min_size(egui::pos2(icon_left + step, icon_top), body);
+    let front = egui::Rect::from_min_size(egui::pos2(icon_left, icon_top + step), body);
+    let outline = egui::Stroke::new(1.0, visuals.fg_stroke.color);
+    ui.painter()
+        .rect_stroke(back, 1.0, outline, egui::StrokeKind::Inside);
+    // The front square is filled with the button's own face before it is
+    // outlined, so it covers the corner of the one behind it. Two bare
+    // outlines just cross, which reads as a grid rather than as depth.
+    ui.painter().rect_filled(front, 1.0, visuals.weak_bg_fill);
+    ui.painter()
+        .rect_stroke(front, 1.0, outline, egui::StrokeKind::Inside);
+    if let Some(galley) = text {
+        let pos = egui::pos2(
+            icon_left + icon + 4.0,
+            rect.center().y - galley.size().y * 0.5,
+        );
+        ui.painter()
+            .galley(pos, galley, visuals.fg_stroke.color);
     }
-    ids
+    response.on_hover_text(hover)
+}
+
+/// A path's file name, for a menu label.
+pub(in crate::app) fn file_label(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// The three references worth one click, as menu items. Returns the anchor of
+/// the one pressed -- an inner `None` meaning the file with no position on it.
+///
+/// A free function taking its candidates rather than a method reading them off
+/// the app, because the editor calls this from inside a context menu on the
+/// canvas, where the tab being drawn already holds the borrow. It is shared so
+/// that the two menus cannot drift on what a reference means or on when one is
+/// offerable.
+pub(in crate::app) fn ui_comment_reference_items(
+    ui: &mut egui::Ui,
+    file_name: &str,
+    playhead_sec: Option<f64>,
+    selection: Option<CommentAnchor>,
+) -> Option<Option<CommentAnchor>> {
+    let mut chosen: Option<Option<CommentAnchor>> = None;
+    if ui
+        .add_enabled(
+            selection.is_some(),
+            egui::Button::new(match selection {
+                Some(anchor) => format!("Selection — {}", format_anchor(anchor)),
+                None => "Selection".to_string(),
+            }),
+        )
+        .on_disabled_hover_text("Select a range in the editor first")
+        .clicked()
+    {
+        chosen = selection.map(Some);
+        ui.close();
+    }
+    if ui
+        .add_enabled(
+            playhead_sec.is_some(),
+            egui::Button::new(match playhead_sec {
+                Some(secs) => format!(
+                    "Playhead — {}",
+                    crate::app::helpers::format_time_s(secs as f32)
+                ),
+                None => "Playhead".to_string(),
+            }),
+        )
+        .on_disabled_hover_text("Nothing is loaded on the transport")
+        .clicked()
+    {
+        chosen = playhead_sec.map(|secs| {
+            Some(CommentAnchor {
+                start_sec: secs,
+                end_sec: None,
+                freq_hz: None,
+            })
+        });
+        ui.close();
+    }
+    if ui.button(format!("File — {file_name}")).clicked() {
+        chosen = Some(None);
+        ui.close();
+    }
+    chosen
+}
+
+/// Every comment id the renderer will paint, root first.
+fn collect_visible_subtree_ids(
+    node: &CommentNode,
+    collapsed: &std::collections::HashSet<String>,
+    ids: &mut Vec<String>,
+) {
+    ids.push(node.comment.id.clone());
+    if collapsed.contains(&node.comment.id) {
+        return;
+    }
+    for reply in &node.replies {
+        collect_visible_subtree_ids(reply, collapsed, ids);
+    }
 }
 
 fn subtree_contains(node: &CommentNode, id: &str) -> bool {

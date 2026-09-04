@@ -381,7 +381,10 @@ impl super::super::WavesPreviewer {
                 if ui
                     .add_enabled(
                         recording || paused,
-                        egui::Button::new("✕ Discard").min_size(egui::vec2(90.0, 32.0)),
+                        // U+00D7, not U+2715: only the system faces carry the
+                        // heavier X, so it renders as a box until the async
+                        // font upgrade lands.
+                        egui::Button::new("× Discard").min_size(egui::vec2(90.0, 32.0)),
                     )
                     .on_hover_text("Throw away the current take")
                     .clicked()

@@ -12,10 +12,7 @@ mod comments_ui {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use egui_kittest::{
-        kittest::{NodeT, Queryable},
-        Harness,
-    };
+    use egui_kittest::{kittest::Queryable, Harness};
     use neowaves::kittest::harness_default;
     use neowaves::WavesPreviewer;
 
@@ -84,6 +81,87 @@ mod comments_ui {
         harness.run_steps(2);
     }
 
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_comments_window_layout_stability() {
+        let (mut harness, _session) = open_saved_session("layout_stability");
+        let root = harness
+            .state_mut()
+            .test_post_comment_blocking(None, "Please check the ambience tail around the loop.")
+            .expect("root comment");
+        harness.state_mut().test_set_comment_reply_to(Some(&root));
+        harness.state_mut().test_open_comments_window();
+        harness.run_steps(2);
+        let initial_rect = harness
+            .state()
+            .test_comments_window_rect()
+            .expect("initial comments window rect");
+        let cancel = harness.get_by_label("Cancel reply");
+        let cancel_size = cancel.rect().size();
+        assert!(
+            (cancel_size.x - cancel_size.y).abs() <= 1.0,
+            "the unframed X keeps a square hit target: {cancel_size:?}"
+        );
+
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("comments_layout");
+        std::fs::create_dir_all(&out_dir).expect("create comments layout evidence dir");
+        harness
+            .render()
+            .expect("render initial comments window")
+            .save(out_dir.join("01_initial.png"))
+            .expect("save initial comments screenshot");
+
+        harness.run_steps(20);
+        let after_20_rect = harness
+            .state()
+            .test_comments_window_rect()
+            .expect("comments window rect after 20 frames");
+        assert!(
+            (after_20_rect.height() - initial_rect.height()).abs() <= 1.0,
+            "comments window must not grow while replying: initial={initial_rect:?} after_20={after_20_rect:?}"
+        );
+        harness
+            .render()
+            .expect("render comments window after 20 frames")
+            .save(out_dir.join("02_after_20_frames.png"))
+            .expect("save comments screenshot after 20 frames");
+
+        harness.run_steps(100);
+        let after_120_rect = harness
+            .state()
+            .test_comments_window_rect()
+            .expect("comments window rect after 120 frames");
+        assert!(
+            (after_120_rect.height() - initial_rect.height()).abs() <= 1.0,
+            "comments window must remain stable: initial={initial_rect:?} after_120={after_120_rect:?}"
+        );
+        harness
+            .render()
+            .expect("render comments window after 120 frames")
+            .save(out_dir.join("03_after_120_frames.png"))
+            .expect("save comments screenshot after 120 frames");
+
+        harness.get_by_label("Cancel reply").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_comment_reply_target(), None);
+        let after_cancel_rect = harness
+            .state()
+            .test_comments_window_rect()
+            .expect("comments window rect after cancelling reply");
+        assert!(
+            (after_cancel_rect.height() - initial_rect.height()).abs() <= 1.0,
+            "leaving reply mode must not resize the window: initial={initial_rect:?} after_cancel={after_cancel_rect:?}"
+        );
+        harness
+            .render()
+            .expect("render comments window after cancelling reply")
+            .save(out_dir.join("04_after_cancel.png"))
+            .expect("save comments screenshot after cancelling reply");
+    }
+
     #[test]
     fn the_file_menu_opens_the_window_and_reads_the_document_on_the_way_in() {
         let (mut harness, session) = open_saved_session("menu");
@@ -112,6 +190,31 @@ mod comments_ui {
             vec!["said before you looked".to_string()],
             "opening the window reads the document, so a colleague's last few \
              minutes are already there"
+        );
+    }
+
+    #[test]
+    fn comments_can_be_started_before_the_first_session_save() {
+        let mut harness = harness_default();
+
+        top_menu_button(&harness, "File").click();
+        harness.run_steps(1);
+        harness.get_by_label("Comments...").click();
+        harness.run_steps(2);
+
+        assert!(
+            harness.state().test_comments_window_open(),
+            "the composer already preserves comments in memory until the first save"
+        );
+        post(&mut harness, "remember this for the shared session");
+        assert_eq!(
+            harness.state().test_comment_bodies(),
+            vec!["remember this for the shared session".to_string()]
+        );
+        assert_eq!(
+            harness.state().test_comments_pending(),
+            1,
+            "without a .nwsess the comment remains visibly pending"
         );
     }
 
@@ -150,7 +253,9 @@ mod comments_ui {
         post(&mut harness, "mine");
 
         let mine = harness.state().test_comments()[0].0.clone();
-        assert!(harness.state_mut().test_edit_comment(&mine, "mine, revised"));
+        assert!(harness
+            .state_mut()
+            .test_edit_comment(&mine, "mine, revised"));
         harness.state_mut().test_settle_comment_jobs();
         assert_eq!(
             harness.state().test_comment_bodies(),
@@ -249,7 +354,7 @@ mod comments_ui {
         harness.run_steps(2);
         post(&mut harness, "before detaching");
 
-        harness.get_by_label("⧉").click();
+        harness.get_by_label("Open in window").click();
         harness.run_steps(2);
         assert!(harness.state().test_comments_detached());
         assert!(
@@ -269,16 +374,16 @@ mod comments_ui {
         write_fixture(&audio);
         let session = dir.join("shared.nwsess");
         let mut harness = harness_default();
-        harness.state_mut().test_replace_with_files(&[audio.clone()]);
+        harness
+            .state_mut()
+            .test_replace_with_files(&[audio.clone()]);
         harness.run_steps(2);
         assert!(harness.state_mut().test_save_session_to(&session));
         harness.run_steps(2);
         harness.state_mut().test_open_comments_window();
         harness.run_steps(2);
 
-        let token = harness
-            .state()
-            .test_comment_ref_token(&audio, Some(12.5));
+        let token = harness.state().test_comment_ref_token(&audio, Some(12.5));
         post(&mut harness, &format!("listen here {token}"));
 
         // A colleague on another machine reads the same token back and
@@ -349,7 +454,9 @@ mod comments_ui {
         write_fixture(&audio);
         let session = dir.join("shared.nwsess");
         let mut harness = harness_default();
-        harness.state_mut().test_replace_with_files(&[audio.clone()]);
+        harness
+            .state_mut()
+            .test_replace_with_files(&[audio.clone()]);
         harness.run_steps(2);
         assert!(harness.state_mut().test_save_session_to(&session));
         harness.run_steps(2);
@@ -410,6 +517,90 @@ mod comments_ui {
             "closing the window resets what counts as new"
         );
         assert!(session.is_file());
+    }
+
+    #[test]
+    fn a_filter_does_not_mark_hidden_comments_as_read() {
+        let dir = temp_dir("filtered_unread");
+        let one = dir.join("one.wav");
+        let two = dir.join("two.wav");
+        write_fixture(&one);
+        write_fixture(&two);
+        let session = dir.join("shared.nwsess");
+        let mut harness = harness_default();
+        harness
+            .state_mut()
+            .test_replace_with_files(&[one.clone(), two.clone()]);
+        harness.run_steps(2);
+        assert!(harness.state_mut().test_save_session_to(&session));
+        harness.run_steps(2);
+
+        let ref_one = harness.state().test_comment_ref_token(&one, None);
+        let ref_two = harness.state().test_comment_ref_token(&two, None);
+        harness
+            .state_mut()
+            .test_post_comment_as("tanaka", None, &format!("about one {ref_one}"))
+            .expect("first colleague comment");
+        harness
+            .state_mut()
+            .test_post_comment_as("suzuki", None, &format!("about two {ref_two}"))
+            .expect("second colleague comment");
+        assert_eq!(harness.state().test_unread_comment_count(), 2);
+
+        harness.state_mut().test_set_comment_filter_this_file();
+        harness.state_mut().test_select_row_with_autoscroll(0);
+        harness.state_mut().test_open_comments_window();
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().test_visible_comment_threads(),
+            vec![format!("about one {ref_one}")]
+        );
+        assert_eq!(
+            harness.state().test_unread_comment_count(),
+            1,
+            "the comment about the other file was never painted and stays unread"
+        );
+        assert_eq!(
+            harness.state().test_highlighted_comment_count(),
+            1,
+            "only the comment the reader actually saw gets the new highlight"
+        );
+
+        harness.get_by_label("● 1").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_unread_comment_count(), 0);
+        let visible = harness.state().test_visible_comment_threads();
+        assert_eq!(visible.len(), 2);
+        assert!(visible.contains(&format!("about one {ref_one}")));
+        assert!(visible.contains(&format!("about two {ref_two}")));
+    }
+
+    #[test]
+    fn a_stopped_comment_worker_cannot_block_later_work_forever() {
+        let (mut harness, _session) = open_saved_session("worker_disconnect");
+        harness
+            .state_mut()
+            .test_post_comment_blocking(None, "keep this queued")
+            .expect("comment fixture");
+
+        assert!(harness.state_mut().test_disconnect_comment_write_worker());
+        harness.state_mut().test_drain_comment_jobs_once();
+        assert_eq!(harness.state().test_comment_workers_active().0, false);
+        assert_eq!(
+            harness.state().test_comments_pending(),
+            1,
+            "the vanished worker's payload returns to the outbox"
+        );
+        assert_eq!(harness.state().test_comment_write_backoff(), (1, true));
+
+        harness.state_mut().test_disconnect_comment_pull_worker();
+        harness.state_mut().test_drain_comment_jobs_once();
+        assert_eq!(
+            harness.state().test_comment_workers_active().1,
+            false,
+            "a vanished refresh worker is cleared so Refresh can be used again"
+        );
     }
 
     // ---- The list's Comments column -------------------------------------

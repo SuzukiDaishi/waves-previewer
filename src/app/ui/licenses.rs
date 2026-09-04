@@ -92,7 +92,11 @@ impl crate::app::WavesPreviewer {
                         }
                         for component in &excluded {
                             ui.label(
-                                egui::RichText::new(format!("✕ {}", component.name))
+                                // U+00D7, not U+2715: the heavier X is only in
+                                // the system faces, so it is a replacement box
+                                // until the font upgrade lands and on any
+                                // machine where none of the candidates exist.
+                                egui::RichText::new(format!("× {}", component.name))
                                     .weak()
                                     .strikethrough(),
                             )
