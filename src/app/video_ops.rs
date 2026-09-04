@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -74,7 +74,7 @@ pub(super) enum VideoFrameMsg {
 /// The UI-side half of one tab's worker.
 pub(super) struct VideoWorkerHandle {
     pub tab_id: u64,
-    tx: Sender<VideoFrameRequest>,
+    tx: SyncSender<VideoFrameRequest>,
     /// Set once, when the tab closes, and never cleared. Interrupts a decode
     /// already in flight so the worker does not finish a batch nobody is
     /// waiting for.
@@ -83,7 +83,7 @@ pub(super) struct VideoWorkerHandle {
 
 impl VideoWorkerHandle {
     fn send(&self, request: VideoFrameRequest) -> bool {
-        self.tx.send(request).is_ok()
+        self.tx.try_send(request).is_ok()
     }
 }
 
@@ -96,9 +96,11 @@ impl Drop for VideoWorkerHandle {
 }
 
 impl WavesPreviewer {
-    fn ensure_video_channel(&mut self) -> Sender<VideoFrameMsg> {
+    fn ensure_video_channel(&mut self) -> SyncSender<VideoFrameMsg> {
         if self.video_frame_tx.is_none() || self.video_frame_rx.is_none() {
-            let (tx, rx) = std::sync::mpsc::channel::<VideoFrameMsg>();
+            let (tx, rx) = std::sync::mpsc::sync_channel::<VideoFrameMsg>(
+                self.perf.background_result_queue_capacity().min(8),
+            );
             self.video_frame_tx = Some(tx);
             self.video_frame_rx = Some(rx);
         }
@@ -137,7 +139,7 @@ impl WavesPreviewer {
         }
 
         let out_tx = self.ensure_video_channel();
-        let (tx, rx) = std::sync::mpsc::channel::<VideoFrameRequest>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<VideoFrameRequest>(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = shutdown.clone();
         let worker_path = path.clone();
@@ -487,10 +489,19 @@ impl WavesPreviewer {
     /// only for the one PTS selected by the painter.
     pub(super) fn apply_video_frame_updates(&mut self, ctx: &egui::Context) {
         let mut messages = Vec::new();
-        if let Some(rx) = &self.video_frame_rx {
-            while let Ok(msg) = rx.try_recv() {
-                messages.push(msg);
+        let limit = self.perf.texture_uploads_per_frame();
+        let latency_critical = self.video_updates_are_latency_critical();
+        {
+            let budget = &mut self.frame_budget;
+            if let Some(rx) = &self.video_frame_rx {
+                while messages.len() < limit && (latency_critical || budget.should_continue()) {
+                    let Ok(msg) = rx.try_recv() else { break };
+                    messages.push(msg);
+                }
             }
+        }
+        if messages.len() >= limit {
+            ctx.request_repaint();
         }
         if messages.is_empty() {
             return;
@@ -787,7 +798,7 @@ fn video_worker_main(
     tab_id: u64,
     path: PathBuf,
     rx: Receiver<VideoFrameRequest>,
-    tx: Sender<VideoFrameMsg>,
+    tx: SyncSender<VideoFrameMsg>,
     shutdown: Arc<AtomicBool>,
 ) {
     let mut decoder = match crate::video::open_video_decoder(&path) {

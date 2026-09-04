@@ -69,20 +69,16 @@ impl crate::app::WavesPreviewer {
                     {
                         dismiss = true;
                     }
-                    ui.label(
-                        RichText::new("Click a row to select it in the list.").weak(),
-                    );
+                    ui.label(RichText::new("Click a row to select it in the list.").weak());
                 });
                 ui.add_space(6.0);
                 ui.separator();
                 // Only the visible rows are built. A `Grid` here would build
                 // a widget per cell for every change, every frame.
                 let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
-                    ui,
-                    row_height,
-                    report.changes.len(),
-                    |ui, range| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show_rows(ui, row_height, report.changes.len(), |ui, range| {
                         for change in &report.changes[range] {
                             ui.horizontal(|ui| {
                                 let (label, color) = match change.kind {
@@ -120,9 +116,7 @@ impl crate::app::WavesPreviewer {
                                     .path
                                     .file_name()
                                     .map(|n| n.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| {
-                                        change.path.to_string_lossy().to_string()
-                                    });
+                                    .unwrap_or_else(|| change.path.to_string_lossy().to_string());
                                 if ui
                                     .add(
                                         egui::Label::new(name)
@@ -136,8 +130,7 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                    },
-                );
+                    });
             });
         drop(scroll_guard);
         if let Some(shown) = shown.as_ref() {
@@ -161,10 +154,7 @@ impl crate::app::WavesPreviewer {
     /// Move the list selection to a path, if the list still has it.
     fn select_list_path(&mut self, path: &std::path::Path) {
         let Some(row) = self.row_for_path(path) else {
-            self.push_toast(
-                ToastSeverity::Info,
-                "That file is no longer in the list",
-            );
+            self.push_toast(ToastSeverity::Info, "That file is no longer in the list");
             return;
         };
         self.selected = Some(row);

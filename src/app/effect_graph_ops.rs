@@ -5100,6 +5100,7 @@ impl WavesPreviewer {
         {
             CachedEdit {
                 ch_samples: tab.ch_samples.clone(),
+                deferred_audio_path: None,
                 samples_len: tab.samples_len,
                 buffer_sample_rate: tab.buffer_sample_rate.max(1),
                 waveform_minmax: tab.waveform_minmax.clone(),
@@ -5147,6 +5148,7 @@ impl WavesPreviewer {
             let old_len = existing.samples_len.max(1);
             CachedEdit {
                 ch_samples: channels.clone(),
+                deferred_audio_path: None,
                 samples_len: new_len,
                 buffer_sample_rate: self.audio.shared.out_sample_rate.max(1),
                 waveform_minmax: rough_waveform.clone(),
@@ -5193,6 +5195,7 @@ impl WavesPreviewer {
         } else {
             CachedEdit {
                 ch_samples: channels.clone(),
+                deferred_audio_path: None,
                 samples_len: new_len,
                 buffer_sample_rate: self.audio.shared.out_sample_rate.max(1),
                 waveform_minmax: rough_waveform.clone(),

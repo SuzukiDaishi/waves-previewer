@@ -31,7 +31,10 @@ pub struct SpanStyle {
 /// One run inside a block.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Span {
-    Text { text: String, style: SpanStyle },
+    Text {
+        text: String,
+        style: SpanStyle,
+    },
     /// A bare URL somebody typed. Not a Markdown link -- `[a](b)` is more
     /// syntax than this is worth, and a pasted address is what people
     /// actually write.
@@ -43,10 +46,16 @@ pub enum Span {
 /// One paragraph-level piece of a comment.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
-    Heading { level: u8, spans: Vec<Span> },
+    Heading {
+        level: u8,
+        spans: Vec<Span>,
+    },
     Paragraph(Vec<Span>),
     /// `ordinal` is `None` for a bullet and `Some(n)` for a numbered item.
-    Item { ordinal: Option<u32>, spans: Vec<Span> },
+    Item {
+        ordinal: Option<u32>,
+        spans: Vec<Span>,
+    },
     Quote(Vec<Span>),
     /// A fenced block, kept exactly as written.
     Code(String),
@@ -163,7 +172,10 @@ fn parse_styled(text: &str, style: SpanStyle, depth: usize, out: &mut Vec<Span>)
                 push_text(&mut plain, style, out);
                 out.push(Span::Text {
                     text: inner[..end].to_string(),
-                    style: SpanStyle { code: true, ..style },
+                    style: SpanStyle {
+                        code: true,
+                        ..style
+                    },
                 });
                 rest = &inner[end + 1..];
                 continue;
@@ -210,7 +222,13 @@ fn parse_styled(text: &str, style: SpanStyle, depth: usize, out: &mut Vec<Span>)
 /// checked before `*` so bold is never read as two italics.
 fn emphasis_at(rest: &str, style: SpanStyle) -> Option<(&'static str, SpanStyle)> {
     if rest.starts_with("**") && !style.bold {
-        return Some(("**", SpanStyle { bold: true, ..style }));
+        return Some((
+            "**",
+            SpanStyle {
+                bold: true,
+                ..style
+            },
+        ));
     }
     if rest.starts_with("~~") && !style.strike {
         return Some((
@@ -350,10 +368,7 @@ mod tests {
     #[test]
     fn an_unclosed_marker_stays_the_character_it_is() {
         assert_eq!(spans("2 * 3"), vec![plain("2 * 3", SpanStyle::default())]);
-        assert_eq!(
-            spans("a `b"),
-            vec![plain("a `b", SpanStyle::default())]
-        );
+        assert_eq!(spans("a `b"), vec![plain("a `b", SpanStyle::default())]);
     }
 
     #[test]
@@ -386,10 +401,7 @@ mod tests {
         );
         assert!(matches!(blocks[0], Block::Heading { level: 1, .. }));
         assert!(matches!(blocks[1], Block::Paragraph(_)));
-        assert!(matches!(
-            blocks[2],
-            Block::Item { ordinal: None, .. }
-        ));
+        assert!(matches!(blocks[2], Block::Item { ordinal: None, .. }));
         assert!(matches!(
             blocks[4],
             Block::Item {

@@ -186,10 +186,16 @@ fn scan_snapshot(root: &Path, skip_dotfiles: bool) -> WatchSnapshot {
 /// path (latest wins), so a hot file contributes one entry, not one per
 /// poll. After a suspend (bulk op / rescan) the poller REBASELINES instead
 /// of diffing across the pause.
-pub fn spawn_folder_watch(root: PathBuf, interval_ms: u64, skip_dotfiles: bool) -> FolderWatch {
+pub fn spawn_folder_watch(
+    root: PathBuf,
+    interval_ms: u64,
+    skip_dotfiles: bool,
+    batch_size: usize,
+    queue_batches: usize,
+) -> FolderWatch {
     let stop = Arc::new(AtomicBool::new(false));
     let suspend = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<WatchEvent>>();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<WatchEvent>>(queue_batches.max(1));
     {
         let root = root.clone();
         let stop = Arc::clone(&stop);
@@ -249,7 +255,24 @@ pub fn spawn_folder_watch(root: PathBuf, interval_ms: u64, skip_dotfiles: bool) 
                         let mut batch: Vec<WatchEvent> = pending.drain().map(|(_, e)| e).collect();
                         batch.sort_by(|a, b| a.path().cmp(b.path()));
                         pending_since = None;
-                        if tx.send(batch).is_err() {
+                        let chunk_size = batch_size.max(1);
+                        let mut chunk = Vec::with_capacity(chunk_size);
+                        for event in batch {
+                            chunk.push(event);
+                            if chunk.len() == chunk_size {
+                                if tx
+                                    .send(std::mem::replace(
+                                        &mut chunk,
+                                        Vec::with_capacity(chunk_size),
+                                    ))
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                crate::ui_wake::wake_ui();
+                            }
+                        }
+                        if !chunk.is_empty() && tx.send(chunk).is_err() {
                             break;
                         }
                         // The UI drains this per frame but sleeps when idle;
@@ -329,6 +352,8 @@ impl crate::app::WavesPreviewer {
                     root,
                     self.watch_poll_interval_ms,
                     self.skip_dotfiles,
+                    self.perf.folder_watch_batch_size(),
+                    self.perf.folder_watch_queue_batches(),
                 ))
             } else {
                 if self.folder_watch.is_some() {
@@ -351,7 +376,8 @@ impl crate::app::WavesPreviewer {
             || self.export_state.is_some()
             || self.bulk_resample_state.is_some()
             || self.batch_loudnorm_state.is_some()
-            || self.inspection_run_state.is_some();
+            || self.inspection_run_state.is_some()
+            || self.inspection_finalize_rx.is_some();
         watch
             .suspend
             .store(busy, std::sync::atomic::Ordering::Relaxed);
@@ -359,10 +385,10 @@ impl crate::app::WavesPreviewer {
         // Applying an event touches the item list, so a bulk change on disk
         // (a folder copied in, a render finishing) must not be applied in a
         // single frame. Unread batches stay in the channel for the next one.
-        const MAX_EVENTS_PER_FRAME: usize = 512;
+        let max_events_per_frame = self.perf.background_result_drain_limit();
         let mut batches: Vec<Vec<WatchEvent>> = Vec::new();
         let mut queued_events = 0usize;
-        while queued_events < MAX_EVENTS_PER_FRAME {
+        while queued_events < max_events_per_frame && self.frame_budget.should_continue() {
             match watch.rx.try_recv() {
                 Ok(batch) => {
                     queued_events += batch.len();
@@ -374,11 +400,13 @@ impl crate::app::WavesPreviewer {
         if batches.is_empty() {
             return;
         }
-        if queued_events >= MAX_EVENTS_PER_FRAME {
+        if queued_events >= max_events_per_frame || !self.frame_budget.should_continue() {
             ctx.request_repaint();
         }
         let mut added: Vec<PathBuf> = Vec::new();
         let mut removed = 0usize;
+        let mut removed_paths = Vec::new();
+        let mut rescanning_for_removals = false;
         let mut removed_skipped = 0usize;
         let mut modified = 0usize;
         let mut modified_skipped = 0usize;
@@ -415,23 +443,12 @@ impl crate::app::WavesPreviewer {
                     if !self.path_index.contains_key(&path) {
                         continue;
                     }
-                    if path.exists() {
-                        // Recreated before the drain ran: treat as modified
-                        // (remove_missing_path would refuse anyway).
-                        if self.watch_apply_modified(&path) {
-                            modified += 1;
-                        } else {
-                            modified_skipped += 1;
-                        }
-                        continue;
-                    }
                     let tab_open = self.tabs.iter().any(|t| t.path == path);
                     if tab_open {
                         removed_skipped += 1;
                         continue;
                     }
-                    self.remove_missing_path(&path);
-                    removed += 1;
+                    removed_paths.push(path);
                 }
                 WatchEvent::Modified(path) => {
                     if !self.path_index.contains_key(&path) {
@@ -445,11 +462,26 @@ impl crate::app::WavesPreviewer {
                 }
             }
         }
-        if !added.is_empty() {
-            let count = self.add_files_merge(&added);
-            if count > 0 {
-                self.after_add_refresh();
+        if !removed_paths.is_empty() {
+            if self.items.len() > self.perf.list_sync_threshold() {
+                // Filtering/reindexing a huge store for every watcher batch
+                // is more expensive than a fresh bounded scan and causes a
+                // large temporary allocation. Rebuild progressively instead.
+                if let Some(root) = self.root.clone() {
+                    self.start_scan_folder(root);
+                    removed = removed_paths.len();
+                    rescanning_for_removals = true;
+                }
+            } else {
+                removed = removed_paths.len();
+                self.remove_paths_from_list(&removed_paths);
             }
+        }
+        if !added.is_empty() && !rescanning_for_removals {
+            // A watcher can report a bulk copy with tens of thousands of
+            // additions in one batch. Reuse the bounded scanner so row/index
+            // construction is sliced instead of freezing this drain frame.
+            self.start_explicit_file_load(added.clone(), false, None, false);
         }
         let mut parts: Vec<String> = Vec::new();
         if !added.is_empty() {

@@ -120,7 +120,12 @@ pub(crate) struct SessionFingerprint {
 
 impl std::fmt::Debug for SessionFingerprint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SessionFingerprint({}, {} bytes)", self.short_hex(), self.len)
+        write!(
+            f,
+            "SessionFingerprint({}, {} bytes)",
+            self.short_hex(),
+            self.len
+        )
     }
 }
 
@@ -139,7 +144,10 @@ impl SessionFingerprint {
 
     /// Short form for debug logs. Never used for comparison.
     pub fn short_hex(&self) -> String {
-        self.sha256[..6].iter().map(|b| format!("{b:02x}")).collect()
+        self.sha256[..6]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 }
 

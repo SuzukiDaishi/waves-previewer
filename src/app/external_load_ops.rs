@@ -22,41 +22,19 @@ impl super::WavesPreviewer {
                 self.external_active_source = Some(active);
             }
         }
-        self.rebuild_external_merged();
-        if let Some(key_column) = restore.key_column.as_ref() {
-            if let Some(key_idx) = self.external_headers.iter().position(|h| h == key_column) {
-                if self.external_key_index != Some(key_idx) {
-                    self.external_key_index = Some(key_idx);
-                    self.rebuild_external_merged();
-                }
-            }
-        }
-        if self
-            .external_key_index
-            .map(|idx| idx >= self.external_headers.len())
-            .unwrap_or(true)
-        {
-            self.external_key_index = Some(0);
-            self.rebuild_external_merged();
-        }
-        let key_idx = self.external_key_index.unwrap_or(0);
-        let key_name = self.external_headers.get(key_idx).cloned();
-        let mut visible: Vec<String> = restore
-            .visible_columns
-            .into_iter()
-            .filter(|c| self.external_headers.iter().any(|h| h == c))
-            .collect();
-        if let Some(key_name) = key_name.as_ref() {
-            visible.retain(|c| c != key_name);
-        }
-        if visible.is_empty() {
-            visible = Self::default_external_columns(&self.external_headers, key_idx);
-        }
-        self.external_visible_columns = visible;
         self.external_show_unmatched = restore.show_unmatched;
         self.sync_active_external_source();
-        self.apply_external_mapping();
-        self.refresh_filter_then_sort();
+        self.rebuild_external_merged_with_preferences(
+            None,
+            restore.key_column,
+            restore.visible_columns,
+        );
+        // A small/headless restore installs synchronously; a large GUI
+        // restore is completed by drain_external_merge_results.
+        if self.external_merge_rx.is_none() {
+            self.apply_external_mapping();
+            self.refresh_filter_then_sort();
+        }
     }
 
     pub(super) fn drain_external_load_results(&mut self, ctx: &egui::Context) {

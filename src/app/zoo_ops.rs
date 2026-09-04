@@ -57,9 +57,8 @@ impl WavesPreviewer {
         }
         // GPU テクスチャのアップロードをフレームあたり最大 4 枚に制限し、
         // 大きな GIF でも 1 フレームを占有しない。残りは次フレームへ回す。
-        const MAX_UPLOADS_PER_FRAME: usize = 4;
         let start = self.zoo_frames_tex.len();
-        let end = (start + MAX_UPLOADS_PER_FRAME).min(self.zoo_frames_raw.len());
+        let end = (start + self.perf.texture_uploads_per_frame()).min(self.zoo_frames_raw.len());
         for (i, frame) in self.zoo_frames_raw[start..end].iter().enumerate() {
             let idx = start + i;
             let id = format!("zoo_anim_{}_{}", self.zoo_texture_gen, idx);

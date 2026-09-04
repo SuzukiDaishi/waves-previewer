@@ -585,7 +585,7 @@ mod tests {
         let path = PathBuf::from(format!("/audio/{name}"));
         MediaItem {
             id: 1,
-            audio_asset: crate::audio_asset::AudioAssetDescriptor::external(path.clone()),
+            audio_asset: crate::audio_asset::AudioAssetDescriptor::external_unprobed(path.clone()),
             path,
             display_name: name.to_string(),
             display_folder: std::sync::Arc::from("audio"),

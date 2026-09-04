@@ -278,7 +278,9 @@ impl crate::app::WavesPreviewer {
                     .item_for_path(&logical_path)
                     .map(|item| item.audio_asset.clone())
                     .unwrap_or_else(|| {
-                        crate::audio_asset::AudioAssetDescriptor::external(logical_path.clone())
+                        crate::audio_asset::AudioAssetDescriptor::external_unprobed(
+                            logical_path.clone(),
+                        )
                     });
                 (logical_path, asset)
             })

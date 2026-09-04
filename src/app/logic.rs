@@ -212,7 +212,9 @@ impl super::WavesPreviewer {
     pub(super) fn resolved_audio_file_path(&self, path: &Path) -> Option<PathBuf> {
         self.item_for_path(path)
             .and_then(|item| item.audio_asset.backing.file_path().map(Path::to_path_buf))
-            .or_else(|| path.is_file().then(|| path.to_path_buf()))
+            // Existence is deliberately left to the worker that opens the
+            // file. A stat here runs on the UI thread for shell/CLI opens.
+            .or_else(|| Some(path.to_path_buf()))
     }
 
     fn exact_stream_path_eligible_cached(&self, path: &Path) -> bool {
@@ -1332,6 +1334,7 @@ impl super::WavesPreviewer {
                 tab.path.clone(),
                 crate::app::types::CachedEdit {
                     ch_samples: tab.ch_samples.clone(),
+                    deferred_audio_path: None,
                     samples_len: tab.samples_len,
                     buffer_sample_rate: tab.buffer_sample_rate.max(1),
                     waveform_minmax: waveform,
@@ -1793,97 +1796,36 @@ impl super::WavesPreviewer {
         tab.redo_bytes = 0;
     }
 
-    fn reset_tab_from_disk(&mut self, idx: usize, update_audio: bool) -> bool {
+    fn reset_tab_from_disk_lazy(&mut self, idx: usize) -> bool {
         let path = match self.tabs.get(idx) {
             Some(t) => t.path.clone(),
             None => return false,
         };
-        if !path.is_file() {
-            self.remove_missing_path(&path);
-            return false;
-        }
-        // Rebuild editor tab state from on-disk audio.
+        let source_path = self
+            .resolved_audio_file_path(&path)
+            .unwrap_or_else(|| path.clone());
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("(invalid)")
             .to_string();
-        let out_sr = self.audio.shared.out_sample_rate;
-        let (mut chs, in_sr) = match crate::wave::decode_wav_multi(&path) {
-            Ok(v) => v,
-            Err(_) => (Vec::new(), out_sr),
-        };
-        if in_sr != out_sr {
-            for c in chs.iter_mut() {
-                *c = self.resample_mono_with_quality(c, in_sr, out_sr);
-            }
-        }
-        let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
-        let file_sr = self.sample_rate_for_path(&path, in_sr);
-        let waveform_cache =
-            if !self.mode_requires_offline_processing() && !chs.is_empty() && samples_len > 0 {
-                Some(Self::build_editor_waveform_cache(&chs, samples_len))
-            } else {
-                None
-            };
         if let Some(tab) = self.tabs.get_mut(idx) {
             tab.display_name = name;
-            if let Some((waveform, waveform_pyramid)) = waveform_cache {
-                tab.waveform_minmax = waveform;
-                tab.waveform_pyramid = waveform_pyramid;
-            } else {
-                tab.waveform_minmax.clear();
-                tab.waveform_pyramid = None;
-            }
-            tab.ch_samples = chs;
-            tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
-            tab.samples_len = samples_len;
-            tab.buffer_sample_rate = out_sr.max(1);
+            tab.ch_samples.clear();
+            tab.ch_samples_arc = std::sync::Arc::new(Vec::new());
+            tab.samples_len = 0;
+            tab.waveform_minmax.clear();
+            tab.waveform_pyramid = None;
+            tab.loading_waveform_minmax.clear();
+            tab.loading = false;
+            tab.paged_asset = true;
+            tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
             Self::reset_tab_defaults(tab);
-            Self::set_loop_region_from_file_markers(tab, &path, in_sr, out_sr);
-            Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
+            tab.dirty = false;
         }
-        if update_audio {
-            self.playing_path = Some(path.clone());
-            let source_time_sec = self.playback_current_source_time_sec();
-            if self.try_activate_editor_stream_transport_for_tab(idx) {
-                if let Some(source_time_sec) = source_time_sec {
-                    self.playback_seek_to_source_time(self.mode, source_time_sec);
-                }
-                return true;
-            }
-            if self.mode_requires_offline_processing() {
-                self.audio.stop();
-                self.audio.set_samples_mono(Vec::new());
-                self.spawn_heavy_processing(&path, ProcessingTarget::EditorTab(path.clone()));
-            } else if let Some((channels, buffer_sr)) = self
-                .tabs
-                .get(idx)
-                .map(|tab| (tab.ch_samples.clone(), tab.buffer_sample_rate.max(1)))
-            {
-                let mut render_spec = self.offline_render_spec_for_path(&path);
-                render_spec.master_gain_db = 0.0;
-                render_spec.file_gain_db = 0.0;
-                let rendered = Self::render_channels_offline_with_spec(
-                    channels,
-                    buffer_sr,
-                    render_spec,
-                    false,
-                );
-                self.audio.set_samples_channels(rendered);
-                self.playback_mark_buffer_source(
-                    super::PlaybackSourceKind::EditorTab(path.clone()),
-                    self.audio.shared.out_sample_rate.max(1),
-                );
-                if let Some(source_time_sec) = source_time_sec {
-                    self.playback_seek_to_source_time(self.mode, source_time_sec);
-                }
-                if let Some(tab) = self.tabs.get(idx) {
-                    self.apply_loop_mode_for_tab(tab);
-                }
-            }
-            self.apply_effective_volume();
-        }
+        let deferred = self.deferred_session_tab_audio.entry(path).or_default();
+        deferred.edited_path = Some(source_path);
+        deferred.preview_path = None;
         true
     }
 
@@ -1895,6 +1837,7 @@ impl super::WavesPreviewer {
         let mut unique_paths: Vec<PathBuf> = Vec::new();
         let mut reload_playing = false;
         let mut affect_playing = false;
+        let mut active_file_tab_to_reset = None;
         for p in paths {
             if !unique.insert(p.clone()) {
                 continue;
@@ -1933,13 +1876,22 @@ impl super::WavesPreviewer {
                 let update_audio = self.active_tab == Some(idx);
                 if self.is_virtual_path(p) {
                     self.reset_tab_from_virtual(idx, update_audio);
+                } else if update_audio {
+                    self.deferred_session_tab_audio.remove(p);
+                    if let Some(tab) = self.tabs.get_mut(idx) {
+                        Self::reset_tab_defaults(tab);
+                    }
+                    active_file_tab_to_reset = Some(idx);
                 } else {
-                    self.reset_tab_from_disk(idx, update_audio);
+                    self.reset_tab_from_disk_lazy(idx);
                 }
             }
             if self.is_list_workspace_active() && self.playing_path.as_ref() == Some(p) {
                 reload_playing = true;
             }
+        }
+        if let Some(idx) = active_file_tab_to_reset {
+            self.clear_edit_in_tab(idx);
         }
         if reload_playing {
             if let Some(p) = self.playing_path.clone() {
@@ -2060,10 +2012,6 @@ impl super::WavesPreviewer {
             return false;
         };
         let path = tab.path.clone();
-        if !path.is_file() {
-            self.remove_missing_path(&path);
-            return false;
-        }
         // Non-destructive: keep in memory and defer file writes until Save Selected.
         self.debug_log(format!(
             "markers queued for save (path: {})",
@@ -2077,10 +2025,6 @@ impl super::WavesPreviewer {
             return false;
         };
         let path = tab.path.clone();
-        if !path.is_file() {
-            self.remove_missing_path(&path);
-            return false;
-        }
         // Non-destructive: keep in memory and defer file writes until Save Selected.
         self.debug_log(format!(
             "loop markers queued for save (path: {})",
@@ -2452,7 +2396,7 @@ impl super::WavesPreviewer {
             }
             return false;
         }
-        if !path.is_file() {
+        if !self.path_is_file_cached(&path) {
             return false;
         }
         if self.try_activate_list_stream_transport(&path) {
@@ -2565,9 +2509,9 @@ impl super::WavesPreviewer {
         if self.is_virtual_path(path) {
             return;
         }
-        if path.exists() {
-            return;
-        }
+        // Every caller has either a cached PathStatus::Missing result or a
+        // filesystem event produced off-thread. Rechecking here would put a
+        // potentially remote stat back on the UI thread.
         let Some(id) = self.path_index.get(path) else {
             return;
         };
@@ -3111,29 +3055,47 @@ impl super::WavesPreviewer {
         skip_dotfiles: bool,
     ) -> std::sync::mpsc::Receiver<ScanMessage> {
         use std::sync::mpsc;
-        let (tx, rx) = mpsc::channel();
+        // Bounded: a fast directory walker must not retain every discovered
+        // PathBuf while a slow UI or a paging machine consumes them. The
+        // sender simply waits on its background thread when the UI is behind.
+        let (tx, rx) = mpsc::sync_channel(self.perf.scan_queue_batches());
+        let batch_size = self.perf.scan_batch_size();
         let found_live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         self.scan_found_live = Some(std::sync::Arc::clone(&found_live));
         std::thread::spawn(move || {
             crate::app::threading::lower_current_thread_priority();
-            let mut batch: Vec<PathBuf> = Vec::with_capacity(128);
+            let mut batch: Vec<PathBuf> = Vec::with_capacity(batch_size);
             let mut seen = HashSet::new();
             let mut visited = 0usize;
             let mut matched = 0usize;
             let progress_interval = 256usize;
+            let mut io_elapsed = std::time::Duration::ZERO;
+            let mut io_samples = 0usize;
 
-            let send_progress =
-                |tx: &std::sync::mpsc::Sender<ScanMessage>, visited: usize, matched: usize| {
-                    tx.send(ScanMessage::Progress { visited, matched })
-                };
-            let flush_batch = |tx: &std::sync::mpsc::Sender<ScanMessage>,
+            let send_progress = |tx: &std::sync::mpsc::SyncSender<ScanMessage>,
+                                 visited: usize,
+                                 matched: usize,
+                                 io_elapsed: &mut std::time::Duration,
+                                 io_samples: &mut usize| {
+                let io_sample_micros = (*io_samples > 0).then(|| {
+                    (io_elapsed.as_micros() / *io_samples as u128).min(u64::MAX as u128) as u64
+                });
+                *io_elapsed = std::time::Duration::ZERO;
+                *io_samples = 0;
+                tx.send(ScanMessage::Progress {
+                    visited,
+                    matched,
+                    io_sample_micros,
+                })
+            };
+            let flush_batch = |tx: &std::sync::mpsc::SyncSender<ScanMessage>,
                                batch: &mut Vec<PathBuf>| {
                 if batch.is_empty() {
                     return Ok(());
                 }
                 tx.send(ScanMessage::Batch(std::mem::take(batch)))
             };
-            let push_file = |tx: &std::sync::mpsc::Sender<ScanMessage>,
+            let push_file = |tx: &std::sync::mpsc::SyncSender<ScanMessage>,
                              path: PathBuf,
                              seen: &mut HashSet<PathBuf>,
                              matched: &mut usize,
@@ -3145,27 +3107,39 @@ impl super::WavesPreviewer {
                 *matched = (*matched).saturating_add(1);
                 found_live.store(*matched, std::sync::atomic::Ordering::Relaxed);
                 batch.push(path);
-                if batch.len() >= 128 {
+                if batch.len() >= batch_size {
                     flush_batch(tx, batch).map_err(|_| ())?;
                 }
                 Ok(())
             };
 
-            let _ = send_progress(&tx, visited, matched);
+            let _ = send_progress(&tx, visited, matched, &mut io_elapsed, &mut io_samples);
             match request {
                 ScanRequestKind::Folder { root } => {
-                    for entry in WalkDir::new(root)
+                    let mut walker = WalkDir::new(root)
                         .follow_links(false)
                         .into_iter()
                         .filter_entry(|e| {
                             !Self::is_internal_temp_cache_path(e.path())
                                 && (!skip_dotfiles || !Self::is_dotfile_path(e.path()))
-                        })
-                    {
+                        });
+                    loop {
+                        let io_started = std::time::Instant::now();
+                        let entry = walker.next();
+                        io_elapsed = io_elapsed.saturating_add(io_started.elapsed());
+                        io_samples = io_samples.saturating_add(1);
+                        let Some(entry) = entry else { break };
                         if let Ok(e) = entry {
                             visited = visited.saturating_add(1);
                             if visited % progress_interval == 0
-                                && send_progress(&tx, visited, matched).is_err()
+                                && send_progress(
+                                    &tx,
+                                    visited,
+                                    matched,
+                                    &mut io_elapsed,
+                                    &mut io_samples,
+                                )
+                                .is_err()
                             {
                                 return;
                             }
@@ -3200,10 +3174,21 @@ impl super::WavesPreviewer {
                         if Self::is_internal_temp_cache_path(&path) {
                             continue;
                         }
-                        if path.is_file() {
+                        let io_started = std::time::Instant::now();
+                        let is_file = path.is_file();
+                        io_elapsed = io_elapsed.saturating_add(io_started.elapsed());
+                        io_samples = io_samples.saturating_add(1);
+                        if is_file {
                             visited = visited.saturating_add(1);
                             if visited % progress_interval == 0
-                                && send_progress(&tx, visited, matched).is_err()
+                                && send_progress(
+                                    &tx,
+                                    visited,
+                                    matched,
+                                    &mut io_elapsed,
+                                    &mut io_samples,
+                                )
+                                .is_err()
                             {
                                 return;
                             }
@@ -3218,19 +3203,38 @@ impl super::WavesPreviewer {
                             {
                                 return;
                             }
-                        } else if path.is_dir() {
-                            for entry in WalkDir::new(path)
+                        } else {
+                            let io_started = std::time::Instant::now();
+                            let is_dir = path.is_dir();
+                            io_elapsed = io_elapsed.saturating_add(io_started.elapsed());
+                            io_samples = io_samples.saturating_add(1);
+                            if !is_dir {
+                                continue;
+                            }
+                            let mut walker = WalkDir::new(path)
                                 .follow_links(false)
                                 .into_iter()
                                 .filter_entry(|e| {
                                     !Self::is_internal_temp_cache_path(e.path())
                                         && (!skip_dotfiles || !Self::is_dotfile_path(e.path()))
-                                })
-                            {
+                                });
+                            loop {
+                                let io_started = std::time::Instant::now();
+                                let entry = walker.next();
+                                io_elapsed = io_elapsed.saturating_add(io_started.elapsed());
+                                io_samples = io_samples.saturating_add(1);
+                                let Some(entry) = entry else { break };
                                 if let Ok(e) = entry {
                                     visited = visited.saturating_add(1);
                                     if visited % progress_interval == 0
-                                        && send_progress(&tx, visited, matched).is_err()
+                                        && send_progress(
+                                            &tx,
+                                            visited,
+                                            matched,
+                                            &mut io_elapsed,
+                                            &mut io_samples,
+                                        )
+                                        .is_err()
                                     {
                                         return;
                                     }
@@ -3269,7 +3273,7 @@ impl super::WavesPreviewer {
             if flush_batch(&tx, &mut batch).is_err() {
                 return;
             }
-            let _ = send_progress(&tx, visited, matched);
+            let _ = send_progress(&tx, visited, matched, &mut io_elapsed, &mut io_samples);
             let _ = tx.send(ScanMessage::Done);
         });
         rx

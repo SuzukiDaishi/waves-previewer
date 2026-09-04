@@ -1380,26 +1380,19 @@ impl super::WavesPreviewer {
                             .iter()
                             .map(|(_, dst)| dst.clone())
                             .collect();
-                        let mut added_any = false;
-                        let mut first_added = None;
-                        for p in &res.success_paths {
-                            if virtual_dests.contains(p) {
-                                continue;
-                            }
-                            if self.add_files_merge(&[p.clone()]) > 0 {
-                                if first_added.is_none() {
-                                    first_added = Some(p.clone());
-                                }
-                                added_any = true;
-                            }
-                        }
-                        if added_any {
-                            self.after_add_refresh();
-                        }
-                        if let Some(p) = first_added {
-                            if let Some(idx) = self.row_for_path(&p) {
-                                self.select_and_load(idx, true);
-                            }
+                        let new_paths: Vec<PathBuf> = res
+                            .success_paths
+                            .iter()
+                            .filter(|path| !virtual_dests.contains(*path))
+                            .cloned()
+                            .collect();
+                        if !new_paths.is_empty() {
+                            self.start_explicit_file_load(
+                                new_paths,
+                                false,
+                                Some(super::types::PendingListLoadTargetKind::Select),
+                                true,
+                            );
                         }
                     }
                 }

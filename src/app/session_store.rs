@@ -451,9 +451,7 @@ impl Db {
             .connection
             .prepare("SELECT id, byte_len FROM session_history ORDER BY captured_at ASC, id ASC")?;
         let mut doomed = Vec::new();
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
         for row in rows {
             let (id, len) = row?;
             doomed.push(id);
@@ -857,7 +855,9 @@ fn run_command(db: &mut Db, command: Command, reply: &mpsc::Sender<StoreReply>) 
             )
             .map_err(|e| (None, e)),
         Command::LoadCommentReads { key, request } => {
-            let ids = db.load_comment_reads(&key).map_err(|e| (Some(request), e))?;
+            let ids = db
+                .load_comment_reads(&key)
+                .map_err(|e| (Some(request), e))?;
             let _ = reply.send(StoreReply::CommentReads { request, ids });
             Ok(())
         }

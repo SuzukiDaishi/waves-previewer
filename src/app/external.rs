@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 
 pub struct ExternalTable {
     pub headers: Vec<String>,
@@ -36,7 +36,7 @@ pub fn load_table(path: &Path) -> Option<ExternalTable> {
     }
 }
 
-pub fn spawn_load_table(cfg: ExternalLoadConfig, tx: Sender<ExternalLoadMsg>) {
+pub fn spawn_load_table(cfg: ExternalLoadConfig, tx: SyncSender<ExternalLoadMsg>) {
     std::thread::spawn(move || {
         let res = (|| -> Result<ExternalTable, String> {
             let ext = cfg
@@ -96,7 +96,7 @@ fn load_csv(path: &Path) -> Option<ExternalTable> {
 
 fn load_csv_with_progress(
     cfg: &ExternalLoadConfig,
-    tx: &Sender<ExternalLoadMsg>,
+    tx: &SyncSender<ExternalLoadMsg>,
 ) -> Result<ExternalTable, String> {
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(false)
@@ -137,7 +137,7 @@ fn normalize_header(raw: &str, idx: usize) -> String {
 
 fn load_excel_with_progress(
     cfg: &ExternalLoadConfig,
-    tx: &Sender<ExternalLoadMsg>,
+    tx: &SyncSender<ExternalLoadMsg>,
 ) -> Result<ExternalTable, String> {
     use calamine::{open_workbook_auto, Reader};
     let mut workbook =

@@ -14,7 +14,9 @@ impl super::WavesPreviewer {
 
     fn ensure_spectro_channel(&mut self) {
         if self.spectro_tx.is_none() || self.spectro_rx.is_none() {
-            let (tx, rx) = std::sync::mpsc::channel::<super::types::SpectrogramJobMsg>();
+            let (tx, rx) = std::sync::mpsc::sync_channel::<super::types::SpectrogramJobMsg>(
+                self.perf.spectrogram_queue_tiles(),
+            );
             self.spectro_tx = Some(tx);
             self.spectro_rx = Some(rx);
         }

@@ -58,7 +58,10 @@ impl super::WavesPreviewer {
         self.external_load_rows = 0;
         self.external_load_started_at = Some(std::time::Instant::now());
         self.external_load_path = Some(path.clone());
-        let (tx, rx) = std::sync::mpsc::channel();
+        // Progress is advisory; bounding it stops a fast CSV reader from
+        // allocating an update per chunk while a software-rendered UI is
+        // repainting slowly.
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
         self.external_load_rx = Some(rx);
         self.external_load_inflight = true;
         let cfg = super::external::ExternalLoadConfig {

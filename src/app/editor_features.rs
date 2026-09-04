@@ -8,7 +8,9 @@ use super::types::{
 impl super::WavesPreviewer {
     fn ensure_feature_analysis_channel(&mut self) {
         if self.editor_feature_tx.is_none() || self.editor_feature_rx.is_none() {
-            let (tx, rx) = std::sync::mpsc::channel::<EditorFeatureAnalysisJobMsg>();
+            let (tx, rx) = std::sync::mpsc::sync_channel::<EditorFeatureAnalysisJobMsg>(
+                self.perf.background_result_queue_capacity().min(8),
+            );
             self.editor_feature_tx = Some(tx);
             self.editor_feature_rx = Some(rx);
         }
@@ -219,9 +221,13 @@ impl super::WavesPreviewer {
             path: tab.path.clone(),
             kind,
         };
-        if self.editor_feature_cache.contains_key(&key)
-            || self.editor_feature_inflight.contains(&key)
-        {
+        if self.editor_feature_cache.contains_key(&key) {
+            self.editor_feature_cache_order
+                .retain(|entry| entry != &key);
+            self.editor_feature_cache_order.push_back(key);
+            return;
+        }
+        if self.editor_feature_inflight.contains(&key) {
             return;
         }
         // Mixdown happens on the worker; cloning the Arc is free and avoids
@@ -297,17 +303,18 @@ impl super::WavesPreviewer {
         }
         // Applying one result rebuilds a viewport cache, so a burst of
         // finished analyses must not all land on the same frame.
-        const MAX_PER_FRAME: usize = 2;
+        let max_per_frame = self.perf.texture_uploads_per_frame().min(4);
         let mut messages = Vec::new();
-        if let Some(rx) = &self.editor_feature_rx {
-            while let Ok(msg) = rx.try_recv() {
-                messages.push(msg);
-                if messages.len() >= MAX_PER_FRAME {
-                    break;
+        {
+            let budget = &mut self.frame_budget;
+            if let Some(rx) = &self.editor_feature_rx {
+                while messages.len() < max_per_frame && budget.should_continue() {
+                    let Ok(msg) = rx.try_recv() else { break };
+                    messages.push(msg);
                 }
             }
         }
-        if messages.len() >= MAX_PER_FRAME {
+        if messages.len() >= max_per_frame {
             ctx.request_repaint();
         }
         for msg in messages {
@@ -380,8 +387,7 @@ impl super::WavesPreviewer {
             }
             return;
         }
-        self.editor_feature_cache
-            .insert(key.clone(), std::sync::Arc::new(data));
+        self.insert_feature_analysis_cache(key.clone(), data);
         self.editor_feature_inflight.remove(&key);
         if let Some(progress) = self.editor_feature_progress.get_mut(&key) {
             progress.done_units = progress.total_units;
@@ -399,7 +405,7 @@ impl super::WavesPreviewer {
         self.editor_feature_progress.remove(key);
         self.editor_feature_progress_shared.remove(key);
         self.editor_feature_generation.remove(key);
-        self.editor_feature_cache.remove(key);
+        self.remove_feature_analysis_cache(key);
     }
 
     pub(super) fn cancel_feature_analysis_for_path(&mut self, path: &Path) {
@@ -429,7 +435,74 @@ impl super::WavesPreviewer {
 
     pub(super) fn reset_all_feature_analysis_state(&mut self) {
         self.cancel_all_feature_analysis();
+        self.editor_feature_cache_order.clear();
+        self.editor_feature_cache_sizes.clear();
+        self.editor_feature_cache_bytes = 0;
         self.editor_feature_generation_counter = 0;
+    }
+
+    fn feature_analysis_size(data: &EditorFeatureAnalysisData) -> usize {
+        let floats = match data {
+            EditorFeatureAnalysisData::Tempogram(data) => {
+                data.bpm_values.len().saturating_add(data.values.len())
+            }
+            EditorFeatureAnalysisData::Chromagram(data) => data.values.len(),
+            EditorFeatureAnalysisData::World(data) => data
+                .f0_values
+                .len()
+                .saturating_add(data.env_db.len())
+                .saturating_add(data.aperiodicity.len()),
+        };
+        floats
+            .saturating_mul(std::mem::size_of::<f32>())
+            .saturating_add(std::mem::size_of::<EditorFeatureAnalysisData>())
+    }
+
+    fn remove_feature_analysis_cache(&mut self, key: &EditorAnalysisKey) {
+        self.editor_feature_cache.remove(key);
+        if let Some(bytes) = self.editor_feature_cache_sizes.remove(key) {
+            self.editor_feature_cache_bytes = self.editor_feature_cache_bytes.saturating_sub(bytes);
+        }
+        self.editor_feature_cache_order.retain(|entry| entry != key);
+    }
+
+    fn insert_feature_analysis_cache(
+        &mut self,
+        key: EditorAnalysisKey,
+        data: EditorFeatureAnalysisData,
+    ) {
+        self.remove_feature_analysis_cache(&key);
+        let bytes = Self::feature_analysis_size(&data);
+        let limit = self.perf.analysis_cache_bytes();
+        while self.editor_feature_cache_bytes.saturating_add(bytes) > limit {
+            let Some(victim) = self.editor_feature_cache_order.pop_front() else {
+                break;
+            };
+            self.editor_feature_cache.remove(&victim);
+            if let Some(removed) = self.editor_feature_cache_sizes.remove(&victim) {
+                self.editor_feature_cache_bytes =
+                    self.editor_feature_cache_bytes.saturating_sub(removed);
+            }
+        }
+        self.editor_feature_cache_bytes = self.editor_feature_cache_bytes.saturating_add(bytes);
+        self.editor_feature_cache_sizes.insert(key.clone(), bytes);
+        self.editor_feature_cache_order.push_back(key.clone());
+        self.editor_feature_cache
+            .insert(key, std::sync::Arc::new(data));
+    }
+
+    pub(super) fn trim_feature_analysis_cache(&mut self) {
+        let limit = self.perf.analysis_cache_bytes();
+        while self.editor_feature_cache_bytes > limit && self.editor_feature_cache.len() > 1 {
+            let Some(victim) = self.editor_feature_cache_order.pop_front() else {
+                break;
+            };
+            self.editor_feature_cache.remove(&victim);
+            if let Some(removed) = self.editor_feature_cache_sizes.remove(&victim) {
+                self.editor_feature_cache_bytes =
+                    self.editor_feature_cache_bytes.saturating_sub(removed);
+            }
+        }
     }
 
     pub(super) fn total_editor_analysis_progress(&self) -> (usize, usize) {

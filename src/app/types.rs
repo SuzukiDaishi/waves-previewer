@@ -83,10 +83,20 @@ impl Default for PlaybackTimelineMap {
 /// rehash was a ~270ms UI stall mid-load. Hashing a `u64` is one multiply,
 /// so growth here only moves slots (~20ms at 1M). Hash collisions (~1e-8 at
 /// 1M entries) degrade a slot to a small vector, never to a wrong answer.
-#[derive(Default)]
 pub struct PathIndex {
-    map: rustc_hash::FxHashMap<u64, PathSlot>,
+    maps: [rustc_hash::FxHashMap<u64, PathSlot>; INDEX_SHARDS],
     len: usize,
+}
+
+const INDEX_SHARDS: usize = 64;
+
+impl Default for PathIndex {
+    fn default() -> Self {
+        Self {
+            maps: std::array::from_fn(|_| rustc_hash::FxHashMap::default()),
+            len: 0,
+        }
+    }
 }
 
 enum PathSlot {
@@ -102,8 +112,13 @@ impl PathIndex {
         h.finish()
     }
 
+    fn shard(hash: u64) -> usize {
+        (hash as usize) & (INDEX_SHARDS - 1)
+    }
+
     pub fn get(&self, path: &Path) -> Option<MediaId> {
-        match self.map.get(&Self::hash_path(path))? {
+        let hash = Self::hash_path(path);
+        match self.maps[Self::shard(hash)].get(&hash)? {
             PathSlot::One(p, id) => (p.as_path() == path).then_some(*id),
             PathSlot::Many(v) => v
                 .iter()
@@ -118,7 +133,7 @@ impl PathIndex {
 
     pub fn insert(&mut self, path: PathBuf, id: MediaId) -> Option<MediaId> {
         let h = Self::hash_path(&path);
-        match self.map.entry(h) {
+        match self.maps[Self::shard(h)].entry(h) {
             std::collections::hash_map::Entry::Vacant(e) => {
                 e.insert(PathSlot::One(path, id));
                 self.len += 1;
@@ -157,12 +172,13 @@ impl PathIndex {
 
     pub fn remove(&mut self, path: &Path) -> Option<MediaId> {
         let h = Self::hash_path(path);
-        let slot = self.map.get_mut(&h)?;
+        let map = &mut self.maps[Self::shard(h)];
+        let slot = map.get_mut(&h)?;
         let removed = match slot {
             PathSlot::One(p, id) => {
                 if p.as_path() == path {
                     let id = *id;
-                    self.map.remove(&h);
+                    map.remove(&h);
                     Some(id)
                 } else {
                     None
@@ -189,16 +205,329 @@ impl PathIndex {
     }
 
     pub fn capacity(&self) -> usize {
-        self.map.capacity()
+        self.maps.iter().map(|map| map.capacity()).sum()
     }
 
-    pub fn reserve(&mut self, additional: usize) {
-        self.map.reserve(additional);
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), String> {
+        let per_shard = additional.div_ceil(INDEX_SHARDS);
+        for map in &mut self.maps {
+            map.try_reserve(per_shard)
+                .map_err(|err| format!("path index allocation failed: {err}"))?;
+        }
+        Ok(())
     }
 
     pub fn clear(&mut self) {
-        self.map.clear();
+        for map in &mut self.maps {
+            map.clear();
+        }
         self.len = 0;
+    }
+}
+
+/// Media rows are kept in moderate fixed-size allocations. Growing a single
+/// `Vec<MediaItem>` can otherwise copy hundreds of megabytes in one UI frame.
+pub const MEDIA_ITEM_CHUNK_LEN: usize = 4_096;
+
+pub struct ChunkedVec<T> {
+    chunks: Vec<Vec<T>>,
+    len: usize,
+}
+
+impl<T> Default for ChunkedVec<T> {
+    fn default() -> Self {
+        Self {
+            chunks: Vec::new(),
+            len: 0,
+        }
+    }
+}
+
+impl<T> ChunkedVec<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index >= self.len {
+            return None;
+        }
+        self.chunks
+            .get(index / MEDIA_ITEM_CHUNK_LEN)
+            .and_then(|chunk| chunk.get(index % MEDIA_ITEM_CHUNK_LEN))
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        if index >= self.len {
+            return None;
+        }
+        self.chunks
+            .get_mut(index / MEDIA_ITEM_CHUNK_LEN)
+            .and_then(|chunk| chunk.get_mut(index % MEDIA_ITEM_CHUNK_LEN))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> + DoubleEndedIterator {
+        self.chunks.iter().flatten()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> + DoubleEndedIterator {
+        self.chunks.iter_mut().flatten()
+    }
+
+    pub fn first(&self) -> Option<&T> {
+        self.chunks.first().and_then(|chunk| chunk.first())
+    }
+
+    pub fn try_push(&mut self, value: T) -> Result<(), T> {
+        let needs_chunk = self
+            .chunks
+            .last()
+            .is_none_or(|chunk| chunk.len() == MEDIA_ITEM_CHUNK_LEN);
+        if needs_chunk {
+            let mut chunk = Vec::new();
+            if chunk.try_reserve_exact(MEDIA_ITEM_CHUNK_LEN).is_err() {
+                return Err(value);
+            }
+            self.chunks.push(chunk);
+        }
+        self.chunks.last_mut().expect("chunk created").push(value);
+        self.len += 1;
+        Ok(())
+    }
+
+    pub fn push(&mut self, value: T) {
+        assert!(self.try_push(value).is_ok(), "media item allocation failed");
+    }
+
+    pub fn insert(&mut self, index: usize, value: T) {
+        assert!(index <= self.len, "insertion index out of bounds");
+        if index == self.len {
+            self.push(value);
+            return;
+        }
+
+        let mut carry = Some(value);
+        let first_chunk = index / MEDIA_ITEM_CHUNK_LEN;
+        let first_offset = index % MEDIA_ITEM_CHUNK_LEN;
+        for chunk_index in first_chunk..self.chunks.len() {
+            let offset = if chunk_index == first_chunk {
+                first_offset
+            } else {
+                0
+            };
+            self.chunks[chunk_index].insert(offset, carry.take().expect("carry present"));
+            if self.chunks[chunk_index].len() <= MEDIA_ITEM_CHUNK_LEN {
+                self.len += 1;
+                return;
+            }
+            carry = self.chunks[chunk_index].pop();
+        }
+        self.push(carry.expect("overflow item"));
+    }
+
+    pub fn remove(&mut self, index: usize) -> T {
+        assert!(index < self.len, "removal index out of bounds");
+        let chunk_index = index / MEDIA_ITEM_CHUNK_LEN;
+        let offset = index % MEDIA_ITEM_CHUNK_LEN;
+        let removed = self.chunks[chunk_index].remove(offset);
+        for next in (chunk_index + 1)..self.chunks.len() {
+            let moved = self.chunks[next].remove(0);
+            self.chunks[next - 1].push(moved);
+        }
+        if self.chunks.last().is_some_and(Vec::is_empty) {
+            self.chunks.pop();
+        }
+        self.len -= 1;
+        removed
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
+        let old = std::mem::take(&mut self.chunks);
+        self.len = 0;
+        let mut compacted = Vec::with_capacity(old.len());
+        let mut current: Option<Vec<T>> = None;
+        for mut chunk in old {
+            chunk.retain(|value| keep(value));
+            if chunk.is_empty() {
+                continue;
+            }
+            if current.is_none() {
+                current = Some(chunk);
+            } else {
+                let room = MEDIA_ITEM_CHUNK_LEN
+                    .saturating_sub(current.as_ref().map(Vec::len).unwrap_or(0));
+                if chunk.len() <= room {
+                    current.as_mut().expect("current chunk").extend(chunk);
+                } else {
+                    current
+                        .as_mut()
+                        .expect("current chunk")
+                        .extend(chunk.drain(..room));
+                    compacted.push(current.take().expect("current chunk"));
+                    current = Some(chunk);
+                }
+            }
+            if current
+                .as_ref()
+                .is_some_and(|chunk| chunk.len() == MEDIA_ITEM_CHUNK_LEN)
+            {
+                compacted.push(current.take().expect("full current chunk"));
+            }
+        }
+        if let Some(chunk) = current {
+            compacted.push(chunk);
+        }
+        self.len = compacted.iter().map(Vec::len).sum();
+        self.chunks = compacted;
+    }
+
+    pub fn clear(&mut self) {
+        self.chunks.clear();
+        self.len = 0;
+    }
+}
+
+impl<T> std::ops::Index<usize> for ChunkedVec<T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("index out of bounds")
+    }
+}
+
+impl<T> std::ops::IndexMut<usize> for ChunkedVec<T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        self.get_mut(index).expect("index out of bounds")
+    }
+}
+
+impl<'a, T> IntoIterator for &'a ChunkedVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::iter::Flatten<std::slice::Iter<'a, Vec<T>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.chunks.iter().flatten()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut ChunkedVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::iter::Flatten<std::slice::IterMut<'a, Vec<T>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.chunks.iter_mut().flatten()
+    }
+}
+
+/// Runtime MediaId -> row lookup, sharded so growth never rehashes every row
+/// in one allocation.
+pub struct MediaIndex {
+    maps: [rustc_hash::FxHashMap<MediaId, usize>; INDEX_SHARDS],
+    len: usize,
+}
+
+impl Default for MediaIndex {
+    fn default() -> Self {
+        Self {
+            maps: std::array::from_fn(|_| rustc_hash::FxHashMap::default()),
+            len: 0,
+        }
+    }
+}
+
+impl MediaIndex {
+    fn shard(id: MediaId) -> usize {
+        (id as usize) & (INDEX_SHARDS - 1)
+    }
+
+    pub fn get(&self, id: &MediaId) -> Option<&usize> {
+        self.maps[Self::shard(*id)].get(id)
+    }
+
+    pub fn insert(&mut self, id: MediaId, row: usize) -> Option<usize> {
+        let old = self.maps[Self::shard(id)].insert(id, row);
+        if old.is_none() {
+            self.len += 1;
+        }
+        old
+    }
+
+    pub fn remove(&mut self, id: &MediaId) -> Option<usize> {
+        let old = self.maps[Self::shard(*id)].remove(id);
+        if old.is_some() {
+            self.len -= 1;
+        }
+        old
+    }
+
+    pub fn clear(&mut self) {
+        for map in &mut self.maps {
+            map.clear();
+        }
+        self.len = 0;
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+#[cfg(test)]
+mod scalable_store_tests {
+    use super::*;
+
+    #[test]
+    fn chunked_vec_preserves_order_across_chunk_boundaries() {
+        let mut values = ChunkedVec::new();
+        for value in 0..(MEDIA_ITEM_CHUNK_LEN + 7) {
+            values.push(value);
+        }
+        assert_eq!(values.len(), MEDIA_ITEM_CHUNK_LEN + 7);
+        assert_eq!(values[MEDIA_ITEM_CHUNK_LEN - 1], MEDIA_ITEM_CHUNK_LEN - 1);
+        assert_eq!(values[MEDIA_ITEM_CHUNK_LEN], MEDIA_ITEM_CHUNK_LEN);
+
+        values.insert(MEDIA_ITEM_CHUNK_LEN - 1, usize::MAX);
+        assert_eq!(values[MEDIA_ITEM_CHUNK_LEN - 1], usize::MAX);
+        assert_eq!(values.remove(MEDIA_ITEM_CHUNK_LEN - 1), usize::MAX);
+        assert_eq!(values[MEDIA_ITEM_CHUNK_LEN], MEDIA_ITEM_CHUNK_LEN);
+
+        values.retain(|value| value % 2 == 0);
+        assert!(values
+            .iter()
+            .copied()
+            .eq((0..MEDIA_ITEM_CHUNK_LEN + 7).filter(|v| v % 2 == 0)));
+    }
+
+    #[test]
+    fn sharded_indexes_replace_and_remove_without_changing_length() {
+        let mut paths = PathIndex::default();
+        for id in 0..10_000u64 {
+            let path = PathBuf::from(format!("folder/{id}.wav"));
+            assert_eq!(paths.insert(path, id), None);
+        }
+        assert_eq!(paths.len(), 10_000);
+        let target = PathBuf::from("folder/4097.wav");
+        assert_eq!(paths.insert(target.clone(), 42), Some(4097));
+        assert_eq!(paths.len(), 10_000);
+        assert_eq!(paths.get(&target), Some(42));
+        assert_eq!(paths.remove(&target), Some(42));
+        assert_eq!(paths.len(), 9_999);
+
+        let mut media = MediaIndex::default();
+        assert_eq!(media.insert(7, 3), None);
+        assert_eq!(media.insert(7, 9), Some(3));
+        assert_eq!(media.len(), 1);
+        assert_eq!(media.get(&7), Some(&9));
+        assert_eq!(media.remove(&7), Some(9));
+        assert_eq!(media.len(), 0);
     }
 }
 
@@ -309,7 +638,7 @@ pub struct MediaItem {
     pub transcript_language: Option<String>,
     /// External CSV/Excel row values. Boxed option: most rows have none and
     /// an inline empty HashMap cost 48 bytes per item at 1M files.
-    pub external: Option<Box<HashMap<String, String>>>,
+    pub external: Option<Arc<HashMap<String, String>>>,
     pub virtual_audio: Option<Arc<AudioBuffer>>,
     pub virtual_state: Option<VirtualState>,
 }
@@ -323,8 +652,12 @@ impl MediaItem {
         self.external = if map.is_empty() {
             None
         } else {
-            Some(Box::new(map))
+            Some(Arc::new(map))
         };
+    }
+
+    pub fn set_external_shared(&mut self, map: Arc<HashMap<String, String>>) {
+        self.external = (!map.is_empty()).then_some(map);
     }
 
     pub fn clear_external(&mut self) {
@@ -3299,8 +3632,31 @@ pub struct PendingListLoadTarget {
 
 pub enum ScanMessage {
     Batch(Vec<PathBuf>),
-    Progress { visited: usize, matched: usize },
+    Progress {
+        visited: usize,
+        matched: usize,
+        /// Mean time spent obtaining one directory/stat result since the
+        /// previous update. Channel backpressure time is excluded.
+        io_sample_micros: Option<u64>,
+    },
     Done,
+}
+
+/// A scanner batch may be more work than the current frame can afford. Keep
+/// its cursor instead of treating a channel message as an indivisible unit.
+pub struct ScanPendingBatch {
+    pub paths: Vec<PathBuf>,
+    pub next: usize,
+}
+
+impl ScanPendingBatch {
+    pub fn new(paths: Vec<PathBuf>) -> Self {
+        Self { paths, next: 0 }
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.next >= self.paths.len()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3676,6 +4032,10 @@ pub struct EditorUndoState {
 #[derive(Clone)]
 pub struct CachedEdit {
     pub ch_samples: Vec<Vec<f32>>,
+    /// Original content-addressed session sidecar. When present the PCM and
+    /// display caches are restored only when the item is opened, and a save
+    /// can copy this source without decoding it first.
+    pub deferred_audio_path: Option<PathBuf>,
     pub samples_len: usize,
     pub buffer_sample_rate: u32,
     pub waveform_minmax: Vec<(f32, f32)>,

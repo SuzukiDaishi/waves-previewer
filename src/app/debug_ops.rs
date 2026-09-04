@@ -444,6 +444,11 @@ impl WavesPreviewer {
         let gain_dirty = self.pending_gain_count();
         let mut lines = Vec::new();
         lines.push(format!("files: {}/{}", self.files.len(), self.items.len()));
+        lines.push(format!(
+            "retired_list_drops: {}",
+            self.retired_list_drops
+                .load(std::sync::atomic::Ordering::Relaxed)
+        ));
         lines.push(format!("selected: {selected}"));
         lines.push(format!("tabs: {} (active: {active_tab})", self.tabs.len()));
         lines.push(format!(
@@ -473,19 +478,66 @@ impl WavesPreviewer {
             self.debug.frame_samples
         ));
         lines.push(format!(
-            "path_probes: {} pending, {} queued since start",
+            "path_probes: {} pending, {} queued since start, {} peak queued",
             self.path_status.pending_count(),
-            self.path_status.queued_total()
+            self.path_status.queued_total(),
+            self.path_status.peak_queued(),
         ));
         lines.push(format!(
-            "perf_tier: {} ({} cores{})",
+            "scan_queue: {} batches pending, {} peak pending, channel capacity {}",
+            self.scan_pending_batches.len(),
+            self.scan_pending_peak,
+            self.perf.scan_queue_batches(),
+        ));
+        lines.push(format!(
+            "perf_tier: {} ({} cores{}, throttle {}%)",
             self.perf.tier.as_str(),
             self.perf.cores,
             if self.perf.demoted_from_hardware() {
                 format!(", auto-lowered from {}", self.perf.base_tier.as_str())
             } else {
                 String::new()
-            }
+            },
+            self.perf.adaptive_percent(),
+        ));
+        let mib = |bytes: Option<u64>| bytes.map(|value| value / (1024 * 1024));
+        lines.push(format!(
+            "resources: memory {:?}/{:?} MiB available/total ({:?}), renderer={}, io={:.1}ms",
+            mib(self.perf.available_memory_bytes),
+            mib(self.perf.total_memory_bytes),
+            self.perf.memory_pressure,
+            self.perf.renderer.as_str(),
+            self.perf.io_latency_ewma_ms,
+        ));
+        let undo_bytes = self.tabs.iter().fold(0usize, |sum, tab| {
+            sum.saturating_add(tab.undo_bytes)
+                .saturating_add(tab.redo_bytes)
+        });
+        let video_bytes = self.tabs.iter().fold(0usize, |sum, tab| {
+            sum.saturating_add(
+                tab.video_panel
+                    .as_ref()
+                    .map(|panel| panel.ring_bytes())
+                    .unwrap_or(0),
+            )
+        });
+        lines.push(format!(
+            "cache_bytes: metadata={} spectrogram={} analysis={} artwork={} preview={} undo={} video={} optional_limit={}",
+            self.metadata_summary_cache.estimated_bytes(),
+            self.spectro_cache_bytes,
+            self.editor_feature_cache_bytes,
+            self.list_art_texture_bytes,
+            self.list_preview_cache_bytes,
+            undo_bytes,
+            video_bytes,
+            self.perf.optional_cache_budget_bytes(),
+        ));
+        lines.push(format!(
+            "drain_budget: deferred={} last_overrun={} external_index={} decode_permit={}MiB",
+            self.frame_budget.deferred_count(),
+            self.frame_budget.last_deferred_stage().unwrap_or("none"),
+            self.external_merge_rx.is_some(),
+            self.perf.full_decode_budget_bytes() / (1024 * 1024),
         ));
         let profiler_samples = self.debug.frame_profiler.samples();
         if !profiler_samples.is_empty() {
@@ -822,8 +874,7 @@ impl WavesPreviewer {
         self.list_preview_prefetch_tx = None;
         self.list_preview_prefetch_rx = None;
         self.list_preview_prefetch_inflight.clear();
-        self.list_preview_cache.clear();
-        self.list_preview_cache_order.clear();
+        self.clear_list_preview_cache();
     }
 
     pub(super) fn cancel_editor_decode(&mut self) {

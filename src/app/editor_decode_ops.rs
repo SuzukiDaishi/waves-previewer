@@ -8,6 +8,14 @@ const EDITOR_STREAMING_PROGRESS_EMIT_SECS: f32 = 0.25;
 
 impl super::WavesPreviewer {
     pub(super) fn spawn_editor_decode(&mut self, path: PathBuf) {
+        let decode_path = self
+            .item_for_path(&path)
+            .and_then(|item| item.audio_asset.backing.file_path().map(PathBuf::from))
+            .unwrap_or_else(|| path.clone());
+        self.spawn_editor_decode_from_path(path, decode_path);
+    }
+
+    pub(super) fn spawn_editor_decode_from_path(&mut self, path: PathBuf, decode_path: PathBuf) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{mpsc, Arc};
         self.cancel_editor_decode();
@@ -16,10 +24,6 @@ impl super::WavesPreviewer {
             .get(&path)
             .copied()
             .filter(|v| *v > 0);
-        let decode_path = self
-            .item_for_path(&path)
-            .and_then(|item| item.audio_asset.backing.file_path().map(PathBuf::from))
-            .unwrap_or_else(|| path.clone());
         let source_sr_hint = self
             .meta_for_path(&path)
             .map(|meta| meta.sample_rate)
@@ -41,7 +45,7 @@ impl super::WavesPreviewer {
         let total_source_frames_hint = self.estimate_editor_total_source_frames_cached(&path);
         let paged_asset = self
             .item_for_path(&path)
-            .map(|item| !item.audio_asset.may_reside_in_memory())
+            .map(|item| item.audio_asset.requires_paged_editor())
             .unwrap_or(false);
         let strategy = Self::editor_decode_strategy(&decode_path);
         self.debug_log(format!(
@@ -956,6 +960,12 @@ impl super::WavesPreviewer {
         }
         for (path, decoded_frames) in decode_final_events {
             self.debug_mark_editor_open_final(&path, decoded_frames);
+            if let Some(deferred) = self.deferred_session_tab_audio.get_mut(&path) {
+                deferred.edited_path = None;
+            }
+            self.deferred_session_tab_audio.retain(|_, deferred| {
+                deferred.edited_path.is_some() || deferred.preview_path.is_some()
+            });
         }
         for value_ms in decode_progress_gap_ms {
             Self::debug_push_latency_sample(

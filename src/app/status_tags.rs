@@ -612,6 +612,7 @@ impl crate::app::WavesPreviewer {
     /// `make_media_item`, which stamps the default status, and without this a
     /// row the user deliberately set back to "no status" would come back
     /// wearing the default on every reopen.
+    #[allow(dead_code)]
     pub(crate) fn clear_all_row_labels(&mut self) {
         for item in &mut self.items {
             item.status_id = None;

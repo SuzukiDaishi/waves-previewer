@@ -316,26 +316,9 @@ impl crate::app::WavesPreviewer {
             .count()
     }
 
-    /// Mark everything currently in the conversation as seen.
-    ///
-    /// Called when the window is showing, because that is what "read" means
-    /// here. The record is per-user and lives in the local database; losing
-    /// it costs a re-read, never any of anybody's work.
-    pub(crate) fn mark_comments_read(&mut self) {
-        let me = &self.comment_author_id;
-        let unseen: Vec<String> = self
-            .comments
-            .iter()
-            .filter(|comment| &comment.author_id != me && !self.comment_reads.contains(&comment.id))
-            .map(|comment| comment.id.clone())
-            .collect();
-        self.record_comments_read(unseen);
-    }
-
     /// Remember that these particular comments were seen.
     ///
-    /// The window marks the whole conversation; a list row's popup marks the
-    /// threads it just showed, which is the same promise made about less.
+    /// The window and a list row's popup both pass only the nodes they painted.
     /// Ids that are already read, or this person's own, are dropped here so
     /// no caller has to filter them first.
     pub(crate) fn record_comments_read(&mut self, ids: Vec<String>) {
@@ -424,9 +407,8 @@ impl crate::app::WavesPreviewer {
         // A span or a spectral band can only be seen on the editor's canvas,
         // so those open it. A bare cursor stays in the list, where following
         // a reference costs nothing.
-        let wants_editor = anchor.is_some_and(|anchor| {
-            anchor.normalized_range().is_some() || anchor.freq_hz.is_some()
-        });
+        let wants_editor = anchor
+            .is_some_and(|anchor| anchor.normalized_range().is_some() || anchor.freq_hz.is_some());
         self.pending_comment_jump = Some((path.clone(), anchor));
         if wants_editor {
             self.open_or_activate_tab(&path);
@@ -610,15 +592,19 @@ impl crate::app::WavesPreviewer {
     }
 
     fn drain_comment_write(&mut self) {
+        use super::loading_ops::{poll_job, JobPoll};
+
         let Some(state) = self.comment_write.as_ref() else {
             return;
         };
-        let Ok(result) = state.rx.try_recv() else {
-            return;
+        let result = match poll_job(&state.rx) {
+            JobPoll::Waiting => return,
+            JobPoll::Ready(result) => Some(result),
+            JobPoll::Gone => None,
         };
         let state = self.comment_write.take().expect("checked above");
         match result {
-            Ok(written) => {
+            Some(Ok(written)) => {
                 self.comment_write_failures = 0;
                 self.comment_retry_after = None;
                 self.debug_log(format!(
@@ -641,44 +627,56 @@ impl crate::app::WavesPreviewer {
                 self.session_revision = Some(written.revision);
                 self.restart_session_watch();
             }
-            Err(error) => {
-                self.debug_log(format!("comment write failed: {error}"));
-                // Back in the queue, in front of anything typed since, so the
-                // document still receives them in the order they were written.
-                let mut restored = state.sent;
-                restored.append(&mut self.comment_outbox);
-                self.comment_outbox = restored;
-                let backoff = FAILURE_BACKOFF_SECS[(self.comment_write_failures as usize)
-                    .min(FAILURE_BACKOFF_SECS.len() - 1)];
-                self.comment_write_failures = self.comment_write_failures.saturating_add(1);
-                self.comment_retry_after =
-                    Some(Instant::now() + std::time::Duration::from_secs(backoff));
-                // Said once per outage, not once per attempt. The window
-                // already carries a standing "not shared yet" count, which is
-                // the right place for a state that persists.
-                if self.comment_write_failures == 1 {
-                    self.push_toast(
-                        crate::app::types::ToastSeverity::Warning,
-                        format!(
-                            "Comment not shared yet — {error}. It stays here and will be retried."
-                        ),
-                    );
-                }
-            }
+            Some(Err(error)) => self.restore_failed_comment_write(state, error),
+            None => self.restore_failed_comment_write(
+                state,
+                "the comment worker stopped without returning a result".to_string(),
+            ),
+        }
+    }
+
+    /// Put an unsuccessful write back at the front of the outbox.
+    ///
+    /// A disconnected channel takes this path too. Treating it as "not yet"
+    /// would leave `comment_write` occupied forever and block every later
+    /// comment from being shared.
+    fn restore_failed_comment_write(&mut self, state: CommentWriteState, error: String) {
+        self.debug_log(format!("comment write failed: {error}"));
+        // Back in the queue, in front of anything typed since, so the
+        // document still receives them in the order they were written.
+        let mut restored = state.sent;
+        restored.append(&mut self.comment_outbox);
+        self.comment_outbox = restored;
+        let backoff = FAILURE_BACKOFF_SECS
+            [(self.comment_write_failures as usize).min(FAILURE_BACKOFF_SECS.len() - 1)];
+        self.comment_write_failures = self.comment_write_failures.saturating_add(1);
+        self.comment_retry_after = Some(Instant::now() + std::time::Duration::from_secs(backoff));
+        // Said once per outage, not once per attempt. The window already
+        // carries a standing "not shared yet" count, which is the right place
+        // for a state that persists.
+        if self.comment_write_failures == 1 {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Warning,
+                format!("Comment not shared yet — {error}. It stays here and will be retried."),
+            );
         }
     }
 
     fn drain_comment_pull(&mut self) {
+        use super::loading_ops::{poll_job, JobPoll};
+
         let Some(rx) = self.comment_pull.as_ref() else {
             return;
         };
-        let Ok(result) = rx.try_recv() else {
-            return;
+        let result = match poll_job(rx) {
+            JobPoll::Waiting => return,
+            JobPoll::Ready(result) => Some(result),
+            JobPoll::Gone => None,
         };
         self.comment_pull = None;
         let pending = self.session_changed_pending.take();
         match result {
-            Ok(pull) => {
+            Some(Ok(pull)) => {
                 let added = comments::merge_into(&mut self.comments, pull.comments);
                 self.mark_comment_index_dirty();
                 // The whole point of the comparison: a document that differs
@@ -698,11 +696,23 @@ impl crate::app::WavesPreviewer {
                     self.announce_session_changed_on_disk(changed);
                 }
             }
-            Err(error) => {
+            Some(Err(error)) => {
                 self.debug_log(format!("comment pull failed: {error}"));
                 // We failed to establish what changed, so the conservative
                 // answer stands: warn about it. Swallowing a real save
                 // because a read hiccuped is the one outcome to avoid.
+                if let Some(changed) = pending {
+                    self.announce_session_changed_on_disk(changed);
+                }
+            }
+            None => {
+                self.debug_log(
+                    "comment pull worker stopped without returning a result".to_string(),
+                );
+                // We still failed to establish whether only comments changed,
+                // so preserve the same conservative warning as a normal read
+                // error. Most importantly, the cleared receiver lets Refresh
+                // start a replacement worker.
                 if let Some(changed) = pending {
                     self.announce_session_changed_on_disk(changed);
                 }

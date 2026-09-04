@@ -73,6 +73,7 @@ pub struct PathStatusService {
     rx: std::sync::mpsc::Receiver<(PathBuf, bool)>,
     /// Probes served from cache vs. queued, for the Debug window.
     queued_total: u64,
+    peak_queued: usize,
 }
 
 impl Default for PathStatusService {
@@ -91,7 +92,7 @@ impl PathStatusService {
             ready: Condvar::new(),
             stop: AtomicBool::new(false),
         });
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(256);
         let worker_queue = Arc::clone(&queue);
         let spawned = std::thread::Builder::new()
             .name("neowaves-path-status".to_string())
@@ -137,6 +138,7 @@ impl PathStatusService {
             queue,
             rx,
             queued_total: 0,
+            peak_queued: 0,
         }
     }
 
@@ -167,6 +169,17 @@ impl PathStatusService {
             .unwrap_or(PathStatus::Unknown)
     }
 
+    /// One-shot lookup for optional companion files such as subtitles.
+    /// Missing is cached until explicit invalidation, so a visible row does
+    /// not probe the same absent `.srt` every TTL interval.
+    pub fn status_once(&mut self, path: &Path) -> PathStatus {
+        if let Some((status, _)) = self.cache.get(path).copied() {
+            return status;
+        }
+        self.enqueue(path);
+        PathStatus::Unknown
+    }
+
     fn enqueue(&mut self, path: &Path) {
         if self.inflight.contains(path) {
             return;
@@ -183,6 +196,7 @@ impl PathStatusService {
                 inner.queued.remove(&dropped);
             }
         }
+        self.peak_queued = self.peak_queued.max(inner.order.len());
         drop(inner);
         self.inflight.insert(path.to_path_buf());
         self.queued_total = self.queued_total.saturating_add(1);
@@ -191,9 +205,18 @@ impl PathStatusService {
 
     /// Take answers the worker has produced. Returns how many landed, so the
     /// frame loop can decide whether a repaint is owed.
+    #[cfg(test)]
     pub fn drain(&mut self, max: usize) -> usize {
+        self.drain_for(max, Duration::MAX)
+    }
+
+    pub fn drain_for(&mut self, max: usize, budget: Duration) -> usize {
+        let started = Instant::now();
         let mut applied = 0usize;
         while applied < max {
+            if applied > 0 && started.elapsed() >= budget {
+                break;
+            }
             match self.rx.try_recv() {
                 Ok((path, exists)) => {
                     self.inflight.remove(&path);
@@ -240,6 +263,10 @@ impl PathStatusService {
 
     pub fn queued_total(&self) -> u64 {
         self.queued_total
+    }
+
+    pub fn peak_queued(&self) -> usize {
+        self.peak_queued
     }
 
     /// Seed an answer the app already knows (the session parse worker stats
@@ -364,6 +391,23 @@ mod tests {
             after_first,
             "a fresh cache entry must not queue more work"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_missing_one_shot_companion_is_not_requeued() {
+        let dir = temp_dir("one_shot_missing");
+        let path = dir.join("clip.srt");
+        let mut service = PathStatusService::new();
+
+        assert_eq!(service.status_once(&path), PathStatus::Unknown);
+        settle(&mut service);
+        assert_eq!(service.status_once(&path), PathStatus::Missing);
+        let after_first = service.queued_total();
+        for _ in 0..500 {
+            assert_eq!(service.status_once(&path), PathStatus::Missing);
+        }
+        assert_eq!(service.queued_total(), after_first);
         let _ = std::fs::remove_dir_all(dir);
     }
 

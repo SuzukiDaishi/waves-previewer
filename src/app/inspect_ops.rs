@@ -12,7 +12,12 @@ use super::types::{InspectionReportState, InspectionRunState, MediaSource, Toast
 use super::WavesPreviewer;
 
 const INSPECTION_MAX_WORKERS: usize = 4;
-const INSPECTION_DRAIN_PER_FRAME: usize = 64;
+
+pub(super) struct InspectionFinalizeResult {
+    report: InspectionReportState,
+    message: String,
+    severity: ToastSeverity,
+}
 
 impl WavesPreviewer {
     /// Selection when non-empty, else every real (file-backed) list item.
@@ -39,7 +44,7 @@ impl WavesPreviewer {
     }
 
     pub(super) fn open_inspection_dialog(&mut self) {
-        if self.inspection_run_state.is_some() {
+        if self.inspection_run_state.is_some() || self.inspection_finalize_rx.is_some() {
             self.push_toast(ToastSeverity::Info, "An inspection is already running");
             return;
         }
@@ -184,29 +189,32 @@ impl WavesPreviewer {
     }
 
     pub(super) fn begin_inspection_run(&mut self, paths: Vec<PathBuf>, cfg: InspectionConfig) {
-        if paths.is_empty() || self.inspection_run_state.is_some() {
+        if paths.is_empty()
+            || self.inspection_run_state.is_some()
+            || self.inspection_finalize_rx.is_some()
+        {
             return;
         }
         // Snapshot cached facts on the UI thread so workers never touch app
         // state. peak_db only counts when it came from a full decode.
-        let jobs: VecDeque<(PathBuf, f32, CachedAudioFacts)> = paths
-            .iter()
-            .map(|path| {
-                let mut facts = CachedAudioFacts::default();
-                if let Some(meta) = self.meta_for_path(path) {
-                    facts.lufs_i = meta.lufs_i;
-                    facts.true_peak_db = meta.true_peak_db;
-                    if !meta.peak_db_estimate {
-                        facts.peak_db = meta.peak_db;
-                    }
-                    facts.total_frames = meta.total_frames;
+        let mut jobs: VecDeque<(PathBuf, f32, CachedAudioFacts)> = VecDeque::new();
+        for path in paths {
+            let mut facts = CachedAudioFacts::default();
+            if let Some(meta) = self.meta_for_path(&path) {
+                facts.lufs_i = meta.lufs_i;
+                facts.true_peak_db = meta.true_peak_db;
+                if !meta.peak_db_estimate {
+                    facts.peak_db = meta.peak_db;
                 }
-                (path.clone(), self.pending_gain_db_for_path(path), facts)
-            })
-            .collect();
+                facts.total_frames = meta.total_frames;
+            }
+            let pending_gain = self.pending_gain_db_for_path(&path);
+            jobs.push_back((path, pending_gain, facts));
+        }
         let total = jobs.len();
         let queue = Arc::new(Mutex::new(jobs));
-        let (tx, rx) = std::sync::mpsc::channel::<InspectionRow>();
+        let queue_capacity = self.perf.background_result_queue_capacity();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<InspectionRow>(queue_capacity);
         let cancel = Arc::new(AtomicBool::new(false));
         let workers = self
             .perf
@@ -241,12 +249,14 @@ impl WavesPreviewer {
             });
         }
         drop(tx);
+        let mut result_rows = Vec::new();
+        let _ = result_rows.try_reserve(queue_capacity.min(total));
         self.inspection_run_state = Some(InspectionRunState {
             total,
             done: 0,
             rx,
             cancel,
-            rows: Vec::with_capacity(total),
+            rows: result_rows,
             started_at: std::time::Instant::now(),
         });
     }
@@ -258,62 +268,118 @@ impl WavesPreviewer {
     }
 
     pub(super) fn drain_inspection_results(&mut self, ctx: &egui::Context) {
-        let Some(state) = &mut self.inspection_run_state else {
-            return;
-        };
-        let mut disconnected = false;
-        for _ in 0..INSPECTION_DRAIN_PER_FRAME {
-            match state.rx.try_recv() {
-                Ok(row) => {
-                    state.rows.push(row);
-                    state.done += 1;
+        if let Some(rx) = self.inspection_finalize_rx.as_ref() {
+            match super::loading_ops::poll_job(rx) {
+                super::loading_ops::JobPoll::Waiting => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(
+                        self.perf.background_repaint_ms(),
+                    ));
+                    return;
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
+                super::loading_ops::JobPoll::Ready(result) => {
+                    self.inspection_finalize_rx = None;
+                    self.push_toast(result.severity, result.message);
+                    self.inspection_report = Some(result.report);
+                    self.show_inspection_window = true;
+                    ctx.request_repaint();
+                    return;
+                }
+                super::loading_ops::JobPoll::Gone => {
+                    self.inspection_finalize_rx = None;
+                    self.push_toast(
+                        ToastSeverity::Error,
+                        "Inspection result worker ended unexpectedly",
+                    );
+                    return;
                 }
             }
         }
-        let finished = state.done >= state.total || disconnected;
+        let drain_limit = self.perf.background_result_drain_limit();
+        let mut disconnected = false;
+        let finished = {
+            let budget = &mut self.frame_budget;
+            let Some(state) = &mut self.inspection_run_state else {
+                return;
+            };
+            for _ in 0..drain_limit {
+                if !budget.should_continue() {
+                    break;
+                }
+                match state.rx.try_recv() {
+                    Ok(row) => {
+                        state.rows.push(row);
+                        state.done += 1;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+            state.done >= state.total || disconnected
+        };
         if finished {
             let state = self.inspection_run_state.take().expect("state present");
             let cancelled = state.cancel.load(Ordering::Relaxed);
+            let total = state.total;
             let mut rows = state.rows;
-            // Stable order: errors first, then warnings, then passes; ties by path.
-            rows.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.path.cmp(&b.path)));
-            let errors = rows
-                .iter()
-                .filter(|r| r.severity == Some(super::inspection::IssueSeverity::Error))
-                .count();
-            let warnings = rows
-                .iter()
-                .filter(|r| r.severity == Some(super::inspection::IssueSeverity::Warning))
-                .count();
-            let passed = rows.len() - errors - warnings;
-            let msg = if cancelled {
-                format!(
-                    "Inspection cancelled: {} of {} files checked ({errors} errors, {warnings} warnings)",
-                    rows.len(),
-                    state.total
-                )
+            let cfg = self.inspection_cfg.clone();
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let spawned = std::thread::Builder::new()
+                .name("neowaves-inspection-finalize".to_string())
+                .spawn(move || {
+                    crate::app::threading::lower_current_thread_priority();
+                    // Sorting a report with hundreds of thousands of rows is
+                    // itself a batch job; never run it in the result drain.
+                    rows.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.path.cmp(&b.path)));
+                    let errors = rows
+                        .iter()
+                        .filter(|row| {
+                            row.severity == Some(super::inspection::IssueSeverity::Error)
+                        })
+                        .count();
+                    let warnings = rows
+                        .iter()
+                        .filter(|row| {
+                            row.severity == Some(super::inspection::IssueSeverity::Warning)
+                        })
+                        .count();
+                    let passed = rows.len().saturating_sub(errors + warnings);
+                    let message = if cancelled {
+                        format!(
+                            "Inspection cancelled: {} of {total} files checked ({errors} errors, {warnings} warnings)",
+                            rows.len()
+                        )
+                    } else {
+                        format!(
+                            "Inspection finished: {errors} errors, {warnings} warnings, {passed} passed"
+                        )
+                    };
+                    let severity = if errors > 0 {
+                        ToastSeverity::Warning
+                    } else {
+                        ToastSeverity::Info
+                    };
+                    let _ = tx.send(InspectionFinalizeResult {
+                        report: InspectionReportState {
+                            rows,
+                            cfg,
+                            cancelled,
+                        },
+                        message,
+                        severity,
+                    });
+                    crate::ui_wake::wake_ui();
+                });
+            if spawned.is_ok() {
+                self.inspection_finalize_rx = Some(rx);
             } else {
-                format!(
-                    "Inspection finished: {errors} errors, {warnings} warnings, {passed} passed"
-                )
-            };
-            let severity = if errors > 0 {
-                ToastSeverity::Warning
-            } else {
-                ToastSeverity::Info
-            };
-            self.push_toast(severity, msg);
-            self.inspection_report = Some(InspectionReportState {
-                rows,
-                cfg: self.inspection_cfg.clone(),
-                cancelled,
-            });
-            self.show_inspection_window = true;
+                self.push_toast(
+                    ToastSeverity::Error,
+                    "Could not start inspection result worker",
+                );
+            }
         }
         ctx.request_repaint();
     }

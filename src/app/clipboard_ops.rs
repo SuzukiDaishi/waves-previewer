@@ -562,8 +562,6 @@ impl super::WavesPreviewer {
                 ));
             }
         }
-        let existing_paths: HashSet<PathBuf> =
-            self.items.iter().map(|item| item.path.clone()).collect();
         // A paste event is the freshest representation of the clipboard. Use
         // its URI/path list before asking Windows for CF_HDROP, which can still
         // hold a stale file list in a synthetic event or after another app
@@ -593,35 +591,26 @@ impl super::WavesPreviewer {
             }
             return;
         }
-        let counts = self.add_files_merge_counted(&files);
-        if counts.added > 0 {
-            self.after_add_refresh();
-            let new_paths: Vec<PathBuf> = self
-                .items
-                .iter()
-                .filter(|item| !existing_paths.contains(&item.path))
-                .map(|item| item.path.clone())
-                .collect();
-            self.record_list_insert_from_paths(&new_paths, before);
-        }
-        // A clipboard is invisible until something appears in the list, so
-        // silently dropping duplicates and non-audio the way drag and drop does
-        // reads as "paste is broken" rather than "those were skipped".
-        if let Some(summary) = counts.summary() {
-            let severity = if counts.added > 0 {
-                super::types::ToastSeverity::Info
-            } else {
-                super::types::ToastSeverity::Warning
-            };
-            self.push_toast(severity, summary);
-        }
+        // Even one path may be a directory on a sleeping disk or an
+        // unavailable network share. Always let the bounded scanner classify
+        // pasted paths instead of using is_file/is_dir on the UI thread.
+        let requested = files.len();
+        self.start_explicit_file_load(
+            files,
+            false,
+            Some(super::types::PendingListLoadTargetKind::Select),
+            true,
+        );
+        self.push_toast(
+            super::types::ToastSeverity::Info,
+            format!("Loading {requested} pasted path(s) in the background"),
+        );
         if self.debug.cfg.enabled {
             self.debug.last_paste_at = Some(std::time::Instant::now());
-            self.debug.last_paste_count = counts.added;
+            self.debug.last_paste_count = 0;
             self.debug.last_paste_source = Some(source.to_string());
             self.debug_trace_input(format!(
-                "paste_clipboard_to_list {source} added={} dup={} unsupported={} missing={}",
-                counts.added, counts.duplicates, counts.unsupported, counts.missing
+                "paste_clipboard_to_list {source} queued={requested}"
             ));
         }
     }

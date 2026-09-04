@@ -109,7 +109,7 @@ impl super::WavesPreviewer {
         // Reserve one core for the UI/audio threads; the workers also run at
         // lowered OS priority (see spawn_meta_pool). A two-core machine gets
         // exactly one worker (see PerfProfile).
-        let workers = self.perf.meta_pool_workers();
+        let workers = self.perf.meta_pool_capacity();
         let (pool, rx) = crate::app::meta::spawn_meta_pool(workers);
         // Only pool construction site, so a pool recreated mid-session keeps
         // measuring Blank Pad at the user's threshold rather than the default.
@@ -118,6 +118,7 @@ impl super::WavesPreviewer {
         // than reading an embedded cover image, so only a couple of workers may
         // do it at once (none at all on a two-core machine).
         pool.set_video_poster_limit(self.perf.video_poster_concurrency());
+        pool.set_active_workers(self.perf.meta_pool_workers());
         self.meta_pool = Some(pool);
         self.meta_rx = Some(rx);
         self.meta_inflight.clear();
@@ -161,6 +162,12 @@ impl super::WavesPreviewer {
         let limit = self.perf.video_poster_concurrency();
         if let Some(pool) = self.meta_pool.as_ref() {
             pool.set_video_poster_limit(limit);
+        }
+    }
+
+    pub(super) fn push_load_governor_to_meta_pool(&self) {
+        if let Some(pool) = self.meta_pool.as_ref() {
+            pool.set_active_workers(self.perf.meta_pool_workers());
         }
     }
 
@@ -321,10 +328,18 @@ impl super::WavesPreviewer {
         let Some(srt_path) = transcript::srt_path_for_audio(path) else {
             return;
         };
-        if !srt_path.is_file() {
-            self.clear_transcript_for_path(path);
-            self.transcript_inflight.remove(path);
-            return;
+        // A visible row calls this every frame. Never stat the adjacent SRT
+        // here: one SMB timeout would freeze the entire window. The shared
+        // path-status worker caches both positive and negative answers and
+        // periodically re-probes, so an SRT created later is still noticed.
+        match self.path_status.status_once(&srt_path) {
+            crate::app::path_status::PathStatus::Unknown => return,
+            crate::app::path_status::PathStatus::Missing => {
+                self.clear_transcript_for_path(path);
+                self.transcript_inflight.remove(path);
+                return;
+            }
+            crate::app::path_status::PathStatus::Present => {}
         }
         if self.transcript_for_path(path).is_some() {
             return;
@@ -506,9 +521,9 @@ impl super::WavesPreviewer {
         let mut drained = 0usize;
         let playback_guard = self.playback_is_playing_now() || self.playback_session.is_playing;
         let update_budget = if playback_guard {
-            16
+            self.perf.meta_update_drain_limit().min(8)
         } else {
-            crate::app::META_UPDATE_FRAME_BUDGET
+            self.perf.meta_update_drain_limit()
         };
         let time_budget_micros = if playback_guard { 250 } else { 1_000 };
         // Cap by count AND wall time: applying an update allocates (meta box,
@@ -596,11 +611,15 @@ impl super::WavesPreviewer {
             self.flush_pending_meta_sort(ctx, false);
             // Metadata streaming does not need 60fps repaints; 15fps keeps the
             // list visibly filling in while leaving CPU to the workers.
-            ctx.request_repaint_after(std::time::Duration::from_millis(66));
+            ctx.request_repaint_after(std::time::Duration::from_millis(
+                self.perf.background_repaint_ms().max(66),
+            ));
         }
         if drained >= update_budget {
             // Avoid a stall by continuing to consume backlog in future frames.
-            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_millis(
+                self.perf.background_repaint_ms(),
+            ));
         }
     }
 }

@@ -108,6 +108,15 @@ lto = "thin"
 # 0 (10-20x); light optimization keeps `cargo run` interactive while
 # preserving debug assertions and usable backtraces.
 opt-level = 1
+# PDB generation for this crate plus the generated Windows API crates can use
+# several additional GiB. Keep debug assertions and the in-app diagnostics,
+# but omit native debug symbols from ordinary `cargo run` builds so they also
+# compile when the machine is already under memory pressure.
+debug = 0
+# Incremental query state raises the main crate's peak memory markedly and can
+# make a nearly-full machine fail during type checking. Dependencies remain
+# cached normally; this only avoids retaining/writing the per-crate query graph.
+incremental = false
 
 # Hot DSP dependencies get full optimization even in dev builds.
 [profile.dev.package.rustfft]
@@ -162,6 +171,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",

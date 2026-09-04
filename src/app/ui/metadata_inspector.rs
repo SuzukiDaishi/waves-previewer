@@ -2167,7 +2167,10 @@ fn draw_metadata_details(
                     {
                         action = Some(PendingMetadataAction::Extract {
                             payload: node.payload,
-                            overwrite: output.exists(),
+                            // The native save dialog owns overwrite
+                            // confirmation. Avoid another stat on the UI
+                            // thread after it returns a user-controlled path.
+                            overwrite: true,
                             output,
                         });
                     }

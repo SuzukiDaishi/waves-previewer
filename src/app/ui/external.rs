@@ -193,6 +193,7 @@ impl crate::app::WavesPreviewer {
                                     self.external_sheet_selected = Some(selected);
                                     if let Some(idx) = self.external_active_source {
                                         if let Some(src) = self.external_sources.get_mut(idx) {
+                                            let src = std::sync::Arc::make_mut(src);
                                             src.sheet_name = self.external_sheet_selected.clone();
                                         }
                                     }
@@ -207,6 +208,7 @@ impl crate::app::WavesPreviewer {
                                 }
                                 if let Some(idx) = self.external_active_source {
                                     if let Some(src) = self.external_sources.get_mut(idx) {
+                                        let src = std::sync::Arc::make_mut(src);
                                         src.has_header = self.external_has_header;
                                         src.header_row = self.external_header_row;
                                     }
@@ -231,6 +233,7 @@ impl crate::app::WavesPreviewer {
                                     };
                                     if let Some(idx) = self.external_active_source {
                                         if let Some(src) = self.external_sources.get_mut(idx) {
+                                            let src = std::sync::Arc::make_mut(src);
                                             src.header_row = self.external_header_row;
                                         }
                                     }
@@ -254,6 +257,7 @@ impl crate::app::WavesPreviewer {
                                     };
                                     if let Some(idx) = self.external_active_source {
                                         if let Some(src) = self.external_sources.get_mut(idx) {
+                                            let src = std::sync::Arc::make_mut(src);
                                             src.data_row = self.external_data_row;
                                         }
                                     }

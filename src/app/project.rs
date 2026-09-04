@@ -95,8 +95,9 @@ pub struct ProjectComment {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited_at: Option<String>,
-    /// Edit count. Merging picks the highest `(rev, edited_at)`, so this is
-    /// what settles two edits to the same comment from two processes.
+    /// Edit count. Merging picks the highest revision first, then the edit
+    /// timestamp and a deterministic comparison of the remaining fields, so
+    /// this is what settles two edits to the same comment from two processes.
     #[serde(default)]
     pub rev: u32,
 
@@ -111,7 +112,7 @@ pub struct ProjectComment {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deleted: bool,
 
-    /// Roots only. A resolved thread collapses by default.
+    /// Roots only. The UI uses this for the Unresolved filter and status label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2232,6 +2233,7 @@ impl super::WavesPreviewer {
         self.active_tab = None;
         self.workspace_view = super::types::WorkspaceView::List;
         self.edited_cache.clear();
+        self.deferred_session_tab_audio.clear();
         self.effect_graph = super::types::EffectGraphState::default();
         self.pending_activate_path = None;
         self.pending_editor_autoplay_path = None;
@@ -2246,6 +2248,7 @@ impl super::WavesPreviewer {
         self.sample_rate_override.clear();
         self.bit_depth_override.clear();
         self.format_override.clear();
+        self.clear_list_art_texture_cache();
         self.list_undo_stack.clear();
         self.list_redo_stack.clear();
         self.overwrite_undo_stack.clear();
@@ -2294,13 +2297,14 @@ impl super::WavesPreviewer {
         self.list_columns_window_pos = self.list_columns_window_global_pos;
     }
 
-    /// `exists` is parallel to `raw_paths` and comes from the parse worker
-    /// (`ParsedSession::file_exists`). Statting here instead would put one
+    /// `exists` is parallel to `raw_paths` and comes from the parse worker.
+    /// Statting here instead would put one
     /// blocking syscall per row on the UI thread; a session listing a few
     /// thousand files on a network share spent seconds in this loop alone.
     /// A short slice (older callers, or a truncated document) is treated as
     /// "unknown, assume present" -- the metadata worker flags a file it
     /// cannot decode anyway.
+    #[allow(dead_code)]
     pub(super) fn reset_list_from_project(
         &mut self,
         raw_paths: &[String],
@@ -2975,8 +2979,18 @@ show_note_labels = false
             resolved_at: None,
         };
         let encoded = toml::to_string_pretty(&comment).unwrap();
-        for absent in ["parent", "author_host", "author_name", "edited_at", "deleted", "resolved"] {
-            assert!(!encoded.contains(absent), "{absent} should be omitted:\n{encoded}");
+        for absent in [
+            "parent",
+            "author_host",
+            "author_name",
+            "edited_at",
+            "deleted",
+            "resolved",
+        ] {
+            assert!(
+                !encoded.contains(absent),
+                "{absent} should be omitted:\n{encoded}"
+            );
         }
     }
 

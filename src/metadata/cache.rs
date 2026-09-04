@@ -77,21 +77,27 @@ pub fn default_cache_path() -> Option<PathBuf> {
 pub struct MetadataCache {
     connection: Connection,
     path: PathBuf,
+    disk_soft_limit: u64,
 }
 
 impl MetadataCache {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_limit(path, DISK_SOFT_LIMIT)
+    }
+
+    pub fn open_with_limit(path: &Path, disk_soft_limit: u64) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create metadata cache directory {}", parent.display()))?;
         }
-        match Self::open_initialized(path) {
+        let disk_soft_limit = effective_disk_soft_limit(path, disk_soft_limit);
+        match Self::open_initialized(path, disk_soft_limit) {
             Ok(cache) => Ok(cache),
             Err(first_error) => {
                 // A corrupt database is cache data, never user data. Preserve
                 // it for diagnosis and start with a clean database.
                 preserve_corrupt_cache_files(path);
-                Self::open_initialized(path).with_context(|| {
+                Self::open_initialized(path, disk_soft_limit).with_context(|| {
                     format!(
                         "recreate metadata cache after error at {}: {first_error}",
                         path.display()
@@ -101,11 +107,12 @@ impl MetadataCache {
         }
     }
 
-    fn open_initialized(path: &Path) -> Result<Self> {
+    fn open_initialized(path: &Path, disk_soft_limit: u64) -> Result<Self> {
         let connection = Self::open_connection(path)?;
         let cache = Self {
             connection,
             path: path.to_path_buf(),
+            disk_soft_limit,
         };
         cache.initialize()?;
         Ok(cache)
@@ -227,6 +234,9 @@ impl MetadataCache {
     }
 
     fn store(&self, key: &CacheKey, summary: &MetadataSummary) -> Result<()> {
+        if !cache_volume_has_headroom(&self.path) {
+            return Ok(());
+        }
         let coverage_json = serde_json::to_string(&summary.coverage)?;
         let summary_json = serde_json::to_string(summary)?;
         self.connection.execute(
@@ -259,10 +269,10 @@ impl MetadataCache {
             |row| row.get(0),
         )?;
         let stored = stored.max(0) as u64;
-        if stored <= DISK_SOFT_LIMIT {
+        if stored <= self.disk_soft_limit {
             return Ok(());
         }
-        let target = DISK_SOFT_LIMIT.saturating_mul(9) / 10;
+        let target = self.disk_soft_limit.saturating_mul(9) / 10;
         let mut remaining = stored;
         let mut statement = self.connection.prepare(
             "
@@ -313,6 +323,63 @@ impl MetadataCache {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn cache_volume_has_headroom(path: &Path) -> bool {
+    let probe = path.parent().unwrap_or(path);
+    volume_space(probe)
+        .map(|(free, total)| free > (1024 * 1024 * 1024u64).max(total / 20))
+        // Failure to ask for space must not disable the cache forever; the
+        // actual SQLite write still reports a full volume safely.
+        .unwrap_or(true)
+}
+
+fn effective_disk_soft_limit(path: &Path, requested: u64) -> u64 {
+    let probe = path.parent().unwrap_or(path);
+    volume_space(probe)
+        .map(|(free, total)| disk_limit_for_space(requested, free, total))
+        .unwrap_or(requested)
+}
+
+fn disk_limit_for_space(requested: u64, free: u64, total: u64) -> u64 {
+    let reserve = (1024 * 1024 * 1024u64).max(total / 20);
+    requested.min(free.saturating_sub(reserve))
+}
+
+#[cfg(windows)]
+fn volume_space(path: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut available = 0u64;
+    let mut total = 0u64;
+    let mut free = 0u64;
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, &mut total, &mut free) };
+    (ok != 0).then_some((available.min(free), total))
+}
+
+#[cfg(unix)]
+fn volume_space(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(path.as_ptr(), &mut stats) } != 0 {
+        return None;
+    }
+    let block = stats.f_frsize as u64;
+    Some((
+        (stats.f_bavail as u64).saturating_mul(block),
+        (stats.f_blocks as u64).saturating_mul(block),
+    ))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn volume_space(_path: &Path) -> Option<(u64, u64)> {
+    None
 }
 
 fn preserve_corrupt_cache_files(path: &Path) {
@@ -457,6 +524,13 @@ pub struct MetadataSummaryPool {
 
 impl MetadataSummaryPool {
     pub fn new(cache_path: Option<PathBuf>) -> (Self, mpsc::Receiver<SummaryUpdate>) {
+        Self::new_with_disk_limit(cache_path, DISK_SOFT_LIMIT)
+    }
+
+    pub fn new_with_disk_limit(
+        cache_path: Option<PathBuf>,
+        disk_soft_limit: u64,
+    ) -> (Self, mpsc::Receiver<SummaryUpdate>) {
         let shared = Arc::new(SharedQueue {
             inner: Mutex::new(QueueInner {
                 tasks: HashMap::new(),
@@ -468,11 +542,11 @@ impl MetadataSummaryPool {
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(false),
         });
-        let (result_tx, result_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::sync_channel(64);
         let worker_shared = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("metadata-summary-cache".to_string())
-            .spawn(move || summary_worker(worker_shared, cache_path, result_tx))
+            .spawn(move || summary_worker(worker_shared, cache_path, disk_soft_limit, result_tx))
             .expect("spawn metadata summary worker");
         (Self { shared }, result_rx)
     }
@@ -558,7 +632,8 @@ impl Drop for MetadataSummaryPool {
 fn summary_worker(
     shared: Arc<SharedQueue>,
     cache_path: Option<PathBuf>,
-    result_tx: mpsc::Sender<SummaryUpdate>,
+    disk_soft_limit: u64,
+    result_tx: mpsc::SyncSender<SummaryUpdate>,
 ) {
     // Do not contend with native window/audio startup. SQLite is opened only
     // when the first metadata column actually requests work.
@@ -597,7 +672,7 @@ fn summary_worker(
         if !cache_initialized {
             cache = cache_path
                 .as_deref()
-                .and_then(|path| MetadataCache::open(path).ok());
+                .and_then(|path| MetadataCache::open_with_limit(path, disk_soft_limit).ok());
             cache_initialized = true;
         }
         let result = if let Some(cache) = cache.as_mut() {
@@ -645,14 +720,41 @@ fn summary_worker(
     }
 }
 
-#[derive(Default)]
 pub struct SummaryMemoryCache {
     entries: HashMap<PathBuf, Arc<MetadataSummary>>,
     order: VecDeque<PathBuf>,
     estimated_bytes: usize,
+    max_entries: usize,
+    max_bytes: usize,
+}
+
+impl Default for SummaryMemoryCache {
+    fn default() -> Self {
+        Self::with_limits(MEMORY_SUMMARY_LIMIT, MEMORY_BYTE_LIMIT)
+    }
 }
 
 impl SummaryMemoryCache {
+    pub fn with_limits(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            estimated_bytes: 0,
+            max_entries: max_entries.max(1),
+            max_bytes: max_bytes.max(1),
+        }
+    }
+
+    pub fn set_limits(&mut self, max_entries: usize, max_bytes: usize) {
+        self.max_entries = max_entries.max(1);
+        self.max_bytes = max_bytes.max(1);
+        self.evict_to_limit();
+    }
+
+    pub fn estimated_bytes(&self) -> usize {
+        self.estimated_bytes
+    }
+
     pub fn get(&mut self, path: &Path) -> Option<Arc<MetadataSummary>> {
         let value = self.entries.get(path).cloned()?;
         self.touch(path);
@@ -676,8 +778,12 @@ impl SummaryMemoryCache {
             .saturating_add(estimate_summary_bytes(&summary));
         self.entries.insert(path.clone(), Arc::clone(&summary));
         self.order.push_back(path);
-        while self.entries.len() > MEMORY_SUMMARY_LIMIT || self.estimated_bytes > MEMORY_BYTE_LIMIT
-        {
+        self.evict_to_limit();
+        summary
+    }
+
+    fn evict_to_limit(&mut self) {
+        while self.entries.len() > self.max_entries || self.estimated_bytes > self.max_bytes {
             let Some(victim) = self.order.pop_front() else {
                 break;
             };
@@ -687,7 +793,6 @@ impl SummaryMemoryCache {
                     .saturating_sub(estimate_summary_bytes(&removed));
             }
         }
-        summary
     }
 
     fn touch(&mut self, path: &Path) {
@@ -729,6 +834,37 @@ mod tests {
         wav.extend_from_slice(b"data");
         wav.extend_from_slice(&0u32.to_le_bytes());
         wav
+    }
+
+    fn empty_summary(path: &str, padding: usize) -> MetadataSummary {
+        MetadataSummary {
+            schema_version: crate::metadata::PARSER_SCHEMA_VERSION,
+            source: PathBuf::from(path),
+            container: crate::metadata::ContainerKind::Unknown,
+            completion: crate::metadata::Completion::Complete,
+            fields: Vec::new(),
+            raw_fields: Default::default(),
+            unknown_nodes: 0,
+            diagnostics: Vec::new(),
+            coverage: vec!["x".repeat(padding)],
+        }
+    }
+
+    #[test]
+    fn memory_summary_cache_is_lru_and_byte_bounded() {
+        let mut cache = SummaryMemoryCache::with_limits(2, usize::MAX);
+        cache.insert(PathBuf::from("a"), empty_summary("a", 0));
+        cache.insert(PathBuf::from("b"), empty_summary("b", 0));
+        assert!(cache.get(Path::new("a")).is_some());
+        cache.insert(PathBuf::from("c"), empty_summary("c", 0));
+        assert!(cache.peek(Path::new("a")).is_some());
+        assert!(cache.peek(Path::new("b")).is_none());
+        assert!(cache.peek(Path::new("c")).is_some());
+
+        let mut tiny = SummaryMemoryCache::with_limits(100, 1_024);
+        tiny.insert(PathBuf::from("large"), empty_summary("large", 8_192));
+        assert!(tiny.peek(Path::new("large")).is_none());
+        assert_eq!(tiny.estimated_bytes(), 0);
     }
 
     #[test]
@@ -874,5 +1010,17 @@ mod tests {
         assert!(combined.summary.coverage.contains(&"__raw__".to_string()));
         drop(cache);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn disk_limit_preserves_the_larger_of_one_gib_or_five_percent() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let requested = 512 * 1024 * 1024;
+        assert_eq!(disk_limit_for_space(requested, 3 * GIB, 100 * GIB), 0);
+        assert_eq!(
+            disk_limit_for_space(requested, 6 * GIB, 100 * GIB),
+            requested
+        );
+        assert_eq!(disk_limit_for_space(requested, GIB / 2, 8 * GIB), 0);
     }
 }

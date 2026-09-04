@@ -8,6 +8,7 @@ use walkdir::WalkDir;
 ///
 /// `missing` covers paths that are neither a file nor a directory — a stale
 /// clipboard from a since-ejected volume, most often.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct FileMergeCounts {
     pub added: usize,
@@ -16,6 +17,7 @@ pub(super) struct FileMergeCounts {
     pub missing: usize,
 }
 
+#[allow(dead_code)]
 impl FileMergeCounts {
     /// How the result reads in a toast, or `None` when there is nothing worth
     /// interrupting the user for.
@@ -44,7 +46,10 @@ impl FileMergeCounts {
 
 impl super::WavesPreviewer {
     fn is_open_target_audio_path(&self, path: &Path) -> bool {
-        if !path.is_file() || self.should_skip_path(path) {
+        // The scan worker validates existence. This helper runs on the UI
+        // thread only to remember which supported argument should be selected
+        // once it appears, so it must not stat a user path here.
+        if self.should_skip_path(path) {
             return false;
         }
         path.extension()
@@ -132,6 +137,7 @@ impl super::WavesPreviewer {
     }
 
     // Merge helper: add a folder recursively (supported audio only)
+    #[allow(dead_code)]
     pub(super) fn add_folder_merge(&mut self, dir: &Path) -> usize {
         let mut added = 0usize;
         let skip_dotfiles = self.skip_dotfiles;
@@ -169,6 +175,7 @@ impl super::WavesPreviewer {
     }
 
     // Merge helper: add explicit files (supported audio only)
+    #[allow(dead_code)]
     pub(super) fn add_files_merge(&mut self, paths: &[PathBuf]) -> usize {
         self.add_files_merge_counted(paths).added
     }
@@ -180,6 +187,7 @@ impl super::WavesPreviewer {
     /// in the list" from "nothing happened because none of them were audio".
     /// Paste needs that distinction: with drag and drop the user can see what
     /// they dropped, but a clipboard is invisible until something appears.
+    #[allow(dead_code)]
     pub(super) fn add_files_merge_counted(&mut self, paths: &[PathBuf]) -> FileMergeCounts {
         let mut counts = FileMergeCounts::default();
         for p in paths {

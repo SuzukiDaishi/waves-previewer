@@ -167,26 +167,24 @@ impl WavesPreviewer {
                 .map(|report| !report.changes.is_empty())
                 .unwrap_or(false);
             if ui
-                .add_enabled(
-                    has_changes,
-                    egui::Button::new("Changed Since Last Open..."),
-                )
+                .add_enabled(has_changes, egui::Button::new("Changed Since Last Open..."))
                 .on_hover_text("Files this session points at that changed since you last opened it")
-                .on_disabled_hover_text("No referenced file changed since you last opened this session")
+                .on_disabled_hover_text(
+                    "No referenced file changed since you last opened this session",
+                )
                 .clicked()
             {
                 self.show_session_changes_window = true;
                 ui.close();
             }
+            let comments_hover = if self.project_path.is_some() {
+                "The conversation stored in this session, shared with everyone who opens it"
+            } else {
+                "Start the conversation now; it will be shared when this session is first saved"
+            };
             if ui
-                .add_enabled(
-                    self.project_path.is_some(),
-                    egui::Button::new("Comments..."),
-                )
-                .on_hover_text(
-                    "The conversation stored in this session, shared with everyone who opens it",
-                )
-                .on_disabled_hover_text("Save the session first — comments live in the .nwsess")
+                .button("Comments...")
+                .on_hover_text(comments_hover)
                 .clicked()
             {
                 self.open_comments_window();

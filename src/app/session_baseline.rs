@@ -456,20 +456,12 @@ impl super::WavesPreviewer {
         if total == 0 {
             // Nothing to look at: still record the visit so the next open has
             // an anchor.
-            self.session_store.update_baseline(
-                session_key.clone(),
-                Vec::new(),
-                stale,
-            );
+            self.session_store
+                .update_baseline(session_key.clone(), Vec::new(), stale);
             let now = now_unix();
             if let Some(path) = self.project_path.clone() {
-                self.session_store.record_visit(
-                    session_key,
-                    path,
-                    now,
-                    now,
-                    self.session_revision,
-                );
+                self.session_store
+                    .record_visit(session_key, path, now, now, self.session_revision);
             }
             return;
         }
@@ -502,8 +494,8 @@ impl super::WavesPreviewer {
                         // Tier 2 only runs when tier 1 found a difference, or
                         // when this file has never been hashed and the
                         // backfill budget covered it.
-                        let wanted_hash = matches!(probe, FileProbe::Present(..))
-                            && (stat_moved || job.backfill);
+                        let wanted_hash =
+                            matches!(probe, FileProbe::Present(..)) && (stat_moved || job.backfill);
                         let hash = if wanted_hash {
                             super::session_sync::hash_file_content(&job.path).ok()
                         } else {
@@ -661,12 +653,12 @@ impl super::WavesPreviewer {
         self.debug_log(format!("{summary} since {}", format_stamp(since)));
         self.push_toast(
             super::types::ToastSeverity::Warning,
-            format!("{summary} since you last opened this session ({})", format_stamp(since)),
+            format!(
+                "{summary} since you last opened this session ({})",
+                format_stamp(since)
+            ),
         );
-        self.session_file_changes = Some(super::types::SessionFileChanges {
-            since,
-            changes,
-        });
+        self.session_file_changes = Some(super::types::SessionFileChanges { since, changes });
     }
 }
 
@@ -733,8 +725,7 @@ impl super::WavesPreviewer {
                             // with no hash would replace one that may still
                             // carry a good one, and nothing would re-hash it
                             // because the stat would then match.
-                            let Some(hash) =
-                                super::session_sync::hash_file_content(&path).ok()
+                            let Some(hash) = super::session_sync::hash_file_content(&path).ok()
                             else {
                                 continue;
                             };
@@ -812,10 +803,7 @@ impl super::WavesPreviewer {
     /// Ask the store for this session's stored versions and open the window.
     pub(super) fn open_session_history_window(&mut self) {
         let Some(path) = self.project_path.clone() else {
-            self.push_toast(
-                super::types::ToastSeverity::Info,
-                "No session is open",
-            );
+            self.push_toast(super::types::ToastSeverity::Info, "No session is open");
             return;
         };
         if !self.session_store.is_enabled() {
@@ -972,7 +960,10 @@ mod tests {
     #[test]
     fn an_untouched_file_is_not_reported_and_needs_no_hash() {
         let previous = base(100, 5, Some("abc"));
-        assert_eq!(classify(Some(&previous), FileProbe::Present(100, 5), None), None);
+        assert_eq!(
+            classify(Some(&previous), FileProbe::Present(100, 5), None),
+            None
+        );
     }
 
     #[test]
@@ -980,7 +971,10 @@ mod tests {
         // The point of the second tier: copied back, restored from a backup,
         // or re-exported byte-identically. The mtime moved; the audio did not.
         let previous = base(100, 5, Some("abc"));
-        assert_eq!(classify(Some(&previous), FileProbe::Present(100, 9), Some("abc")), None);
+        assert_eq!(
+            classify(Some(&previous), FileProbe::Present(100, 9), Some("abc")),
+            None
+        );
     }
 
     #[test]
@@ -1005,9 +999,15 @@ mod tests {
 
     #[test]
     fn a_new_reference_is_added_and_a_vanished_one_is_removed() {
-        assert_eq!(classify(None, FileProbe::Present(10, 1), None), Some(ChangeKind::Added));
+        assert_eq!(
+            classify(None, FileProbe::Present(10, 1), None),
+            Some(ChangeKind::Added)
+        );
         let previous = base(10, 1, Some("abc"));
-        assert_eq!(classify(Some(&previous), FileProbe::Missing, None), Some(ChangeKind::Removed));
+        assert_eq!(
+            classify(Some(&previous), FileProbe::Missing, None),
+            Some(ChangeKind::Removed)
+        );
     }
 
     #[test]
@@ -1084,8 +1084,15 @@ mod tests {
     #[test]
     fn a_new_file_is_recorded_even_when_it_could_not_be_hashed() {
         // Nothing to preserve, so recording the stat is still progress.
-        let row = next_baseline_row(None, TrackedKind::Audio, FileProbe::Present(10, 1), true, None, 999)
-            .expect("row");
+        let row = next_baseline_row(
+            None,
+            TrackedKind::Audio,
+            FileProbe::Present(10, 1),
+            true,
+            None,
+            999,
+        )
+        .expect("row");
         assert_eq!(row.content_hash, None);
         assert_eq!(row.size, 10);
     }
@@ -1094,8 +1101,15 @@ mod tests {
     fn a_missing_file_produces_no_row() {
         let previous = base(100, 5, Some("abc"));
         assert!(
-            next_baseline_row(Some(&previous), TrackedKind::Audio, FileProbe::Missing, false, None, 999)
-                .is_none(),
+            next_baseline_row(
+                Some(&previous),
+                TrackedKind::Audio,
+                FileProbe::Missing,
+                false,
+                None,
+                999
+            )
+            .is_none(),
             "a vanished file is a removal, not a row"
         );
     }

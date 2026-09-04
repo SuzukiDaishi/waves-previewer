@@ -3183,8 +3183,7 @@ fn write_project_file_checked(
         .with_context(|| format!("write {}", temp.display()))?;
     if let Err(err) = session_sync::atomic_replace_file(&temp, path) {
         let _ = std::fs::remove_file(&temp);
-        return Err(anyhow::Error::from(err)
-            .context(format!("commit {}", path.display())));
+        return Err(anyhow::Error::from(err).context(format!("commit {}", path.display())));
     }
     Ok(SessionWriteOutcome::Written)
 }

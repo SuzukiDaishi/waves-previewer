@@ -125,19 +125,57 @@ impl super::WavesPreviewer {
     }
 
     fn insert_list_preview_cache_entry(&mut self, path: PathBuf, entry: ListPreviewCacheEntry) {
+        if let Some(previous) = self.list_preview_cache.remove(&path) {
+            self.list_preview_cache_bytes = self
+                .list_preview_cache_bytes
+                .saturating_sub(Self::list_preview_entry_bytes(&previous));
+        }
+        self.list_preview_cache_bytes = self
+            .list_preview_cache_bytes
+            .saturating_add(Self::list_preview_entry_bytes(&entry));
         self.list_preview_cache.insert(path.clone(), entry);
         self.touch_list_preview_cache_path(&path);
-        while self.list_preview_cache_order.len() > crate::app::LIST_PREVIEW_CACHE_MAX {
+        let byte_limit = self
+            .perf
+            .visual_cache_bytes()
+            .saturating_sub(self.list_art_texture_bytes)
+            .max(4 * 1024 * 1024);
+        while self.list_preview_cache_order.len() > crate::app::LIST_PREVIEW_CACHE_MAX
+            || self.list_preview_cache_bytes > byte_limit
+        {
             if let Some(oldest) = self.list_preview_cache_order.pop_front() {
-                self.list_preview_cache.remove(&oldest);
+                if let Some(removed) = self.list_preview_cache.remove(&oldest) {
+                    self.list_preview_cache_bytes = self
+                        .list_preview_cache_bytes
+                        .saturating_sub(Self::list_preview_entry_bytes(&removed));
+                }
             } else {
                 break;
             }
         }
     }
 
+    fn list_preview_entry_bytes(entry: &ListPreviewCacheEntry) -> usize {
+        entry
+            .audio
+            .channels
+            .iter()
+            .map(|channel| channel.len().saturating_mul(std::mem::size_of::<f32>()))
+            .sum()
+    }
+
+    pub(super) fn clear_list_preview_cache(&mut self) {
+        self.list_preview_cache.clear();
+        self.list_preview_cache_order.clear();
+        self.list_preview_cache_bytes = 0;
+    }
+
     pub(super) fn evict_list_preview_cache_path(&mut self, path: &Path) {
-        self.list_preview_cache.remove(path);
+        if let Some(removed) = self.list_preview_cache.remove(path) {
+            self.list_preview_cache_bytes = self
+                .list_preview_cache_bytes
+                .saturating_sub(Self::list_preview_entry_bytes(&removed));
+        }
         if let Some(pos) = self
             .list_preview_cache_order
             .iter()
@@ -206,7 +244,10 @@ impl super::WavesPreviewer {
         self.list_preview_job_max_secs = max_secs;
         let job_epoch = self.list_preview_job_epoch.clone();
         let settings = self.preview_settings_for_path(&path);
-        let (tx, rx) = mpsc::channel::<ListPreviewResult>();
+        // Each progressive update owns an audio buffer. Keep at most one
+        // waiting behind the UI so a slow frame cannot accumulate multiple
+        // clip-sized generations.
+        let (tx, rx) = mpsc::sync_channel::<ListPreviewResult>(1);
         std::thread::spawn(move || {
             let use_progressive = max_secs > 0.0 || emit_every_secs > 0.0;
             if use_progressive {
@@ -259,7 +300,7 @@ impl super::WavesPreviewer {
     fn spawn_list_preview_prefetch(&mut self, path: PathBuf, max_secs: f32) {
         use std::sync::mpsc;
         if self.list_preview_prefetch_tx.is_none() || self.list_preview_prefetch_rx.is_none() {
-            let (tx, rx) = mpsc::channel::<ListPreviewPrefetchResult>();
+            let (tx, rx) = mpsc::sync_channel::<ListPreviewPrefetchResult>(2);
             self.list_preview_prefetch_tx = Some(tx);
             self.list_preview_prefetch_rx = Some(rx);
         }
@@ -566,7 +607,7 @@ impl super::WavesPreviewer {
                 if self.is_list_workspace_active()
                     && selected_matches
                     && !self.is_virtual_path(&path)
-                    && path.is_file()
+                    && self.item_for_path(&path).is_some()
                 {
                     if let Some((audio, truncated, play_sr)) = self.take_cached_list_preview(&path)
                     {

@@ -212,7 +212,7 @@ impl super::WavesPreviewer {
 
     fn ensure_editor_viewport_channel(&mut self) {
         if self.editor_viewport_tx.is_none() || self.editor_viewport_rx.is_none() {
-            let (tx, rx) = std::sync::mpsc::channel::<EditorViewportJobMsg>();
+            let (tx, rx) = std::sync::mpsc::sync_channel::<EditorViewportJobMsg>(1);
             self.editor_viewport_tx = Some(tx);
             self.editor_viewport_rx = Some(rx);
         }
@@ -251,10 +251,18 @@ impl super::WavesPreviewer {
 
     pub(super) fn apply_editor_viewport_render_updates(&mut self, ctx: &egui::Context) {
         let mut messages = Vec::new();
-        if let Some(rx) = &self.editor_viewport_rx {
-            while let Ok(msg) = rx.try_recv() {
-                messages.push(msg);
+        let limit = self.perf.texture_uploads_per_frame();
+        {
+            let budget = &mut self.frame_budget;
+            if let Some(rx) = &self.editor_viewport_rx {
+                while messages.len() < limit && budget.should_continue() {
+                    let Ok(msg) = rx.try_recv() else { break };
+                    messages.push(msg);
+                }
             }
+        }
+        if messages.len() >= limit {
+            ctx.request_repaint();
         }
         for msg in messages {
             let EditorViewportJobMsg::Ready {
@@ -733,7 +741,7 @@ impl super::WavesPreviewer {
 
     fn render_editor_viewport_request(
         request: EditorViewportRequest,
-        tx: &std::sync::mpsc::Sender<EditorViewportJobMsg>,
+        tx: &std::sync::mpsc::SyncSender<EditorViewportJobMsg>,
     ) {
         match request {
             EditorViewportRequest::Waveform {

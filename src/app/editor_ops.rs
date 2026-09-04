@@ -3743,6 +3743,7 @@ impl crate::app::WavesPreviewer {
             viewport_restore,
         )) = apply_done
         {
+            let undo_max_bytes = self.perf.undo_cache_bytes();
             // Resolve identity -> index at completion time; the tab may have
             // moved (another tab closed) or be gone entirely.
             let cur_idx = self.tabs.iter().position(|t| t.tab_id == tab_id);
@@ -3754,7 +3755,7 @@ impl crate::app::WavesPreviewer {
                     let old_view = tab.view_offset;
                     let old_spp = tab.samples_per_px;
                     if let Some(undo_state) = undo {
-                        Self::push_undo_state_from(tab, undo_state, true);
+                        Self::push_undo_state_from(tab, undo_state, true, undo_max_bytes);
                     }
                     tab.preview_audio_tool = None;
                     tab.preview_overlay = None;

@@ -7,7 +7,7 @@
 //! batch all land on the same frame, each spends its own budget and the
 //! frame runs long enough for Windows to paint the ghost window.
 //!
-//! `FrameBudget` gives them a shared deadline. A drain that is not
+//! `DrainBudget` gives them a shared deadline. A drain that is not
 //! latency-critical asks `should_continue()` first and, when the budget is
 //! spent, leaves its work queued for the next frame and requests a repaint.
 //! Latency-critical work (playback sync, audio device recovery, input,
@@ -15,7 +15,7 @@
 
 use std::time::{Duration, Instant};
 
-pub struct FrameBudget {
+pub struct DrainBudget {
     started_at: Instant,
     budget: Duration,
     /// Set once the deadline is first observed to have passed, so the
@@ -25,20 +25,23 @@ pub struct FrameBudget {
     /// Number of drains that were skipped this frame. The frame loop uses
     /// this to decide whether another repaint is owed.
     deferred: u32,
+    /// Most recently skipped stage, retained across frames for Debug.
+    last_deferred_stage: Option<&'static str>,
 }
 
-impl Default for FrameBudget {
+impl Default for DrainBudget {
     fn default() -> Self {
         Self {
             started_at: Instant::now(),
             budget: Duration::from_millis(8),
             exhausted: false,
             deferred: 0,
+            last_deferred_stage: None,
         }
     }
 }
 
-impl FrameBudget {
+impl DrainBudget {
     /// Start a new frame. `started_at` is the frame's own start instant, so
     /// time already spent before the drain phase counts against the budget.
     pub fn begin(&mut self, started_at: Instant, budget: Duration) {
@@ -61,8 +64,14 @@ impl FrameBudget {
     }
 
     /// Record that a drain was skipped because the budget was spent.
+    #[cfg(test)]
     pub fn note_deferred(&mut self) {
+        self.note_deferred_at("(unspecified)");
+    }
+
+    pub fn note_deferred_at(&mut self, stage: &'static str) {
         self.deferred = self.deferred.saturating_add(1);
+        self.last_deferred_stage = Some(stage);
     }
 
     /// True when anything was skipped and the frame loop owes a repaint.
@@ -73,6 +82,10 @@ impl FrameBudget {
     pub fn deferred_count(&self) -> u32 {
         self.deferred
     }
+
+    pub fn last_deferred_stage(&self) -> Option<&'static str> {
+        self.last_deferred_stage
+    }
 }
 
 #[cfg(test)]
@@ -81,7 +94,7 @@ mod tests {
 
     #[test]
     fn a_fresh_budget_allows_work() {
-        let mut budget = FrameBudget::default();
+        let mut budget = DrainBudget::default();
         budget.begin(Instant::now(), Duration::from_millis(50));
         assert!(budget.should_continue());
         assert!(!budget.has_deferred_work());
@@ -89,7 +102,7 @@ mod tests {
 
     #[test]
     fn an_elapsed_budget_stops_work_and_stays_stopped() {
-        let mut budget = FrameBudget::default();
+        let mut budget = DrainBudget::default();
         // A deadline already in the past: begin() from an old instant.
         budget.begin(
             Instant::now() - Duration::from_millis(100),
@@ -103,7 +116,7 @@ mod tests {
 
     #[test]
     fn begin_resets_a_spent_budget() {
-        let mut budget = FrameBudget::default();
+        let mut budget = DrainBudget::default();
         budget.begin(
             Instant::now() - Duration::from_millis(100),
             Duration::from_millis(1),
@@ -120,7 +133,7 @@ mod tests {
 
     #[test]
     fn deferrals_are_counted() {
-        let mut budget = FrameBudget::default();
+        let mut budget = DrainBudget::default();
         budget.begin(Instant::now(), Duration::from_millis(50));
         budget.note_deferred();
         budget.note_deferred();

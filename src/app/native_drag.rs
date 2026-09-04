@@ -646,7 +646,7 @@ mod tests {
         );
         let item = MediaItem {
             id,
-            audio_asset: crate::audio_asset::AudioAssetDescriptor::external(path.clone()),
+            audio_asset: crate::audio_asset::AudioAssetDescriptor::external_unprobed(path.clone()),
             path: path.clone(),
             display_name,
             display_folder,

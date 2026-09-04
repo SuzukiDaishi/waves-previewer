@@ -95,6 +95,22 @@ impl AudioAssetDescriptor {
         Self::from_file_backing(AudioBacking::ExternalFile(path))
     }
 
+    /// Create a descriptor without touching the source path. List rows are
+    /// constructed on the UI thread and a removable/network file can block
+    /// even for a small header probe; the metadata worker fills these facts
+    /// later.
+    pub fn external_unprobed(path: PathBuf) -> Self {
+        Self {
+            id: AudioAssetId::new(),
+            revision: AssetRevision::INITIAL,
+            backing: AudioBacking::ExternalFile(path),
+            sample_rate: 0,
+            channels: 0,
+            bits_per_sample: 0,
+            frame_count: None,
+        }
+    }
+
     pub fn managed(path: PathBuf) -> Self {
         Self::from_file_backing(AudioBacking::ManagedFile(path))
     }
@@ -142,6 +158,18 @@ impl AudioAssetDescriptor {
         self.estimated_decoded_bytes()
             .map(|bytes| bytes <= MAX_RESIDENT_DECODE_BYTES)
             .unwrap_or(false)
+    }
+
+    /// Whether a known-size asset is too large for a resident editor buffer.
+    ///
+    /// An unprobed list row has no size yet. Treating "unknown" as oversized
+    /// made every freshly scanned WAV open as a paged, zero-sample tab before
+    /// its metadata worker had a chance to publish the header. Editor decode
+    /// is already single-flight, so unknown inputs are safely decoded one at
+    /// a time; only a positively known oversized asset takes the paged path.
+    pub fn requires_paged_editor(&self) -> bool {
+        self.estimated_decoded_bytes()
+            .is_some_and(|bytes| bytes > MAX_RESIDENT_DECODE_BYTES)
     }
 
     pub fn access(&self) -> AssetAccess<'_> {
@@ -402,5 +430,13 @@ mod tests {
             frame_count: Some(MAX_RESIDENT_DECODE_BYTES / 8 + 1),
         };
         assert!(!asset.may_reside_in_memory());
+        assert!(asset.requires_paged_editor());
+    }
+
+    #[test]
+    fn an_unprobed_asset_decodes_single_flight_instead_of_becoming_paged() {
+        let asset = AudioAssetDescriptor::external_unprobed(PathBuf::from("pending.wav"));
+        assert!(!asset.may_reside_in_memory());
+        assert!(!asset.requires_paged_editor());
     }
 }

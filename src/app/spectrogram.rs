@@ -26,8 +26,9 @@ impl super::WavesPreviewer {
         }
     }
 
-    fn evict_spectro_cache_if_needed(&mut self) {
-        while self.spectro_cache_bytes > super::SPECTRO_CACHE_MAX_BYTES {
+    pub(super) fn evict_spectro_cache_if_needed(&mut self) {
+        let max_bytes = self.perf.spectro_cache_bytes();
+        while self.spectro_cache_bytes > max_bytes {
             let Some(path) = self.spectro_cache_order.pop_front() else {
                 break;
             };
@@ -61,27 +62,25 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn apply_spectrogram_updates(&mut self, ctx: &egui::Context) {
-        let messages = self.collect_spectrogram_messages();
-        let hit_budget = messages.len() >= super::SPECTRO_DRAIN_MAX_PER_FRAME;
-        for msg in messages {
+        let mut drained = 0usize;
+        while drained < super::SPECTRO_DRAIN_MAX_PER_FRAME && self.frame_budget.should_continue() {
+            let next = {
+                let Some(rx) = &self.spectro_rx else {
+                    break;
+                };
+                rx.try_recv()
+            };
+            let msg = match next {
+                Ok(msg) => msg,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            };
             self.apply_spectrogram_message(ctx, msg);
+            drained += 1;
         }
-        if hit_budget {
+        if drained >= super::SPECTRO_DRAIN_MAX_PER_FRAME || !self.frame_budget.should_continue() {
             ctx.request_repaint();
         }
-    }
-
-    fn collect_spectrogram_messages(&mut self) -> Vec<SpectrogramJobMsg> {
-        let mut messages = Vec::new();
-        if let Some(rx) = &self.spectro_rx {
-            while let Ok(msg) = rx.try_recv() {
-                messages.push(msg);
-                if messages.len() >= super::SPECTRO_DRAIN_MAX_PER_FRAME {
-                    break;
-                }
-            }
-        }
-        messages
     }
 
     fn apply_spectrogram_message(&mut self, ctx: &egui::Context, msg: SpectrogramJobMsg) {
@@ -177,7 +176,9 @@ impl super::WavesPreviewer {
                 // every 64-frame tile caused cache churn, worker storms and—
                 // because workers retain an Arc—full spectrogram copies here.
                 // A coalesced progress repaint is enough while tiles arrive.
-                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                ctx.request_repaint_after(std::time::Duration::from_millis(
+                    self.perf.background_repaint_ms(),
+                ));
             }
             SpectrogramJobMsg::Done { path, generation } => {
                 if self.spectro_generation.get(&path).copied() != Some(generation) {

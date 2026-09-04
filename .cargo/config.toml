@@ -1,3 +1,9 @@
+[build]
+# Cargo otherwise starts one compiler per logical CPU. NeoWaves has several
+# heavy native/plugin dependencies, so that default can exhaust RAM before the
+# main crate starts even though each compiler would fit by itself.
+jobs = 1
+
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-Ctarget-feature=-crt-static"]
 

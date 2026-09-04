@@ -2393,9 +2393,10 @@ impl crate::app::WavesPreviewer {
                             self.debug.plugin_native_fallback_count =
                                 self.debug.plugin_native_fallback_count.saturating_add(1);
                         }
+                        let undo_max_bytes = self.perf.undo_cache_bytes();
                         if let Some(tab) = self.tabs.get_mut(result.tab_idx) {
                             if let Some(undo) = state.undo.take() {
-                                Self::push_undo_state_from(tab, undo, true);
+                                Self::push_undo_state_from(tab, undo, true, undo_max_bytes);
                             }
                             tab.preview_audio_tool = None;
                             tab.preview_overlay = None;

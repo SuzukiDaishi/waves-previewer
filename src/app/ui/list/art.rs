@@ -9,9 +9,13 @@ impl WavesPreviewer {
         path: &std::path::Path,
         art: std::sync::Arc<egui::ColorImage>,
     ) -> egui::TextureHandle {
-        if let Some(texture) = self.list_art_textures.get(path) {
-            return texture.clone();
+        if let Some(texture) = self.list_art_textures.get(path).cloned() {
+            self.list_art_texture_order
+                .retain(|candidate| candidate.as_path() != path);
+            self.list_art_texture_order.push_back(path.to_path_buf());
+            return texture;
         }
+        let estimated_bytes = art.size[0].saturating_mul(art.size[1]).saturating_mul(4);
         let texture = ctx.load_texture(
             format!("list-cover-art:{}", path.display()),
             (*art).clone(),
@@ -19,7 +23,45 @@ impl WavesPreviewer {
         );
         self.list_art_textures
             .insert(path.to_path_buf(), texture.clone());
+        self.list_art_texture_sizes
+            .insert(path.to_path_buf(), estimated_bytes);
+        self.list_art_texture_order.push_back(path.to_path_buf());
+        self.list_art_texture_bytes = self.list_art_texture_bytes.saturating_add(estimated_bytes);
+        self.trim_list_art_texture_cache();
         texture
+    }
+
+    pub(in crate::app) fn trim_list_art_texture_cache(&mut self) {
+        let limit = self
+            .perf
+            .visual_cache_bytes()
+            .saturating_sub(self.list_preview_cache_bytes)
+            .max(4 * 1024 * 1024);
+        while self.list_art_texture_bytes > limit {
+            let Some(victim) = self.list_art_texture_order.pop_front() else {
+                break;
+            };
+            self.list_art_textures.remove(&victim);
+            if let Some(bytes) = self.list_art_texture_sizes.remove(&victim) {
+                self.list_art_texture_bytes = self.list_art_texture_bytes.saturating_sub(bytes);
+            }
+        }
+    }
+
+    pub(in crate::app) fn remove_list_art_texture(&mut self, path: &std::path::Path) {
+        self.list_art_textures.remove(path);
+        self.list_art_texture_order
+            .retain(|candidate| candidate.as_path() != path);
+        if let Some(bytes) = self.list_art_texture_sizes.remove(path) {
+            self.list_art_texture_bytes = self.list_art_texture_bytes.saturating_sub(bytes);
+        }
+    }
+
+    pub(in crate::app) fn clear_list_art_texture_cache(&mut self) {
+        self.list_art_textures.clear();
+        self.list_art_texture_order.clear();
+        self.list_art_texture_sizes.clear();
+        self.list_art_texture_bytes = 0;
     }
 
     pub(super) fn open_list_art_window(&mut self, ctx: &egui::Context, path: &std::path::Path) {

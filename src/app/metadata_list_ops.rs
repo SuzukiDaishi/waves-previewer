@@ -290,29 +290,29 @@ impl WavesPreviewer {
     }
 
     pub(super) fn drain_metadata_summary_updates(&mut self, ctx: &egui::Context) {
-        let mut updates = Vec::new();
         let max_updates = if self.playback_is_playing_now() || self.playback_session.is_playing {
             8
         } else {
             128
         };
-        if let Some(rx) = &self.metadata_summary_rx {
-            for _ in 0..max_updates {
-                match rx.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        self.metadata_summary_rx = None;
-                        self.metadata_summary_pool = None;
-                        break;
-                    }
+        let mut drained = 0usize;
+        let mut disconnected = false;
+        while drained < max_updates && self.frame_budget.should_continue() {
+            let next = {
+                let Some(rx) = &self.metadata_summary_rx else {
+                    break;
+                };
+                rx.try_recv()
+            };
+            let update = match next {
+                Ok(update) => update,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
                 }
-            }
-        }
-        if updates.is_empty() {
-            return;
-        }
-        for update in updates {
+            };
+            drained += 1;
             if self.metadata_summary_inflight.get(&update.path).copied() != Some(update.generation)
             {
                 continue;
@@ -331,6 +331,13 @@ impl WavesPreviewer {
                 }
             }
         }
+        if disconnected {
+            self.metadata_summary_rx = None;
+            self.metadata_summary_pool = None;
+        }
+        if drained == 0 {
+            return;
+        }
         if matches!(self.sort_key, crate::app::types::SortKey::Metadata(_))
             && self.sort_dir != crate::app::types::SortDir::None
         {
@@ -339,7 +346,9 @@ impl WavesPreviewer {
         if !self.search_query.trim().is_empty() {
             self.schedule_search_refresh();
         }
-        ctx.request_repaint();
+        ctx.request_repaint_after(std::time::Duration::from_millis(
+            self.perf.background_repaint_ms(),
+        ));
     }
 
     pub(super) fn metadata_cell_for_path(

@@ -1399,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_session_prefs_roundtrip_filters_dedupes_and_limits() {
+    fn recent_session_prefs_roundtrip_filters_extensions_dedupes_and_limits() {
         let dir = temp_dir("prefs_roundtrip");
         let first = dir.join("first.nwsess");
         let second = dir.join("second.nwsess");
@@ -1428,7 +1428,7 @@ mod tests {
             second.clone(),
             second.clone(),
             legacy,
-            missing,
+            missing.clone(),
             third.clone(),
             fourth.clone(),
         ];
@@ -1441,18 +1441,11 @@ mod tests {
         loaded.set_recent_sessions_from_prefs(Vec::new());
         loaded.load_prefs_from_path(&prefs);
 
-        let mut expected = vec![
-            std::fs::canonicalize(first).expect("first canonical"),
-            std::fs::canonicalize(second).expect("second canonical"),
-            std::fs::canonicalize(third).expect("third canonical"),
-            std::fs::canonicalize(fourth).expect("fourth canonical"),
-        ];
-        expected.extend(
-            extras
-                .iter()
-                .take(6)
-                .map(|p| std::fs::canonicalize(p).expect("extra canonical")),
-        );
+        // Stale entries remain visible without probing user paths from the UI
+        // thread. Trying to open one reports the error from the background
+        // session-open job.
+        let mut expected = vec![first, second, missing, third, fourth];
+        expected.extend(extras.iter().take(5).cloned());
         assert_eq!(loaded.recent_session_paths_for_menu(), expected);
         assert_eq!(expected.len(), 10, "limit should cap the list at 10");
         let _ = std::fs::remove_dir_all(dir);
@@ -1480,12 +1473,7 @@ mod tests {
 
         // Under the 10-entry limit nothing is evicted; "second" moves to
         // front on its second insert instead of duplicating.
-        let expected = vec![
-            std::fs::canonicalize(fourth).expect("fourth canonical"),
-            std::fs::canonicalize(second).expect("second canonical"),
-            std::fs::canonicalize(third).expect("third canonical"),
-            std::fs::canonicalize(first).expect("first canonical"),
-        ];
+        let expected = vec![fourth, second, third, first];
         assert_eq!(app.recent_session_paths_for_menu(), expected);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1509,12 +1497,9 @@ mod tests {
         let menu = app.recent_session_paths_for_menu();
         assert_eq!(menu.len(), 10, "list should cap at RECENT_SESSION_LIMIT");
         // Most-recently-inserted first; the two oldest (session0, session1) are evicted.
-        assert_eq!(
-            menu[0],
-            std::fs::canonicalize(&paths[11]).expect("canonical")
-        );
-        assert!(!menu.contains(&std::fs::canonicalize(&paths[0]).expect("canonical")));
-        assert!(!menu.contains(&std::fs::canonicalize(&paths[1]).expect("canonical")));
+        assert_eq!(menu[0], paths[11]);
+        assert!(!menu.contains(&paths[0]));
+        assert!(!menu.contains(&paths[1]));
         let _ = std::fs::remove_dir_all(dir);
     }
 

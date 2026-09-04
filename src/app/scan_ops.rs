@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use super::types::{
-    ListLoadKind, PendingListLoadTarget, PendingListLoadTargetKind, ScanMessage, ScanRequestKind,
+    ListLoadKind, PendingListLoadTarget, PendingListLoadTargetKind, ScanMessage, ScanPendingBatch,
+    ScanRequestKind,
 };
 use super::WavesPreviewer;
 
@@ -33,17 +34,27 @@ impl WavesPreviewer {
         let original_files = std::mem::take(&mut self.original_files);
         let folder_intern = std::mem::take(&mut self.folder_intern);
         if items.len() > 50_000 {
-            std::thread::spawn(move || {
-                crate::app::threading::lower_current_thread_priority();
-                drop((
-                    items,
-                    path_index,
-                    item_index,
-                    files,
-                    original_files,
-                    folder_intern,
-                ));
-            });
+            let retired = std::sync::Arc::clone(&self.retired_list_drops);
+            retired.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let retired_for_worker = std::sync::Arc::clone(&retired);
+            let spawned = std::thread::Builder::new()
+                .name("neowaves-retired-list-drop".to_string())
+                .spawn(move || {
+                    crate::app::threading::lower_current_thread_priority();
+                    drop((
+                        items,
+                        path_index,
+                        item_index,
+                        files,
+                        original_files,
+                        folder_intern,
+                    ));
+                    retired_for_worker.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    crate::ui_wake::wake_ui();
+                });
+            if spawned.is_err() {
+                retired.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
@@ -59,8 +70,8 @@ impl WavesPreviewer {
         self.list_preview_prefetch_tx = None;
         self.list_preview_prefetch_rx = None;
         self.list_preview_prefetch_inflight.clear();
-        self.list_preview_cache.clear();
-        self.list_preview_cache_order.clear();
+        self.clear_list_preview_cache();
+        self.clear_list_art_texture_cache();
         self.spectro_cache.clear();
         self.spectro_inflight.clear();
         self.spectro_progress.clear();
@@ -88,6 +99,7 @@ impl WavesPreviewer {
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
         self.transcript_ai_inflight.clear();
+        self.clear_list_art_texture_cache();
         self.spectro_cache.clear();
         self.spectro_inflight.clear();
         self.spectro_progress.clear();
@@ -215,77 +227,44 @@ impl WavesPreviewer {
         self.scan_found_count.max(live)
     }
 
-    /// Grow the list containers toward the scanner's discovery count before
-    /// the appender catches up. Directory discovery runs far ahead of the
-    /// budgeted appends, so the reserve happens while the containers are
-    /// still small - otherwise the path/id hash maps rehashed ~1M entries
-    /// mid-load (a several-hundred-ms UI stall at the 7/8 load-factor
-    /// boundary), and the items vec re-copied hundreds of MB on growth.
-    fn reserve_list_capacity_for_scan(&mut self) {
-        let target = self.scan_discovered_count();
-        if target == 0 {
-            return;
-        }
-        let trace = std::env::var_os("NEOWAVES_BENCH_TRACE").is_some();
-        let t0 = std::time::Instant::now();
-        let before = (
-            self.items.capacity(),
-            self.path_index.capacity(),
-            self.items.len(),
-        );
-        if self.items.capacity() < target {
-            self.items.reserve(target - self.items.len());
-        }
-        if self.files.capacity() < target {
-            self.files.reserve(target - self.files.len());
-        }
-        if self.original_files.capacity() < target {
-            self.original_files
-                .reserve(target - self.original_files.len());
-        }
-        if self.path_index.capacity() < target {
-            self.path_index.reserve(target - self.path_index.len());
-        }
-        if self.item_index.capacity() < target {
-            self.item_index.reserve(target - self.item_index.len());
-        }
-        if trace {
-            let ms = t0.elapsed().as_secs_f64() * 1000.0;
-            if ms > 30.0 {
-                eprintln!(
-                    "[trace] reserve_list_capacity target={target} len={} items_cap {}->{} map_cap {}->{} took {ms:.1}ms",
-                    before.2,
-                    before.0,
-                    self.items.capacity(),
-                    before.1,
-                    self.path_index.capacity()
-                );
-            }
-        }
-    }
-
-    pub(super) fn append_scanned_paths(&mut self, batch: Vec<PathBuf>) {
-        if batch.is_empty() {
-            return;
+    /// Apply part of one scanner message. Returns true once the batch is
+    /// exhausted. Deadline checks happen between individual rows, so neither
+    /// a high-tier batch nor an unexpectedly expensive allocation owns a
+    /// complete UI frame.
+    fn append_scanned_paths_until(
+        &mut self,
+        batch: &mut ScanPendingBatch,
+        started: Instant,
+        budget: std::time::Duration,
+    ) -> bool {
+        if batch.is_done() {
+            return true;
         }
         self.note_files_membership_changed();
-        self.reserve_list_capacity_for_scan();
         let has_search = !self.search_query.trim().is_empty();
         let query = self.search_query.to_lowercase();
-        self.items.reserve(batch.len());
-        if !has_search {
-            self.files.reserve(batch.len());
-            self.original_files.reserve(batch.len());
-        }
-        for p in batch {
+        while batch.next < batch.paths.len() {
+            if batch.next > 0 && started.elapsed() >= budget {
+                break;
+            }
+            let p = std::mem::take(&mut batch.paths[batch.next]);
+            batch.next += 1;
             if self.path_index.contains_key(&p) {
                 continue;
             }
             let item = self.make_media_item(p.clone());
             let id = item.id;
+            let row = self.items.len();
+            if self.items.try_push(item).is_err() {
+                self.debug_log("scan stopped: unable to allocate another media-item chunk");
+                self.scan_rx = None;
+                self.scan_pending_batches.clear();
+                self.scan_worker_done = true;
+                self.scan_in_progress = false;
+                return true;
+            }
             self.path_index.insert(p.clone(), id);
-            self.item_index.insert(id, self.items.len());
-            self.items.push(item);
+            self.item_index.insert(id, row);
             if !has_search {
                 self.files.push(id);
                 self.original_files.push(id);
@@ -307,11 +286,22 @@ impl WavesPreviewer {
                 }
             }
         }
+        batch.is_done()
     }
 
     pub(super) fn process_scan_messages(&mut self) {
         if self.scan_rx.is_none() && self.scan_pending_batches.is_empty() && !self.scan_worker_done
         {
+            return;
+        }
+        if self.perf.memory_pressure == super::perf_profile::MemoryPressure::Critical
+            && self
+                .retired_list_drops
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+        {
+            // The bounded scanner channel now supplies backpressure while
+            // the previous large list is actually being freed.
             return;
         }
 
@@ -336,10 +326,23 @@ impl WavesPreviewer {
                 rx.try_recv()
             };
             match next {
-                Ok(ScanMessage::Batch(batch)) => self.scan_pending_batches.push_back(batch),
-                Ok(ScanMessage::Progress { visited, matched }) => {
+                Ok(ScanMessage::Batch(batch)) => {
+                    self.scan_pending_batches
+                        .push_back(ScanPendingBatch::new(batch));
+                    self.scan_pending_peak =
+                        self.scan_pending_peak.max(self.scan_pending_batches.len());
+                }
+                Ok(ScanMessage::Progress {
+                    visited,
+                    matched,
+                    io_sample_micros,
+                }) => {
                     self.scan_visited_count = self.scan_visited_count.max(visited);
                     self.scan_found_count = self.scan_found_count.max(matched);
+                    if let Some(micros) = io_sample_micros {
+                        self.perf
+                            .note_io_latency(std::time::Duration::from_micros(micros));
+                    }
                 }
                 Ok(ScanMessage::Done) => {
                     self.scan_rx = None;
@@ -356,11 +359,15 @@ impl WavesPreviewer {
         }
 
         while start.elapsed() < budget {
-            let Some(batch) = self.scan_pending_batches.pop_front() else {
+            let Some(mut batch) = self.scan_pending_batches.pop_front() else {
                 break;
             };
-            self.append_scanned_paths(batch);
+            let done = self.append_scanned_paths_until(&mut batch, start, budget);
             self.maybe_apply_pending_list_load_target();
+            if !done {
+                self.scan_pending_batches.push_front(batch);
+                break;
+            }
         }
 
         if self.scan_worker_done && self.scan_pending_batches.is_empty() {

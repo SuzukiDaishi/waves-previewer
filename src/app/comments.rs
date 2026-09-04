@@ -80,8 +80,10 @@ pub fn new_comment_id() -> String {
 /// Two versions of one comment only exist when its author edited it from two
 /// processes at once, so the tie-breaks matter less than being *decided*:
 /// every machine must pick the same winner, or the two keep overwriting each
-/// other forever. `rev` first, then the edit stamp, then the body as a last
-/// deterministic resort.
+/// other forever. `rev` first, then tombstone state and the edit stamp, then
+/// every remaining field as a deterministic resort. Otherwise two machines
+/// could each keep their own version when resolution metadata differed at the
+/// same revision and timestamp.
 fn supersedes(candidate: &ProjectComment, current: &ProjectComment) -> bool {
     match candidate.rev.cmp(&current.rev) {
         std::cmp::Ordering::Greater => return true,
@@ -95,11 +97,17 @@ fn supersedes(candidate: &ProjectComment, current: &ProjectComment) -> bool {
     }
     let candidate_stamp = candidate.edited_at.as_deref().unwrap_or("");
     let current_stamp = current.edited_at.as_deref().unwrap_or("");
-    match candidate_stamp.cmp(current_stamp) {
-        std::cmp::Ordering::Greater => true,
-        std::cmp::Ordering::Less => false,
-        std::cmp::Ordering::Equal => candidate.body > current.body,
-    }
+    candidate_stamp
+        .cmp(current_stamp)
+        .then_with(|| candidate.resolved_at.cmp(&current.resolved_at))
+        .then_with(|| candidate.resolved_by.cmp(&current.resolved_by))
+        .then_with(|| candidate.body.cmp(&current.body))
+        .then_with(|| candidate.parent.cmp(&current.parent))
+        .then_with(|| candidate.author_id.cmp(&current.author_id))
+        .then_with(|| candidate.author_host.cmp(&current.author_host))
+        .then_with(|| candidate.author_name.cmp(&current.author_name))
+        .then_with(|| candidate.created_at.cmp(&current.created_at))
+        .is_gt()
 }
 
 /// Fold `incoming` into `into`, keyed by id. Returns how many entries were
@@ -212,7 +220,9 @@ pub fn build_threads(comments: &[ProjectComment]) -> Vec<CommentNode> {
     }
 
     let order = |a: &&ProjectComment, b: &&ProjectComment| {
-        a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id))
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
     };
     roots.sort_by(order);
     for bucket in children.values_mut() {
@@ -423,7 +433,9 @@ fn parse_seconds(text: &str) -> Option<f64> {
 }
 
 fn parse_freq_field(field: &str) -> Option<(f32, f32)> {
-    let body = field.strip_suffix("Hz").or_else(|| field.strip_suffix("hz"))?;
+    let body = field
+        .strip_suffix("Hz")
+        .or_else(|| field.strip_suffix("hz"))?;
     let (low, high) = body.split_once('-')?;
     let low: f32 = low.trim().parse().ok()?;
     let high: f32 = high.trim().parse().ok()?;
@@ -465,7 +477,10 @@ mod tests {
 
         // The other direction reaches the same set: the merge is commutative.
         let mut reversed = theirs;
-        merge_into(&mut reversed, vec![comment("a", None, "2026-09-01T00:00:00Z")]);
+        merge_into(
+            &mut reversed,
+            vec![comment("a", None, "2026-09-01T00:00:00Z")],
+        );
         assert_eq!(
             mine.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
             reversed.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
@@ -504,6 +519,25 @@ mod tests {
         removed.deleted = true;
         assert_eq!(merge_into(&mut into, vec![removed]), 1);
         assert!(into[0].deleted);
+    }
+
+    #[test]
+    fn equal_revision_resolution_races_converge_in_both_directions() {
+        let mut open = comment("a", None, "2026-09-01T00:00:00Z");
+        open.rev = 1;
+        open.edited_at = Some("2026-09-01T00:05:00Z".to_string());
+
+        let mut resolved = open.clone();
+        resolved.resolved_by = Some("tanaka".to_string());
+        resolved.resolved_at = Some("2026-09-01T00:05:00Z".to_string());
+
+        let mut left = vec![open.clone()];
+        merge_into(&mut left, [resolved.clone()]);
+        let mut right = vec![resolved];
+        merge_into(&mut right, [open]);
+
+        assert_eq!(left, right);
+        assert!(left[0].resolved_at.is_some());
     }
 
     #[test]

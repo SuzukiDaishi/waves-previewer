@@ -371,7 +371,7 @@ impl WavesPreviewer {
             false
         };
         if updated {
-            self.list_art_textures.remove(path);
+            self.remove_list_art_texture(path);
         }
         if silent_video_timeline {
             let out_sr = self.audio.shared.out_sample_rate.max(1);
@@ -404,7 +404,7 @@ impl WavesPreviewer {
             item.meta = None;
         }
         self.sample_rate_probe_cache.remove(path);
-        self.list_art_textures.remove(path);
+        self.remove_list_art_texture(path);
     }
 
     pub(super) fn transcript_for_path(&self, path: &Path) -> Option<&Transcript> {

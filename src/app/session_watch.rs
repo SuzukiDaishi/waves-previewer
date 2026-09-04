@@ -98,7 +98,7 @@ pub(super) fn spawn_session_watch(
     let stop = Arc::new(AtomicBool::new(false));
     let suspend = Arc::new(AtomicBool::new(false));
     let target = Arc::new(Mutex::new(WatchTarget { path, fingerprint }));
-    let (tx, rx) = std::sync::mpsc::channel::<SessionWatchEvent>();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<SessionWatchEvent>(2);
     {
         let stop = Arc::clone(&stop);
         let suspend = Arc::clone(&suspend);
@@ -142,7 +142,8 @@ pub(super) fn spawn_session_watch(
                     };
                     match probe {
                         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                            next_sleep = super::watch::next_walk_delay(interval_ms, started.elapsed());
+                            next_sleep =
+                                super::watch::next_walk_delay(interval_ms, started.elapsed());
                             if !reported_missing {
                                 reported_missing = true;
                                 reported = None;
@@ -152,7 +153,8 @@ pub(super) fn spawn_session_watch(
                             continue;
                         }
                         Err(err) => {
-                            next_sleep = super::watch::next_walk_delay(interval_ms, started.elapsed());
+                            next_sleep =
+                                super::watch::next_walk_delay(interval_ms, started.elapsed());
                             if !reported_error {
                                 reported_error = true;
                                 send(SessionWatchEvent::Unreadable(err.to_string()));
@@ -188,9 +190,11 @@ pub(super) fn spawn_session_watch(
                                 send(SessionWatchEvent::Removed);
                             }
                         }
-                        Ok(ref state @ session_sync::SessionDiskState::Present {
-                            fingerprint, ..
-                        }) => {
+                        Ok(
+                            ref state @ session_sync::SessionDiskState::Present {
+                                fingerprint, ..
+                            },
+                        ) => {
                             if fingerprint == expected {
                                 // Back in agreement: a save of ours landed,
                                 // or someone reverted. Re-arm.

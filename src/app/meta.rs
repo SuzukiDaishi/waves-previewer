@@ -172,6 +172,7 @@ struct MetaQueue {
     cv: Condvar,
     stop: AtomicBool,
     paused: AtomicBool,
+    active_workers: AtomicUsize,
     /// Blank Pad threshold in dBFS, stored as `f32::to_bits`. Kept out of
     /// `MetaTask` on purpose: the queue dedupes tasks by path, so a payload
     /// carrying the threshold would silently keep whichever copy landed first.
@@ -228,6 +229,13 @@ pub struct MetaPool {
 }
 
 impl MetaPool {
+    pub fn set_active_workers(&self, workers: usize) {
+        self.shared
+            .active_workers
+            .store(workers.max(1), Ordering::Relaxed);
+        self.shared.cv.notify_all();
+    }
+
     /// How many video first-frame extractions may run at once. Zero turns the
     /// fallback off, leaving only embedded cover art.
     pub fn set_video_poster_limit(&self, limit: usize) {
@@ -676,7 +684,8 @@ fn decode_full_meta(
 
 pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<MetaUpdate>) {
     use std::sync::mpsc;
-    let (tx, rx) = mpsc::channel();
+    let worker_count = workers.max(1);
+    let (tx, rx) = mpsc::sync_channel(worker_count.saturating_mul(4).max(8));
     let shared = Arc::new(MetaQueue {
         inner: Mutex::new(QueueInner {
             tasks: HashMap::new(),
@@ -688,14 +697,14 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
         cv: Condvar::new(),
         stop: AtomicBool::new(false),
         paused: AtomicBool::new(false),
+        active_workers: AtomicUsize::new(worker_count),
         blank_threshold_bits: AtomicU32::new(
             crate::app::inspection::DEFAULT_BLANK_THRESHOLD_DBFS.to_bits(),
         ),
         poster_limit: AtomicUsize::new(0),
         poster_inflight: AtomicUsize::new(0),
     });
-    let worker_count = workers.max(1);
-    for _ in 0..worker_count {
+    for worker_index in 0..worker_count {
         let shared = Arc::clone(&shared);
         let tx = tx.clone();
         std::thread::spawn(move || {
@@ -712,6 +721,14 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                         }
                         if shared.paused.load(Ordering::Relaxed) {
                             guard = shared.cv.wait(guard).unwrap();
+                            continue;
+                        }
+                        if worker_index >= shared.active_workers.load(Ordering::Relaxed) {
+                            let (next, _) = shared
+                                .cv
+                                .wait_timeout(guard, std::time::Duration::from_millis(50))
+                                .unwrap_or_else(|error| error.into_inner());
+                            guard = next;
                             continue;
                         }
                         let next_path = loop {
@@ -761,7 +778,7 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
 fn run_meta_task(
     task: MetaTask,
     cancel: &AtomicBool,
-    tx: &std::sync::mpsc::Sender<MetaUpdate>,
+    tx: &std::sync::mpsc::SyncSender<MetaUpdate>,
     blank_threshold_dbfs: f32,
     allow_video_poster: bool,
 ) {
