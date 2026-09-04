@@ -266,7 +266,8 @@ impl WavesPreviewer {
     /// toast is gone in seconds and the reader may have been away.
     fn ui_topbar_unread_comments_badge(&mut self, ui: &mut egui::Ui) {
         if self.show_comments_window && !self.comments_detached {
-            // It is on screen. Counting what is being read would be noise.
+            // The window's own header carries the remaining count where it
+            // cannot be covered by that same floating window.
             return;
         }
         let count = self.unread_comment_count();
@@ -276,9 +277,15 @@ impl WavesPreviewer {
         ui.separator();
         let color = Color32::from_rgb(140, 190, 240);
         let response = ui
-            .add(egui::Button::new(RichText::new(format!("💬 {count} new")).color(color)).frame(false))
+            .add(
+                egui::Button::new(RichText::new(format!("💬 {count} new")).color(color))
+                    .frame(false),
+            )
             .on_hover_text("Comments from other people in this session. Click to read them.");
         if response.clicked() {
+            // If a filter is why these comments are still unread, take the
+            // reader to a view where the badge's promise can be fulfilled.
+            self.comment_filter = crate::app::ui::comments::CommentFilter::All;
             self.open_comments_window();
         }
     }
@@ -871,10 +878,26 @@ impl WavesPreviewer {
     fn ui_topbar_volume_control(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, compact: bool) {
         let width = if compact { 128.0 } else { 210.0 };
         let height = 22.0;
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+        // Interacted under a fixed id rather than the auto one, so the rest of
+        // the app can ask whether this fader is holding the arrow keys --
+        // `Self::topbar_volume_owns_arrows`. Same shape as the list's focus
+        // sink in `ui/list/navigation.rs`.
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        let response = ui.interact(
+            rect,
+            Self::topbar_volume_id(),
+            egui::Sense::click_and_drag(),
+        );
         self.topbar_volume_rect = Some(rect);
-        if response.clicked() {
+        // Where the pointer is *interacting with this control*, which is what
+        // separates a real click from the one egui synthesises when Space or
+        // Enter is pressed on a focused click-sensing widget
+        // (`FAKE_PRIMARY_CLICKED`, folded into `Response::clicked()`). Reading
+        // the global pointer position instead is what let Space -- the
+        // play/pause key -- write the volume from wherever the mouse happened
+        // to be resting, on top of toggling playback.
+        let pointer_pos = response.interact_pointer_pos();
+        if response.clicked() && pointer_pos.is_some() {
             response.request_focus();
         }
 
@@ -885,8 +908,9 @@ impl WavesPreviewer {
             egui::pos2(track_right.max(track_left + 24.0), rect.center().y + 4.0),
         );
         let mut changed = false;
-        // Double click puts the monitor back at unity. The whole control is one
-        // allocated rect, so the label, the track and the readout all take it.
+        // Double click steps through `helpers::VOLUME_PRESETS_DB`. The whole
+        // control is one allocated rect, so the label, the track and the
+        // readout all take it.
         //
         // `Response::double_clicked()` is not enough by itself here; see
         // `helpers::note_repeated_click`.
@@ -894,31 +918,40 @@ impl WavesPreviewer {
         // Either way it has to be decided before the positional branch and lock
         // it out for the frame: a double click reports `clicked()` too, and the
         // position under the pointer would otherwise be written straight back
-        // over the reset.
-        let click_pos = ctx.input(|i| i.pointer.interact_pos());
+        // over the preset.
         let repeated_click = response.clicked()
-            && click_pos.is_some_and(|pos| {
-                crate::app::helpers::note_repeated_click(&mut self.topbar_volume_last_click, pos)
+            && pointer_pos.is_some_and(|pos| {
+                let repeat = crate::app::helpers::note_repeated_click(
+                    &mut self.topbar_volume_last_click,
+                    pos,
+                );
+                if !repeat {
+                    // The opening click of the pair. Remember the level it
+                    // found, because the positional branch below is about to
+                    // move it: cycling from the live value would read that
+                    // arbitrary position and restart at unity every time.
+                    self.topbar_volume_preset_anchor_db = self.volume_db;
+                }
+                repeat
             });
-        let reset_to_unity = response.double_clicked() || repeated_click;
-        if reset_to_unity {
-            if (self.volume_db - 0.0).abs() >= f32::EPSILON {
-                self.volume_db = 0.0;
+        let cycle_preset = pointer_pos.is_some() && (response.double_clicked() || repeated_click);
+        if cycle_preset {
+            let next =
+                crate::app::helpers::next_volume_preset_db(self.topbar_volume_preset_anchor_db);
+            if (next - self.volume_db).abs() >= f32::EPSILON {
+                self.volume_db = next;
                 changed = true;
             }
-        } else if (response.dragged() || response.clicked())
-            && ctx.input(|i| i.pointer.interact_pos()).is_some()
-        {
-            if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                let t = ((pos.x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
-                // Not linear in dB: see `helpers::VOLUME_TAPER`. The range this
-                // control is used in -- unity down to -24 -- owns most of the
-                // track, and the tail to silence is compressed.
-                let next = crate::app::helpers::volume_db_from_fader(t);
-                if (next - self.volume_db).abs() >= 0.02 {
-                    self.volume_db = next;
-                    changed = true;
-                }
+            self.topbar_volume_preset_anchor_db = next;
+        } else if let Some(pos) = pointer_pos.filter(|_| response.dragged() || response.clicked()) {
+            let t = ((pos.x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
+            // Not linear in dB: see `helpers::VOLUME_TAPER`. The range this
+            // control is used in -- unity down to -24 -- owns most of the
+            // track, and the tail to silence is compressed.
+            let next = crate::app::helpers::volume_db_from_fader(t);
+            if (next - self.volume_db).abs() >= 0.02 {
+                self.volume_db = next;
+                changed = true;
             }
         }
         if response.has_focus() {
@@ -1038,7 +1071,8 @@ impl WavesPreviewer {
         // exact value lives -- and where the double click is advertised, since
         // nothing about the control suggests it.
         response.on_hover_text(format!(
-            "Monitor volume: {:.1} dB\nDrag to set, double-click for 0.0 dB. \
+            "Monitor volume: {:.1} dB\nDrag to set; double-click steps through \
+             0 / -6 / -18 / -24 dB. A / D and the arrow keys move it 1 dB. \
              Affects what you hear, not the file, the meters' LUFS, or exports.",
             self.volume_db
         ));

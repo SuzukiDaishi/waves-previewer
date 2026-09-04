@@ -142,6 +142,13 @@ impl WavesPreviewer {
         // itself -- `topbar/transport.rs:133` consumes a focused DragValue's
         // arrows and hands focus back here.
         let allow_list_keys = list_owns_keys && !self.files.is_empty() && !search_focused;
+        // Left/Right adjust gain here, and the same two keys step the topbar
+        // volume fader while it is focused. The fader consumes them first, but
+        // `key_presses` deliberately falls back to the raw log for presses
+        // another widget consumed, so the gain would move too. This is the only
+        // thing that keeps the two apart, and it does not depend on the topbar
+        // drawing before the list.
+        let allow_list_gain_keys = allow_list_keys && !self.topbar_volume_owns_arrows(ctx);
         if self.debug.cfg.enabled && self.is_list_workspace_active() && !self.files.is_empty() {
             let nav_key_pressed = ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowDown)
@@ -162,8 +169,9 @@ impl WavesPreviewer {
                 i.key_pressed(egui::Key::ArrowDown)
                     || i.key_pressed(egui::Key::ArrowUp)
                     || (!has_non_list_focus && i.key_pressed(egui::Key::Enter))
-                    || i.key_pressed(egui::Key::ArrowLeft)
-                    || i.key_pressed(egui::Key::ArrowRight)
+                    || (allow_list_gain_keys
+                        && (i.key_pressed(egui::Key::ArrowLeft)
+                            || i.key_pressed(egui::Key::ArrowRight)))
                     || i.key_pressed(egui::Key::PageDown)
                     || i.key_pressed(egui::Key::PageUp)
                     || i.key_pressed(egui::Key::Home)
@@ -226,12 +234,12 @@ impl WavesPreviewer {
         } else {
             false
         };
-        let pressed_left = if allow_list_keys {
+        let pressed_left = if allow_list_gain_keys {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
         } else {
             false
         };
-        let pressed_right = if allow_list_keys {
+        let pressed_right = if allow_list_gain_keys {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
         } else {
             false

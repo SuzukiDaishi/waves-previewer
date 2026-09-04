@@ -11,6 +11,10 @@ impl super::WavesPreviewer {
         egui::Id::new("search_box")
     }
 
+    pub(super) fn topbar_volume_id() -> egui::Id {
+        egui::Id::new("topbar_volume")
+    }
+
     pub(super) fn request_list_focus(&mut self, ctx: &egui::Context) {
         self.list_has_focus = true;
         self.search_has_focus = false;
@@ -102,33 +106,24 @@ impl super::WavesPreviewer {
             }
             if let Some(idx) = target {
                 if idx == 0 {
-                    if !self.is_list_workspace_active() {
-                        if let Some(prev) = self.active_tab {
-                            self.clear_preview_if_any(prev);
-                        }
-                        self.workspace_view = super::types::WorkspaceView::List;
-                        self.pending_editor_autoplay_path = None;
-                        self.pending_activate_path = None;
-                        self.pending_activate_kind = None;
-                        self.pending_activate_ready = false;
-                        self.audio.set_loop_enabled(false);
-                    }
-                    self.request_list_focus(ctx);
+                    self.activate_list_workspace(ctx);
                 } else {
                     self.activate_editor_tab(idx - 1);
                 }
             }
         }
 
-        // Tab / Shift+Tab step through the editor tabs.
+        // Tab / Shift+Tab step through the tab strip: slot 0 is the List and
+        // slots 1.. are the editor tabs, the same order `Ctrl+1..` uses.
         //
-        // Only while an editor tab is actually in front, and only with more
-        // than one open: in the list, and with a single tab, Tab is still
-        // egui's focus traversal, which is what it is for there.
+        // With no editor tab open there is nowhere to step, so Tab stays egui's
+        // focus traversal, which is what it is for there; the same goes for the
+        // Recording and Effect Graph workspaces, which are not in this cycle.
         // `workspace_keys_allowed` keeps it out of a text field, a metadata
         // field, a modal and the shortcut-capture box -- all of which own their
         // own Tab.
-        if allow_workspace && self.is_editor_workspace_active() && self.tabs.len() > 1 {
+        let in_tab_cycle = self.is_list_workspace_active() || self.is_editor_workspace_active();
+        if allow_workspace && in_tab_cycle && !self.tabs.is_empty() {
             // Shift first, and this order is load-bearing: egui matches
             // modifiers *logically*, so a pattern of `NONE` also accepts an
             // event with Shift held. Asking for the bare Tab first would
@@ -137,16 +132,27 @@ impl super::WavesPreviewer {
             let forward =
                 !back && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
             if forward || back {
-                if let Some(next) = self.editor_tab_index_offset_by(if forward { 1 } else { -1 }) {
-                    self.activate_editor_tab(next);
-                }
                 // egui reads Tab for focus traversal at the very start of the
                 // pass, before any of this runs, so by now it has already moved
                 // focus to some widget in the outgoing tab. Left there it would
                 // swallow the *next* Tab press -- and if it landed on a text
-                // field, every unmodified key after it. Hand the focus back.
+                // field, every unmodified key after it. Drop it *before* the
+                // switch: the List slot asks for the list's focus on its way
+                // in, and surrendering afterwards would take it straight back.
                 if let Some(id) = ctx.memory(|m| m.focused()) {
                     ctx.memory_mut(|m| m.surrender_focus(id));
+                }
+                let slots = self.tabs.len() as isize + 1;
+                let current = if self.is_list_workspace_active() {
+                    0
+                } else {
+                    self.active_tab.map_or(0, |i| i as isize + 1)
+                };
+                let next = (current + if forward { 1 } else { -1 }).rem_euclid(slots);
+                if next == 0 {
+                    self.activate_list_workspace(ctx);
+                } else {
+                    self.activate_editor_tab(next as usize - 1);
                 }
             }
         }

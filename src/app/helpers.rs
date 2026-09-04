@@ -69,6 +69,30 @@ pub fn volume_fader_from_db(db: f32) -> f32 {
     1.0
 }
 
+/// The monitor levels a double click on the volume fader steps through.
+///
+/// Unity first, so the gesture still answers "put it back" the way it always
+/// did, then the three levels people actually drop to while working.
+pub const VOLUME_PRESETS_DB: [f32; 4] = [0.0, -6.0, -18.0, -24.0];
+
+/// The preset after `current`, wrapping. A value that is not a preset lands on
+/// the first one.
+///
+/// `current` is the level the fader was at when the double click *started* --
+/// see the anchor in `ui_topbar_volume_control`. The opening click of the pair
+/// sets the volume from its own position, so reading this off the live value
+/// would restart the cycle at unity every time.
+pub fn next_volume_preset_db(current: f32) -> f32 {
+    const SLOP_DB: f32 = 0.05;
+    match VOLUME_PRESETS_DB
+        .iter()
+        .position(|preset| (preset - current).abs() <= SLOP_DB)
+    {
+        Some(i) => VOLUME_PRESETS_DB[(i + 1) % VOLUME_PRESETS_DB.len()],
+        None => VOLUME_PRESETS_DB[0],
+    }
+}
+
 pub fn db_to_amp(db: f32) -> f32 {
     if db <= GAIN_DB_MIN {
         0.0
@@ -191,6 +215,27 @@ mod volume_taper_tests {
         }
         assert!((volume_db_from_fader(0.0) - VOLUME_DB_MIN).abs() < 1.0e-4);
         assert!((volume_db_from_fader(1.0) - VOLUME_DB_MAX).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn the_volume_presets_cycle_and_come_back_round() {
+        // Anything that is not a preset enters the cycle at unity, so the
+        // gesture still answers "put it back" from wherever the fader was.
+        assert_eq!(next_volume_preset_db(-31.0), 0.0);
+        assert_eq!(next_volume_preset_db(-7.5), 0.0);
+        assert_eq!(next_volume_preset_db(6.0), 0.0);
+
+        let mut db = next_volume_preset_db(-31.0);
+        let mut walked = vec![db];
+        for _ in 0..VOLUME_PRESETS_DB.len() {
+            db = next_volume_preset_db(db);
+            walked.push(db);
+        }
+        assert_eq!(walked, vec![0.0, -6.0, -18.0, -24.0, 0.0]);
+
+        // The readout rounds to one decimal, so a value that came back from
+        // the taper a hair off must still count as the preset it is sitting on.
+        assert_eq!(next_volume_preset_db(-6.02), -18.0);
     }
 
     #[test]

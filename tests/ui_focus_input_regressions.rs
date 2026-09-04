@@ -952,4 +952,181 @@ mod ui_focus_input_regressions {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Click the topbar volume fader -- which is how it takes focus -- and then
+    /// put the monitor at `db`.
+    ///
+    /// The whole allocated rect is the control, so the click that focuses it
+    /// also writes the volume from its own position. The level under test is
+    /// set afterwards so the key being exercised is the only thing that moved
+    /// it.
+    fn focus_volume_fader_at(harness: &mut Harness<'static, WavesPreviewer>, db: f32) {
+        let rect = harness
+            .state()
+            .test_topbar_volume_rect()
+            .expect("volume control rect");
+        click_at(harness, egui::pos2(rect.left() + 6.0, rect.center().y));
+        harness.state_mut().test_set_volume_db(db);
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_volume_db(), db);
+    }
+
+    /// The everyday gesture, guarded because the fader now reads its position
+    /// from `Response::interact_pointer_pos` rather than the global pointer
+    /// state, and is interacted under a fixed id rather than an allocated one.
+    #[test]
+    fn the_volume_fader_still_follows_a_pointer_drag() {
+        let dir = make_temp_dir("volume_drag");
+        let wav = dir.join("volume_drag.wav");
+        write_fixture_wav(&wav, 48_000, 0.5);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_volume_db(-60.0);
+        harness.run_steps(2);
+
+        let rect = harness
+            .state()
+            .test_topbar_volume_rect()
+            .expect("volume control rect");
+        let y = rect.center().y;
+        // Press near the left of the track and drag right: the taper puts unity
+        // at 90% of the travel, so this has to climb a long way without
+        // reaching the top.
+        harness.hover_at(egui::pos2(rect.left() + 70.0, y));
+        harness.event(egui::Event::PointerButton {
+            pos: egui::pos2(rect.left() + 70.0, y),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+        let after_press = harness.state().test_volume_db();
+
+        harness.hover_at(egui::pos2(rect.right() - 70.0, y));
+        harness.run_steps(2);
+        let dragged = harness.state().test_volume_db();
+        harness.event(egui::Event::PointerButton {
+            pos: egui::pos2(rect.right() - 70.0, y),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+
+        assert!(
+            dragged > after_press,
+            "dragging right must raise the monitor: {after_press} -> {dragged}"
+        );
+        let expected_gain = 10f32.powf(dragged / 20.0);
+        assert!(
+            (harness.state().test_audio_output_volume_linear() - expected_gain).abs() < 1.0e-3,
+            "the dragged level has to reach the engine, not just the readout"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Space is the transport key. egui turns it into a click on whatever
+    /// focused widget senses clicks, so a focused volume fader used to read it
+    /// as a click and write the monitor level from wherever the mouse was
+    /// resting -- on top of starting playback.
+    #[test]
+    fn space_moves_the_transport_and_not_a_focused_volume_fader() {
+        let dir = make_temp_dir("volume_space");
+        let wav = dir.join("volume_space.wav");
+        write_fixture_wav(&wav, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_and_load_row(0));
+        harness.run_steps(2);
+
+        focus_volume_fader_at(&mut harness, -12.0);
+
+        let playing_before = harness.state().test_audio_is_playing();
+        harness.key_press(Key::Space);
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().test_volume_db(),
+            -12.0,
+            "Space must not reach the volume fader, focused or not"
+        );
+        assert_ne!(
+            harness.state().test_audio_is_playing(),
+            playing_before,
+            "Space still belongs to the transport while the fader has focus"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The editor reads its seek arrows from `key_down`, a held-key set the
+    /// fader's `consume_key` never touches, so a focused fader has to be asked
+    /// about rather than merely out-consumed.
+    #[test]
+    fn a_focused_volume_fader_keeps_the_arrows_from_the_editor() {
+        let dir = make_temp_dir("volume_arrows_editor");
+        let wav = dir.join("volume_arrows_editor.wav");
+        write_fixture_wav(&wav, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&wav));
+        wait_for_editor_ready(&mut harness);
+
+        focus_volume_fader_at(&mut harness, -12.0);
+        let playhead_before = harness.state().test_playhead_display_now();
+
+        harness.key_press(Key::ArrowRight);
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().test_volume_db(),
+            -11.0,
+            "Right should step the focused fader by 1 dB"
+        );
+        assert_eq!(
+            harness.state().test_playhead_display_now(),
+            playhead_before,
+            "the editor must not seek on an arrow the volume fader owns"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The list's arrows adjust gain, and it counts them against the raw event
+    /// log as a fallback for presses another widget consumed -- which is
+    /// exactly what the fader does with them.
+    #[test]
+    fn a_focused_volume_fader_keeps_the_arrows_from_the_list() {
+        let dir = make_temp_dir("volume_arrows_list");
+        let wav = dir.join("volume_arrows_list.wav");
+        write_fixture_wav(&wav, 48_000, 0.5);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_and_load_row(0));
+        harness.run_steps(2);
+
+        focus_volume_fader_at(&mut harness, -12.0);
+        let gain_before = harness.state().test_pending_gain_db(&wav);
+
+        harness.key_press(Key::ArrowRight);
+        harness.run_steps(3);
+
+        assert_eq!(
+            harness.state().test_volume_db(),
+            -11.0,
+            "Right should step the focused fader by 1 dB"
+        );
+        assert_eq!(
+            harness.state().test_pending_gain_db(&wav),
+            gain_before,
+            "the row's gain must not move on an arrow the volume fader owns"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

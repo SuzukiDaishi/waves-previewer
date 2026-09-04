@@ -232,47 +232,117 @@ fn closing_only_tab_clears_active_and_returns_to_list() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `Tab` / `Shift+Tab` cycle the editor tabs, wrapping at both ends.
+/// The slot in front, named the way the tab strip names it.
+fn active_slot(h: &Harness<'static, WavesPreviewer>) -> String {
+    if h.state().test_is_list_workspace_active() {
+        return "List".to_string();
+    }
+    h.state()
+        .test_active_tab_path()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .expect("an active tab")
+}
+
+/// `Tab` / `Shift+Tab` cycle the tab strip, wrapping at both ends. The List is
+/// the first slot, the same place `Ctrl+1` puts it.
 ///
 /// The keys were previously unbound, so they fell through to egui's own focus
 /// traversal. That traversal still runs -- it reads Tab before any of the app's
-/// handlers -- so the interesting part is that the tab switch happens *and*
-/// nothing is left holding focus afterwards.
+/// handlers -- so the interesting part is that the switch happens *and* nothing
+/// is left holding focus afterwards.
 #[test]
-fn tab_and_shift_tab_cycle_the_editor_tabs() {
+fn tab_and_shift_tab_cycle_the_tab_strip_through_the_list() {
     let (mut harness, dir, paths) = harness_with_three_tabs();
     let names: Vec<String> = paths
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
 
-    let active = |h: &Harness<'static, WavesPreviewer>| -> String {
-        h.state()
-            .test_active_tab_path()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .expect("an active tab")
-    };
     assert_eq!(
-        active(&harness),
+        active_slot(&harness),
         names[2],
         "the last opened tab is in front"
     );
 
     harness.key_press(egui::Key::Tab);
     harness.run_steps(3);
-    assert_eq!(active(&harness), names[0], "Tab wraps past the last tab");
+    assert_eq!(
+        active_slot(&harness),
+        "List",
+        "Tab wraps past the last tab into the List"
+    );
 
     harness.key_press(egui::Key::Tab);
     harness.run_steps(3);
-    assert_eq!(active(&harness), names[1]);
+    assert_eq!(active_slot(&harness), names[0], "and on into the first tab");
+
+    harness.key_press(egui::Key::Tab);
+    harness.run_steps(3);
+    assert_eq!(active_slot(&harness), names[1]);
 
     harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
     harness.run_steps(3);
-    assert_eq!(active(&harness), names[0], "Shift+Tab goes back");
+    assert_eq!(active_slot(&harness), names[0], "Shift+Tab goes back");
 
     harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
     harness.run_steps(3);
-    assert_eq!(active(&harness), names[2], "and wraps past the first tab");
+    assert_eq!(active_slot(&harness), "List", "back into the List");
+
+    harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+    harness.run_steps(3);
+    assert_eq!(
+        active_slot(&harness),
+        names[2],
+        "and wraps past the List to the last tab"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Tab reaching the List must not cost the List its arrows: the switch hands
+/// focus to the list widget, and surrendering egui's own traversal focus
+/// afterwards would take it straight back off again.
+#[test]
+fn tab_into_the_list_leaves_the_list_holding_the_keyboard() {
+    let (mut harness, dir, _paths) = harness_with_three_tabs();
+
+    harness.key_press(egui::Key::Tab);
+    harness.run_steps(3);
+    assert_eq!(active_slot(&harness), "List");
+    assert!(
+        harness.state().test_list_owns_surface_keys(),
+        "the List has to own its keys the moment Tab lands on it"
+    );
+
+    let before = harness.state().test_selected_row();
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run_steps(3);
+    assert_ne!(
+        harness.state().test_selected_row(),
+        before,
+        "ArrowDown should move the selection right after Tab reaches the List"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// With no editor tab open there is nowhere to cycle to, so Tab stays egui's
+/// focus traversal in the List -- which is what it is for there.
+#[test]
+fn tab_is_left_to_focus_traversal_when_no_editor_tab_is_open() {
+    let dir = make_temp_dir("tab_no_tabs");
+    write_wav(&dir, "only.wav", 220.0);
+
+    let mut harness = harness_with_folder(dir.clone());
+    wait_for_scan(&mut harness);
+
+    assert!(harness.state().test_is_list_workspace_active());
+    harness.key_press(egui::Key::Tab);
+    harness.run_steps(3);
+    assert!(
+        harness.state().test_is_list_workspace_active(),
+        "Tab must not move the workspace when the strip has only the List on it"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

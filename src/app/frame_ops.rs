@@ -197,7 +197,7 @@ impl WavesPreviewer {
                 if self.frame_budget.should_continue() {
                     $body;
                 } else {
-                    self.frame_budget.note_deferred();
+                    self.frame_budget.note_deferred_at(stringify!($body));
                 }
             }};
         }
@@ -226,6 +226,7 @@ impl WavesPreviewer {
         if let Some(pool) = self.metadata_summary_pool.as_ref() {
             pool.set_paused(protect_editor_playback);
         }
+        self.push_load_governor_to_meta_pool();
         trace_stage!("audio meters / volume", {
             self.sync_channel_masks_to_engine();
             self.meter_db = self.current_output_meter_db();
@@ -238,6 +239,11 @@ impl WavesPreviewer {
                 ctx.request_repaint();
             }
         });
+        deferrable!(trace_stage!("external mapping", {
+            if self.pump_external_mapping() {
+                ctx.request_repaint_after(Duration::from_millis(self.perf.background_repaint_ms()));
+            }
+        }));
         deferrable!(trace_stage!(
             "list metadata prefetch",
             self.pump_list_meta_prefetch()
@@ -297,8 +303,12 @@ impl WavesPreviewer {
         deferrable!(trace_stage!("path status results", {
             // Applying an answer only touches a hash map, but a screen of
             // rows resolving at once still deserves a cap.
-            if self.path_status.drain(256) > 0 {
-                ctx.request_repaint();
+            if self.path_status.drain_for(
+                self.perf.path_status_drain_limit(),
+                self.perf.frame_budget() / 8,
+            ) > 0
+            {
+                ctx.request_repaint_after(Duration::from_millis(self.perf.background_repaint_ms()));
             }
         }));
         deferrable!(trace_stage!("folder watch", self.tick_folder_watch(ctx)));
@@ -360,7 +370,8 @@ impl WavesPreviewer {
             self.drain_metadata_summary_updates(ctx)
         ));
         deferrable!(trace_stage!("external data results", {
-            self.drain_external_load_results(ctx)
+            self.drain_external_load_results(ctx);
+            self.drain_external_merge_results(ctx);
         }));
         trace_stage!("batch operations", {
             self.check_csv_export_completion();
@@ -397,7 +408,7 @@ impl WavesPreviewer {
         deferrable!(trace_stage!("loudness recalc results", {
             self.drain_lufs_recalc_results()
         }));
-        if self.inspection_run_state.is_some() {
+        if self.inspection_run_state.is_some() || self.inspection_finalize_rx.is_some() {
             deferrable!(trace_stage!("inspection results", {
                 self.drain_inspection_results(ctx)
             }));
@@ -439,18 +450,7 @@ impl WavesPreviewer {
                     RichText::new("List")
                 };
                 if ui.selectable_label(is_list, list_label).clicked() {
-                    if !is_list {
-                        if let Some(idx) = self.active_tab {
-                            self.clear_preview_if_any(idx);
-                        }
-                        self.workspace_view = WorkspaceView::List;
-                        self.pending_editor_autoplay_path = None;
-                        self.pending_activate_path = None;
-                        self.pending_activate_kind = None;
-                        self.pending_activate_ready = false;
-                        self.audio.set_loop_enabled(false);
-                    }
-                    self.request_list_focus(&ctx);
+                    self.activate_list_workspace(&ctx);
                 }
                 // Recording tab label
                 if self.recording_tab.tab_open
@@ -716,6 +716,11 @@ impl WavesPreviewer {
                         }
                     }
                     if !used_tab_transport {
+                        let deferred_source = self
+                            .deferred_session_tab_audio
+                            .get(&p)
+                            .and_then(|deferred| deferred.edited_path.clone());
+                        let mut start_decode = false;
                         if let Some(idx) = self.active_tab {
                             if let Some(tab) = self.tabs.get_mut(idx) {
                                 if tab.path == p
@@ -723,8 +728,15 @@ impl WavesPreviewer {
                                     && !tab.uses_silent_video_timeline()
                                 {
                                     tab.loading = true;
-                                    self.spawn_editor_decode(p.clone());
+                                    start_decode = true;
                                 }
+                            }
+                        }
+                        if start_decode {
+                            if let Some(source) = deferred_source {
+                                self.spawn_editor_decode_from_path(p.clone(), source);
+                            } else {
+                                self.spawn_editor_decode(p.clone());
                             }
                         }
                         if !self.editor_playback_handoff_matches(&p) {
@@ -1250,7 +1262,7 @@ impl WavesPreviewer {
         if self.bulk_resample_state.is_some() {
             active.push("bulk-resample");
         }
-        if self.inspection_run_state.is_some() {
+        if self.inspection_run_state.is_some() || self.inspection_finalize_rx.is_some() {
             active.push("inspection");
         }
         let deferred = self.frame_budget.deferred_count();
@@ -1341,7 +1353,7 @@ impl WavesPreviewer {
         let repaint_ms = if fast_repaint {
             Some(16)
         } else if progress_repaint {
-            Some(50)
+            Some(self.perf.background_repaint_ms())
         } else if self.zoo_enabled && self.is_list_workspace_active() {
             Some(50)
         } else if self.zoo_enabled {
@@ -1379,18 +1391,29 @@ impl WavesPreviewer {
             self.debug.frame_peak_ms = self.debug.frame_last_ms;
         }
         self.record_long_frame(frame_ms as f32);
-        // Sustained slow frames mean this machine cannot afford the slice
-        // sizes it was given; drop a tier so every budget shrinks at once.
+        if playing {
+            self.perf.note_interaction();
+        }
+        // The governor reacts to stalls, recovery and memory-pressure
+        // changes. Re-apply every derived cache/worker ceiling atomically.
         if self.perf.note_frame_ms(self.debug.frame_last_ms) {
             let tier = self.perf.tier;
             self.debug_log(format!(
-                "perf tier demoted to {} after sustained slow frames (last {:.1}ms)",
+                "load governor changed: tier={} throttle={}% pressure={:?} (last {:.1}ms)",
                 tier.as_str(),
+                self.perf.adaptive_percent(),
+                self.perf.memory_pressure,
                 self.debug.frame_last_ms
             ));
-            // A demotion does not rebuild the metadata pool, so the budgets it
-            // holds have to be pushed across by hand.
             self.push_video_poster_limit_to_meta_pool();
+            self.metadata_summary_cache.set_limits(
+                crate::metadata::cache::MEMORY_SUMMARY_LIMIT,
+                self.perf.metadata_memory_cache_bytes(),
+            );
+            self.evict_spectro_cache_if_needed();
+            self.trim_feature_analysis_cache();
+            self.trim_list_art_texture_cache();
         }
+        self.trim_editor_undo_caches();
     }
 }

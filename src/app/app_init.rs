@@ -5,6 +5,7 @@ use super::*;
 impl WavesPreviewer {
     pub(super) fn build_app(startup: StartupConfig, audio: AudioEngine) -> Self {
         audio.set_loop_enabled(false);
+        let perf = crate::app::perf_profile::PerfProfile::default();
         let metadata_cache_path = if cfg!(feature = "kittest") {
             std::env::var_os("NEOWAVES_METADATA_CACHE")
                 .filter(|value| !value.is_empty())
@@ -16,7 +17,10 @@ impl WavesPreviewer {
                 .or_else(crate::metadata::cache::default_cache_path)
         };
         let (metadata_summary_pool, metadata_summary_rx) =
-            crate::metadata::cache::MetadataSummaryPool::new(metadata_cache_path);
+            crate::metadata::cache::MetadataSummaryPool::new_with_disk_limit(
+                metadata_cache_path,
+                perf.metadata_disk_cache_bytes(),
+            );
         // Same isolation rule as the metadata cache: under kittest only an
         // explicit database is used, so tests never read or write the
         // developer's real session history.
@@ -38,12 +42,14 @@ impl WavesPreviewer {
         let mut app = Self {
             audio,
             root: None,
-            items: Vec::new(),
+            items: types::ChunkedVec::new(),
             item_index: Default::default(),
             path_index: Default::default(),
             folder_intern: Default::default(),
+            retired_list_drops: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             files: Vec::new(),
             next_media_id: 1,
+            deferred_session_tab_audio: HashMap::new(),
             selected: None,
             volume_db: 0.0,
             audio_output_device_name: None,
@@ -74,6 +80,7 @@ impl WavesPreviewer {
             meter_ch_last_time: None,
             topbar_volume_rect: None,
             topbar_volume_last_click: None,
+            topbar_volume_preset_anchor_db: 0.0,
             editor_loop_handle_last_click: None,
             topbar_output_meter_rect: None,
             topbar_search_rect: None,
@@ -132,11 +139,14 @@ impl WavesPreviewer {
             external_match_input: ExternalRegexInput::FileName,
             external_visible_columns: Vec::new(),
             external_lookup: HashMap::new(),
+            external_merge_rx: None,
+            external_merge_generation: 0,
             external_key_row_index: HashMap::new(),
             external_match_count: 0,
             external_unmatched_count: 0,
             external_show_unmatched: false,
             external_unmatched_rows: Vec::new(),
+            external_mapping_state: None,
             external_sheet_names: Vec::new(),
             external_sheet_selected: None,
             external_has_header: true,
@@ -191,6 +201,9 @@ impl WavesPreviewer {
             editor_viewport_request_tx: None,
             editor_viewport_generation_counter: 0,
             editor_feature_cache: HashMap::new(),
+            editor_feature_cache_order: VecDeque::new(),
+            editor_feature_cache_sizes: HashMap::new(),
+            editor_feature_cache_bytes: 0,
             editor_feature_inflight: HashSet::new(),
             editor_feature_progress: HashMap::new(),
             editor_feature_progress_shared: HashMap::new(),
@@ -201,6 +214,7 @@ impl WavesPreviewer {
             editor_feature_rx: None,
             scan_rx: None,
             scan_pending_batches: VecDeque::new(),
+            scan_pending_peak: 0,
             scan_in_progress: false,
             scan_worker_done: false,
             scan_started_at: None,
@@ -227,7 +241,10 @@ impl WavesPreviewer {
             metadata_list_columns: Vec::new(),
             metadata_summary_pool: Some(metadata_summary_pool),
             metadata_summary_rx: Some(metadata_summary_rx),
-            metadata_summary_cache: Default::default(),
+            metadata_summary_cache: crate::metadata::cache::SummaryMemoryCache::with_limits(
+                crate::metadata::cache::MEMORY_SUMMARY_LIMIT,
+                perf.metadata_memory_cache_bytes(),
+            ),
             metadata_summary_inflight: Default::default(),
             metadata_summary_generation: 0,
             metadata_summary_prefetch_cursor: 0,
@@ -240,6 +257,9 @@ impl WavesPreviewer {
             list_table_layout_revision: 0,
             list_max_duration_secs: 0.0,
             list_art_textures: HashMap::new(),
+            list_art_texture_order: VecDeque::new(),
+            list_art_texture_sizes: HashMap::new(),
+            list_art_texture_bytes: 0,
             path_status: crate::app::path_status::PathStatusService::new(),
             search_highlight_cache: None,
             overlay_bins_cache: Default::default(),
@@ -258,6 +278,7 @@ impl WavesPreviewer {
             clipboard_c_was_down: false,
             editor_audio_clipboard: None,
             inspection_run_state: None,
+            inspection_finalize_rx: None,
             inspection_report: None,
             show_inspection_dialog: false,
             show_inspection_window: false,
@@ -336,6 +357,7 @@ impl WavesPreviewer {
             mix_audition_state: None,
             variation_audition_advancing: false,
             duplicate_scan_state: None,
+            duplicate_finalize_rx: None,
             duplicate_report: None,
             show_duplicates_window: false,
             folder_watch: None,
@@ -353,6 +375,7 @@ impl WavesPreviewer {
             list_preview_prefetch_inflight: HashSet::new(),
             list_preview_cache: HashMap::new(),
             list_preview_cache_order: VecDeque::new(),
+            list_preview_cache_bytes: 0,
             plugin_search_paths: Self::default_plugin_search_paths(),
             plugin_search_path_input: String::new(),
             plugin_preset_name_input: String::new(),
@@ -366,8 +389,8 @@ impl WavesPreviewer {
             plugin_rack_worker: std::sync::Arc::new(std::sync::Mutex::new(None)),
             plugin_job_id: 0,
             plugin_temp_seq: 0,
-            perf: crate::app::perf_profile::PerfProfile::default(),
-            frame_budget: crate::app::frame_budget::FrameBudget::default(),
+            perf,
+            frame_budget: crate::app::frame_budget::DrainBudget::default(),
             zoo_enabled: false,
             zoo_walk_enabled: true,
             zoo_voice_enabled: false,

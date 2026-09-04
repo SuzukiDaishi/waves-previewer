@@ -120,7 +120,7 @@ impl super::WavesPreviewer {
         );
     }
 
-    fn seed_editor_notes_for_tab(&self, tab: &mut EditorTab) {
+    pub(in crate::app) fn seed_editor_notes_for_tab(&self, tab: &mut EditorTab) {
         if let Some(item) = self.item_for_path(&tab.path) {
             tab.editor_notes = item.editor_notes.clone();
         }
@@ -175,9 +175,11 @@ impl super::WavesPreviewer {
                 let cached_sr = cached.buffer_sample_rate.max(1);
                 let cached_samples_len = cached.samples_len;
                 let cached_channels = cached.ch_samples;
+                let deferred_audio_path = cached.deferred_audio_path;
                 let cached_loading_overview = cached.waveform_minmax;
                 let mut tab = EditorTab::new_base(path.to_path_buf(), name);
                 self.seed_editor_notes_for_tab(&mut tab);
+                tab.loading = deferred_audio_path.is_some();
                 tab.buffer_sample_rate = cached_sr;
                 tab.samples_len_visual = cached_samples_len;
                 tab.loading_waveform_minmax = cached_loading_overview;
@@ -218,11 +220,15 @@ impl super::WavesPreviewer {
                 self.playing_path = Some(path.to_path_buf());
                 self.reset_editor_transport_unless_handoff(path, cached_sr);
                 self.apply_effective_volume();
-                self.spawn_editor_decode_from_ready_channels(
-                    path.to_path_buf(),
-                    cached_channels,
-                    cached_sr,
-                );
+                if let Some(decode_path) = deferred_audio_path {
+                    self.spawn_editor_decode_from_path(path.to_path_buf(), decode_path);
+                } else {
+                    self.spawn_editor_decode_from_ready_channels(
+                        path.to_path_buf(),
+                        cached_channels,
+                        cached_sr,
+                    );
+                }
                 return;
             }
             let Some(item) = self.item_for_path(path) else {
@@ -297,11 +303,9 @@ impl super::WavesPreviewer {
             self.spawn_editor_decode_from_audio_buffer(path.to_path_buf(), audio, virtual_in_sr);
             return;
         }
-        if !path.is_file() {
-            self.cancel_editor_playback_handoff_for_path(path);
-            self.remove_missing_path(path);
-            return;
-        }
+        // Do not stat a user path here. A slow or disconnected share can
+        // block the UI for the full SMB timeout; the decode/header workers
+        // report a missing source asynchronously.
         // An explicit shell/CLI open can enter the editor before the list has
         // ever rendered a row for this path. Video duration and the
         // no-audio/AAC classification come from header metadata, so request it
@@ -351,9 +355,11 @@ impl super::WavesPreviewer {
             let cached_sr = cached.buffer_sample_rate.max(1);
             let cached_samples_len = cached.samples_len;
             let cached_channels = cached.ch_samples;
+            let deferred_audio_path = cached.deferred_audio_path;
             let cached_loading_overview = cached.waveform_minmax;
             let mut tab = EditorTab::new_base(path.to_path_buf(), name);
             self.seed_editor_notes_for_tab(&mut tab);
+            tab.loading = deferred_audio_path.is_some();
             tab.buffer_sample_rate = cached_sr;
             tab.samples_len_visual = cached_samples_len;
             tab.loading_waveform_minmax = cached_loading_overview;
@@ -394,11 +400,15 @@ impl super::WavesPreviewer {
             self.playing_path = Some(path.to_path_buf());
             self.reset_editor_transport_unless_handoff(path, cached_sr);
             self.apply_effective_volume();
-            self.spawn_editor_decode_from_ready_channels(
-                path.to_path_buf(),
-                cached_channels,
-                cached_sr,
-            );
+            if let Some(decode_path) = deferred_audio_path {
+                self.spawn_editor_decode_from_path(path.to_path_buf(), decode_path);
+            } else {
+                self.spawn_editor_decode_from_ready_channels(
+                    path.to_path_buf(),
+                    cached_channels,
+                    cached_sr,
+                );
+            }
             return;
         }
         let name = path
@@ -497,14 +507,39 @@ impl super::WavesPreviewer {
         true
     }
 
-    /// The tab `steps` away from the one in front, wrapping at both ends.
-    pub(super) fn editor_tab_index_offset_by(&self, steps: isize) -> Option<usize> {
-        let len = self.tabs.len();
-        if len == 0 {
-            return None;
+    /// Bring the file list to the front and give it the keyboard.
+    ///
+    /// The three ways in -- Ctrl+1, the tab strip's "List", and the Tab cycle
+    /// -- all have to drop the outgoing tab's preview and its queued
+    /// activation, or the list comes up still playing what the editor was on.
+    ///
+    /// How the keyboard is handed over depends on whether the list was already
+    /// in front. Asking for it outright is only safe once the list has been
+    /// built this pass: egui copies `Memory::focused` into the AccessKit tree
+    /// update verbatim, without checking the id is among the nodes it just
+    /// collected, so requesting focus for a widget that never drew ends the
+    /// frame with a malformed tree (`Focused ID ... is not in the node list`).
+    /// Coming from another workspace -- and `handle_global_shortcuts` runs
+    /// after all of the UI -- the list has not drawn yet, so only the intent is
+    /// recorded and `handle_list_focus_and_keyboard` claims focus on the first
+    /// frame the list is really there. Already on the list, the direct request
+    /// stands: that is what puts the arrows back when something else took them.
+    pub(super) fn activate_list_workspace(&mut self, ctx: &egui::Context) {
+        if self.is_list_workspace_active() {
+            self.request_list_focus(ctx);
+            return;
         }
-        let current = self.active_tab? as isize;
-        let len_i = len as isize;
-        Some(((current + steps).rem_euclid(len_i)) as usize)
+        if let Some(prev) = self.active_tab {
+            self.clear_preview_if_any(prev);
+        }
+        self.workspace_view = super::types::WorkspaceView::List;
+        self.pending_editor_autoplay_path = None;
+        self.pending_activate_path = None;
+        self.pending_activate_kind = None;
+        self.pending_activate_ready = false;
+        self.audio.set_loop_enabled(false);
+        self.list_has_focus = true;
+        self.search_has_focus = false;
+        ctx.request_repaint();
     }
 }

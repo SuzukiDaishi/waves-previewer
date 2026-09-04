@@ -98,8 +98,8 @@ mod render;
 mod resample_ops;
 mod scan_ops;
 mod search_ops;
-mod session_ops;
 mod session_baseline;
+mod session_ops;
 mod session_store;
 mod session_sync;
 mod session_watch;
@@ -128,10 +128,10 @@ mod world_edit_ops;
 mod zoo_assets;
 mod zoo_ops;
 pub use self::cli_ops::run_cli;
-use self::list_state_ops::SelectionMenuSummary;
 #[cfg(feature = "kittest")]
 use self::dialogs::TestDialogQueue;
 use self::input_focus::{InputScope, UiInputFocusState};
+use self::list_state_ops::SelectionMenuSummary;
 use self::render::waveform_pyramid::WaveformScratch;
 use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
@@ -146,16 +146,13 @@ pub use self::types::{
 
 const LIVE_PREVIEW_SAMPLE_LIMIT: usize = 2_000_000;
 const UNDO_STACK_LIMIT: usize = 20;
-const UNDO_STACK_MAX_BYTES: usize = 256 * 1024 * 1024;
 const MAX_EDITOR_TABS: usize = 12;
 const SPECTRO_TILE_FRAMES: usize = 64;
-const SPECTRO_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 const SPECTRO_DRAIN_MAX_PER_FRAME: usize = 8;
 const BULK_RESAMPLE_THRESHOLD: usize = 10_000;
 const BULK_RESAMPLE_CHUNK: usize = 200;
 const BULK_RESAMPLE_BLOCK_SECS: u64 = 2;
 const BULK_RESAMPLE_FRAME_BUDGET_MS: u64 = 3;
-const META_UPDATE_FRAME_BUDGET: usize = 256;
 const META_SORT_MIN_INTERVAL_MS: u64 = 120;
 const LIST_META_PREFETCH_BUDGET: usize = 64;
 // Max rows walked per frame by pump_list_meta_prefetch; keeps the idle scan
@@ -460,6 +457,16 @@ struct PendingPreviewAutoplay {
     display_sample: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+struct DeferredSessionTabAudio {
+    /// Resolved path to the existing edited-audio sidecar. Kept until the
+    /// tab is activated and decoded, or copied into a later session save.
+    edited_path: Option<PathBuf>,
+    /// Saved tool-preview audio for an inactive tab. It is copied forward on
+    /// save and only regenerated/decoded if that tab actually needs it.
+    preview_path: Option<PathBuf>,
+}
+
 #[derive(Default)]
 struct CrashReportState {
     reports: Vec<crate::crash_report::CrashReportEntry>,
@@ -472,15 +479,17 @@ type AudioBootstrapMessage = Result<(AudioEngine, Option<String>, Option<String>
 pub struct WavesPreviewer {
     pub audio: AudioEngine,
     pub root: Option<PathBuf>,
-    pub items: Vec<MediaItem>,
-    pub item_index: rustc_hash::FxHashMap<MediaId, usize>,
+    pub items: types::ChunkedVec<MediaItem>,
+    pub item_index: types::MediaIndex,
     // See types::PathIndex: growth must not re-hash a million PathBufs.
     pub path_index: types::PathIndex,
     /// Shared folder-name strings, keyed by parent directory (see
     /// MediaItem::display_folder).
     folder_intern: rustc_hash::FxHashMap<PathBuf, std::sync::Arc<str>>,
+    retired_list_drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub files: Vec<MediaId>,
     pub next_media_id: MediaId,
+    deferred_session_tab_audio: HashMap<PathBuf, DeferredSessionTabAudio>,
     pub selected: Option<usize>,
     pub volume_db: f32,
     audio_output_device_name: Option<String>,
@@ -516,9 +525,13 @@ pub struct WavesPreviewer {
     meter_ch_last_time: Option<std::time::Instant>,
     topbar_volume_rect: Option<egui::Rect>,
     /// When and where the volume control was last clicked, for the
-    /// double-click-to-unity reset. See `helpers::note_repeated_click` for why
+    /// double-click preset cycle. See `helpers::note_repeated_click` for why
     /// egui's own double-click reporting is not enough here.
     topbar_volume_last_click: Option<(std::time::Instant, egui::Pos2)>,
+    /// The monitor level the opening click of that pair found. The cycle steps
+    /// from here rather than from the live value, which that same click has
+    /// already moved to wherever it landed on the track.
+    topbar_volume_preset_anchor_db: f32,
     /// The same, for the double click on a loop handle that zooms in on it.
     editor_loop_handle_last_click: Option<(std::time::Instant, egui::Pos2)>,
     topbar_output_meter_rect: Option<egui::Rect>,
@@ -592,7 +605,7 @@ pub struct WavesPreviewer {
     music_preview_state: Option<MusicPreviewRunState>,
     music_preview_generation_counter: u64,
     music_preview_expected_generation: u64,
-    pub external_sources: Vec<ExternalSource>,
+    pub external_sources: Vec<std::sync::Arc<ExternalSource>>,
     pub external_active_source: Option<usize>,
     pub external_source: Option<PathBuf>,
     pub external_headers: Vec<String>,
@@ -601,12 +614,15 @@ pub struct WavesPreviewer {
     pub external_key_rule: ExternalKeyRule,
     pub external_match_input: ExternalRegexInput,
     pub external_visible_columns: Vec<String>,
-    pub external_lookup: HashMap<String, HashMap<String, String>>,
+    pub external_lookup: HashMap<String, std::sync::Arc<HashMap<String, String>>>,
+    external_merge_rx: Option<std::sync::mpsc::Receiver<(u64, external_ops::ExternalMergedData)>>,
+    external_merge_generation: u64,
     pub external_key_row_index: HashMap<String, usize>,
     pub external_match_count: usize,
     pub external_unmatched_count: usize,
     pub external_show_unmatched: bool,
     pub external_unmatched_rows: Vec<usize>,
+    external_mapping_state: Option<external_ops::ExternalMappingState>,
     pub external_sheet_names: Vec<String>,
     pub external_sheet_selected: Option<String>,
     pub external_has_header: bool,
@@ -648,15 +664,15 @@ pub struct WavesPreviewer {
     pub spectro_generation: HashMap<PathBuf, u64>,
     spectro_generation_counter: u64,
     pub spectro_cfg: SpectrogramConfig,
-    pub spectro_tx: Option<std::sync::mpsc::Sender<SpectrogramJobMsg>>,
+    pub spectro_tx: Option<std::sync::mpsc::SyncSender<SpectrogramJobMsg>>,
     pub spectro_rx: Option<std::sync::mpsc::Receiver<SpectrogramJobMsg>>,
-    pub editor_viewport_tx: Option<std::sync::mpsc::Sender<EditorViewportJobMsg>>,
+    pub editor_viewport_tx: Option<std::sync::mpsc::SyncSender<EditorViewportJobMsg>>,
     pub editor_viewport_rx: Option<std::sync::mpsc::Receiver<EditorViewportJobMsg>>,
     editor_viewport_request_tx:
         Option<std::sync::mpsc::SyncSender<editor_viewport::EditorViewportRequest>>,
     editor_viewport_generation_counter: u64,
     /// Result channel shared by every video decode worker; see `video_ops`.
-    video_frame_tx: Option<std::sync::mpsc::Sender<video_ops::VideoFrameMsg>>,
+    video_frame_tx: Option<std::sync::mpsc::SyncSender<video_ops::VideoFrameMsg>>,
     video_frame_rx: Option<std::sync::mpsc::Receiver<video_ops::VideoFrameMsg>>,
     /// One entry per open video tab. Dropping a handle stops its worker.
     video_workers: Vec<video_ops::VideoWorkerHandle>,
@@ -668,6 +684,9 @@ pub struct WavesPreviewer {
     /// only product is something on screen is skipped.
     headless: bool,
     pub editor_feature_cache: HashMap<EditorAnalysisKey, std::sync::Arc<EditorFeatureAnalysisData>>,
+    pub editor_feature_cache_order: VecDeque<EditorAnalysisKey>,
+    pub editor_feature_cache_sizes: HashMap<EditorAnalysisKey, usize>,
+    pub editor_feature_cache_bytes: usize,
     pub editor_feature_inflight: HashSet<EditorAnalysisKey>,
     pub editor_feature_progress: HashMap<EditorAnalysisKey, AnalysisProgress>,
     /// Live 0..=100 progress written by analysis worker threads (WORLD).
@@ -677,17 +696,19 @@ pub struct WavesPreviewer {
         HashMap<EditorAnalysisKey, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub editor_feature_generation: HashMap<EditorAnalysisKey, u64>,
     editor_feature_generation_counter: u64,
-    pub editor_feature_tx: Option<std::sync::mpsc::Sender<EditorFeatureAnalysisJobMsg>>,
+    pub editor_feature_tx: Option<std::sync::mpsc::SyncSender<EditorFeatureAnalysisJobMsg>>,
     pub editor_feature_rx: Option<std::sync::mpsc::Receiver<EditorFeatureAnalysisJobMsg>>,
     pub scan_rx: Option<std::sync::mpsc::Receiver<ScanMessage>>,
-    pub scan_pending_batches: VecDeque<Vec<PathBuf>>,
+    pub scan_pending_batches: VecDeque<types::ScanPendingBatch>,
+    /// High-water mark of scanner batches waiting for UI-side adoption.
+    pub scan_pending_peak: usize,
     pub scan_in_progress: bool,
     pub scan_worker_done: bool,
     pub scan_started_at: Option<std::time::Instant>,
     pub scan_found_count: usize,
     /// Written directly by the scan worker (not via the message channel):
-    /// discovery runs far ahead of the budgeted appends, and the capacity
-    /// pre-reserve needs the live count to get ahead of hash-map growth.
+    /// discovery can run ahead of the budgeted appends, while the UI still
+    /// reports the true progress without draining or preallocating for it.
     scan_found_live: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     pub scan_visited_count: usize,
     pub scan_load_kind: Option<ListLoadKind>,
@@ -748,6 +769,9 @@ pub struct WavesPreviewer {
     /// the list is reloaded.
     list_max_duration_secs: f32,
     list_art_textures: HashMap<PathBuf, egui::TextureHandle>,
+    list_art_texture_order: VecDeque<PathBuf>,
+    list_art_texture_sizes: HashMap<PathBuf, usize>,
+    list_art_texture_bytes: usize,
     /// Background "does this path exist" service. On a network share a
     /// single `stat` can block for the SMB timeout, so the UI thread takes
     /// none of them: it reads this cache and a worker does the syscalls.
@@ -777,6 +801,8 @@ pub struct WavesPreviewer {
     clipboard_c_was_down: bool,
     editor_audio_clipboard: Option<EditorAudioClip>,
     inspection_run_state: Option<InspectionRunState>,
+    inspection_finalize_rx:
+        Option<std::sync::mpsc::Receiver<inspect_ops::InspectionFinalizeResult>>,
     inspection_report: Option<InspectionReportState>,
     show_inspection_dialog: bool,
     show_inspection_window: bool,
@@ -911,6 +937,8 @@ pub struct WavesPreviewer {
     variation_audition_advancing: bool,
     mix_audition_state: Option<types::MixAuditionState>,
     duplicate_scan_state: Option<duplicate_ops::DuplicateScanState>,
+    duplicate_finalize_rx:
+        Option<std::sync::mpsc::Receiver<duplicate_ops::DuplicateFinalizeResult>>,
     duplicate_report: Option<duplicate_ops::DuplicateReportState>,
     show_duplicates_window: bool,
     // Folder watch (polling): rescans the root and applies disk changes.
@@ -926,11 +954,12 @@ pub struct WavesPreviewer {
     bwf_fields: crate::wave::BextFields,
     bwf_info: crate::wave::InfoFields,
     bwf_ixml: crate::wave::IxmlFields,
-    list_preview_prefetch_tx: Option<std::sync::mpsc::Sender<ListPreviewPrefetchResult>>,
+    list_preview_prefetch_tx: Option<std::sync::mpsc::SyncSender<ListPreviewPrefetchResult>>,
     list_preview_prefetch_rx: Option<std::sync::mpsc::Receiver<ListPreviewPrefetchResult>>,
     list_preview_prefetch_inflight: HashSet<PathBuf>,
     list_preview_cache: HashMap<PathBuf, ListPreviewCacheEntry>,
     list_preview_cache_order: VecDeque<PathBuf>,
+    list_preview_cache_bytes: usize,
     plugin_search_paths: Vec<PathBuf>,
     plugin_search_path_input: String,
     plugin_preset_name_input: String,
@@ -950,7 +979,7 @@ pub struct WavesPreviewer {
     perf: crate::app::perf_profile::PerfProfile,
     /// Shared deadline for the deferrable drains in `run_frame_pre_ui`, so
     /// their individual budgets cannot add up into a long frame.
-    frame_budget: crate::app::frame_budget::FrameBudget,
+    frame_budget: crate::app::frame_budget::DrainBudget,
     zoo_enabled: bool,
     zoo_walk_enabled: bool,
     zoo_voice_enabled: bool,
@@ -1203,10 +1232,7 @@ pub struct WavesPreviewer {
     #[allow(clippy::type_complexity)]
     baseline_notes: Vec<(
         String,
-        std::sync::mpsc::Receiver<(
-            Vec<(PathBuf, session_store::FileBaseline)>,
-            Vec<PathBuf>,
-        )>,
+        std::sync::mpsc::Receiver<(Vec<(PathBuf, session_store::FileBaseline)>, Vec<PathBuf>)>,
     )>,
     theme_mode: ThemeMode,
     item_bg_mode: ItemBgMode,
@@ -2106,7 +2132,7 @@ impl WavesPreviewer {
         self.next_media_id = self.next_media_id.wrapping_add(1);
         let display_name = Self::display_name_for_path(&path);
         let display_folder = self.interned_display_folder(&path);
-        let audio_asset = crate::audio_asset::AudioAssetDescriptor::external(path.clone());
+        let audio_asset = crate::audio_asset::AudioAssetDescriptor::external_unprobed(path.clone());
         let mut item = MediaItem {
             id,
             audio_asset,
@@ -2782,11 +2808,6 @@ impl WavesPreviewer {
                 done += 1;
                 continue;
             }
-            if !item.path.is_file() {
-                total += 1;
-                done += 1;
-                continue;
-            }
             total += 1;
             if needs_meta && !self.csv_meta_ready(&item.path, needs_peak, needs_lufs) {
                 pending.insert(item.path.clone());
@@ -3007,6 +3028,9 @@ impl WavesPreviewer {
         self.spectro_generation.clear();
         self.spectro_generation_counter = 0;
         self.editor_feature_cache.clear();
+        self.editor_feature_cache_order.clear();
+        self.editor_feature_cache_sizes.clear();
+        self.editor_feature_cache_bytes = 0;
         self.editor_feature_inflight.clear();
         self.editor_feature_progress.clear();
         self.editor_feature_cancel.clear();
@@ -3025,7 +3049,6 @@ impl WavesPreviewer {
         if count == 0 {
             return;
         }
-        self.items.reserve(count);
         let prefix = "C:\\_dummy\\waves";
         for i in 0..count {
             let name = format!("wav_{:06}.wav", i);
@@ -3145,15 +3168,56 @@ impl WavesPreviewer {
         stack: &mut Vec<EditorUndoState>,
         bytes: &mut usize,
         state: EditorUndoState,
+        max_bytes: usize,
     ) {
         *bytes = bytes.saturating_add(state.approx_bytes);
         stack.push(state);
-        while stack.len() > UNDO_STACK_LIMIT || *bytes > UNDO_STACK_MAX_BYTES {
+        while stack.len() > UNDO_STACK_LIMIT || *bytes > max_bytes {
             if stack.is_empty() {
                 break;
             }
             let removed = stack.remove(0);
             *bytes = bytes.saturating_sub(removed.approx_bytes);
+        }
+    }
+
+    pub(super) fn trim_editor_undo_caches(&mut self) {
+        let limit = self.perf.undo_cache_bytes();
+        let mut total = self.tabs.iter().fold(0usize, |sum, tab| {
+            sum.saturating_add(tab.undo_bytes)
+                .saturating_add(tab.redo_bytes)
+        });
+        while total > limit {
+            let Some((tab_index, from_undo, _)) = self
+                .tabs
+                .iter()
+                .enumerate()
+                .filter_map(|(index, tab)| {
+                    let undo = tab.undo_stack.first().map(|state| state.approx_bytes);
+                    let redo = tab.redo_stack.first().map(|state| state.approx_bytes);
+                    match (undo, redo) {
+                        (Some(left), Some(right)) if left >= right => Some((index, true, left)),
+                        (Some(_), Some(right)) => Some((index, false, right)),
+                        (Some(left), None) => Some((index, true, left)),
+                        (None, Some(right)) => Some((index, false, right)),
+                        (None, None) => None,
+                    }
+                })
+                .max_by_key(|(_, _, bytes)| *bytes)
+            else {
+                break;
+            };
+            let tab = &mut self.tabs[tab_index];
+            let removed = if from_undo {
+                let state = tab.undo_stack.remove(0);
+                tab.undo_bytes = tab.undo_bytes.saturating_sub(state.approx_bytes);
+                state.approx_bytes
+            } else {
+                let state = tab.redo_stack.remove(0);
+                tab.redo_bytes = tab.redo_bytes.saturating_sub(state.approx_bytes);
+                state.approx_bytes
+            };
+            total = total.saturating_sub(removed);
         }
     }
 
@@ -3176,21 +3240,27 @@ impl WavesPreviewer {
 
     fn push_editor_undo_state(&mut self, tab_idx: usize, state: EditorUndoState, clear_redo: bool) {
         self.last_undo_scope = UndoScope::Editor;
+        let max_bytes = self.perf.undo_cache_bytes();
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            Self::push_undo_state_from(tab, state, clear_redo);
+            Self::push_undo_state_from(tab, state, clear_redo, max_bytes);
         }
     }
 
-    fn push_undo_state_from(tab: &mut EditorTab, state: EditorUndoState, clear_redo: bool) {
+    fn push_undo_state_from(
+        tab: &mut EditorTab,
+        state: EditorUndoState,
+        clear_redo: bool,
+        max_bytes: usize,
+    ) {
         if clear_redo {
             tab.redo_stack.clear();
             tab.redo_bytes = 0;
         }
-        Self::push_state_to_stack(&mut tab.undo_stack, &mut tab.undo_bytes, state);
+        Self::push_state_to_stack(&mut tab.undo_stack, &mut tab.undo_bytes, state, max_bytes);
     }
 
-    fn push_redo_state(tab: &mut EditorTab, state: EditorUndoState) {
-        Self::push_state_to_stack(&mut tab.redo_stack, &mut tab.redo_bytes, state);
+    fn push_redo_state(tab: &mut EditorTab, state: EditorUndoState, max_bytes: usize) {
+        Self::push_state_to_stack(&mut tab.redo_stack, &mut tab.redo_bytes, state, max_bytes);
     }
 
     fn restore_state_in_tab(&mut self, tab_idx: usize, state: EditorUndoState) -> bool {
@@ -3294,6 +3364,7 @@ impl WavesPreviewer {
     }
 
     fn undo_in_tab(&mut self, tab_idx: usize) -> bool {
+        let max_bytes = self.perf.undo_cache_bytes();
         let (undo_state, redo_state) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return false;
@@ -3307,12 +3378,13 @@ impl WavesPreviewer {
             (undo_state, redo_state)
         };
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            Self::push_redo_state(tab, redo_state);
+            Self::push_redo_state(tab, redo_state, max_bytes);
         }
         self.restore_state_in_tab(tab_idx, undo_state)
     }
 
     fn redo_in_tab(&mut self, tab_idx: usize) -> bool {
+        let max_bytes = self.perf.undo_cache_bytes();
         let (redo_state, undo_state) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return false;
@@ -3326,7 +3398,7 @@ impl WavesPreviewer {
             (redo_state, undo_state)
         };
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            Self::push_undo_state_from(tab, undo_state, false);
+            Self::push_undo_state_from(tab, undo_state, false, max_bytes);
         }
         self.restore_state_in_tab(tab_idx, redo_state)
     }
@@ -3338,6 +3410,7 @@ impl WavesPreviewer {
         // engine first, then swap in the real engine from a worker.
         let audio = AudioEngine::new_for_test();
         let mut app = Self::build_app(startup, audio);
+        app.detect_renderer(cc);
         app.begin_native_audio_bootstrap();
         Self::apply_theme_visuals(&cc.egui_ctx, app.theme_mode);
         Ok(app)
@@ -3356,9 +3429,28 @@ impl WavesPreviewer {
         Self::init_egui_style(&cc.egui_ctx);
         let audio = AudioEngine::new_for_test();
         let mut app = Self::build_app(startup, audio);
+        app.detect_renderer(cc);
         app.finish_test_startup();
         Self::apply_theme_visuals(&cc.egui_ctx, app.theme_mode);
         Ok(app)
+    }
+
+    fn detect_renderer(&mut self, cc: &eframe::CreationContext<'_>) {
+        let mut description = String::new();
+        #[cfg(feature = "glow")]
+        if let Some(gl) = cc.gl.as_ref() {
+            use eframe::glow::HasContext as _;
+            description = unsafe { gl.get_parameter_string(eframe::glow::RENDERER) };
+        }
+        #[cfg(feature = "wgpu")]
+        if description.is_empty() {
+            if let Some(state) = cc.wgpu_render_state.as_ref() {
+                let info = state.adapter.get_info();
+                description = format!("{} {:?}", info.name, info.device_type);
+            }
+        }
+        self.perf.set_renderer_description(&description);
+        self.push_video_poster_limit_to_meta_pool();
     }
 }
 
@@ -3371,6 +3463,9 @@ impl eframe::App for WavesPreviewer {
                 || i.pointer.any_released()
                 || i.pointer.delta() != egui::Vec2::ZERO
         });
+        if had_ui_input {
+            self.perf.note_interaction();
+        }
         self.run_frame(ctx, frame_started, had_ui_input);
     }
 

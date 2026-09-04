@@ -299,6 +299,20 @@ impl WavesPreviewer {
         self.global_keys_allowed() && self.input_scope.owner == target
     }
 
+    /// Whether the topbar volume fader is holding the left/right arrows.
+    ///
+    /// The fader consumes them while focused, but consumption does not settle
+    /// this on its own. The editor's seek reads `key_down`, a held-key set
+    /// `consume_key` never touches -- it only removes events -- so a held arrow
+    /// scrubbed the playhead and moved the monitor at the same time. The list
+    /// counts its arrows against `i.raw.events` as a fallback for exactly the
+    /// presses another widget consumed, and would answer the same arrow twice.
+    /// Both have to be told, not merely out-consumed, and neither may depend on
+    /// the topbar happening to draw first.
+    pub(super) fn topbar_volume_owns_arrows(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.has_focus(Self::topbar_volume_id()))
+    }
+
     pub(super) fn begin_floating_scroll_surface(&mut self, id: impl std::hash::Hash) -> UiSurface {
         let target = UiSurface::Floating(Id::new(id));
         self.ui_input_focus.begin_surface(target);
