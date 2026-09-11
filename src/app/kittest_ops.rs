@@ -4322,6 +4322,7 @@ impl super::WavesPreviewer {
             return false;
         };
         tab.channel_view = crate::app::types::ChannelView::mixdown();
+        tab.channel_view_user_set = true;
         true
     }
 
@@ -4336,6 +4337,7 @@ impl super::WavesPreviewer {
             mode: crate::app::types::ChannelViewMode::All,
             selected: Vec::new(),
         };
+        tab.channel_view_user_set = true;
         true
     }
 
@@ -4350,7 +4352,50 @@ impl super::WavesPreviewer {
             mode: crate::app::types::ChannelViewMode::Custom,
             selected,
         };
+        tab.channel_view_user_set = true;
         true
+    }
+
+    /// Fill in a list row's asset descriptor from the file's own header.
+    ///
+    /// A scanned row carries an unprobed descriptor -- no channel count, no
+    /// frame count -- which is why a freshly scanned file never takes the paged
+    /// editor path. A session restore, a drag-in and a recording all arrive
+    /// with those facts already filled in; this reproduces that state without
+    /// the machinery around it.
+    pub fn test_probe_audio_asset_for_path(&mut self, path: &Path) -> bool {
+        let descriptor = crate::audio_asset::AudioAssetDescriptor::external(path.to_path_buf());
+        if descriptor.channels == 0 || descriptor.frame_count.is_none() {
+            return false;
+        }
+        let Some(item) = self.item_for_path_mut(path) else {
+            return false;
+        };
+        item.audio_asset.sample_rate = descriptor.sample_rate;
+        item.audio_asset.channels = descriptor.channels;
+        item.audio_asset.bits_per_sample = descriptor.bits_per_sample;
+        item.audio_asset.frame_count = descriptor.frame_count;
+        true
+    }
+
+    pub fn test_active_tab_paged_asset(&self) -> Option<bool> {
+        let tab_idx = self.active_tab?;
+        Some(self.tabs.get(tab_idx)?.paged_asset)
+    }
+
+    pub fn test_active_tab_channel_count(&self) -> Option<usize> {
+        let tab_idx = self.active_tab?;
+        Some(self.tabs.get(tab_idx)?.ch_samples.len())
+    }
+
+    /// "mixdown" / "all" / "custom" for the active tab's channel view.
+    pub fn test_active_tab_channel_view_mode(&self) -> Option<&'static str> {
+        let tab_idx = self.active_tab?;
+        Some(match self.tabs.get(tab_idx)?.channel_view.mode {
+            crate::app::types::ChannelViewMode::Mixdown => "mixdown",
+            crate::app::types::ChannelViewMode::All => "all",
+            crate::app::types::ChannelViewMode::Custom => "custom",
+        })
     }
 
     pub fn test_waveform_lod_counts(&self) -> (u64, u64, u64) {

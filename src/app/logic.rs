@@ -8,9 +8,9 @@ use std::sync::Arc;
 use walkdir::WalkDir;
 
 use super::types::{
-    EditorDecodeStage, EditorDecodeStrategy, EditorDecodeUiStatus, EditorTab, MediaId,
-    OfflineRenderSpec, ProcessingResult, ProcessingState, ProcessingTarget, RateMode, ScanMessage,
-    ScanRequestKind, SortDir, SortKey,
+    ChannelView, ChannelViewMode, EditorDecodeStage, EditorDecodeStrategy, EditorDecodeUiStatus,
+    EditorTab, MediaId, OfflineRenderSpec, ProcessingResult, ProcessingState, ProcessingTarget,
+    RateMode, ScanMessage, ScanRequestKind, SortDir, SortKey,
 };
 
 const LIST_PREVIEW_PREFIX_SECS: f32 = 0.35;
@@ -196,6 +196,71 @@ impl super::WavesPreviewer {
         } else {
             tab.samples_len
         }
+    }
+
+    /// Whether the canvas has to draw from the whole-file overview rather than
+    /// from `ch_samples`.
+    ///
+    /// True while a decode is still running, and true forever for a paged
+    /// asset: one too large for a resident buffer never publishes PCM at all
+    /// (see `AudioAssetDescriptor::requires_paged_editor`), so `ch_samples` is
+    /// empty and `loading_waveform_minmax` is the only picture there is. This
+    /// pairs with `editor_display_samples_len`, which reads the timeline length
+    /// from `samples_len_visual` in exactly the same two cases; keeping the two
+    /// conditions apart is what left a paged tab drawing nothing on a canvas
+    /// whose length it had already computed as zero.
+    pub(super) fn editor_draws_overview_only(tab: &EditorTab) -> bool {
+        tab.loading || tab.paged_asset
+    }
+
+    /// How the canvas divides into channel lanes.
+    ///
+    /// Returns `(use_mixdown, visible_channels, lane_count)`. The canvas needs
+    /// the lane count before it allocates its height and the lane list after,
+    /// and working the two out separately is how they drift apart.
+    pub(super) fn editor_lane_layout(
+        tab: &EditorTab,
+        view_mode: super::types::ViewMode,
+    ) -> (bool, Vec<usize>, usize) {
+        use super::types::ViewMode;
+        let channel_count = tab.ch_samples.len().max(1);
+        let mut visible_channels = tab.channel_view.visible_indices(channel_count);
+        // These views analyse one signal, so they have one lane whatever the
+        // channel view says.
+        let force_feature_mixdown = matches!(
+            view_mode,
+            ViewMode::Tempogram | ViewMode::Chromagram | ViewMode::World
+        );
+        let use_mixdown = force_feature_mixdown
+            || tab.channel_view.mode == ChannelViewMode::Mixdown
+            || visible_channels.is_empty();
+        if use_mixdown {
+            visible_channels.clear();
+        }
+        let lane_count = if use_mixdown {
+            1
+        } else {
+            visible_channels.len().max(1)
+        };
+        (use_mixdown, visible_channels, lane_count)
+    }
+
+    /// Give a file with more than two channels per-channel lanes by default.
+    ///
+    /// Every mixdown path averages over the channel count, so a 12-channel file
+    /// in the default Mixdown view draws up to 21.6 dB down -- a near-flat line
+    /// that reads as "the editor did not load anything". Beyond stereo there is
+    /// no single mix worth showing anyway; `docs/EDITOR_SPEC.md` asks for one
+    /// lane per channel. Only ever applied to a view nobody has chosen, and
+    /// only once the decode has published a channel count.
+    pub(super) fn apply_default_channel_view(tab: &mut EditorTab) {
+        if tab.channel_view_user_set || tab.ch_samples.len() <= 2 {
+            return;
+        }
+        tab.channel_view = ChannelView {
+            mode: ChannelViewMode::All,
+            selected: Vec::new(),
+        };
     }
 
     fn cached_source_sample_rate_for_path(&self, path: &Path) -> Option<u32> {
@@ -3394,5 +3459,127 @@ mod loading_overview_total_tests {
             ),
             10_000
         );
+    }
+}
+
+#[cfg(test)]
+mod editor_lane_layout_tests {
+    use crate::app::types::{ChannelViewMode, EditorTab, ViewMode};
+    use crate::app::WavesPreviewer;
+
+    fn tab_with_channels(channels: usize) -> EditorTab {
+        let mut tab = EditorTab::new_base(std::path::PathBuf::from("/t.wav"), "t.wav".to_string());
+        tab.ch_samples = vec![vec![0.0; 8]; channels];
+        tab
+    }
+
+    #[test]
+    fn a_mixdown_view_is_one_lane_whatever_the_channel_count() {
+        let tab = tab_with_channels(12);
+        let (use_mixdown, visible, lanes) =
+            WavesPreviewer::editor_lane_layout(&tab, ViewMode::Waveform);
+        assert!(use_mixdown);
+        assert!(visible.is_empty());
+        assert_eq!(lanes, 1);
+    }
+
+    #[test]
+    fn every_channel_gets_a_lane_under_the_all_view() {
+        let mut tab = tab_with_channels(12);
+        WavesPreviewer::apply_default_channel_view(&mut tab);
+        let (use_mixdown, visible, lanes) =
+            WavesPreviewer::editor_lane_layout(&tab, ViewMode::Waveform);
+        assert!(!use_mixdown);
+        assert_eq!(visible, (0..12).collect::<Vec<_>>());
+        assert_eq!(lanes, 12);
+    }
+
+    /// Tempogram, Chromagram and World analyse a single signal, so they collapse
+    /// to one lane even with per-channel lanes selected.
+    #[test]
+    fn feature_views_collapse_to_one_lane() {
+        let mut tab = tab_with_channels(12);
+        WavesPreviewer::apply_default_channel_view(&mut tab);
+        for view in [ViewMode::Tempogram, ViewMode::Chromagram, ViewMode::World] {
+            let (use_mixdown, _, lanes) = WavesPreviewer::editor_lane_layout(&tab, view);
+            assert!(use_mixdown, "{view:?} did not collapse to a mixdown");
+            assert_eq!(lanes, 1, "{view:?} drew more than one lane");
+        }
+    }
+
+    /// A Mixdown of N channels divides by N, so 12 channels draw ~21.6 dB down
+    /// -- flat enough to read as an editor that loaded nothing.
+    #[test]
+    fn more_than_two_channels_default_to_per_channel_lanes() {
+        let mut tab = tab_with_channels(12);
+        assert_eq!(tab.channel_view.mode, ChannelViewMode::Mixdown);
+        WavesPreviewer::apply_default_channel_view(&mut tab);
+        assert_eq!(tab.channel_view.mode, ChannelViewMode::All);
+    }
+
+    #[test]
+    fn mono_and_stereo_keep_the_mixdown_default() {
+        for channels in [1usize, 2] {
+            let mut tab = tab_with_channels(channels);
+            WavesPreviewer::apply_default_channel_view(&mut tab);
+            assert_eq!(
+                tab.channel_view.mode,
+                ChannelViewMode::Mixdown,
+                "{channels}-channel default changed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chosen_view_survives_the_multichannel_default() {
+        let mut tab = tab_with_channels(12);
+        tab.channel_view_user_set = true;
+        WavesPreviewer::apply_default_channel_view(&mut tab);
+        assert_eq!(tab.channel_view.mode, ChannelViewMode::Mixdown);
+    }
+}
+
+#[cfg(test)]
+mod editor_display_length_tests {
+    use crate::app::types::EditorTab;
+    use crate::app::WavesPreviewer;
+
+    fn tab() -> EditorTab {
+        EditorTab::new_base(std::path::PathBuf::from("/t.wav"), "t.wav".to_string())
+    }
+
+    /// A paged tab is neither loading nor holding samples. Reading its length
+    /// from `loading || samples_len` alone gave zero, and a canvas that measures
+    /// zero skips its ruler, its zoom and every lane's waveform.
+    #[test]
+    fn a_paged_tab_has_the_length_of_the_file_it_cannot_hold() {
+        let mut tab = tab();
+        tab.loading = false;
+        tab.paged_asset = true;
+        tab.samples_len = 0;
+        tab.samples_len_visual = 7_920_000;
+        assert_eq!(WavesPreviewer::editor_display_samples_len(&tab), 7_920_000);
+        assert!(WavesPreviewer::editor_draws_overview_only(&tab));
+    }
+
+    #[test]
+    fn a_decoded_tab_has_the_length_of_its_buffer() {
+        let mut tab = tab();
+        tab.loading = false;
+        tab.paged_asset = false;
+        tab.samples_len = 480_000;
+        tab.samples_len_visual = 7_920_000;
+        assert_eq!(WavesPreviewer::editor_display_samples_len(&tab), 480_000);
+        assert!(!WavesPreviewer::editor_draws_overview_only(&tab));
+    }
+
+    #[test]
+    fn a_loading_tab_spans_the_whole_file_it_is_still_decoding() {
+        let mut tab = tab();
+        tab.loading = true;
+        tab.samples_len = 48_000;
+        tab.samples_len_visual = 7_920_000;
+        assert_eq!(WavesPreviewer::editor_display_samples_len(&tab), 7_920_000);
+        assert!(WavesPreviewer::editor_draws_overview_only(&tab));
     }
 }

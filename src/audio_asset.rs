@@ -14,6 +14,24 @@ use std::sync::Arc;
 
 pub const MAX_RESIDENT_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
+/// The resident-buffer ceiling actually in force.
+///
+/// [`MAX_RESIDENT_DECODE_BYTES`] unless `NEOWAVES_MAX_RESIDENT_DECODE_BYTES`
+/// names a different byte count. Tests need a ceiling they can cross with a
+/// fixture small enough to generate, and a machine with the memory to spare can
+/// raise it to keep large multichannel files out of the paged path. Read once,
+/// so it cannot change under a session mid-decode.
+pub fn max_resident_decode_bytes() -> u64 {
+    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("NEOWAVES_MAX_RESIDENT_DECODE_BYTES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|bytes| *bytes > 0)
+            .unwrap_or(MAX_RESIDENT_DECODE_BYTES)
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AudioAssetId(pub u128);
 
@@ -156,7 +174,7 @@ impl AudioAssetDescriptor {
 
     pub fn may_reside_in_memory(&self) -> bool {
         self.estimated_decoded_bytes()
-            .map(|bytes| bytes <= MAX_RESIDENT_DECODE_BYTES)
+            .map(|bytes| bytes <= max_resident_decode_bytes())
             .unwrap_or(false)
     }
 
@@ -169,7 +187,7 @@ impl AudioAssetDescriptor {
     /// a time; only a positively known oversized asset takes the paged path.
     pub fn requires_paged_editor(&self) -> bool {
         self.estimated_decoded_bytes()
-            .is_some_and(|bytes| bytes > MAX_RESIDENT_DECODE_BYTES)
+            .is_some_and(|bytes| bytes > max_resident_decode_bytes())
     }
 
     pub fn access(&self) -> AssetAccess<'_> {
@@ -438,5 +456,28 @@ mod tests {
         let asset = AudioAssetDescriptor::external_unprobed(PathBuf::from("pending.wav"));
         assert!(!asset.may_reside_in_memory());
         assert!(!asset.requires_paged_editor());
+    }
+
+    /// Channel count, not length, is what puts an ordinary file over the
+    /// ceiling: 12 channels at 48 kHz cross it at 1:56, where stereo needs
+    /// 11:39. A 2:45 twelve-channel file is paged, and the editor has to stay
+    /// legible when it is.
+    #[test]
+    fn twelve_channels_page_at_a_length_stereo_does_not() {
+        let probed = |channels: u16, secs: f64| AudioAssetDescriptor {
+            id: AudioAssetId::new(),
+            revision: AssetRevision::INITIAL,
+            backing: AudioBacking::ExternalFile(PathBuf::from("clip.wav")),
+            sample_rate: 48_000,
+            channels,
+            bits_per_sample: 24,
+            frame_count: Some((secs * 48_000.0) as u64),
+        };
+        // 2:45.
+        assert!(probed(12, 165.0).requires_paged_editor());
+        assert!(!probed(2, 165.0).requires_paged_editor());
+        // Either side of the 12-channel cut-off.
+        assert!(!probed(12, 116.0).requires_paged_editor());
+        assert!(probed(12, 117.0).requires_paged_editor());
     }
 }

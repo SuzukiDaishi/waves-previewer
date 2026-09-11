@@ -788,11 +788,7 @@ impl super::WavesPreviewer {
                 }
                 if let Some(idx) = self.tabs.iter().position(|t| t.path == res.path) {
                     if let Some(tab) = self.tabs.get_mut(idx) {
-                        let old_display_len = if tab.loading && tab.samples_len_visual > 0 {
-                            tab.samples_len_visual
-                        } else {
-                            tab.samples_len
-                        };
+                        let old_display_len = Self::editor_display_samples_len(tab);
                         let old_view = tab.view_offset;
                         let old_spp = tab.samples_per_px;
                         let had_preview =
@@ -819,6 +815,9 @@ impl super::WavesPreviewer {
                                 tab.loading = false;
                                 tab.loading_waveform_minmax.clear();
                                 tab.samples_len_visual = tab.samples_len;
+                                // The channel count is only real once the decode
+                                // publishes its buffers.
+                                Self::apply_default_channel_view(tab);
                                 Self::invalidate_editor_viewport_cache(tab);
                                 if tab.samples_len != old_audio_len {
                                     spectro_reset_paths.push(tab.path.clone());
@@ -826,11 +825,7 @@ impl super::WavesPreviewer {
                                 if !is_clear_edit {
                                     marker_updates.push((idx, res.path.clone()));
                                 }
-                                let new_display_len = if tab.loading && tab.samples_len_visual > 0 {
-                                    tab.samples_len_visual
-                                } else {
-                                    tab.samples_len
-                                };
+                                let new_display_len = Self::editor_display_samples_len(tab);
                                 remap_view_for_display_len(
                                     tab,
                                     old_display_len,
@@ -1009,6 +1004,18 @@ impl super::WavesPreviewer {
                 self.push_toast(
                     crate::app::types::ToastSeverity::Error,
                     format!("Clear Edit failed: {err}"),
+                );
+            } else {
+                // Every other editor decode failure used to reach the debug log
+                // and nowhere else, so the tab simply sat there with an empty
+                // canvas and no way to tell that anything had gone wrong.
+                let name = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("this file");
+                self.push_toast(
+                    crate::app::types::ToastSeverity::Error,
+                    format!("Could not load {name} into the editor: {err}"),
                 );
             }
         }
