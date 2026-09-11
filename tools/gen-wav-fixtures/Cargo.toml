@@ -1,0 +1,17 @@
+# Standalone on purpose, like `tools/gen-licenses`: this tool only emits bytes,
+# and keeping it out of the main crate means regenerating the fixtures does not
+# need NeoWaves's native build dependencies (ALSA, X11/Wayland, a C++ toolchain
+# for OpenH264). The fixtures are most useful exactly when the app does not
+# build or does not run, so the generator must not depend on it.
+#
+# No dependencies at all, including hound: the point of several fixtures is a
+# header no ordinary writer will produce -- a channel mask that disagrees with
+# the channel count, an RF64 root, a `data` chunk that lies about its length.
+[package]
+name = "gen-wav-fixtures"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Writes the deterministic WAV fixture matrix in test_samples/formats"
+
+[dependencies]

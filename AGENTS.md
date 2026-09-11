@@ -73,7 +73,9 @@ Repository Layout
   - `src/ui_wake.rs`: process-wide handle for waking the UI thread from a background thread (the frame loop sleeps when idle, so a thread pushing into a channel the UI polls must ask for a frame).
   - `src/kittest.rs`: kittest feature helpers.
 - `tools/gen-licenses/`: standalone crate that merges `cargo about generate --format json` with `assets/licenses/extra.json` into the committed snapshot. Deliberately outside the main crate so regenerating licences does not need NeoWaves's native build deps (ALSA, X11/Wayland, a C++ toolchain).
+- `tools/gen-wav-fixtures/`: standalone crate that writes `test_samples/formats/`. Zero dependencies and hand-written RIFF bytes, because several fixtures are headers no ordinary writer will produce (a channel mask that disagrees with the channel count, an RF64 root, a `data` chunk that lies about its length). Outside the main crate for the same reason as `gen-licenses`, and because the fixtures are most useful when the app itself does not build.
 - `tests/`: integration tests (including kittest harness).
+- `test_samples/`: committed audio fixtures. `voices/` and `bgms/` are recorded material for list/editor work; `video/` and `formats/` are generated and each carries a README stating what the app must do with every file. `formats/` covers channel counts, bit depths, sample rates and deliberately malformed headers -- regenerate it with `tools/gen-wav-fixtures`, and keep `tests/format_fixture_matrix.rs` in step with its README.
 - `target/`: Cargo build artifacts (generated).
 
 Cargo Features

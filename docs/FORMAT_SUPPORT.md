@@ -1,6 +1,6 @@
 # フォーマット別対応マトリクス (FORMAT_SUPPORT)
 
-最終更新: 2026-08-25 (AAC を OS デコーダー経由で再生・LAME 動的リンク化)
+最終更新: 2026-09-11 (WAV 読み込みの受理範囲・RF64/BW64・26ch 上限を明記)
 
 NeoWaves が扱う音声フォーマットごとの、デコード / エンコード / メタ情報
 (loop marker・marker・BPM・artwork 等) の対応状況と、
@@ -47,7 +47,8 @@ Media Foundation、`src/audio_mf.rs`）。借りられる環境では mp4 / m4a 
 
 | フォーマット | デコード | エンコード (書き出し) | 備考 |
 | --- | --- | --- | --- |
-| WAV | hound + symphonia (`pcm`) | hound: 16/24-bit PCM, 32-bit float | 唯一 exact-stream 再生・sparse proxy 読みに対応 |
+| WAV (RIFF) | hound + symphonia (`pcm`) | hound: 16/24-bit PCM, 32-bit float | 唯一 exact-stream 再生・sparse proxy 読みに対応。読みは 8/16/24/32-bit 整数と 32/64-bit float。詳細は §1.1 |
+| WAV (RF64 / BW64) | ヘッダのみ (`wav_stream::read_wave_pcm_info`) | `StreamingWaveWriter` のみ (32-bit float、録音用) | **フルデコード不可** — symphonia は `RIFF` マーカーしか受け付けない。リスト行は出るがエディタは開けない。マーカー / ループはサイドカー JSON に回る |
 | AIFF / AIF | symphonia (`aiff`) | 自前 writer: 16/24-bit PCM (AIFF), 32-bit float (AIFC `fl32`) | |
 | FLAC | symphonia (`flac`) | flacenc: 16-bit / 24-bit 整数 | FLAC は float 非対応のため 32f 指定・未指定は 24-bit に量子化。9ch 以上は非対応 (仕様上限 8ch) |
 | MP3 | symphonia (`mp3`) | 動的 `libmp3lame` 3.100 CBR (96–320 kbps, 設定値) | ステレオまで (3ch 以上は先頭 2ch) |
@@ -56,6 +57,36 @@ Media Foundation、`src/audio_mf.rs`）。借りられる環境では mp4 / m4a 
 | OGG (Vorbis) | symphonia (`ogg`/`vorbis`) | vorbis_rs quality-VBR | ステレオまで |
 | MP4 / MOV / M4V / 3GP / 3G2 (音声) | AAC は OS デコーダー / それ以外は symphonia | **非対応 (読み込み専用)** | ALAC / QuickTime PCM は symphonia。OS デコーダーの無い環境の AAC のみ `AAC UNSUPPORTED`＋無音タイムライン |
 | MP4 / MOV / M4V / 3GP / 3G2 (映像) | Windows: Media Foundation / 全 OS: openh264 (H.264 のみ) | 非対応 | エディタの Mini Meter にプレビュー表示するためだけにデコードする |
+
+### 1.1 WAV 読み込みの受理範囲
+
+ヘッダの高速パス `wav_stream::read_wave_pcm_info` が受け付けるのは
+`(audio_format, bits_per_sample)` が次のいずれかの場合だけ。
+
+| audio_format | bits | |
+| --- | --- | --- |
+| 1 (PCM) | 8 / 16 / 24 / 32 | 8-bit は unsigned (`(b - 128) / 128`) |
+| 3 (IEEE float) | 32 | |
+| 0xFFFE (EXTENSIBLE) | 上記 | SubFormat GUID を展開して上表で判定 |
+
+`(3, 64)` — 64-bit float — は**この表に無いがフルデコードは通る**。高速パスが
+降りるので sparse proxy のオーバービューが作られず、エディタは全デコードを待つ。
+
+`dwChannelMask` がチャンネル数と一致しない場合（0、少なすぎる、多すぎる）は
+上位ビットを足す／削ることで補正されるので、そのままでは失敗しない。
+
+**チャンネル数の上限は 26。** symphonia の `Channels` ビットマスクが 26 個しか
+位置を定義していないため、27ch 以上の EXTENSIBLE ヘッダはチャンネルを表現できず
+`wav: too many channels in mask for fmt_ext` でデコードに失敗する。ヘッダの高速
+パスは通るのでリスト行には Ch 数と長さが出る。
+
+再生時のスピーカー配置 (`audio_channels::standard_layout`) は 1–8, 10, 12ch に
+定義がある。9, 11, 13ch 以上は定義が無く、チャンネル位置ではなくインデックスで
+出力にマップされる。
+
+これらを網羅した WAV 一式が `test_samples/formats/` にある
+（生成は `tools/gen-wav-fixtures`、期待値は同ディレクトリの README と
+`tests/format_fixture_matrix.rs`）。
 
 ### 動画コンテナの扱い
 

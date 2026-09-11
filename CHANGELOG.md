@@ -4,6 +4,30 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### マルチチャンネル / フォーマット網羅のテスト WAV を追加した
+
+- `test_samples/formats/` に **50 本の WAV**（約 13 MB）。コミット済みの素材は
+  これまで 16bit モノラル 44.1k・24bit ステレオ 44.1k・MP3・MP4 だけで、
+  **マルチチャンネルも float も 8bit も 44.1k 以外も EXTENSIBLE も RF64 も一つも無かった**。
+  上の 12ch の不具合が見つからなかったのは、そもそもその形のファイルが無かったから。
+- 内訳: チャンネル数 1〜32（**26ch が上限で 27ch 以上はデコード不可**という境界を挟む）、
+  ビット深度 8/16/24/32int/32float、サンプルレート 8k〜192k（11.025 / 88.2 / 176.4k を含む）、
+  12ch の内容パターン 4 種（**ch1 だけ大音量 = Mix だと 1/12 に潰れる**、同位相、逆位相キャンセル、
+  ch 別トーン）、ヘッダ異常系 14 種（channel mask の不一致 / 0、不明な SubFormat、
+  64bit float、data 奇数長、fmt 前後のチャンク、truncated data、data 長 0、
+  block_align 不一致、RF64/BW64、非 WAV）。
+- 生成は `tools/gen-wav-fixtures`（依存ゼロの独立クレート）。**再生成はバイト単位で同一**なので
+  差分が出たら生成側のバグ。`--huge` で 256 MiB 超え（64 MB、paged 経路を実物で踏む）を
+  gitignore 済みの `debug/` に出せる。
+- **全部が開けるはずのセットではない。** 27ch/32ch、RF64/BW64、truncated、不明 SubFormat、
+  非 WAV は「落ちるのが正しい」ケース。各ファイルに何を期待するかは
+  `test_samples/formats/README.md` の表にあり、同じ表を `tests/format_fixture_matrix.rs` が
+  コードとして持っているので README が挙動から乖離しない。
+- 判明した挙動も記録した: 64bit float は**ヘッダの高速パスは降りるがフルデコードは通る**、
+  `block_align` 不一致だと 2 つのリーダーが違う長さを出す（4114 と 4223）、
+  data 長 0 のデコード結果は**チャンネル 0 本**（空のチャンネル 1 本ではない）。
+  `docs/FORMAT_SUPPORT.md` に受理表・RF64・26ch 上限を追記。
+
 ### 12ch の長い音声で Editor が真っ黒のままだったのを直した
 
 - **12ch / 48kHz / 2:45 の WAV を開くと、タブは開くのに波形が一切出なかった**。
