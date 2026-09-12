@@ -2822,12 +2822,61 @@ show_note_labels = false
         assert_eq!(restored.spectrogram.db_ceiling, -12.0);
     }
 
+    /// A session written before `snap_zero_cross` was dropped still loads, and
+    /// saving it again does not write the dead key back out.
+    ///
+    /// The legacy document is built by the app's own serializer and then has the
+    /// old key spliced in, rather than being a hand-written or captured file.
+    /// Two reasons. `ProjectTab` has required fields with no `serde` default, so
+    /// a hand-written tab stops parsing the moment a field is added -- and a
+    /// captured one did exactly that: this test used to `include_str!` a file
+    /// under the gitignored `debug/`, which no clone has ever had, so the whole
+    /// lib test target failed to compile away from the machine that wrote it.
+    ///
+    /// The key also has to go in the right place. `snap_zero_cross` was a field
+    /// on the *tab*, never on `[app]`; put it under `[app]` and both assertions
+    /// hold for a document that exercises nothing, because serde drops the
+    /// unknown key on the way in and there was never anything to write back.
     #[test]
     fn legacy_snap_zero_cross_fields_are_ignored_and_not_written_again() {
-        let legacy = include_str!("../../debug/cli-renders/phase1b_smoke.nwsess");
-        assert!(legacy.contains("snap_zero_cross"));
-        let project = deserialize_project(legacy).expect("load legacy session");
-        let encoded = serialize_project(&project).expect("serialize migrated session");
+        let mut project = deserialize_project(MINIMAL_TOML).expect("minimal session");
+        let tab = crate::app::types::EditorTab::new_base(
+            std::path::PathBuf::from("/audio/a.wav"),
+            "a.wav".to_string(),
+        );
+        project.tabs.push(project_tab_from_tab(
+            &tab,
+            std::path::Path::new("/audio"),
+            SessionPathMode::Absolute,
+            None,
+            None,
+            None,
+        ));
+        let current = serialize_project(&project).expect("serialize a session with one tab");
+
+        // Splice the dead key into the tab table the way a session from that
+        // era would have carried it.
+        let legacy = current.replace("[[tabs]]\n", "[[tabs]]\nsnap_zero_cross = true\n");
+        assert_ne!(legacy, current, "the tab table should have been found");
+        // Guard the splice itself: the key only proves anything while it sits
+        // inside the tab table, between its header and whatever table follows.
+        // Land it anywhere else and the assertion below holds over a document
+        // that exercises nothing.
+        let tab_table = legacy
+            .split("[[tabs]]")
+            .nth(1)
+            .expect("a tab table")
+            .split("\n[")
+            .next()
+            .expect("the tab table's own keys");
+        assert!(
+            tab_table.contains("snap_zero_cross"),
+            "the legacy key must sit in the tab table, not some later section"
+        );
+
+        let restored = deserialize_project(&legacy).expect("load legacy session");
+        assert_eq!(restored.tabs.len(), 1, "the tab itself must still load");
+        let encoded = serialize_project(&restored).expect("serialize migrated session");
         assert!(!encoded.contains("snap_zero_cross"));
     }
 

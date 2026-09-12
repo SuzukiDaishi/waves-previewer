@@ -4,6 +4,31 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### 素の clone でビルド・テストが通らなかったのを直した
+
+- **`vendor/lame-3.100` の実行権限が全部落ちていた**。shebang を持つスクリプト 17 本が
+  すべて `100644`（というよりリポジトリ全体で `100755` が 0 件）で、`autotools` クレートが
+  configure を `exec` するため **既定 feature の `mp3_lame` が Linux / macOS で一切ビルドできなかった**。
+  17 本に実行ビットを付けた。Windows は `build_lame_dll_windows`（cc 直叩き）で configure を
+  通らないので影響しない。
+- これはビルドだけの問題ではなかった。**フルスイートの失敗 16 件のうち 15 件がこれが原因**だった
+  （mp3 フィクスチャが書けない → `maybe_generate_extra_formats` が mp3/m4a/ogg を用意できない →
+  同じバイナリ内の video / paste / licenses 系まで連鎖）。`tests/mp3_preview_timing.rs` は
+  5/5 全滅から全通過になった。残る失敗は VST3 の 1 件のみ。
+- **`src/app/project.rs` が、一度もコミットされていないファイルを `include_str!` していた**。
+  `debug/cli-renders/phase1b_smoke.nwsess` は gitignore 対象の `debug/` 配下で、
+  どのコミットにも存在しない（全オブジェクトを走査して確認）。著者の手元にだけあるので、
+  **素の clone では lib テストターゲットがコンパイルできなかった**。ツリー内の他の
+  `include_str!` / `include_bytes!` は全てコミット済みパスを指しており、これだけが例外。
+- 元ファイルは復元できないので、テストを**アプリ自身のシリアライザで組み立てる形**に置き換えた。
+  `project_tab_from_tab` で 1 タブ入りドキュメントを書かせ、その `[[tabs]]` テーブルに
+  旧キーを注入する。`ProjectTab` は `serde(default)` の無い必須フィールドを持つので、
+  手書き TOML はフィールドが増えるたびに腐る。
+- ついでに**テストの置き場所の誤りも直した**。`snap_zero_cross` は `[app]` ではなく
+  **tab のフィールド**だった。`[app]` に置くと serde が未知キーとして捨て、再シリアライズにも
+  出てこないので assert が両方成立し、**移行パスを何も検証しないまま通る**。
+  キーが tab テーブル内にあることを assert で固定した。
+
 ### マルチチャンネル / フォーマット網羅のテスト WAV を追加した
 
 - `test_samples/formats/` に **50 本の WAV**（約 13 MB）。コミット済みの素材は
