@@ -4,6 +4,84 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### 素の clone でビルド・テストが通らなかったのを直した
+
+- **`vendor/lame-3.100` の実行権限が全部落ちていた**。shebang を持つスクリプト 17 本が
+  すべて `100644`（というよりリポジトリ全体で `100755` が 0 件）で、`autotools` クレートが
+  configure を `exec` するため **既定 feature の `mp3_lame` が Linux / macOS で一切ビルドできなかった**。
+  17 本に実行ビットを付けた。Windows は `build_lame_dll_windows`（cc 直叩き）で configure を
+  通らないので影響しない。
+- これはビルドだけの問題ではなかった。**フルスイートの失敗 16 件のうち 15 件がこれが原因**だった
+  （mp3 フィクスチャが書けない → `maybe_generate_extra_formats` が mp3/m4a/ogg を用意できない →
+  同じバイナリ内の video / paste / licenses 系まで連鎖）。`tests/mp3_preview_timing.rs` は
+  5/5 全滅から全通過になった。残る失敗は VST3 の 1 件のみ。
+- **`src/app/project.rs` が、一度もコミットされていないファイルを `include_str!` していた**。
+  `debug/cli-renders/phase1b_smoke.nwsess` は gitignore 対象の `debug/` 配下で、
+  どのコミットにも存在しない（全オブジェクトを走査して確認）。著者の手元にだけあるので、
+  **素の clone では lib テストターゲットがコンパイルできなかった**。ツリー内の他の
+  `include_str!` / `include_bytes!` は全てコミット済みパスを指しており、これだけが例外。
+- 元ファイルは復元できないので、テストを**アプリ自身のシリアライザで組み立てる形**に置き換えた。
+  `project_tab_from_tab` で 1 タブ入りドキュメントを書かせ、その `[[tabs]]` テーブルに
+  旧キーを注入する。`ProjectTab` は `serde(default)` の無い必須フィールドを持つので、
+  手書き TOML はフィールドが増えるたびに腐る。
+- ついでに**テストの置き場所の誤りも直した**。`snap_zero_cross` は `[app]` ではなく
+  **tab のフィールド**だった。`[app]` に置くと serde が未知キーとして捨て、再シリアライズにも
+  出てこないので assert が両方成立し、**移行パスを何も検証しないまま通る**。
+  キーが tab テーブル内にあることを assert で固定した。
+
+### マルチチャンネル / フォーマット網羅のテスト WAV を追加した
+
+- `test_samples/formats/` に **50 本の WAV**（約 13 MB）。コミット済みの素材は
+  これまで 16bit モノラル 44.1k・24bit ステレオ 44.1k・MP3・MP4 だけで、
+  **マルチチャンネルも float も 8bit も 44.1k 以外も EXTENSIBLE も RF64 も一つも無かった**。
+  上の 12ch の不具合が見つからなかったのは、そもそもその形のファイルが無かったから。
+- 内訳: チャンネル数 1〜32（**26ch が上限で 27ch 以上はデコード不可**という境界を挟む）、
+  ビット深度 8/16/24/32int/32float、サンプルレート 8k〜192k（11.025 / 88.2 / 176.4k を含む）、
+  12ch の内容パターン 4 種（**ch1 だけ大音量 = Mix だと 1/12 に潰れる**、同位相、逆位相キャンセル、
+  ch 別トーン）、ヘッダ異常系 14 種（channel mask の不一致 / 0、不明な SubFormat、
+  64bit float、data 奇数長、fmt 前後のチャンク、truncated data、data 長 0、
+  block_align 不一致、RF64/BW64、非 WAV）。
+- 生成は `tools/gen-wav-fixtures`（依存ゼロの独立クレート）。**再生成はバイト単位で同一**なので
+  差分が出たら生成側のバグ。`--huge` で 256 MiB 超え（64 MB、paged 経路を実物で踏む）を
+  gitignore 済みの `debug/` に出せる。
+- **全部が開けるはずのセットではない。** 27ch/32ch、RF64/BW64、truncated、不明 SubFormat、
+  非 WAV は「落ちるのが正しい」ケース。各ファイルに何を期待するかは
+  `test_samples/formats/README.md` の表にあり、同じ表を `tests/format_fixture_matrix.rs` が
+  コードとして持っているので README が挙動から乖離しない。
+- 判明した挙動も記録した: 64bit float は**ヘッダの高速パスは降りるがフルデコードは通る**、
+  `block_align` 不一致だと 2 つのリーダーが違う長さを出す（4114 と 4223）、
+  data 長 0 のデコード結果は**チャンネル 0 本**（空のチャンネル 1 本ではない）。
+  `docs/FORMAT_SUPPORT.md` に受理表・RF64・26ch 上限を追記。
+
+### 12ch の長い音声で Editor が真っ黒のままだったのを直した
+
+- **12ch / 48kHz / 2:45 の WAV を開くと、タブは開くのに波形が一切出なかった**。
+  常駐デコード上限は 256 MiB で、判定は `frame_count x channels x 4`
+  （`AudioAssetDescriptor::requires_paged_editor`）。このファイルは 362.5 MiB なので
+  *paged*（全 PCM を持たず全体波形だけ）タブになる。12ch/48kHz では **1:56** で超えるので、
+  ステレオなら 11:39 必要な長さを多チャンネルというだけで踏む。
+- 原因は**表示長の計算が 2 通りあった**こと。`editor_display_samples_len` は
+  `loading || paged_asset` を見るのに、キャンバス側は同じ式を 5 箇所に手で展開していて
+  `paged_asset` が抜けていた。paged タブは loading でもサンプルも持たないので
+  タイムライン長が **0** になり、ズーム初期化もタイムルーラーも走らず、
+  `visible_len == 0` で**全レーンの波形描画がスキップ**される。loading でもないので
+  "Loading audio…" も出ず、dB グリッドだけの黒い矩形が残っていた。
+  5 箇所をヘルパー呼び出しに集約し、オーバービューを描く条件も
+  `editor_draws_overview_only` に一本化した（描画側と非同期ビューポート要求側の両方）。
+- **デコード失敗が無言だった**。`debug_log` に出るだけで、トーストは "Clear Edit" のときしか
+  出していなかった。ワーカーが結果を出さずに死んだ場合も `paged_asset` が立つので、
+  あらゆる失敗が同じ「説明のない空キャンバス」に化けていた。通常の失敗もトーストを出す。
+- **paged タブに `OVERVIEW ONLY` バッジ**を追加（`NO AUDIO` と同じ並び）。全体波形のみで
+  編集ツールが使えないこと、`NEOWAVES_MAX_RESIDENT_DECODE_BYTES` で上限を変えられることを
+  hover に書いてある。この環境変数は上限の差し替え用に新設したもの。
+- **3ch 以上は既定でチャンネルごとのレーン表示**にした。Mix はチャンネル数 N で割るので
+  12ch では最大 −21.6 dB になり、全部読み込めていても平坦な線にしか見えない。
+  ユーザーが選んだ表示とセッションが持つ表示は上書きしない。
+- ついでに、**キャンバス高が 12 レーンを 15px に潰していた**のと、
+  `(canvas_w * 0.35).clamp(180.0, canvas_area_h)` が Editor の利用可能高さが 180px を
+  下回ると `min > max` で **panic** していたのを直した（`min` を最後に適用する）。
+  レーン数からキャンバス高の下限も取るようにしてある。
+
 ## 0.20260904.0 - 2026-09-04
 
 ### Volume スライダーが、自分のキーだけに答えるようにした

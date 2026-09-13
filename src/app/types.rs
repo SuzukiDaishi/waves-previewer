@@ -2924,19 +2924,25 @@ pub struct EditorTab {
     pub metadata_artwork_texture: Option<(crate::metadata::NodeId, egui::TextureHandle)>,
     pub show_waveform_overlay: bool, // draw waveform overlay in feature views
     pub channel_view: ChannelView,   // Mixdown / All / Custom
-    pub bpm_enabled: bool,           // grid toggle in editor
-    pub bpm_value: f32,              // current BPM for grid
-    pub bpm_user_set: bool,          // user-overridden BPM
-    pub bpm_offset_sec: f32,         // grid offset in seconds
-    pub time_sig_numerator: u8,      // time signature numerator (e.g. 4)
-    pub time_sig_denominator: u8,    // time signature denominator (e.g. 4)
-    pub seek_hold: Option<SeekHoldState>, // key repeat state for seek
+    /// Whether `channel_view` reflects a choice someone made, rather than the
+    /// default a tab opens with. A file with more than two channels defaults to
+    /// per-channel lanes once its channel count is known -- a Mixdown of N
+    /// channels divides by N, so a 12-channel file draws as a near-flat line --
+    /// and this keeps that default from overwriting an explicit pick.
+    pub channel_view_user_set: bool,
+    pub bpm_enabled: bool,                      // grid toggle in editor
+    pub bpm_value: f32,                         // current BPM for grid
+    pub bpm_user_set: bool,                     // user-overridden BPM
+    pub bpm_offset_sec: f32,                    // grid offset in seconds
+    pub time_sig_numerator: u8,                 // time signature numerator (e.g. 4)
+    pub time_sig_denominator: u8,               // time signature denominator (e.g. 4)
+    pub seek_hold: Option<SeekHoldState>,       // key repeat state for seek
     pub selection_anchor_sample: Option<usize>, // shared Shift/click/drag anchor
     pub right_drag_mode: Option<RightDragMode>, // transient mode while secondary drag
-    pub active_tool: ToolKind,       // current editing tool
-    pub tool_state: ToolState,       // simple per-tool parameters
-    pub loop_mode: LoopMode,         // Off / On (whole) / Marker
-    pub dragging_marker: Option<MarkerKind>, // transient while dragging A/B
+    pub active_tool: ToolKind,                  // current editing tool
+    pub tool_state: ToolState,                  // simple per-tool parameters
+    pub loop_mode: LoopMode,                    // Off / On (whole) / Marker
+    pub dragging_marker: Option<MarkerKind>,    // transient while dragging A/B
     /// Has the armed loop-edge drag actually moved yet?
     ///
     /// Latched for the life of the press: a press that never moves stays a
@@ -3239,6 +3245,7 @@ impl EditorTab {
             metadata_artwork_texture: None,
             show_waveform_overlay: false,
             channel_view: ChannelView::mixdown(),
+            channel_view_user_set: false,
             bpm_enabled: false,
             bpm_value: 120.0,
             bpm_user_set: false,

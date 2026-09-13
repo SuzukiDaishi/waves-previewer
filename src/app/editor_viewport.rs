@@ -559,7 +559,8 @@ impl super::WavesPreviewer {
                 let raw_mode = matches!(quality, EditorViewportRenderQuality::Fine)
                     && samples_per_column < 2.0;
                 let mut lanes = Vec::with_capacity(hint.lane_count.max(1));
-                if tab.loading && !tab.loading_waveform_minmax.is_empty() {
+                if Self::editor_draws_overview_only(tab) && !tab.loading_waveform_minmax.is_empty()
+                {
                     for _ in 0..hint.lane_count.max(1) {
                         lanes.push(WaveLaneRequest::Overview {
                             overview: tab.loading_waveform_minmax.clone(),

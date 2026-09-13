@@ -245,6 +245,10 @@ const WAVE_CENTER_LINE_W: f32 = 1.4;
 const WAVE_CENTER_LABEL_COL: Color32 = Color32::from_rgb(150, 158, 172);
 const WAVE_DB_GRID_COL: Color32 = Color32::from_rgb(38, 38, 44);
 
+/// Height a single channel lane needs before its trace stops reading as a line.
+/// Enough room for the centre line and the -6/-12 dBFS grid either side of it.
+const MIN_LANE_H: f32 = 44.0;
+
 /// Laid over a lane whose channel is muted (or lost to someone else's solo).
 /// The canvas background at ~59% alpha, so the lane fades toward the backdrop
 /// instead of changing hue. Written premultiplied because that is the `const`
@@ -850,11 +854,7 @@ impl crate::app::WavesPreviewer {
         if wave_w <= 0.0 {
             return;
         }
-        let display_samples_len = if tab.loading && tab.samples_len_visual > 0 {
-            tab.samples_len_visual
-        } else {
-            tab.samples_len
-        };
+        let display_samples_len = Self::editor_display_samples_len(tab);
         if display_samples_len == 0 {
             return;
         }
@@ -887,11 +887,7 @@ impl crate::app::WavesPreviewer {
         if wave_w <= 0.0 {
             return;
         }
-        let display_samples_len = if tab.loading && tab.samples_len_visual > 0 {
-            tab.samples_len_visual
-        } else {
-            tab.samples_len
-        };
+        let display_samples_len = Self::editor_display_samples_len(tab);
         if display_samples_len == 0 {
             return;
         }
@@ -927,11 +923,7 @@ impl crate::app::WavesPreviewer {
         if wave_w <= 0.0 {
             return;
         }
-        let display_samples_len = if tab.loading && tab.samples_len_visual > 0 {
-            tab.samples_len_visual
-        } else {
-            tab.samples_len
-        };
+        let display_samples_len = Self::editor_display_samples_len(tab);
         if display_samples_len == 0 {
             return;
         }
@@ -960,11 +952,7 @@ impl crate::app::WavesPreviewer {
         if wave_w <= 0.0 {
             return;
         }
-        let display_samples_len = if tab.loading && tab.samples_len_visual > 0 {
-            tab.samples_len_visual
-        } else {
-            tab.samples_len
-        };
+        let display_samples_len = Self::editor_display_samples_len(tab);
         if display_samples_len == 0 {
             return;
         }
@@ -3581,6 +3569,20 @@ impl crate::app::WavesPreviewer {
                     "This video has no audio track. Playback and seeking use a silent timeline so the picture remains fully previewable."
                 });
             }
+            if tab.paged_asset {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new("OVERVIEW ONLY")
+                            .small()
+                            .monospace()
+                            .color(Color32::from_rgb(220, 180, 110)),
+                    )
+                    .sense(egui::Sense::hover()),
+                )
+                .on_hover_text(
+                    "This file decodes to more than the editor's resident buffer holds, so only the whole-file overview is loaded. The timeline, playback and seeking work; editing tools need the full buffer and stay disabled. Raise NEOWAVES_MAX_RESIDENT_DECODE_BYTES to load it in full.",
+                );
+            }
         });
         let mut discard_preview_for_view_change = false;
         let mut request_preview_refresh = false;
@@ -3838,6 +3840,7 @@ impl crate::app::WavesPreviewer {
         if let Some(view) = requested_channel_view.take() {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 tab.channel_view = view;
+                tab.channel_view_user_set = true;
             }
             let path = self.tabs[tab_idx].path.clone();
             self.cancel_spectrogram_for_path(&path);
@@ -4359,14 +4362,25 @@ impl crate::app::WavesPreviewer {
                     egui::vec2(canvas_w, canvas_area_h),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                    let canvas_h = (canvas_w * 0.35).clamp(180.0, canvas_area_h);
+                    // Layout parameters. The lane split is settled before the
+                    // canvas is allocated because its height depends on it.
+                    let view_mode = tab.leaf_view_mode();
+                    let (use_mixdown, visible_channels, lane_count) =
+                        Self::editor_lane_layout(tab, view_mode);
+                    // Room for the lanes that are about to be drawn: the
+                    // aspect-derived height alone gave a 12-channel file 15 px
+                    // per lane. `min` last, never `clamp` -- the editor's
+                    // available height can fall under the 180 px floor, and
+                    // `f32::clamp` panics when its min exceeds its max.
+                    let canvas_h = (canvas_w * 0.35)
+                        .max(180.0)
+                        .max(lane_count as f32 * MIN_LANE_H)
+                        .min(canvas_area_h.max(1.0));
                     let (resp, painter) = ui.allocate_painter(egui::vec2(canvas_w, canvas_h), Sense::click_and_drag());
                     let rect = resp.rect;
                     let w = rect.width().max(1.0); let h = rect.height().max(1.0);
                     let mut hover_cursor: Option<egui::CursorIcon> = None;
                     painter.rect_filled(rect, 0.0, Color32::from_rgb(16,16,18));
-                    // Layout parameters
-                    let view_mode = tab.leaf_view_mode();
                     let gutter_w = 44.0;
                     let show_amplitude_navigator = matches!(
                         view_mode,
@@ -4424,34 +4438,13 @@ impl crate::app::WavesPreviewer {
                             tab.vertical_view_center,
                         )
                     });
-                        let channel_count = tab.ch_samples.len().max(1);
-                        let mut visible_channels = tab.channel_view.visible_indices(channel_count);
-                        let force_feature_mixdown = matches!(
-                            view_mode,
-                            ViewMode::Tempogram | ViewMode::Chromagram | ViewMode::World
-                        );
-                        let use_mixdown = force_feature_mixdown
-                            || tab.channel_view.mode == ChannelViewMode::Mixdown
-                            || visible_channels.is_empty();
-                        if use_mixdown {
-                            visible_channels.clear();
-                        }
-                        let lane_count = if force_feature_mixdown || use_mixdown {
-                            1
-                        } else {
-                            visible_channels.len().max(1)
-                        };
                         let lane_h = h / lane_count as f32;
 
                     // Visual amplitude scale: assume Volume=0 dB for display; apply per-file Gain only
                     let scale = db_to_amp(gain_db);
 
                     // Initialize zoom to fit if unset (show whole file)
-                    let display_samples_len = if tab.loading && tab.samples_len_visual > 0 {
-                        tab.samples_len_visual
-                    } else {
-                        tab.samples_len
-                    };
+                    let display_samples_len = Self::editor_display_samples_len(tab);
                     if display_samples_len > 0 && tab.samples_per_px <= 0.0 {
                         let fit_spp = Self::editor_fit_samples_per_px(display_samples_len, wave_w);
                         tab.samples_per_px = fit_spp;
@@ -7271,9 +7264,9 @@ impl crate::app::WavesPreviewer {
                 }
 
                 if visible_len > 0 {
-                    let (wave_lod, lane_query_ms, lane_draw_ms) = if tab.loading
-                        && !tab.loading_waveform_minmax.is_empty()
-                    {
+                    let draw_from_overview = Self::editor_draws_overview_only(tab)
+                        && !tab.loading_waveform_minmax.is_empty();
+                    let (wave_lod, lane_query_ms, lane_draw_ms) = if draw_from_overview {
                         Self::render_loading_overview_waveform(
                             &tab.loading_waveform_minmax,
                             display_samples_len.max(1),

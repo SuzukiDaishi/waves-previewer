@@ -5332,6 +5332,9 @@ impl super::WavesPreviewer {
                         metadata_sub_view_from_project(tab.metadata_sub_view.as_deref());
                     t.show_waveform_overlay = tab.show_waveform_overlay;
                     t.channel_view = project_channel_view_to_channel_view(&tab.channel_view);
+                    // A restored session carries the choice the author made, so
+                    // the multichannel default must not overwrite it.
+                    t.channel_view_user_set = true;
                     t.active_tool = tool_kind_from_str(&tab.active_tool);
                     t.tool_state = project_tool_state_to_tool_state(&tab.tool_state);
                     t.plugin_fx_draft = project_plugin_fx_draft_to_draft(&tab.plugin_fx_draft);
