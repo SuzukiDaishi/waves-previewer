@@ -463,7 +463,7 @@ pub struct ProjectListColumns {
     #[serde(default)]
     pub transcript_language: bool,
     pub external: bool,
-    #[serde(default = "default_status_column_visible")]
+    #[serde(default)]
     pub status: bool,
     #[serde(default)]
     pub tags: bool,
@@ -489,9 +489,9 @@ pub struct ProjectListColumns {
     pub modified_at: bool,
     pub gain: bool,
     pub wave: bool,
-    /// The conversation column. Defaults visible like `note`: a session that
-    /// predates it is still a session somebody may be discussing.
-    #[serde(default = "default_comments_column_visible")]
+    /// The conversation column. Hidden unless the session says otherwise,
+    /// like `status`: both are opt-in workflow columns.
+    #[serde(default)]
     pub comments: bool,
     #[serde(default = "default_note_column_visible")]
     pub note: bool,
@@ -712,14 +712,6 @@ fn default_music_analysis_visible() -> bool {
 }
 
 fn default_note_column_visible() -> bool {
-    true
-}
-
-fn default_comments_column_visible() -> bool {
-    true
-}
-
-fn default_status_column_visible() -> bool {
     true
 }
 
@@ -3121,11 +3113,14 @@ note = "memo"
         assert!(list.tags.is_empty());
         assert!(list.default_status.is_none());
 
-        // A session saved before the column existed still shows it, the way
-        // `note` was introduced.
+        // Status is an opt-in workflow column, so a session saved before it
+        // existed opens without it -- the same baseline a fresh list gets.
         let columns = &deserialize_project(MINIMAL_TOML).unwrap().app.list_columns;
-        assert!(columns.status);
+        assert!(!columns.status);
         assert!(!columns.tags);
+        assert!(!columns.comments);
+        // `note` predates all of them and stays visible.
+        assert!(columns.note);
     }
 
     #[test]

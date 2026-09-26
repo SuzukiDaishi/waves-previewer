@@ -292,10 +292,13 @@ impl WavesPreviewer {
     }
 
     fn prefs_path() -> Option<PathBuf> {
-        // Kittest harnesses build a real `WavesPreviewer` and must stay isolated from
-        // the developer's actual saved preferences (e.g. `auto_play_list_nav`) — both
-        // for read and write — so tests behave identically across machines.
-        if cfg!(feature = "kittest") {
+        // Kittest harnesses and unit tests build a real `WavesPreviewer` and must
+        // stay isolated from the developer's actual saved preferences (e.g.
+        // `auto_play_list_nav`) — both for read and write — so tests behave
+        // identically across machines and never write a fixture's state back over
+        // the real file. Tests that want the round-trip use `save_prefs_to_path` /
+        // `load_prefs_from_path` with a temp path.
+        if cfg!(feature = "kittest") || cfg!(test) {
             return None;
         }
         let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("LOCALAPPDATA"))?;

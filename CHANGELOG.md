@@ -4,6 +4,27 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### 開けなかった session を Recent から消すようにした
+
+- 削除・移動された `.nwsess` が、開くたびに失敗しながらウェルカム画面と
+  File > Recent Sessions に残り続けていた。**開けなかった時点でリストから外す**
+  ようにした（トーストにも "removed from Recent sessions" と出る）。
+- 一覧を描くときに存在確認はしない方針は変えていない。メニューを開くたびに
+  切断された共有フォルダを stat すると UI が止まるためで、
+  `normalize_recent_session_path` は今も純粋に字面だけを見る。判定は元から
+  「バックグラウンドの session-open ジョブに任せる」設計だったので、
+  その失敗ハンドラで刈り取るようにしただけ。
+
+### Status / Comments 列を既定で非表示にした
+
+- 新規リストの既定と、列がまだ無かった頃の session を開いたときの既定を
+  どちらも OFF に揃えた（`ListColumnConfig::default` と
+  `ProjectListColumns` の serde 既定）。どちらもワークフロー用の任意列で、
+  常時出ているほどのものではない。
+- 機能自体への入口は変わらない。Status は行の右クリックメニュー、
+  Comments は行の右クリックメニュー / エディタ / `ToggleComments` キーから
+  今までどおり開ける。列は List Columns ウィンドウでいつでも戻せる。
+
 ### 素の clone でビルド・テストが通らなかったのを直した
 
 - **`vendor/lame-3.100` の実行権限が全部落ちていた**。shebang を持つスクリプト 17 本が

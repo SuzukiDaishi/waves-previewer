@@ -358,6 +358,9 @@ pub(super) struct ProjectOpenState {
     pub started_at: Instant,
     pub shown: bool,
     pub phase: SessionOpenPhase,
+    /// The document being opened. Kept past the point `project_open_pending`
+    /// is consumed so a failure can name -- and forget -- the session.
+    pub path: PathBuf,
     /// Result channel for the parse worker.
     pub parse_rx: Option<std::sync::mpsc::Receiver<Result<ParsedSession, String>>>,
     /// Result channel for the decode stage, which returns the parsed
@@ -850,6 +853,38 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    /// A recent entry the user cannot actually open must stop being offered.
+    /// The list is drawn without touching the disk (opening a menu must not
+    /// stat a disconnected share), so the failed open is what prunes it.
+    #[test]
+    fn a_session_that_fails_to_open_is_dropped_from_the_recents() {
+        let dir = temp_dir("recent_prune");
+        let gone = dir.join("gone.nwsess");
+        let kept = dir.join("kept.nwsess");
+
+        let mut app = crate::app::WavesPreviewer::new_headless(crate::StartupConfig::default())
+            .expect("headless app");
+        app.set_recent_sessions_from_prefs(vec![gone.clone(), kept.clone()]);
+
+        app.queue_project_open(gone.clone());
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while app.session_open_in_progress() && Instant::now() < deadline {
+            app.tick_project_open();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        assert!(
+            !app.session_open_in_progress(),
+            "the open of a missing session should have failed, not hung"
+        );
+        assert_eq!(
+            app.recent_session_paths_for_menu(),
+            vec![kept],
+            "the unopenable session must be gone; the others stay"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1612,6 +1647,23 @@ impl super::WavesPreviewer {
         }
     }
 
+    /// Drop a session that failed to open. The list is drawn without
+    /// touching the disk (see `normalize_recent_session_path`), so an entry
+    /// that has been deleted, moved or corrupted is pruned here instead --
+    /// once the open job has reported it unopenable, it stops being offered.
+    pub(super) fn forget_recent_session_path(&mut self, path: &Path) -> bool {
+        let Some(path) = Self::normalize_recent_session_path(path) else {
+            return false;
+        };
+        let before = self.recent_sessions.len();
+        self.recent_sessions.retain(|existing| existing != &path);
+        let removed = self.recent_sessions.len() != before;
+        if removed {
+            self.save_prefs();
+        }
+        removed
+    }
+
     /// Blocking close, kept for the CLI, the kittest harness and unit tests
     /// that need the file on disk when the call returns. The GUI uses
     /// `request_close_project_with_autosave`.
@@ -1656,11 +1708,12 @@ impl super::WavesPreviewer {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         self.project_open_generation = self.project_open_generation.wrapping_add(1);
-        self.project_open_pending = Some(path);
+        self.project_open_pending = Some(path.clone());
         self.project_open_state = Some(ProjectOpenState {
             started_at: Instant::now(),
             shown: false,
             phase: SessionOpenPhase::Announced,
+            path,
             parse_rx: None,
             decode_rx: None,
             progress_rx: None,
@@ -1819,6 +1872,19 @@ impl super::WavesPreviewer {
         self.push_toast(super::types::ToastSeverity::Info, "Session open cancelled");
     }
 
+    /// A session the user asked for could not be opened: say so, and take it
+    /// out of the recents so the same dead entry is not offered again.
+    fn fail_session_open(&mut self, path: &Path, err: String) {
+        self.debug_log(format!("session open error: {err}"));
+        let forgotten = self.forget_recent_session_path(path);
+        let message = if forgotten {
+            format!("Session open failed: {err} — removed from Recent sessions")
+        } else {
+            format!("Session open failed: {err}")
+        };
+        self.push_toast(super::types::ToastSeverity::Error, message);
+    }
+
     /// Drive the staged session open. Reading and repairing the document
     /// runs on a worker (the path repair stats every referenced file);
     /// applying it happens on the UI thread once the worker lands.
@@ -1879,6 +1945,7 @@ impl super::WavesPreviewer {
                 match rx.try_recv() {
                     Ok(result) => {
                         state.parse_rx = None;
+                        let opening = state.path.clone();
                         // The user may have started another open while this
                         // one was parsing; that one owns the app state now.
                         if generation != self.project_open_generation {
@@ -1888,12 +1955,8 @@ impl super::WavesPreviewer {
                         let parsed = match result {
                             Ok(parsed) => parsed,
                             Err(err) => {
-                                self.debug_log(format!("session open error: {err}"));
-                                self.push_toast(
-                                    super::types::ToastSeverity::Error,
-                                    format!("Session open failed: {err}"),
-                                );
                                 self.project_open_state = None;
+                                self.fail_session_open(&opening, err);
                                 return;
                             }
                         };
@@ -1940,6 +2003,7 @@ impl super::WavesPreviewer {
                 let generation = state.generation;
                 match rx.try_recv() {
                     Ok((parsed, prefetch)) => {
+                        let opening = state.path.clone();
                         state.decode_rx = None;
                         state.progress_rx = None;
                         state.phase = SessionOpenPhase::Applying;
@@ -1947,14 +2011,11 @@ impl super::WavesPreviewer {
                             self.project_open_state = None;
                             return;
                         }
-                        if let Err(err) = self.apply_parsed_session_with_audio(parsed, prefetch) {
-                            self.debug_log(format!("session open error: {err}"));
-                            self.push_toast(
-                                super::types::ToastSeverity::Error,
-                                format!("Session open failed: {err}"),
-                            );
-                        }
+                        let applied = self.apply_parsed_session_with_audio(parsed, prefetch);
                         self.project_open_state = None;
+                        if let Err(err) = applied {
+                            self.fail_session_open(&opening, err);
+                        }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
