@@ -4,6 +4,8 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+## 0.20260926.0 - 2026-09-26
+
 ### ProRes の .mov に映像が出なかったのを直した
 
 - **ProRes 4444（アルファ付き）の `.mov` を開くと、映像パネルに何も出なかった**。
