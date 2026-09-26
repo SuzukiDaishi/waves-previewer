@@ -5,16 +5,19 @@
 //! exists only so the editor can show which picture the sound belongs to, and
 //! so the list can show a thumbnail. Nothing here ever writes.
 //!
-//! Two backends sit behind one trait:
+//! Three backends sit behind one trait:
 //!
+//! * **ProRes**, in pure Rust (`oxideav-prores`), everywhere. No stock OS
+//!   decoder reads it, so a ProRes track goes here first and never reaches
+//!   the other two.
 //! * **Media Foundation** on Windows, which decodes whatever the machine has a
 //!   codec for (H.264, HEVC, VP9, ...), in hardware where possible.
 //! * **OpenH264** everywhere, built from bundled C++ sources, which decodes
 //!   H.264 and nothing else.
 //!
-//! Both are tried in that order. Failing both is not an error the user needs
-//! to act on: the audio still plays and the panel says the picture is not
-//! available, which is the honest outcome for a ProRes or AV1 file.
+//! Everything but ProRes tries the last two in that order. Failing both is not
+//! an error the user needs to act on: the audio still plays and the panel says
+//! the picture is not available, which is the honest outcome for an AV1 file.
 
 pub mod annexb;
 pub mod container;
@@ -25,6 +28,8 @@ mod decoder_openh264;
 
 #[cfg(windows)]
 mod decoder_mf;
+
+mod decoder_prores;
 
 // The fixture synthesises its H.264 with OpenH264's *encoder* and its audio
 // with FDK, so it only exists when those are compiled in.
@@ -124,6 +129,15 @@ pub fn open_video_decoder(path: &Path) -> Result<Box<dyn VideoDecoder>, VideoOpe
         Ok(container) => container,
         Err(err) => return Err(classify_open_error(&err)),
     };
+
+    // Media Foundation has no ProRes decoder on a stock install, so trying it
+    // first would only log a misleading failure after building a source
+    // reader over what is often a multi-gigabyte file.
+    if container.info.codec == VideoCodec::ProRes {
+        return decoder_prores::ProResDecoder::open(container)
+            .map(|decoder| Box::new(decoder) as Box<dyn VideoDecoder>)
+            .map_err(|err| VideoOpenError::Failed(format!("{err:#}")));
+    }
 
     #[cfg(windows)]
     {

@@ -63,6 +63,12 @@ vst3 = { version = "0.3.0", optional = true }
 # build that does not want the C++ compile can drop it; on Windows the Media
 # Foundation backend covers the same ground with more codecs.
 openh264 = { version = "0.9", optional = true }
+# ProRes decoder for the same preview (SMPTE RDD 36, 422 and 4444 with alpha).
+# Media Foundation ships no ProRes decoder, so without this a ProRes .mov --
+# the usual export for graphics with transparency -- has no picture at all.
+# Pure Rust with no C build, and ProRes has no patent pool of the kind that
+# keeps OpenH264 behind `video`, so it is an ordinary dependency.
+oxideav-prores = "0.1"
 libloading = { version = "0.9.0", optional = true }
 
 [features]
@@ -132,6 +138,12 @@ opt-level = 3
 [profile.dev.package.openh264]
 opt-level = 3
 [profile.dev.package.openh264-sys2]
+opt-level = 3
+# Same reason for the ProRes decoder: a 1080p 4444 frame is roughly a hundred
+# thousand 8x8 inverse DCTs, about 33 ms even at opt-level 3.
+[profile.dev.package.oxideav-prores]
+opt-level = 3
+[profile.dev.package.oxideav-core]
 opt-level = 3
 
 [build-dependencies]

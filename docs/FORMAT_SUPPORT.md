@@ -99,7 +99,11 @@ Media Foundation、`src/audio_mf.rs`）。借りられる環境では mp4 / m4a 
   詳細は §6。
 - 映像トラックが無い `.mp4` は実質 `.m4a` として扱われ、Mini Meter に
   映像パネルは出ない。
-- 映像コーデックが H.264 以外 (ProRes / AV1 / VP9、および Media Foundation の
+- **ProRes (422 / 4444) は全プラットフォームで表示できる**。OS のデコーダーを
+  使わず、内蔵の純 Rust デコーダー (`oxideav-prores`) で読む。4444 のアルファは
+  暗い市松模様の上に合成するので、テロップ等の重ね用素材は透明部分が
+  市松模様として見える。ProRes RAW は非対応。
+- それ以外で映像コーデックが H.264 以外 (AV1 / VP9、および Media Foundation の
   無い環境の HEVC) の場合は、**音声は通常どおり再生され**、映像パネルだけが
   `no preview (コーデック名)` になる。
 - HDR (PQ / HLG) はトーンマップせず SDR として表示するため、色が浅く出る。

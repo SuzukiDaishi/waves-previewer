@@ -13,7 +13,19 @@ The two MP4 files in this directory are deterministic six-second, 1920x1080,
   audio track. It must be reported as `NO AUDIO`, not as a file/decode error,
   and must still provide a seekable silent transport.
 
-Regenerate both files from the repository root with:
+The two MOV files are tiny ProRes fixtures from the same script: four 64x48
+frames at 24 fps, no audio, BT.709 declared in the frame header. The left half
+is red, green, blue, white on frames 0-3, so a test can tell which frame it
+was handed.
+
+- `prores_4444_alpha_64x48.mov` is ProRes 4444 (`ap4h`) with 16-bit alpha; its
+  right half is fully transparent and must show the preview's checkerboard.
+  This is the shape of a lyric or graphics overlay exported from a motion
+  graphics tool, which Media Foundation cannot decode.
+- `prores_422hq_64x48.mov` is ProRes 422 HQ (`apch`), opaque, with a black
+  right half. It covers the half-width chroma path.
+
+Regenerate all four files from the repository root with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File commands\generate_video_test_samples.ps1

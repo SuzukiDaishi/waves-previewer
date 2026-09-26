@@ -2524,7 +2524,7 @@ pub enum VideoPanelStatus {
     /// Frames are flowing.
     Ready,
     /// There is a picture in there, but nothing in this build decodes it
-    /// (ProRes, AV1, HEVC without an OS codec). The audio is unaffected.
+    /// (AV1, HEVC without an OS codec). The audio is unaffected.
     Unsupported(String),
     /// The container or the decoder refused the file.
     Failed(String),

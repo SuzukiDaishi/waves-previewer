@@ -64,8 +64,12 @@ pub enum VideoCodec {
     H264,
     H265,
     Vp9,
+    /// Apple ProRes, 422 or 4444. The `mp4` crate drops sample entries it does
+    /// not model, so this is recognised from the first sample's own frame
+    /// header rather than from `stsd` (see [`VideoContainer::open`]).
+    ProRes,
     /// Parsed as a video track, but the sample entry is one the container
-    /// reader does not name (ProRes, AV1, encrypted media, ...).
+    /// reader does not name (AV1, encrypted media, ...).
     Unknown,
 }
 
@@ -75,6 +79,7 @@ impl VideoCodec {
             VideoCodec::H264 => "H.264",
             VideoCodec::H265 => "HEVC",
             VideoCodec::Vp9 => "VP9",
+            VideoCodec::ProRes => "ProRes",
             VideoCodec::Unknown => "unknown codec",
         }
     }
@@ -231,13 +236,40 @@ impl VideoContainer {
         let params = avc_parameter_sets(track);
         let index = build_sample_index(track)?;
 
-        Ok(Self {
+        let mut container = Self {
             reader,
             track_id,
             info,
             params,
             index,
-        })
+        };
+        if container.info.codec == VideoCodec::Unknown {
+            container.recognise_prores();
+        }
+        Ok(container)
+    }
+
+    /// Name a ProRes track from its first frame.
+    ///
+    /// `mp4` keeps only the sample entries it models (`avc1`, `hev1`, `vp09`,
+    /// ...) and discards the rest, so an `ap4h` / `apch` track reaches here as
+    /// `Unknown` with its four-character code already gone. Every ProRes
+    /// sample carries its own frame header behind an `icpf` marker, which is
+    /// as reliable a signature and also says 4:4:4 or 4:2:2. Only tracks
+    /// nothing else recognised pay for this one-sample read.
+    fn recognise_prores(&mut self) {
+        let Ok(Some(first)) = self.read_sample_at(0) else {
+            return;
+        };
+        let Ok((header, _)) = oxideav_prores::frame::parse_frame(&first) else {
+            return;
+        };
+        self.info.codec = VideoCodec::ProRes;
+        self.info.codec_label = match header.chroma_format {
+            oxideav_prores::frame::ChromaFormat::Y444 => "ProRes 4444",
+            oxideav_prores::frame::ChromaFormat::Y422 => "ProRes 422",
+        }
+        .to_string();
     }
 
     /// Raw AVCC bytes of one sample, addressed by index position.

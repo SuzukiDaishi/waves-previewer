@@ -11546,6 +11546,48 @@ mod kittest_suite {
     }
 
     #[test]
+    fn prores_overlay_without_audio_shows_its_picture_and_follows_seeks() {
+        // ProRes 4444 with alpha and no audio track: the shape of a lyric
+        // overlay exported from a motion-graphics tool. No OS decoder reads
+        // it, so the picture has to come from the bundled ProRes decoder.
+        let path = video_fixture_path("prores_4444_alpha_64x48.mov");
+        let mut cfg = StartupConfig::default();
+        cfg.open_files = vec![path.clone()];
+        let mut harness = harness_with_startup(cfg);
+        wait_for_scan(&mut harness);
+        wait_for_tab(&mut harness);
+        wait_for_video_metadata(&mut harness, &path);
+        wait_for_tab_ready(&mut harness);
+
+        assert_eq!(
+            harness.state().test_path_audio_track_absent(&path),
+            Some(true)
+        );
+        assert!(harness.state().test_path_decode_error(&path).is_none());
+        assert!(harness.state().test_audio_is_silent_timeline());
+
+        wait_for_video_pts(&mut harness, 0.0);
+        // Halfway into the third frame (four frames at 24 fps).
+        let target_secs = 2.5 / 24.0;
+        let sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("display sample rate");
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample((target_secs * sr as f64) as usize));
+        let pts = wait_for_video_pts(&mut harness, target_secs);
+        assert!(
+            (pts - 2.0 / 24.0).abs() < 0.002,
+            "expected the third ProRes frame, got pts={pts:.4}"
+        );
+        assert_eq!(
+            harness.state().test_active_video_status().as_deref(),
+            Some("ready")
+        );
+    }
+
+    #[test]
     fn video_play_prebuffer_is_cancellable_and_never_blocks_transport() {
         let video_dir = wav_dir().join("video");
         let path = video_fixture_path("video_no_audio_6s_30fps.mp4");

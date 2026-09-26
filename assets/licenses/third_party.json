@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-04",
+  "generated_at": "2026-09-22",
   "generator": "cargo-about + gen-licenses",
   "licenses": [
     {
@@ -996,43 +996,43 @@
       "key": "MIT-183",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License\n\nCopyright (c) 2026 zukky\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "MIT License\n\nCopyright (c) 2026 Karpelès Lab Inc.\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-184",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License\n\nCopyright (c) <year> <copyright holders>\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and\nassociated documentation files (the \"Software\"), to deal in the Software without restriction, including\nwithout limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the\nfollowing conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial\nportions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT\nLIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO\nEVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER\nIN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE\nUSE OR OTHER DEALINGS IN THE SOFTWARE."
+      "text": "MIT License\n\nCopyright (c) 2026 zukky\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-185",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License\n\nCopyright (c) <year> <copyright holders>\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+      "text": "MIT License\n\nCopyright (c) <year> <copyright holders>\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and\nassociated documentation files (the \"Software\"), to deal in the Software without restriction, including\nwithout limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the\nfollowing conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial\nportions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT\nLIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO\nEVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER\nIN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE\nUSE OR OTHER DEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-186",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License\n\nCopyright (c) Microsoft Corporation\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "MIT License\n\nCopyright (c) <year> <copyright holders>\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-187",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License\n\nCopyright (c) Tokio Contributors\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "MIT License\n\nCopyright (c) Microsoft Corporation\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-188",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License\n\nCopyright (c) [2021] [Marvin Countryman]\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "MIT License\n\nCopyright (c) Tokio Contributors\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-189",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License\n\nCopyright (c) zune-image developers\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "MIT License\n\nCopyright (c) [2021] [Marvin Countryman]\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-19",
@@ -1044,61 +1044,61 @@
       "key": "MIT-190",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License\n\nCopyright 2013-2014 RAD Game Tools and Valve Software\nCopyright 2010-2014 Rich Geldreich and Tenacious Software LLC\nCopyright (c) 2017 Frommi\nCopyright (c) 2017-2024 oyvindln\n\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "MIT License\n\nCopyright (c) zune-image developers\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-191",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License\n\nCopyright 2013-2014 RAD Game Tools and Valve Software\nCopyright 2010-2014 Rich Geldreich and Tenacious Software LLC\nCopyright (c) 2017 Frommi\nCopyright (c) 2017-2024 oyvindln\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "MIT License\n\nCopyright 2013-2014 RAD Game Tools and Valve Software\nCopyright 2010-2014 Rich Geldreich and Tenacious Software LLC\nCopyright (c) 2017 Frommi\nCopyright (c) 2017-2024 oyvindln\n\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-192",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License\n\nPermission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
+      "text": "MIT License\n\nCopyright 2013-2014 RAD Game Tools and Valve Software\nCopyright 2010-2014 Rich Geldreich and Tenacious Software LLC\nCopyright (c) 2017 Frommi\nCopyright (c) 2017-2024 oyvindln\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-193",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "MIT License\n\nPermission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-194",
       "id": "MIT",
       "name": "MIT License",
-      "text": "MIT License Copyright (c) <year> <copyright holders>\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is furnished\nto do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice (including the next\nparagraph) shall be included in all copies or substantial portions of the\nSoftware.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS\nFOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS\nOR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,\nWHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF\nOR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+      "text": "MIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-195",
       "id": "MIT",
       "name": "MIT License",
-      "text": "Permission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
+      "text": "MIT License Copyright (c) <year> <copyright holders>\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is furnished\nto do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice (including the next\nparagraph) shall be included in all copies or substantial portions of the\nSoftware.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS\nFOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS\nOR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,\nWHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF\nOR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-196",
       "id": "MIT",
       "name": "MIT License",
-      "text": "Permission is hereby granted, free of charge, to any person obtaining\na copy of this software and associated documentation files (the\n\"Software\"), to deal in the Software without restriction, including\nwithout limitation the rights to use, copy, modify, merge, publish,\ndistribute, sublicense, and/or sell copies of the Software, and to\npermit persons to whom the Software is furnished to do so, subject to\nthe following conditions:\n\nThe above copyright notice and this permission notice shall be\nincluded in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\nEXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\nMERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND\nNONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE\nLIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION\nWITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+      "text": "Permission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-197",
       "id": "MIT",
       "name": "MIT License",
-      "text": "Permission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE"
+      "text": "Permission is hereby granted, free of charge, to any person obtaining\na copy of this software and associated documentation files (the\n\"Software\"), to deal in the Software without restriction, including\nwithout limitation the rights to use, copy, modify, merge, publish,\ndistribute, sublicense, and/or sell copies of the Software, and to\npermit persons to whom the Software is furnished to do so, subject to\nthe following conditions:\n\nThe above copyright notice and this permission notice shall be\nincluded in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\nEXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\nMERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND\nNONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE\nLIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION\nWITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-198",
       "id": "MIT",
       "name": "MIT License",
-      "text": "Permission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "Permission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE"
     },
     {
       "key": "MIT-199",
       "id": "MIT",
       "name": "MIT License",
-      "text": "Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+      "text": "Permission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-2",
@@ -1116,61 +1116,61 @@
       "key": "MIT-200",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2014 Mathijs van de Nes\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-201",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2014 Mathijs van de Nes\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n\nSome files in the \"tests/data\" subdirectory of this repository are under other\nlicences; see files named LICENSE.*.txt for details."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2014 Mathijs van de Nes\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-202",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2014 Paho Lurie-Gregg\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2014 Mathijs van de Nes\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n\nSome files in the \"tests/data\" subdirectory of this repository are under other\nlicences; see files named LICENSE.*.txt for details."
     },
     {
       "key": "MIT-203",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2014 Vladimir Matveev\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2014 Paho Lurie-Gregg\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-204",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2014-2017 James Hurst\n              2017      polyfloyd\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of\nthis software and associated documentation files (the \"Software\"), to deal in\nthe Software without restriction, including without limitation the rights to\nuse, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software is furnished to do so,\nsubject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS\nFOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR\nCOPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER\nIN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\nCONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2014 Vladimir Matveev\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-205",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2014-2022 Steven Fackler, Yuki Okushi\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of\nthis software and associated documentation files (the \"Software\"), to deal in\nthe Software without restriction, including without limitation the rights to\nuse, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software is furnished to do so,\nsubject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS\nFOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR\nCOPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER\nIN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\nCONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2014-2017 James Hurst\n              2017      polyfloyd\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of\nthis software and associated documentation files (the \"Software\"), to deal in\nthe Software without restriction, including without limitation the rights to\nuse, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software is furnished to do so,\nsubject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS\nFOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR\nCOPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER\nIN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\nCONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-206",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Alice Maz\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2014-2022 Steven Fackler, Yuki Okushi\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of\nthis software and associated documentation files (the \"Software\"), to deal in\nthe Software without restriction, including without limitation the rights to\nuse, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software is furnished to do so,\nsubject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS\nFOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR\nCOPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER\nIN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\nCONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-207",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Andrew Gallant\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Alice Maz\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
     },
     {
       "key": "MIT-208",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Austin Bonander\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Andrew Gallant\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
     },
     {
       "key": "MIT-209",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Bartłomiej Kamiński\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Austin Bonander\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-21",
@@ -1182,61 +1182,61 @@
       "key": "MIT-210",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Danny Guo\nCopyright (c) 2016 Titus Wormer <tituswormer@gmail.com>\nCopyright (c) 2018 Akash Kurdekar\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Bartłomiej Kamiński\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-211",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Gerd Zellweger\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Danny Guo\nCopyright (c) 2016 Titus Wormer <tituswormer@gmail.com>\nCopyright (c) 2018 Akash Kurdekar\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-212",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Nicholas Allegra (comex).\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Gerd Zellweger\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
     },
     {
       "key": "MIT-213",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Steven Fackler\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of\nthis software and associated documentation files (the \"Software\"), to deal in\nthe Software without restriction, including without limitation the rights to\nuse, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software is furnished to do so,\nsubject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS\nFOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR\nCOPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER\nIN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\nCONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Nicholas Allegra (comex).\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
     },
     {
       "key": "MIT-214",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 The tiny-http Contributors\nCopyright (c) 2015 The rust-chunked-transfer Contributors\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 Steven Fackler\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of\nthis software and associated documentation files (the \"Software\"), to deal in\nthe Software without restriction, including without limitation the rights to\nuse, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software is furnished to do so,\nsubject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS\nFOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR\nCOPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER\nIN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\nCONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-215",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 nwin\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 The tiny-http Contributors\nCopyright (c) 2015 The rust-chunked-transfer Contributors\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-216",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015-2019 PistonDevelopers\nCopyright (c) 2019 image-rs contributors\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015 nwin\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-217",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2015-2022 Amod Malviya\n\nPermission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015-2019 PistonDevelopers\nCopyright (c) 2019 image-rs contributors\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-218",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2016 Johann Tuffe\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2015-2022 Amod Malviya\n\nPermission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-219",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2016 Philipp Oppermann\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2016 Johann Tuffe\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
     },
     {
       "key": "MIT-22",
@@ -1248,61 +1248,61 @@
       "key": "MIT-220",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2016 PistonDevelopers\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2016 Philipp Oppermann\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-221",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2016 rust-derive-builder contributors\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2016 PistonDevelopers\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-222",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2017 Andrew Gallant\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2016 rust-derive-builder contributors\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-223",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2017 Armin Ronacher <armin.ronacher@active-4.com>\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2017 Andrew Gallant\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
     },
     {
       "key": "MIT-224",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2017 nabijaczleweli\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2017 Armin Ronacher <armin.ronacher@active-4.com>\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-225",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2019 The Crossbeam Project Developers\n\nPermission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2017 nabijaczleweli\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-226",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2019 nabijaczleweli\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2019 The Crossbeam Project Developers\n\nPermission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-227",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2023 Kirill Chibisov\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2019 nabijaczleweli\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-228",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) 2025 Alice Maz, Marshall Pierce\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2023 Kirill Chibisov\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-229",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\n\nCopyright (c) HeroicKatora 2020\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) 2025 Alice Maz, Marshall Pierce\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in\nall copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\nTHE SOFTWARE."
     },
     {
       "key": "MIT-23",
@@ -1314,16 +1314,22 @@
       "key": "MIT-230",
       "id": "MIT",
       "name": "MIT License",
-      "text": "The MIT License (MIT)\nCopyright (c) 2017-2018 Sergio Benitez\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of\nthis software and associated documentation files (the \"Software\"), to deal in\nthe Software without restriction, including without limitation the rights to\nuse, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software is furnished to do so,\nsubject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS\nFOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR\nCOPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER\nIN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\nCONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+      "text": "The MIT License (MIT)\n\nCopyright (c) HeroicKatora 2020\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE."
     },
     {
       "key": "MIT-231",
       "id": "MIT",
       "name": "MIT License",
-      "text": "This work is derived in part from the `linked-hash-map` crate, Copyright (c)\n2015 The Rust Project Developers\n\nPermission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
+      "text": "The MIT License (MIT)\nCopyright (c) 2017-2018 Sergio Benitez\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of\nthis software and associated documentation files (the \"Software\"), to deal in\nthe Software without restriction, including without limitation the rights to\nuse, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software is furnished to do so,\nsubject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS\nFOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR\nCOPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER\nIN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\nCONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
     },
     {
       "key": "MIT-232",
+      "id": "MIT",
+      "name": "MIT License",
+      "text": "This work is derived in part from the `linked-hash-map` crate, Copyright (c)\n2015 The Rust Project Developers\n\nPermission is hereby granted, free of charge, to any\nperson obtaining a copy of this software and associated\ndocumentation files (the \"Software\"), to deal in the\nSoftware without restriction, including without\nlimitation the rights to use, copy, modify, merge,\npublish, distribute, sublicense, and/or sell copies of\nthe Software, and to permit persons to whom the Software\nis furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice\nshall be included in all copies or substantial portions\nof the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF\nANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED\nTO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A\nPARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT\nSHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY\nCLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION\nOF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR\nIN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\nDEALINGS IN THE SOFTWARE."
+    },
+    {
+      "key": "MIT-233",
       "id": "MIT",
       "name": "MIT License",
       "text": "© Kornel Lesiński\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
@@ -1969,7 +1975,7 @@
         "MIT-onnxruntime"
       ],
       "license_keys": [
-        "MIT-186"
+        "MIT-187"
       ],
       "authors": "Microsoft Corporation",
       "repository": "https://github.com/microsoft/onnxruntime",
@@ -2185,7 +2191,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "The AccessKit contributors",
       "repository": "https://github.com/AccessKit/accesskit",
@@ -2203,7 +2209,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Jonas Schievink <jonasschievink@gmail.com>, oyvindln <oyvindln@users.noreply.github.com>",
       "repository": "https://github.com/oyvindln/adler2",
@@ -2239,7 +2245,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-207"
+        "MIT-208"
       ],
       "authors": "Andrew Gallant <jamslam@gmail.com>",
       "repository": "https://github.com/BurntSushi/aho-corasick",
@@ -2419,7 +2425,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/anyhow",
@@ -2582,7 +2588,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk3-rs",
@@ -2600,7 +2606,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk3-rs",
@@ -2618,7 +2624,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Dmitry Rodionov <gh@rdmtr.com>",
       "repository": "https://github.com/RoDmitry/atoi_simd",
@@ -2636,7 +2642,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195",
+        "MIT-196",
         "MIT-6"
       ],
       "authors": "Stjepan Glavina <stjepang@gmail.com>, Contributors to futures-rs",
@@ -2673,7 +2679,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "John-John Tedro <udoprog@tedro.se>",
       "repository": "https://github.com/udoprog/audio",
@@ -2835,7 +2841,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-206"
+        "MIT-207"
       ],
       "authors": "Alice Maz <alice@alicemaz.com>, Marshall Pierce <marshall@mpierce.org>",
       "repository": "https://github.com/marshallpierce/rust-base64",
@@ -2853,7 +2859,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-206"
+        "MIT-207"
       ],
       "authors": "Marshall Pierce <marshall@mpierce.org>",
       "repository": "https://github.com/marshallpierce/rust-base64",
@@ -2871,7 +2877,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-228"
+        "MIT-229"
       ],
       "authors": "Marshall Pierce <marshall@mpierce.org>",
       "repository": "https://github.com/marshallpierce/rust-base64",
@@ -2925,7 +2931,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-219"
+        "MIT-220"
       ],
       "authors": "Philipp Oppermann <dev@phil-opp.com>",
       "repository": "https://github.com/phil-opp/rust-bit-field",
@@ -3015,7 +3021,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Steven Sheldon, Mads Marquart <mads@marquart.dk>",
       "repository": "https://github.com/madsmtm/objc2",
@@ -3033,7 +3039,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Mads Marquart <mads@marquart.dk>",
       "repository": "https://github.com/madsmtm/objc2",
@@ -3141,7 +3147,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-207"
+        "MIT-208"
       ],
       "authors": "Andrew Gallant <jamslam@gmail.com>",
       "repository": "https://github.com/BurntSushi/byteorder",
@@ -3159,7 +3165,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-207"
+        "MIT-208"
       ],
       "authors": "",
       "repository": "https://github.com/image-rs/byteorder-lite",
@@ -3195,7 +3201,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -3213,7 +3219,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -3231,7 +3237,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-218"
+        "MIT-219"
       ],
       "authors": "Johann Tuffe <tafia973@gmail.com>",
       "repository": "https://github.com/tafia/calamine",
@@ -3321,7 +3327,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Without Boats <saoirse@without.boats>, Ashley Williams <ashley666ashley@gmail.com>, Steve Klabnik <steve@steveklabnik.com>, Rain <rain@sunshowers.io>",
       "repository": "https://github.com/camino-rs/camino",
@@ -3448,7 +3454,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/chronotope/chrono",
@@ -3466,7 +3472,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-214"
+        "MIT-215"
       ],
       "authors": "Corey Farwell <coreyf@rwell.org>",
       "repository": "https://github.com/frewsxcv/rust-chunked-transfer",
@@ -3574,7 +3580,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Micah Johnston <micah@photophore.systems>, Robbert van der Helm <mail@robbertvanderhelm.nl",
       "repository": "https://github.com/micahrj/clap-sys",
@@ -3682,7 +3688,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-193"
+        "MIT-194"
       ],
       "authors": "",
       "repository": "https://github.com/linebender/color",
@@ -3700,7 +3706,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-220"
+        "MIT-221"
       ],
       "authors": "nwin <nwin@users.noreply.github.com>",
       "repository": "https://github.com/image-rs/color_quant.git",
@@ -3736,7 +3742,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Micah Johnston <micahrjohnston@gmail.com>",
       "repository": "https://github.com/coupler-rs/vst3-rs",
@@ -3754,7 +3760,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Stjepan Glavina <stjepang@gmail.com>, Taiki Endo <te316e89@gmail.com>, John Nunley <dev@notgull.net>",
       "repository": "https://github.com/smol-rs/concurrent-queue",
@@ -3772,7 +3778,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-223"
+        "MIT-224"
       ],
       "authors": "Armin Ronacher <armin.ronacher@active-4.com>",
       "repository": "https://github.com/console-rs/console",
@@ -4024,7 +4030,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-225"
+        "MIT-226"
       ],
       "authors": "",
       "repository": "https://github.com/crossbeam-rs/crossbeam",
@@ -4042,7 +4048,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-225"
+        "MIT-226"
       ],
       "authors": "",
       "repository": "https://github.com/crossbeam-rs/crossbeam",
@@ -4060,7 +4066,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-225"
+        "MIT-226"
       ],
       "authors": "",
       "repository": "https://github.com/crossbeam-rs/crossbeam",
@@ -4096,7 +4102,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-207"
+        "MIT-208"
       ],
       "authors": "Andrew Gallant <jamslam@gmail.com>",
       "repository": "https://github.com/BurntSushi/rust-csv",
@@ -4114,7 +4120,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-207"
+        "MIT-208"
       ],
       "authors": "Andrew Gallant <jamslam@gmail.com>",
       "repository": "https://github.com/BurntSushi/rust-csv",
@@ -4204,7 +4210,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "mitchmindtree <mitchell.nordine@gmail.com>",
       "repository": "https://github.com/rustaudio/dasp.git",
@@ -4222,7 +4228,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "mitchmindtree <mitchell.nordine@gmail.com>",
       "repository": "https://github.com/rustaudio/dasp.git",
@@ -4240,7 +4246,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "mitchmindtree <mitchell.nordine@gmail.com>",
       "repository": "https://github.com/rustaudio/dasp.git",
@@ -4258,7 +4264,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "mitchmindtree <mitchell.nordine@gmail.com>",
       "repository": "https://github.com/rustaudio/dasp.git",
@@ -4276,7 +4282,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "mitchmindtree <mitchell.nordine@gmail.com>",
       "repository": "https://github.com/rustaudio/dasp.git",
@@ -4294,7 +4300,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "mitchmindtree <mitchell.nordine@gmail.com>",
       "repository": "https://github.com/rustaudio/dasp.git",
@@ -4312,7 +4318,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "mitchmindtree <mitchell.nordine@gmail.com>",
       "repository": "https://github.com/rustaudio/dasp.git",
@@ -4330,7 +4336,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "mitchmindtree <mitchell.nordine@gmail.com>",
       "repository": "https://github.com/rustaudio/sample.git",
@@ -4348,7 +4354,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "mitchmindtree <mitchell.nordine@gmail.com>",
       "repository": "https://github.com/rustaudio/dasp.git",
@@ -4366,7 +4372,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "mitchmindtree <mitchell.nordine@gmail.com>",
       "repository": "https://github.com/rustaudio/dasp.git",
@@ -4384,7 +4390,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "mitchmindtree <mitchell.nordine@gmail.com>",
       "repository": "https://github.com/rustaudio/dasp.git",
@@ -4438,7 +4444,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-221"
+        "MIT-222"
       ],
       "authors": "Colin Kiegel <kiegel@gmx.de>, Pascal Hertleif <killercup@gmail.com>, Jan-Erik Rediger <janerik@fnordig.de>, Ted Driggs <ted.driggs@outlook.com>",
       "repository": "https://github.com/colin-kiegel/rust-derive-builder",
@@ -4456,7 +4462,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-221"
+        "MIT-222"
       ],
       "authors": "Colin Kiegel <kiegel@gmx.de>, Pascal Hertleif <killercup@gmail.com>, Jan-Erik Rediger <janerik@fnordig.de>, Ted Driggs <ted.driggs@outlook.com>",
       "repository": "https://github.com/colin-kiegel/rust-derive-builder",
@@ -4474,7 +4480,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-221"
+        "MIT-222"
       ],
       "authors": "Colin Kiegel <kiegel@gmx.de>, Pascal Hertleif <killercup@gmail.com>, Jan-Erik Rediger <janerik@fnordig.de>, Ted Driggs <ted.driggs@outlook.com>",
       "repository": "https://github.com/colin-kiegel/rust-derive-builder",
@@ -4546,7 +4552,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Steven Sheldon",
       "repository": "http://github.com/SSheldon/rust-dispatch",
@@ -4564,7 +4570,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Mads Marquart <mads@marquart.dk>, Mary <mary@mary.zone>",
       "repository": "https://github.com/madsmtm/objc2",
@@ -4582,7 +4588,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Jane Lusby <jlusby@yaah.dev>",
       "repository": "https://github.com/yaahc/displaydoc",
@@ -4656,7 +4662,7 @@
       ],
       "license_keys": [
         "Apache-2.0-10",
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/rust-windowing/winit",
@@ -4674,7 +4680,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "CrabNebula Ltd.",
       "repository": "",
@@ -4710,7 +4716,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Emil Ernerfeldt <emil.ernerfeldt@gmail.com>, Andreas Reich <reichandreas@gmx.de>",
       "repository": "https://github.com/emilk/egui",
@@ -4728,7 +4734,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Emil Ernerfeldt <emil.ernerfeldt@gmail.com>",
       "repository": "https://github.com/emilk/egui/tree/main/crates/eframe",
@@ -4746,7 +4752,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Emil Ernerfeldt <emil.ernerfeldt@gmail.com>",
       "repository": "https://github.com/emilk/egui",
@@ -4764,7 +4770,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Emil Ernerfeldt <emil.ernerfeldt@gmail.com>",
       "repository": "https://github.com/emilk/egui/tree/main/crates/egui-winit",
@@ -4782,7 +4788,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Dominik Rössler <dominik@freshx.de>, Emil Ernerfeldt <emil.ernerfeldt@gmail.com>, René Rössler <rene@freshx.de>",
       "repository": "https://github.com/emilk/egui",
@@ -4800,7 +4806,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Emil Ernerfeldt <emil.ernerfeldt@gmail.com>",
       "repository": "https://github.com/emilk/egui/tree/main/crates/egui_glow",
@@ -4836,7 +4842,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Emil Ernerfeldt <emil.ernerfeldt@gmail.com>",
       "repository": "https://github.com/emilk/egui/tree/main/crates/emath",
@@ -4854,7 +4860,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-224"
+        "MIT-225"
       ],
       "authors": "наб <nabijaczleweli@nabijaczleweli.xyz>, Cat Plus Plus <piotrlegnica@piotrl.pl>, Liigo <liigo@qq.com>, azyobuzin <azyobuzin@users.sourceforge.jp>, Peter Atashian <retep998@gmail.com>, pravic <ehysta@gmail.com>, Gabriel Majeri <gabriel.majeri6@gmail.com>, SonnyX, Johan Andersson <repi@repi.se>, Jordan Poles <jpdev.noreply@gmail.com>, MSxDOS <melcodos@gmail.com>, Jim McGrath <jimmc2@gmail.com>, roblabla <unfiltered@roblab.la>, Jasper Bekkers <jasper@traverseresearch.nl>, Richard Markiewicz <rmarkiewicz@devolutions.net>, Emerson de Freitas Barcelos <emersonfxbx@gmail.com>, Li Keqing <me@kaze.ai>, Alexis Bourget <alexis.bourget@gmail.com>, Michael Farrell <micolous+git@gmail.com>, Jacob Okamoto <oko@oko.io>, Marijn Suijten <marijn@traverseresearch.nl>, Lucas Nogueira <lucas@tauri.app>, CharlesChen0823 <yongchen0823@gmail.com>, Daniel Schaefer <dhs@frame.work>, Rene Leonhardt, ssrlive, Kan-Ru Chen <kanru@kanru.info>, Tony <legendmastertony@gmail.com>, Berrysoft <Strawberry_Str@hotmail.com>, Marcus Ahlberg <marcus.ahlberg@kvaser.com>",
       "repository": "https://github.com/nabijaczleweli/rust-embed-resource",
@@ -4872,7 +4878,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-197"
+        "MIT-198"
       ],
       "authors": "Torbjørn Birch Moltu <t.b.moltu@lyse.net>",
       "repository": "https://github.com/tormol/encode_unicode",
@@ -4911,7 +4917,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-185"
+        "MIT-186"
       ],
       "authors": "Kamila Borowska <kamila@borowska.pw>",
       "repository": "https://codeberg.org/xfix/enum-map",
@@ -4929,7 +4935,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-185"
+        "MIT-186"
       ],
       "authors": "Kamila Borowska <kamila@borowska.pw>",
       "repository": "https://codeberg.org/xfix/enum-map",
@@ -4947,7 +4953,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Emil Ernerfeldt <emil.ernerfeldt@gmail.com>",
       "repository": "https://github.com/emilk/egui/tree/main/crates/epaint",
@@ -5167,7 +5173,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Ivan Smirnov <i.s.smirnov@gmail.com>, Alex Huszagh <ahuszagh@gmail.com>",
       "repository": "https://github.com/Alexhuszagh/fast-float-rust",
@@ -5185,7 +5191,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Stjepan Glavina <stjepang@gmail.com>",
       "repository": "https://github.com/smol-rs/fastrand",
@@ -5221,7 +5227,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-192"
+        "MIT-193"
       ],
       "authors": "The image-rs Developers",
       "repository": "https://github.com/image-rs/fdeflate",
@@ -5653,7 +5659,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk3-rs",
@@ -5671,7 +5677,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -5689,7 +5695,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -5707,7 +5713,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk3-rs",
@@ -5725,7 +5731,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk3-rs",
@@ -5743,7 +5749,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk3-rs",
@@ -5761,7 +5767,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-209"
+        "MIT-210"
       ],
       "authors": "Bartłomiej Kamiński <fizyk20@gmail.com>, Aaron Trent <novacrazy@gmail.com>",
       "repository": "https://github.com/fizyk20/generic-array.git",
@@ -5851,7 +5857,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-215"
+        "MIT-216"
       ],
       "authors": "The image-rs Developers",
       "repository": "https://github.com/image-rs/image-gif",
@@ -5869,7 +5875,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -5887,7 +5893,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -5923,7 +5929,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -5941,7 +5947,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -5959,7 +5965,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -5995,7 +6001,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Joshua Groves <josh@joshgroves.com>, Dzmitry Malyshau <kvarkus@gmail.com>",
       "repository": "https://github.com/grovesNL/glow",
@@ -6103,7 +6109,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -6121,7 +6127,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk3-rs",
@@ -6139,7 +6145,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk3-rs",
@@ -6157,7 +6163,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk3-rs",
@@ -6193,7 +6199,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-193"
+        "MIT-194"
       ],
       "authors": "Kathryn Long <squeeself@gmail.com>",
       "repository": "https://github.com/VoidStarKat/half-rs",
@@ -6265,7 +6271,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-231"
+        "MIT-232"
       ],
       "authors": "",
       "repository": "https://github.com/djc/hashlink",
@@ -6679,7 +6685,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-204"
+        "MIT-205"
       ],
       "authors": "polyfloyd <floyd@polyfloyd.net>",
       "repository": "https://codeberg.org/polyfloyd/rust-id3",
@@ -6697,7 +6703,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-193"
+        "MIT-194"
       ],
       "authors": "Ted Driggs <ted.driggs@outlook.com>",
       "repository": "https://github.com/TedDriggs/ident_case",
@@ -6751,7 +6757,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-192"
+        "MIT-193"
       ],
       "authors": "The image-rs Developers",
       "repository": "https://github.com/image-rs/image",
@@ -6769,7 +6775,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-192"
+        "MIT-193"
       ],
       "authors": "",
       "repository": "https://github.com/image-rs/image-webp",
@@ -6823,7 +6829,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-223"
+        "MIT-224"
       ],
       "authors": "",
       "repository": "https://github.com/console-rs/indicatif",
@@ -6949,7 +6955,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/itoa",
@@ -7111,7 +7117,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Alex Crichton <alex@alexcrichton.com>, Amanieu d'Antras <amanieu@gmail.com>, Jorge Aparicio <japaricious@gmail.com>, Trevor Gross <tg@trevorgross.com>",
       "repository": "https://github.com/rust-lang/compiler-builtins",
@@ -7147,7 +7153,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-193"
+        "MIT-194"
       ],
       "authors": "",
       "repository": "https://github.com/linebender/raw_resource_handle",
@@ -7165,7 +7171,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Dan Gohman <dev@sunfishcode.online>",
       "repository": "https://github.com/sunfishcode/linux-raw-sys",
@@ -7183,7 +7189,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Dan Gohman <dev@sunfishcode.online>",
       "repository": "https://github.com/sunfishcode/linux-raw-sys",
@@ -7273,7 +7279,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-232"
+        "MIT-233"
       ],
       "authors": "Kornel <kornel@geekhood.net>",
       "repository": "https://gitlab.com/kornelski/loop9.git",
@@ -7417,7 +7423,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-207"
+        "MIT-208"
       ],
       "authors": "Andrew Gallant <jamslam@gmail.com>, bluss",
       "repository": "https://github.com/BurntSushi/memchr",
@@ -7489,7 +7495,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-208"
+        "MIT-209"
       ],
       "authors": "Austin Bonander <austin.bonander@gmail.com>",
       "repository": "https://github.com/ttys3/mime_guess2",
@@ -7507,7 +7513,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Alex Huszagh <ahuszagh@gmail.com>",
       "repository": "https://github.com/Alexhuszagh/minimal-lexical",
@@ -7525,8 +7531,8 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-190",
-        "MIT-191"
+        "MIT-191",
+        "MIT-192"
       ],
       "authors": "Frommi <daniil.liferenko@gmail.com>, oyvindln <oyvindln@users.noreply.github.com>, Rich Geldreich richgel99@gmail.com",
       "repository": "https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide",
@@ -7562,7 +7568,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/monostate",
@@ -7580,7 +7586,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/monostate",
@@ -7709,8 +7715,8 @@
         "MIT-137",
         "MIT-174",
         "MIT-182",
-        "MIT-183",
-        "MIT-186"
+        "MIT-184",
+        "MIT-187"
       ],
       "authors": "",
       "repository": "",
@@ -7962,7 +7968,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Benjamin Sago <ogham@bsago.me>",
       "repository": "https://github.com/ogham/rust-number-prefix",
@@ -7980,7 +7986,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Mads Marquart <mads@marquart.dk>",
       "repository": "https://github.com/madsmtm/objc2",
@@ -7998,7 +8004,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Steven Sheldon, Mads Marquart <mads@marquart.dk>",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8016,7 +8022,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Mads Marquart <mads@marquart.dk>",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8034,7 +8040,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8052,7 +8058,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8070,7 +8076,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8088,7 +8094,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8106,7 +8112,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8124,7 +8130,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8142,7 +8148,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8160,7 +8166,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8178,7 +8184,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8196,7 +8202,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8214,7 +8220,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8232,7 +8238,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8250,7 +8256,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Mads Marquart <mads@marquart.dk>",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8268,7 +8274,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8286,7 +8292,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8304,7 +8310,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/madsmtm/objc2",
@@ -8340,7 +8346,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Aleksey Kladov <aleksey.kladov@gmail.com>",
       "repository": "https://github.com/matklad/once_cell",
@@ -8585,6 +8591,42 @@
       "feature": null
     },
     {
+      "name": "oxideav-core",
+      "version": "0.1.36",
+      "kind": "crate",
+      "license_expr": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_keys": [
+        "MIT-183"
+      ],
+      "authors": "Mark Karpeles",
+      "repository": "https://github.com/OxideAV/oxideav-core",
+      "flag": null,
+      "note": null,
+      "topic": null,
+      "feature": null
+    },
+    {
+      "name": "oxideav-prores",
+      "version": "0.1.1",
+      "kind": "crate",
+      "license_expr": "MIT",
+      "license_ids": [
+        "MIT"
+      ],
+      "license_keys": [
+        "MIT-183"
+      ],
+      "authors": "Mark Karpeles",
+      "repository": "https://github.com/OxideAV/oxideav-prores",
+      "flag": null,
+      "note": null,
+      "topic": null,
+      "feature": null
+    },
+    {
       "name": "pango",
       "version": "0.18.3",
       "kind": "crate",
@@ -8593,7 +8635,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -8611,7 +8653,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-198"
+        "MIT-199"
       ],
       "authors": "The gtk-rs Project Developers",
       "repository": "https://github.com/gtk-rs/gtk-rs-core",
@@ -8665,7 +8707,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/paste",
@@ -8683,7 +8725,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Aditya Kumar <git@adityais.dev>, David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/as1100k/pastey",
@@ -8701,7 +8743,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Aditya Kumar <git@adityais.dev>, David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/as1100k/pastey",
@@ -8773,7 +8815,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-205"
+        "MIT-206"
       ],
       "authors": "Steven Fackler <sfackler@gmail.com>",
       "repository": "https://github.com/rust-phf/rust-phf",
@@ -8791,7 +8833,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-205"
+        "MIT-206"
       ],
       "authors": "Steven Fackler <sfackler@gmail.com>",
       "repository": "https://github.com/rust-phf/rust-phf",
@@ -8809,7 +8851,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "",
       "repository": "https://github.com/taiki-e/pin-project-lite",
@@ -8863,7 +8905,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net>",
       "repository": "https://github.com/smol-rs/polling",
@@ -8917,7 +8959,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "",
       "repository": "https://github.com/taiki-e/portable-atomic",
@@ -8971,7 +9013,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/prettyplease",
@@ -9007,7 +9049,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Bastian Köcher <git@kchr.de>",
       "repository": "https://github.com/bkchr/proc-macro-crate",
@@ -9025,7 +9067,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Bastian Köcher <git@kchr.de>",
       "repository": "https://github.com/bkchr/proc-macro-crate",
@@ -9079,7 +9121,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>, Alex Crichton <alex@alexcrichton.com>",
       "repository": "https://github.com/dtolnay/proc-macro2",
@@ -9097,7 +9139,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Philip Degarmo <aclysma@gmail.com>",
       "repository": "https://github.com/aclysma/profiling",
@@ -9115,7 +9157,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Philip Degarmo <aclysma@gmail.com>",
       "repository": "https://github.com/aclysma/profiling",
@@ -9151,7 +9193,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "sarah quiñones <sarah@veganb.tw>",
       "repository": "https://github.com/sarah-quinones/pulp/",
@@ -9224,7 +9266,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-218"
+        "MIT-219"
       ],
       "authors": "",
       "repository": "https://github.com/tafia/quick-xml",
@@ -9242,7 +9284,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-218"
+        "MIT-219"
       ],
       "authors": "",
       "repository": "https://github.com/tafia/quick-xml",
@@ -9260,7 +9302,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/quote",
@@ -9423,7 +9465,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-211"
+        "MIT-212"
       ],
       "authors": "Gerd Zellweger <mail@gerdzellweger.com>",
       "repository": "https://github.com/gz/rust-cpuid",
@@ -9549,7 +9591,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "HEnquist <henrik.enquist@gmail.com>",
       "repository": "https://github.com/HEnquist/realfft",
@@ -9766,7 +9808,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "The Rust Project Developers",
       "repository": "https://github.com/rust-lang-nursery/rustc-hash",
@@ -9784,7 +9826,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "The Rust Project Developers",
       "repository": "https://github.com/rust-lang/rustc-hash",
@@ -9838,7 +9880,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>",
       "repository": "https://github.com/bytecodealliance/rustix",
@@ -9856,7 +9898,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>",
       "repository": "https://github.com/bytecodealliance/rustix",
@@ -9928,7 +9970,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/rustversion",
@@ -9982,7 +10024,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-222"
+        "MIT-223"
       ],
       "authors": "Andrew Gallant <jamslam@gmail.com>",
       "repository": "https://github.com/BurntSushi/same-file",
@@ -10054,7 +10096,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-213"
+        "MIT-214"
       ],
       "authors": "Steven Fackler <sfackler@gmail.com>, Kornel <kornel@geekhood.net>",
       "repository": "https://github.com/kornelski/rust-security-framework",
@@ -10072,7 +10114,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-213"
+        "MIT-214"
       ],
       "authors": "Steven Fackler <sfackler@gmail.com>, Kornel <kornel@geekhood.net>",
       "repository": "https://github.com/kornelski/rust-security-framework",
@@ -10108,7 +10150,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/semver",
@@ -10126,7 +10168,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/seq-macro",
@@ -10144,7 +10186,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/serde-rs/serde",
@@ -10162,7 +10204,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/serde-rs/serde",
@@ -10180,7 +10222,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/serde-rs/serde",
@@ -10198,7 +10240,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/serde-rs/json",
@@ -10288,7 +10330,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-212"
+        "MIT-213"
       ],
       "authors": "comex <comexk@gmail.com>, Fenhl <fenhl@fenhl.net>, Adrian Taylor <adetaylor@chromium.org>, Alex Touchet <alextouchet@outlook.com>, Daniel Parks <dp+git@oxidized.org>, Garrett Berg <googberg@gmail.com>",
       "repository": "https://github.com/comex/rust-shlex",
@@ -10306,7 +10348,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-212"
+        "MIT-213"
       ],
       "authors": "comex <comexk@gmail.com>, Fenhl <fenhl@fenhl.net>, Adrian Taylor <adetaylor@chromium.org>, Alex Touchet <alextouchet@outlook.com>, Daniel Parks <dp+git@oxidized.org>, Garrett Berg <googberg@gmail.com>",
       "repository": "https://github.com/comex/rust-shlex",
@@ -10344,7 +10386,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-188"
+        "MIT-189"
       ],
       "authors": "Marvin Countryman <me@maar.vin>",
       "repository": "https://github.com/mcountryman/simd-adler32",
@@ -10362,7 +10404,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Luca Barbato <lu_zero@gentoo.org>",
       "repository": "https://github.com/lu-zero/simd_helpers",
@@ -10380,7 +10422,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Frank Denis <github@pureftpd.org>",
       "repository": "https://github.com/jedisct1/rust-siphash",
@@ -10506,7 +10548,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Aleksey Kladov <aleksey.kladov@gmail.com>",
       "repository": "https://github.com/rust-analyzer/smol_str",
@@ -10632,7 +10674,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-210"
+        "MIT-211"
       ],
       "authors": "Danny Guo <danny@dannyguo.com>, maxbachmann <oss@maxbachmann.de>",
       "repository": "https://github.com/rapidfuzz/strsim-rs",
@@ -10884,7 +10926,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/syn",
@@ -10902,7 +10944,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/syn",
@@ -10920,7 +10962,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/syn",
@@ -11010,7 +11052,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Guillaume Desmottes <guillaume.desmottes@collabora.com>, Josh Triplett <josh@joshtriplett.org>",
       "repository": "https://github.com/gdesmott/system-deps",
@@ -11082,7 +11124,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/thiserror",
@@ -11100,7 +11142,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/thiserror",
@@ -11118,7 +11160,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/thiserror",
@@ -11136,7 +11178,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/thiserror",
@@ -11208,7 +11250,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-199"
+        "MIT-200"
       ],
       "authors": "Lokathor <zefria@gmail.com>",
       "repository": "https://github.com/Lokathor/tinyvec",
@@ -11262,7 +11304,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-187"
+        "MIT-188"
       ],
       "authors": "Tokio Contributors <team@tokio.rs>",
       "repository": "https://github.com/tokio-rs/tokio",
@@ -11316,7 +11358,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-187"
+        "MIT-188"
       ],
       "authors": "Tokio Contributors <team@tokio.rs>",
       "repository": "https://github.com/tokio-rs/tokio",
@@ -11568,7 +11610,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-200",
+        "MIT-201",
         "MIT-93"
       ],
       "authors": "Tokio Contributors <team@tokio.rs>",
@@ -11623,7 +11665,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Chip Senkbeil <chip@senkbeil.org>",
       "repository": "https://github.com/chipsenkbeil/typed-path",
@@ -11641,7 +11683,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-202"
+        "MIT-203"
       ],
       "authors": "",
       "repository": "https://github.com/paholg/typenum",
@@ -11678,7 +11720,7 @@
         "Unicode-3.0"
       ],
       "license_keys": [
-        "MIT-195",
+        "MIT-196",
         "Unicode-3.0"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
@@ -11788,7 +11830,7 @@
       ],
       "license_keys": [
         "MIT-159",
-        "MIT-214"
+        "MIT-215"
       ],
       "authors": "Martin Algesten <martin@algesten.se>, Jacob Hoffman-Andrews <ureq@hoffman-andrews.com>",
       "repository": "https://github.com/algesten/ureq",
@@ -11860,7 +11902,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Simon Sapin <simon.sapin@exyr.org>, Martin Algesten <martin@algesten.se>",
       "repository": "https://github.com/algesten/utf8-zero",
@@ -12022,7 +12064,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-230"
+        "MIT-231"
       ],
       "authors": "Sergio Benitez <sb@sergio.bz>",
       "repository": "https://github.com/SergioBenitez/version_check",
@@ -12076,7 +12118,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "Micah Johnston <micahrjohnston@gmail.com>",
       "repository": "https://github.com/coupler-rs/vst3-rs",
@@ -12094,7 +12136,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-226"
+        "MIT-227"
       ],
       "authors": "nabijaczleweli <nabijaczleweli@gmail.com>",
       "repository": "https://github.com/nabijaczleweli/vswhom.rs",
@@ -12112,7 +12154,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-226"
+        "MIT-227"
       ],
       "authors": "наб <nabijaczleweli@nabijaczleweli.xyz>, forrestsmithfb <forrest.smith@fb.com>",
       "repository": "https://github.com/nabijaczleweli/vswhom-sys.rs",
@@ -12130,7 +12172,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-207"
+        "MIT-208"
       ],
       "authors": "Andrew Gallant <jamslam@gmail.com>",
       "repository": "https://github.com/BurntSushi/walkdir",
@@ -12293,7 +12335,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-194",
+        "MIT-195",
         "MIT-27"
       ],
       "authors": "Elinor Berger <elinor@safaradeg.net>",
@@ -12384,7 +12426,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-217"
+        "MIT-218"
       ],
       "authors": "Amod Malviya @amodm",
       "repository": "https://github.com/amodm/webbrowser-rs",
@@ -12456,7 +12498,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-229"
+        "MIT-230"
       ],
       "authors": "The image-rs Developers",
       "repository": "https://github.com/image-rs/weezl",
@@ -12510,7 +12552,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-222"
+        "MIT-223"
       ],
       "authors": "Andrew Gallant <jamslam@gmail.com>",
       "repository": "https://github.com/BurntSushi/winapi-util",
@@ -12546,7 +12588,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12564,7 +12606,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12582,7 +12624,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12600,7 +12642,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12618,7 +12660,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12636,7 +12678,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12654,7 +12696,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12672,7 +12714,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12690,7 +12732,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12708,7 +12750,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12726,7 +12768,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12744,7 +12786,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12762,7 +12804,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12780,7 +12822,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12798,7 +12840,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12816,7 +12858,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12834,7 +12876,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12852,7 +12894,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12870,7 +12912,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12888,7 +12930,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12906,7 +12948,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12924,7 +12966,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12942,7 +12984,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12960,7 +13002,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12978,7 +13020,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -12996,7 +13038,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -13014,7 +13056,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -13032,7 +13074,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/MasterOfRespawn/windows_exe_info",
@@ -13050,7 +13092,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -13068,7 +13110,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -13086,7 +13128,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "Microsoft",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -13104,7 +13146,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "https://github.com/microsoft/windows-rs",
@@ -13140,7 +13182,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-196"
+        "MIT-197"
       ],
       "authors": "",
       "repository": "https://github.com/winnow-rs/winnow",
@@ -13158,7 +13200,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-196"
+        "MIT-197"
       ],
       "authors": "",
       "repository": "https://github.com/winnow-rs/winnow",
@@ -13212,7 +13254,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "daggerbot <daggerbot@gmail.com>, Erle Pereira <erle@erlepereira.com>, AltF02 <contact@altf2.dev>",
       "repository": "https://github.com/AltF02/x11-rs.git",
@@ -13230,7 +13272,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "daggerbot <daggerbot@gmail.com>, Erle Pereira <erle@erlepereira.com>, AltF02 <contact@altf2.dev>",
       "repository": "https://github.com/AltF02/x11-rs.git",
@@ -13302,7 +13344,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-227"
+        "MIT-228"
       ],
       "authors": "Francesca Frangipane <francesca@comfysoft.net>",
       "repository": "https://github.com/rust-windowing/xkbcommon-dl",
@@ -13338,7 +13380,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-203"
+        "MIT-204"
       ],
       "authors": "Vladimir Matveev <vmatveev@citrine.cc>",
       "repository": "https://github.com/kornelski/xml-rs",
@@ -13356,7 +13398,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-216"
+        "MIT-217"
       ],
       "authors": "Kagami Hiiragi <kagami@genshiken.org>",
       "repository": "https://github.com/image-rs/y4m.git",
@@ -13554,7 +13596,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-201"
+        "MIT-202"
       ],
       "authors": "Mathijs van de Nes <git@mathijs.vd-nes.nl>, Marli Frost <marli@frost.red>, Ryan Levick <ryan.levick@gmail.com>, Chris Hennick <hennickc@amazon.com>",
       "repository": "https://github.com/zip-rs/zip2.git",
@@ -13590,7 +13632,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-195"
+        "MIT-196"
       ],
       "authors": "David Tolnay <dtolnay@gmail.com>",
       "repository": "https://github.com/dtolnay/zmij",
@@ -13626,7 +13668,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-189"
+        "MIT-190"
       ],
       "authors": "",
       "repository": "https://github.com/etemesi254/zune-image",
@@ -13644,7 +13686,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-184"
+        "MIT-185"
       ],
       "authors": "",
       "repository": "",
@@ -13662,7 +13704,7 @@
         "MIT"
       ],
       "license_keys": [
-        "MIT-189"
+        "MIT-190"
       ],
       "authors": "caleb <etemesicaleb@gmail.com>",
       "repository": "https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg",

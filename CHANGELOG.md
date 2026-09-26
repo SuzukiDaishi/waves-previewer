@@ -4,6 +4,33 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### ProRes の .mov に映像が出なかったのを直した
+
+- **ProRes 4444（アルファ付き）の `.mov` を開くと、映像パネルに何も出なかった**。
+  ログには `Media Foundation could not open ... no video stream, or RGB32 unavailable
+  for it ... (0xC00D5212)` が出ていた。0xC00D5212 は `MF_E_TOPO_CODEC_NOT_FOUND`
+  で、RGB32 変換の問題ではなく **Windows に ProRes のデコーダーがそもそも無い**。
+  予備の OpenH264 は H.264 専用なので、どのプラットフォームでも絵が出なかった。
+  モーショングラフィックスから書き出すテロップ・グラフィック素材はほぼこの形式。
+- さらに `mp4` クレートは知らないサンプル記述（`ap4h` / `apch`）を読み捨てるので、
+  コンテナ側でも ProRes と判別できず `unknown codec` 扱いになっていた。
+- **純 Rust の ProRes デコーダー `oxideav-prores`（MIT、SMPTE RDD 36）を追加**した。
+  C のビルドも無く、OpenH264 のような特許プールの事情も無いので、`video` feature ではなく
+  常時有効。追加されたクレートはこれと `oxideav-core` の 2 つだけ。
+  - ProRes の判別は先頭サンプルのフレームヘッダー（`icpf`）で行う。
+    パネルの表記は `ProRes 4444` / `ProRes 422`。
+  - ProRes は Media Foundation を経由せず直接このデコーダーに回す。
+    失敗が確定している試行と、誤解を招くログが出なくなる。
+  - 全フレームがイントラなので、シークは目的のフレームを 1 枚デコードするだけで済む。
+  - 色変換はフレームヘッダーの `matrix_coefficients` に従う。未指定なら
+    高さ 576 超で BT.709、それ以下で BT.601（video range 前提）。
+  - **アルファは暗い市松模様の上に合成**する。マスはパネル上で約 8px。
+    白い歌詞テロップが読めるよう、明るい市松ではなく暗いグレー 2 色にした。
+- テスト用に `test_samples/video/` へ 64x48・4 フレームの ProRes を 2 本追加した
+  （4444 + アルファ、422 HQ。どちらも数 KB）。生成は
+  `commands/generate_video_test_samples.ps1`。同スクリプトは WinGet の Shared 版
+  ffmpeg のリンクが DLL 不足（0xC0000135）で落ちていたので、リンク先の実体を使うようにした。
+
 ### 開けなかった session を Recent から消すようにした
 
 - 削除・移動された `.nwsess` が、開くたびに失敗しながらウェルカム画面と

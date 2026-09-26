@@ -14,6 +14,12 @@ $ffmpeg = if ($staticFfmpeg) {
 } else {
     (Get-Command ffmpeg -ErrorAction Stop).Source
 }
+# Otherwise follow a WinGet link to the real binary: run from its own bin
+# directory, the shared build finds its DLLs.
+$ffmpegLink = Get-Item $ffmpeg
+if ($ffmpegLink.LinkType -eq "SymbolicLink") {
+    $ffmpeg = $ffmpegLink.Target | Select-Object -First 1
+}
 $resolvedOutput = [System.IO.Path]::GetFullPath($OutputDir)
 New-Item -ItemType Directory -Force -Path $resolvedOutput | Out-Null
 
@@ -62,6 +68,40 @@ if ($LASTEXITCODE -ne 0) {
     throw "ffmpeg failed while creating $withoutAudio"
 }
 
+# ProRes: four 64x48 frames at 24 fps. The left half is red, green, blue,
+# white on frames 0-3 so a test can tell which frame it got; the right half is
+# fully transparent in the 4444 file (and black in the opaque 422 one). The
+# colour description is written as BT.709 so the frame header declares it.
+$proresSource = "color=c=black:s=64x48:r=24,format=rgba," +
+    "geq=r='if(lt(X,32),255*(eq(N,0)+eq(N,3)),0)'" +
+    ":g='if(lt(X,32),255*(eq(N,1)+eq(N,3)),0)'" +
+    ":b='if(lt(X,32),255*(eq(N,2)+eq(N,3)),0)'" +
+    ":a='if(lt(X,32),255,0)'"
+$proresFixtures = @(
+    @{ Name = "prores_4444_alpha_64x48.mov"; Profile = "4444"; PixFmt = "yuva444p10le" },
+    @{ Name = "prores_422hq_64x48.mov"; Profile = "hq"; PixFmt = "yuv422p10le" }
+)
+$proresOutputs = @()
+foreach ($fixture in $proresFixtures) {
+    $proresPath = Join-Path $resolvedOutput $fixture.Name
+    & $ffmpeg @(
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", $proresSource, "-frames:v", "4",
+        "-vf", "scale=out_color_matrix=bt709:out_range=tv,format=$($fixture.PixFmt)",
+        "-c:v", "prores_ks", "-profile:v", $fixture.Profile,
+        "-colorspace", "bt709", "-color_primaries", "bt709",
+        "-color_trc", "bt709", "-color_range", "tv",
+        "-bitexact", $proresPath
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "ffmpeg failed while creating $proresPath"
+    }
+    $proresOutputs += $proresPath
+}
+
 Write-Host "Created deterministic video fixtures:"
 Write-Host "  $withAudio"
 Write-Host "  $withoutAudio"
+foreach ($proresPath in $proresOutputs) {
+    Write-Host "  $proresPath"
+}

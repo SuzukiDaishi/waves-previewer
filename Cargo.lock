@@ -3943,6 +3943,7 @@ dependencies = [
  "ndarray",
  "openh264",
  "ort",
+ "oxideav-prores",
  "quick-xml 0.39.4",
  "rand 0.9.5",
  "realfft",
@@ -4704,6 +4705,26 @@ dependencies = [
  "hmac-sha256",
  "lzma-rust2",
  "ureq 3.4.0",
+]
+
+[[package]]
+name = "oxideav-core"
+version = "0.1.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a78b502f679c580ceb7cc834d23f80821673b0a393a3083d54ef82668bb9c028"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "oxideav-prores"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62324df6b4a40e1af30e6a885946b1b56d0e83aa3b6cb5706701de3fca042b09"
+dependencies = [
+ "oxideav-core",
 ]
 
 [[package]]
