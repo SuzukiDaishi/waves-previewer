@@ -539,7 +539,8 @@ fn demix_input_audio_to_stems(
     on_progress("Demucs: separating stems...".to_string());
     let mut last_pct = -1i32;
     let mut last_emit = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_millis(250))
+        // Backdated so the first progress report goes out at once.
+        .checked_sub(crate::app::ui_timing::PROGRESS_EMIT_INTERVAL * 2)
         .unwrap_or_else(std::time::Instant::now);
     let stems = demucs
         .separate(&stereo, None, cancel_requested, |chunk, total| {
@@ -551,7 +552,7 @@ fn demix_input_audio_to_stems(
             let pct_i = pct.round() as i32;
             let now = std::time::Instant::now();
             if pct_i == last_pct
-                && now.duration_since(last_emit) < std::time::Duration::from_millis(120)
+                && now.duration_since(last_emit) < crate::app::ui_timing::PROGRESS_EMIT_INTERVAL
             {
                 return;
             }
@@ -900,7 +901,8 @@ fn run_onnx_ensemble(
             if cancel_requested.load(Ordering::Relaxed) {
                 return cancel_err();
             }
-            let recv = rx.recv_timeout(std::time::Duration::from_millis(80));
+            // Wake between chunks to check for cancellation.
+            let recv = rx.recv_timeout(crate::app::ui_timing::PROGRESS_REFRESH);
             let (idx, result) = match recv {
                 Ok(v) => v,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,

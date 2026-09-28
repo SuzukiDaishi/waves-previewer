@@ -3,7 +3,6 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::types::{
     TranscriptAiConfig, TranscriptComputeTarget, TranscriptModelVariant, TranscriptPerfMode,
@@ -1056,7 +1055,8 @@ impl super::WavesPreviewer {
                 if running == 0 {
                     break;
                 }
-                match item_rx.recv_timeout(Duration::from_millis(120)) {
+                // Wake between items to check for cancellation.
+                match item_rx.recv_timeout(crate::app::ui_timing::PROGRESS_EMIT_INTERVAL) {
                     Ok(item) => {
                         running = running.saturating_sub(1);
                         if let Some(err) = item.error.as_ref() {
@@ -1133,7 +1133,7 @@ impl super::WavesPreviewer {
             }
         }
         if self.transcript_model_download_state.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            ctx.request_repaint_after(crate::app::ui_timing::SMOOTH_REFRESH);
         } else {
             ctx.request_repaint();
         }
@@ -1222,7 +1222,7 @@ impl super::WavesPreviewer {
             ctx.request_repaint();
             return;
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        ctx.request_repaint_after(crate::app::ui_timing::SMOOTH_REFRESH);
     }
 }
 

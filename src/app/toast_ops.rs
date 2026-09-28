@@ -96,7 +96,7 @@ impl WavesPreviewer {
                         ToastSeverity::Error => (ui.style().visuals.error_fg_color, "Error"),
                     };
                     let frame = egui::Frame::window(ui.style())
-                        .stroke(egui::Stroke::new(1.5, accent))
+                        .stroke(egui::Stroke::new(1.5_f32, accent))
                         .inner_margin(egui::Margin::symmetric(10, 8));
                     let resp = frame
                         .show(ui, |ui| {

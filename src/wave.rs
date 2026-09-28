@@ -2277,6 +2277,31 @@ pub struct NoiseGateParams {
     pub release_ms: f32,
 }
 
+impl NoiseGateParams {
+    /// Accepted ranges, shared by every UI and by the effect-graph clamp.
+    /// Threshold: down to the noise floor of a quiet room, up to full scale.
+    pub const THRESHOLD_DB: std::ops::RangeInclusive<f32> = -80.0..=0.0;
+    /// Attack: from sample-accurate to half a second.
+    pub const ATTACK_MS: std::ops::RangeInclusive<f32> = 0.1..=500.0;
+    /// Release: from a click-length fade to a two-second tail.
+    pub const RELEASE_MS: std::ops::RangeInclusive<f32> = 1.0..=2_000.0;
+}
+
+/// Starting point for a new noise gate, wherever one is created (editor
+/// tool, effect-graph node, a session that predates the field, the CLI).
+impl Default for NoiseGateParams {
+    fn default() -> Self {
+        Self {
+            // Well under speech, well over a quiet room's noise floor.
+            threshold_db: -40.0,
+            // Fast enough not to clip a consonant's onset.
+            attack_ms: 2.0,
+            // Slow enough that a word's tail is not chopped.
+            release_ms: 100.0,
+        }
+    }
+}
+
 /// Envelope-follower noise gate: below `threshold_db` the signal is ramped
 /// toward silence over `release_ms`; at/above it, ramped back to unity gain
 /// over `attack_ms`. Shared by the EffectGraph NoiseGate node and the Editor
@@ -2328,6 +2353,33 @@ pub struct CompressorParams {
     pub attack_ms: f32,
     pub release_ms: f32,
     pub makeup_db: f32,
+}
+
+impl CompressorParams {
+    /// Accepted ranges, shared by every UI and by the effect-graph clamp.
+    /// Threshold: -60 dB is already compressing room tone; lower only adds
+    /// ways to crush the whole file.
+    pub const THRESHOLD_DB: std::ops::RangeInclusive<f32> = -60.0..=0.0;
+    /// Ratio: 1:1 (off) up to 20:1, where it is a limiter in all but name.
+    pub const RATIO: std::ops::RangeInclusive<f32> = 1.0..=20.0;
+    pub const ATTACK_MS: std::ops::RangeInclusive<f32> = NoiseGateParams::ATTACK_MS;
+    pub const RELEASE_MS: std::ops::RangeInclusive<f32> = NoiseGateParams::RELEASE_MS;
+    /// Makeup gain: enough to recover the deepest threshold at a mild ratio.
+    pub const MAKEUP_DB: std::ops::RangeInclusive<f32> = 0.0..=24.0;
+}
+
+/// Starting point for a new compressor: gentle bus-style settings that audibly
+/// work without pumping.
+impl Default for CompressorParams {
+    fn default() -> Self {
+        Self {
+            threshold_db: -18.0,
+            ratio: 3.0,
+            attack_ms: 10.0,
+            release_ms: 150.0,
+            makeup_db: 0.0,
+        }
+    }
 }
 
 /// Feedforward peak compressor with a one-pole envelope follower. Shared by
@@ -2482,6 +2534,36 @@ pub struct ThreeBandEqParams {
     pub mid_q: f32,
     pub high_shelf_freq_hz: f32,
     pub high_shelf_gain_db: f32,
+}
+
+impl ThreeBandEqParams {
+    /// Accepted ranges, shared by the EQ plot's handles, the Editor inspector,
+    /// the Effect Graph node and its clamp. The shelves overlap the mid band
+    /// on purpose: a shelf can reach into the mids, the mid can reach out.
+    pub const LOW_SHELF_HZ: std::ops::RangeInclusive<f32> = crate::sample_rate::AUDIBLE_LOW_HZ..=2_000.0;
+    pub const MID_HZ: std::ops::RangeInclusive<f32> = 50.0..=12_000.0;
+    pub const HIGH_SHELF_HZ: std::ops::RangeInclusive<f32> = 500.0..=crate::sample_rate::AUDIBLE_HIGH_HZ;
+    /// Largest boost or cut of any band.
+    pub const GAIN_DB: std::ops::RangeInclusive<f32> = -24.0..=24.0;
+    /// Mid band Q: from a broad tilt to a narrow notch.
+    pub const MID_Q: std::ops::RangeInclusive<f32> = 0.1..=10.0;
+}
+
+/// Starting point for a new EQ: flat (every gain 0 dB), with the bands at
+/// the classic console positions -- low shelf under the voice's body, mid at
+/// 1 kHz, high shelf at the start of "air".
+impl Default for ThreeBandEqParams {
+    fn default() -> Self {
+        Self {
+            low_shelf_freq_hz: 120.0,
+            low_shelf_gain_db: 0.0,
+            mid_freq_hz: 1_000.0,
+            mid_gain_db: 0.0,
+            mid_q: 1.0,
+            high_shelf_freq_hz: 8_000.0,
+            high_shelf_gain_db: 0.0,
+        }
+    }
 }
 
 /// Zero-phase 4th-order Butterworth low-pass: two cascaded RBJ low-pass
@@ -3107,6 +3189,17 @@ fn encode_mp3(_chans: &[Vec<f32>], _in_sr: u32) -> Result<Vec<u8>> {
     )
 }
 
+/// The rates MPEG-1/2/2.5 Layer III defines. LAME resamples anything else
+/// itself; these are what the defensive retry below treats as already legal.
+#[cfg(feature = "mp3_lame")]
+const MP3_NATIVE_SAMPLE_RATES: [u32; 9] = [
+    8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000,
+];
+/// Where the retry resamples an unusual rate to: CD rate, which every MP3
+/// decoder plays.
+#[cfg(feature = "mp3_lame")]
+const MP3_FALLBACK_SAMPLE_RATE: u32 = 44_100;
+
 #[cfg(feature = "mp3_lame")]
 fn encode_mp3(chans: &[Vec<f32>], in_sr: u32) -> Result<Vec<u8>> {
     if chans.is_empty() {
@@ -3120,12 +3213,9 @@ fn encode_mp3(chans: &[Vec<f32>], in_sr: u32) -> Result<Vec<u8>> {
     match crate::lame::encode_planar_f32(&chans, in_sr, bitrate) {
         Ok(out) => Ok(out),
         Err(first)
-            if !matches!(
-                in_sr,
-                8_000 | 11_025 | 12_000 | 16_000 | 22_050 | 24_000 | 32_000 | 44_100 | 48_000
-            ) =>
+            if !MP3_NATIVE_SAMPLE_RATES.contains(&in_sr) =>
         {
-            let target = 44_100;
+            let target = MP3_FALLBACK_SAMPLE_RATE;
             chans = resample_channels(&chans, in_sr, target);
             crate::lame::encode_planar_f32(&chans, target, bitrate)
                 .with_context(|| format!("MP3 encode failed at {in_sr} Hz ({first:#})"))
@@ -3641,8 +3731,20 @@ fn biquad_inplace_f32(x: &mut [f32], b0: f32, b1: f32, b2: f32, a1: f32, a2: f32
     }
 }
 
+/// The rate loudness is measured at. BS.1770 specifies the K-weighting
+/// filters at 48 kHz; measuring everything there keeps one set of
+/// coefficients and makes LUFS comparable across files of any rate.
+pub const LOUDNESS_REFERENCE_SAMPLE_RATE: u32 = 48_000;
+/// EBU Tech 3341 windows: momentary 400 ms, short-term 3 s, both stepped
+/// every 100 ms.
+const LUFS_MOMENTARY_WINDOW_SECS: f64 = 0.4;
+const LUFS_SHORT_TERM_WINDOW_SECS: f64 = 3.0;
+const LUFS_HOP_SECS: f64 = 0.1;
+/// BS.1770 absolute gate: blocks quieter than this are not programme.
+const LUFS_ABSOLUTE_GATE: f32 = -70.0;
+
 fn k_weighting_apply_48k(chans: &mut [Vec<f32>]) {
-    let kw = crate::meter::k_weight_coeffs(48_000);
+    let kw = crate::meter::k_weight_coeffs(LOUDNESS_REFERENCE_SAMPLE_RATE);
     let (s, h) = (kw.shelf, kw.highpass);
     for ch in chans.iter_mut() {
         biquad_inplace_f32(
@@ -3665,7 +3767,7 @@ fn k_weighting_apply_48k(chans: &mut [Vec<f32>]) {
 }
 
 fn ensure_sr_48k(chans: &[Vec<f32>], in_sr: u32) -> (Vec<Vec<f32>>, u32) {
-    if in_sr == 48_000 {
+    if in_sr == LOUDNESS_REFERENCE_SAMPLE_RATE {
         return (chans.to_vec(), in_sr);
     }
     // Fast windowed-sinc: the metadata pool runs this per file, and BS.1770's
@@ -3673,8 +3775,13 @@ fn ensure_sr_48k(chans: &[Vec<f32>], in_sr: u32) -> (Vec<Vec<f32>>, u32) {
     // but linear interpolation's rolloff/imaging measurably skewed LUFS for
     // high-sample-rate sources.
     (
-        resample_channels_quality(chans, in_sr, 48_000, ResampleQuality::Fast),
-        48_000,
+        resample_channels_quality(
+            chans,
+            in_sr,
+            LOUDNESS_REFERENCE_SAMPLE_RATE,
+            ResampleQuality::Fast,
+        ),
+        LOUDNESS_REFERENCE_SAMPLE_RATE,
     )
 }
 
@@ -3727,6 +3834,9 @@ pub struct LoudnessMetrics {
     pub true_peak_db: Option<f32>,
 }
 
+const TRUE_PEAK_4X_BELOW_SR: u32 = 96_000;
+const TRUE_PEAK_2X_BELOW_SR: u32 = 192_000;
+
 /// Inter-sample true peak via polyphase windowed-sinc interpolation
 /// (BS.1770-4 Annex 2). 4x below 96 kHz, 2x below 192 kHz, sample peak above.
 pub fn true_peak_db_from_multi(chans: &[Vec<f32>], in_sr: u32) -> Option<f32> {
@@ -3739,9 +3849,11 @@ pub fn true_peak_db_from_multi(chans: &[Vec<f32>], in_sr: u32) -> Option<f32> {
             }
         }
     }
-    let factor: usize = if in_sr < 96_000 {
+    // Oversample until the interpolated signal is at 192 kHz or more, the
+    // rate at which BS.1770 considers the true peak resolved.
+    let factor: usize = if in_sr < TRUE_PEAK_4X_BELOW_SR {
         4
-    } else if in_sr < 192_000 {
+    } else if in_sr < TRUE_PEAK_2X_BELOW_SR {
         2
     } else {
         1
@@ -3845,11 +3957,17 @@ fn loudness_metrics_impl(
         }
     }
     // Momentary: 400ms window with 100ms hop
-    let win_m = (0.400 * 48_000.0) as usize;
-    let hop = (0.100 * 48_000.0) as usize;
+    let win_m = crate::sample_rate::frames_for_secs(
+        LUFS_MOMENTARY_WINDOW_SECS,
+        LOUDNESS_REFERENCE_SAMPLE_RATE,
+    );
+    let hop = crate::sample_rate::frames_for_secs(LUFS_HOP_SECS, LOUDNESS_REFERENCE_SAMPLE_RATE);
     let means = block_means_power(&p_sum, win_m, hop);
     // Short-term: 3s window with 100ms hop (ungated max per EBU Tech 3341)
-    let win_s = (3.0 * 48_000.0) as usize;
+    let win_s = crate::sample_rate::frames_for_secs(
+        LUFS_SHORT_TERM_WINDOW_SECS,
+        LOUDNESS_REFERENCE_SAMPLE_RATE,
+    );
     let lufs_s_max = block_means_power(&p_sum, win_s, hop)
         .into_iter()
         .fold(None::<f64>, |acc, m| Some(acc.map_or(m, |a| a.max(m))))
@@ -3877,7 +3995,7 @@ fn loudness_metrics_impl(
         .fold(None::<f32>, |acc, l| Some(acc.map_or(l, |a| a.max(l))));
     let lufs_i = {
         // Absolute gate -70 LUFS
-        let mut sel: Vec<bool> = blocks_lufs.iter().map(|&l| l > -70.0).collect();
+        let mut sel: Vec<bool> = blocks_lufs.iter().map(|&l| l > LUFS_ABSOLUTE_GATE).collect();
         if !sel.iter().any(|&b| b) {
             f32::NEG_INFINITY
         } else {

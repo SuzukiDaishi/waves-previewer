@@ -196,7 +196,14 @@ impl WhisperOnnxTranscriber {
         let preproc = Preprocessor {
             n_mels,
             window: hann_periodic(N_FFT),
-            mel_fb_t: build_mel_filterbank_t(WHISPER_SR as f32, N_FFT, n_mels, 0.0, 8000.0)?,
+            mel_fb_t: build_mel_filterbank_t(
+                WHISPER_SR as f32,
+                N_FFT,
+                n_mels,
+                0.0,
+                // Whisper's filterbank spans 0 Hz to Nyquist at its 16 kHz input.
+                WHISPER_SR as f32 / 2.0,
+            )?,
             fft: planner.plan_fft_forward(N_FFT),
         };
 

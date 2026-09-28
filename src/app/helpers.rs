@@ -1,5 +1,4 @@
 use egui::{text::LayoutJob, text::TextFormat, Color32, FontId, RichText, TextStyle};
-use regex::RegexBuilder;
 
 use super::types::{SortDir, SortKey};
 
@@ -101,11 +100,21 @@ pub fn db_to_amp(db: f32) -> f32 {
     }
 }
 
+/// The level the colour map starts at: at or below this, the darkest colour.
+/// The map runs from here up to 0 dBFS.
+pub const COLORMAP_FLOOR_DB: f32 = -80.0;
+
+/// The colour at fraction `t` (0 = darkest, 1 = brightest) of the map, for
+/// views that normalise their own range before colouring.
+pub fn colormap_at(t: f32) -> Color32 {
+    db_to_color(COLORMAP_FLOOR_DB * (1.0 - t))
+}
+
 pub fn db_to_color(db: f32) -> Color32 {
     // Expanded palette for clearer perception across ranges.
     // Control points: (dBFS, Color)
     let pts: &[(f32, Color32)] = &[
-        (-80.0, Color32::from_rgb(10, 10, 12)),   // near silence
+        (COLORMAP_FLOOR_DB, Color32::from_rgb(10, 10, 12)), // near silence
         (-60.0, Color32::from_rgb(20, 50, 110)),  // deep blue
         (-40.0, Color32::from_rgb(40, 100, 180)), // blue
         (-25.0, Color32::from_rgb(80, 200, 255)), // cyan/teal
@@ -280,62 +289,172 @@ fn perceived_luminance(c: Color32) -> f32 {
     0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32
 }
 
-pub fn sortable_header(
+/// What a column header's right-click menu asked for, beyond sorting (which
+/// the header applies itself).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderMenuAction {
+    OpenFilter,
+    ClearFilter,
+    ClearAllFilters,
+    ReapplyFilters,
+}
+
+/// What a column header reported this frame.
+#[derive(Default)]
+pub struct HeaderResponse {
+    pub sort_changed: bool,
+    pub menu: Option<HeaderMenuAction>,
+}
+
+/// A sortable, filterable column header.
+///
+/// Left click cycles the sort (the column's natural direction first, then the
+/// other, then unsorted). Right click opens the Excel-style menu: sort either
+/// way, clear the sort, and the filter actions. A filtered column shows a
+/// small funnel after its label. The menu only reads the two flags passed in
+/// -- it runs every frame it is open, so it must not look at the list.
+#[allow(clippy::too_many_arguments)]
+pub fn column_header(
     ui: &mut egui::Ui,
     label: &str,
     sort_key: &mut SortKey,
     sort_dir: &mut SortDir,
     key: SortKey,
     default_asc: bool,
-) -> bool {
+    filtered: bool,
+    any_filters: bool,
+) -> HeaderResponse {
+    let mut out = HeaderResponse::default();
     let is_active = *sort_key == key && *sort_dir != SortDir::None;
-    let arrow = if is_active {
-        match *sort_dir {
-            SortDir::Asc => " \u{25B2}",
-            SortDir::Desc => " \u{25BC}",
-            SortDir::None => "",
-        }
-    } else {
-        ""
+    let arrow = match (is_active, *sort_dir) {
+        (true, SortDir::Asc) => " \u{25B2}",
+        (true, SortDir::Desc) => " \u{25BC}",
+        _ => "",
     };
-    let btn = egui::Button::new(RichText::new(format!("{}{}", label, arrow)).strong());
-    let clicked = ui.add(btn).clicked();
-    if clicked {
-        if *sort_key != key {
-            *sort_key = key;
-            *sort_dir = if default_asc {
-                SortDir::Asc
-            } else {
-                SortDir::Desc
-            };
-        } else {
-            *sort_dir = match *sort_dir {
-                SortDir::Asc => {
-                    if default_asc {
-                        SortDir::Desc
-                    } else {
-                        SortDir::None
-                    }
-                }
-                SortDir::Desc => {
-                    if default_asc {
-                        SortDir::None
-                    } else {
-                        SortDir::Asc
-                    }
-                }
-                SortDir::None => {
-                    if default_asc {
-                        SortDir::Asc
-                    } else {
-                        SortDir::Desc
-                    }
-                }
-            };
-        }
-        return true;
+    let resp = ui.add(egui::Button::new(
+        RichText::new(format!("{label}{arrow}")).strong(),
+    ));
+    if filtered {
+        // Beside the button rather than in its text, so the header keeps its
+        // name (and its width does not jump when a filter is set).
+        let (mark, _) = ui.allocate_exact_size(
+            egui::vec2(FUNNEL_SLOT_W, resp.rect.height()),
+            egui::Sense::hover(),
+        );
+        paint_filter_funnel(ui, mark, ui.visuals().selection.stroke.color);
     }
-    false
+    if resp.clicked() {
+        cycle_sort(sort_key, sort_dir, key, default_asc);
+        out.sort_changed = true;
+    }
+    let resp = if filtered {
+        resp.on_hover_text("Filtered -- right-click for filter options")
+    } else {
+        resp
+    };
+    resp.context_menu(|ui| {
+        let mut set = |dir: SortDir| {
+            *sort_key = key;
+            *sort_dir = dir;
+            out.sort_changed = true;
+        };
+        if ui.button("Sort ascending").clicked() {
+            set(SortDir::Asc);
+            ui.close();
+        }
+        if ui.button("Sort descending").clicked() {
+            set(SortDir::Desc);
+            ui.close();
+        }
+        if ui
+            .add_enabled(is_active, egui::Button::new("Clear sort"))
+            .clicked()
+        {
+            set(SortDir::None);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Filter\u{2026}").clicked() {
+            out.menu = Some(HeaderMenuAction::OpenFilter);
+            ui.close();
+        }
+        if ui
+            .add_enabled(filtered, egui::Button::new(format!("Clear filter from \"{label}\"")))
+            .clicked()
+        {
+            out.menu = Some(HeaderMenuAction::ClearFilter);
+            ui.close();
+        }
+        if ui
+            .add_enabled(any_filters, egui::Button::new("Clear all filters"))
+            .clicked()
+        {
+            out.menu = Some(HeaderMenuAction::ClearAllFilters);
+            ui.close();
+        }
+        if ui
+            .add_enabled(any_filters, egui::Button::new("Reapply filters"))
+            .on_hover_text("Filter again against the current values")
+            .clicked()
+        {
+            out.menu = Some(HeaderMenuAction::ReapplyFilters);
+            ui.close();
+        }
+    });
+    out
+}
+
+/// Next sort state for a left click on a column's header.
+fn cycle_sort(sort_key: &mut SortKey, sort_dir: &mut SortDir, key: SortKey, default_asc: bool) {
+    let (first, second) = if default_asc {
+        (SortDir::Asc, SortDir::Desc)
+    } else {
+        (SortDir::Desc, SortDir::Asc)
+    };
+    if *sort_key != key {
+        *sort_key = key;
+        *sort_dir = first;
+        return;
+    }
+    *sort_dir = match *sort_dir {
+        dir if dir == first => second,
+        dir if dir == second => SortDir::None,
+        _ => first,
+    };
+}
+
+/// Width of the slot a filtered column's funnel mark takes, in points.
+const FUNNEL_SLOT_W: f32 = 12.0;
+
+/// A small funnel centred in `rect` -- drawn rather than a glyph, since the
+/// bundled fonts have no funnel.
+pub fn paint_filter_funnel(ui: &egui::Ui, rect: egui::Rect, color: Color32) {
+    /// Funnel size, in points.
+    const FUNNEL_W: f32 = 8.0;
+    const FUNNEL_H: f32 = 9.0;
+    let right = rect.center().x + FUNNEL_W * 0.5;
+    let top = rect.center().y - FUNNEL_H * 0.5;
+    let left = right - FUNNEL_W;
+    let mid = (left + right) * 0.5;
+    let neck = top + FUNNEL_H * 0.45;
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(left, top),
+            egui::pos2(right, top),
+            egui::pos2(mid + 1.2, neck),
+            egui::pos2(mid - 1.2, neck),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(mid - 1.2, neck),
+            egui::pos2(mid + 1.2, top + FUNNEL_H),
+        ),
+        0.0,
+        color,
+    );
 }
 
 pub fn format_duration(secs: f32) -> String {
@@ -401,19 +520,11 @@ pub fn format_system_time_local(st: std::time::SystemTime) -> String {
 
 /// Compile the search highlight regex once; reuse via
 /// `WavesPreviewer::cached_highlight_regex()` instead of rebuilding per label.
+/// The regex that paints search matches: whatever the search itself matches
+/// (see `text_match::TextMatcher::search`), so the highlight and the filter
+/// cannot disagree about an invalid pattern.
 pub fn build_highlight_regex(query: &str, use_regex: bool) -> Option<regex::Regex> {
-    let q = query.trim();
-    if q.is_empty() {
-        return None;
-    }
-    if use_regex {
-        RegexBuilder::new(q).case_insensitive(true).build().ok()
-    } else {
-        RegexBuilder::new(&regex::escape(q))
-            .case_insensitive(true)
-            .build()
-            .ok()
-    }
+    crate::app::text_match::TextMatcher::search(query, use_regex)?.highlight_regex()
 }
 
 #[allow(dead_code)]

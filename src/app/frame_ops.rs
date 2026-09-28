@@ -184,6 +184,12 @@ impl WavesPreviewer {
         // Background threads push into channels this loop polls; once the
         // loop is allowed to sleep they need a way to ask for a frame.
         crate::ui_wake::register_ui_context(ctx);
+        // Ctrl+V after copying files in Explorer reaches egui as nothing at
+        // all; the hook sees it (see os_paste_key.rs). Installed once, from
+        // here because this is the thread that runs the event loop. (A test
+        // thread gets one too; with no window it never receives a key, and
+        // tests raise the flag directly.)
+        super::os_paste_key::install();
         // One shared deadline for everything marked deferrable below. The
         // per-subsystem budgets are additive on their own; this caps the sum.
         self.frame_budget
@@ -835,6 +841,7 @@ impl WavesPreviewer {
         self.run_frame_first_save_prompt(ctx);
         self.ui_export_settings_window(ctx);
         self.ui_list_columns_window(ctx);
+        self.ui_list_filter_dialog(ctx);
         self.ui_status_tags_window(ctx);
         self.ui_shortcuts_window(ctx);
         self.ui_keymap_window(ctx);
@@ -1167,7 +1174,7 @@ impl WavesPreviewer {
                     ui.label("Target sample rate (Hz):");
                     ui.add(
                         egui::DragValue::new(&mut self.resample_target_sr)
-                            .range(8000..=384_000)
+                            .range(crate::sample_rate::MIN_SAMPLE_RATE..=crate::sample_rate::MAX_SAMPLE_RATE)
                             .speed(100.0),
                     );
                 });

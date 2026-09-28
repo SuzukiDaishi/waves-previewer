@@ -197,8 +197,24 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn spawn_save_selected(&mut self, indices: std::collections::BTreeSet<usize>) {
+        let paths: Vec<PathBuf> = indices
+            .into_iter()
+            .filter_map(|row| self.path_for_row(row).cloned())
+            .collect();
+        self.spawn_save_paths(paths, None);
+    }
+
+    /// Saves one `(virtual)` item to a destination the user picked, through the
+    /// same job as a list save, so that on success the virtual row itself
+    /// becomes the file row (see `promote_virtual_to_file`) instead of a copy
+    /// the watcher would add as a second row.
+    pub(super) fn spawn_save_virtual_as(&mut self, path: PathBuf, dst: PathBuf) {
+        self.spawn_save_paths(vec![path.clone()], Some((path, dst)));
+    }
+
+    fn spawn_save_paths(&mut self, paths: Vec<PathBuf>, virtual_dst: Option<(PathBuf, PathBuf)>) {
         use std::sync::mpsc;
-        if indices.is_empty() {
+        if paths.is_empty() {
             return;
         }
         struct EditSaveTask {
@@ -248,11 +264,13 @@ impl super::WavesPreviewer {
             loop_region: Option<(usize, usize)>,
             write_markers: bool,
             write_loop_markers: bool,
+            marker_source: Option<PathBuf>,
         }
         let mut virtual_tasks: Vec<VirtualSaveTask> = Vec::new();
         let mut skipped_video: Vec<PathBuf> = Vec::new();
-        for i in indices {
-            let Some(item) = self.item_for_row(i) else {
+        let mut skipped_dirty_dst: Vec<PathBuf> = Vec::new();
+        for path in paths {
+            let Some(item) = self.item_for_path(&path) else {
                 continue;
             };
             let p = item.path.clone();
@@ -279,6 +297,10 @@ impl super::WavesPreviewer {
                 let audio = self
                     .edited_audio_for_path(&p)
                     .or_else(|| item.virtual_audio.clone());
+                let explicit_dst = virtual_dst
+                    .as_ref()
+                    .filter(|(src, _)| *src == p)
+                    .map(|(_, dst)| dst.clone());
                 let parent = self
                     .export_cfg
                     .dest_folder
@@ -309,20 +331,45 @@ impl super::WavesPreviewer {
                 let name = apply_export_name_template(&self.export_cfg.name_template, stem, db);
                 let name = crate::app::helpers::sanitize_filename_component(&name);
                 let mut dst = parent.join(name);
-                let target_ext = path_format_override
+                let mut target_ext = path_format_override
                     .as_deref()
                     .or(format_override.as_deref())
-                    .unwrap_or("wav");
-                dst.set_extension(target_ext);
-                if dst.exists() {
-                    match self.export_cfg.conflict {
-                        ConflictPolicy::Overwrite => {}
-                        ConflictPolicy::Skip => continue,
-                        ConflictPolicy::Rename => {
-                            dst = next_renamed_export_path(&dst);
+                    .unwrap_or("wav")
+                    .to_string();
+                if let Some(explicit) = explicit_dst {
+                    // The file dialog already asked about replacing an existing
+                    // file, so the conflict policy does not apply here.
+                    target_ext = explicit
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_ascii_lowercase())
+                        .filter(|e| crate::audio_io::is_encodable_extension(e))
+                        .unwrap_or(target_ext);
+                    dst = explicit;
+                    dst.set_extension(&target_ext);
+                } else {
+                    dst.set_extension(&target_ext);
+                    if dst.exists() {
+                        match self.export_cfg.conflict {
+                            ConflictPolicy::Overwrite => {}
+                            ConflictPolicy::Skip => continue,
+                            ConflictPolicy::Rename => {
+                                dst = next_renamed_export_path(&dst);
+                            }
                         }
                     }
                 }
+                // Replacing a file whose editor tab holds unsaved edits would
+                // throw those edits away when the virtual row takes its place.
+                if self
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.path == dst && (tab.dirty || tab.markers_dirty))
+                {
+                    skipped_dirty_dst.push(dst);
+                    continue;
+                }
+                let target_ext = target_ext.as_str();
                 let sr = item
                     .virtual_state
                     .as_ref()
@@ -371,11 +418,23 @@ impl super::WavesPreviewer {
                     .current_edit_annotation_snapshot(&p)
                     .map(|snap| (snap.markers, snap.loop_region))
                     .unwrap_or_default();
+                let has_snapshot = self.current_edit_annotation_snapshot(&p).is_some();
                 let write_markers = !markers.is_empty();
                 let write_loop_markers = loop_region.is_some();
                 if write_markers || write_loop_markers {
                     edit_annotation_snapshots.insert(p.clone(), (markers.clone(), loop_region));
                 }
+                // Never opened in the editor: the only copy of its markers is
+                // in the file it was made from (a recording's temp WAV), which
+                // the worker reads back and writes to the destination.
+                let marker_source = if has_snapshot {
+                    None
+                } else {
+                    item.virtual_state.as_ref().and_then(|v| match &v.source {
+                        VirtualSourceRef::FilePath(path) => Some(path.clone()),
+                        _ => None,
+                    })
+                };
                 virtual_tasks.push(VirtualSaveTask {
                     src: p.clone(),
                     dst,
@@ -390,6 +449,7 @@ impl super::WavesPreviewer {
                     loop_region,
                     write_markers,
                     write_loop_markers,
+                    marker_source,
                 });
             } else {
                 let mut dirty_audio = false;
@@ -435,7 +495,7 @@ impl super::WavesPreviewer {
                                     .meta_for_path(&p)
                                     .and_then(|m| m.duration_secs)
                                     .map(|secs| {
-                                        (secs * self.sample_rate_for_path(&p, out_sr) as f32)
+                                        (secs * self.sample_rate_for_path(&p) as f32)
                                             .round()
                                             .max(0.0) as u64
                                     });
@@ -445,7 +505,7 @@ impl super::WavesPreviewer {
                                 .meta_for_path(&p)
                                 .and_then(|m| m.duration_secs)
                                 .map(|secs| {
-                                    (secs * self.sample_rate_for_path(&p, out_sr) as f32)
+                                    (secs * self.sample_rate_for_path(&p) as f32)
                                         .round()
                                         .max(0.0) as u64
                                 });
@@ -485,7 +545,7 @@ impl super::WavesPreviewer {
                                     .meta_for_path(&p)
                                     .and_then(|m| m.duration_secs)
                                     .map(|secs| {
-                                        (secs * self.sample_rate_for_path(&p, out_sr) as f32)
+                                        (secs * self.sample_rate_for_path(&p) as f32)
                                             .round()
                                             .max(0.0) as u64
                                     });
@@ -495,7 +555,7 @@ impl super::WavesPreviewer {
                                 .meta_for_path(&p)
                                 .and_then(|m| m.duration_secs)
                                 .map(|secs| {
-                                    (secs * self.sample_rate_for_path(&p, out_sr) as f32)
+                                    (secs * self.sample_rate_for_path(&p) as f32)
                                         .round()
                                         .max(0.0) as u64
                                 });
@@ -526,7 +586,7 @@ impl super::WavesPreviewer {
                     let file_sr = if write_audio {
                         target_sr
                     } else {
-                        self.sample_rate_for_path(&p, out_sr)
+                        self.sample_rate_for_path(&p)
                     };
                     let write_markers = markers_dirty || (write_audio && !markers.is_empty());
                     let write_loop_markers =
@@ -555,6 +615,17 @@ impl super::WavesPreviewer {
                     items.push((p, db));
                 }
             }
+        }
+        if let Some(first) = skipped_dirty_dst.first() {
+            let name = first
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("the destination")
+                .to_string();
+            self.push_toast(
+                crate::app::types::ToastSeverity::Warning,
+                format!("Not saved: {name} is open in the editor with unsaved edits. Save or close it first."),
+            );
         }
         if items.is_empty() && edit_tasks.is_empty() && virtual_tasks.is_empty() {
             return;
@@ -950,9 +1021,28 @@ impl super::WavesPreviewer {
                     failed_paths.push(dst.clone());
                 }
             }
-            for task in virtual_jobs {
-                let src = task.src;
-                let dst = task.dst;
+            for mut task in virtual_jobs {
+                let src = task.src.clone();
+                let dst = task.dst.clone();
+                // The virtual row becomes this file's row when the job reports
+                // back. Until then the folder watcher must not add the file as
+                // a second row: `materialize_current_revision` copies or
+                // hard-links without going through the writers that note this.
+                crate::app::watch::note_self_write(&dst);
+                // Even a byte copy needs this: past the inline-rewrite limit
+                // the markers live in a `.markers.json` beside the source,
+                // which the copy does not carry.
+                if !task.write_markers {
+                    if let Some(source) = task.marker_source.as_ref() {
+                        let src_sr = task.src_sr.max(1);
+                        if let Ok(markers) = crate::markers::read_markers(source, src_sr, src_sr) {
+                            if !markers.is_empty() {
+                                task.markers = markers;
+                                task.write_markers = true;
+                            }
+                        }
+                    }
+                }
                 if task.can_materialize {
                     match task.asset.access().materialize_current_revision(&dst) {
                         Ok(()) => {
@@ -1336,7 +1426,7 @@ impl super::WavesPreviewer {
                     self.sample_rate_probe_cache.remove(src);
                     self.bit_depth_override.remove(src);
                     self.format_override.remove(src);
-                    self.replace_path_in_state(src, dst);
+                    self.promote_virtual_to_file(src, dst, ctx);
                     self.sample_rate_override.remove(dst);
                     self.sample_rate_probe_cache.remove(dst);
                     self.bit_depth_override.remove(dst);
@@ -1406,6 +1496,51 @@ impl super::WavesPreviewer {
             self.export_state = None;
             ctx.request_repaint();
         }
+    }
+
+    /// Turns a saved `(virtual)` row into the row of the file it was saved to.
+    ///
+    /// There must be exactly one row for `dst` afterwards. Another one can
+    /// already exist: the watcher or a rescan may have seen the new file
+    /// first, or the save replaced a file that was already listed. That row is
+    /// dropped in favour of the virtual one -- which carries the open editor
+    /// tab, the undo history and the recording take that point at it -- and
+    /// its labels move across when the virtual row has none of its own.
+    pub(super) fn promote_virtual_to_file(&mut self, src: &Path, dst: &Path, ctx: &egui::Context) {
+        let Some(src_id) = self.path_index.get(src) else {
+            return;
+        };
+        if let Some(existing_id) = self.path_index.get(dst).filter(|id| *id != src_id) {
+            let (status_id, tags) = self
+                .item_for_id(existing_id)
+                .map(|item| (item.status_id.clone(), item.tags.clone()))
+                .unwrap_or_default();
+            // `spawn_save_paths` refuses a destination with unsaved edits, so
+            // whatever tab is still open on it has nothing to lose.
+            while let Some(idx) = self.tabs.iter().position(|tab| tab.path == dst) {
+                self.close_tab_at(idx, ctx);
+            }
+            self.remove_paths_from_list(&[dst.to_path_buf()]);
+            if let Some(item) = self.item_for_id_mut(src_id) {
+                if item.status_id.is_none() {
+                    item.status_id = status_id;
+                }
+                if item.tags.is_none() {
+                    item.tags = tags;
+                }
+            }
+        }
+        self.replace_path_in_state(src, dst);
+        if let Some(item) = self.item_for_id_mut(src_id) {
+            // Left behind, this still points at the temp file the row was
+            // made from, and anything asking "is this derived?" says yes.
+            item.virtual_state = None;
+        }
+        self.ensure_meta_pool();
+        self.clear_meta_for_path(dst);
+        self.meta_inflight.remove(dst);
+        self.queue_meta_for_path(&dst.to_path_buf(), false);
+        self.refresh_filter_then_sort();
     }
 
     pub(super) fn undo_last_overwrite_export(&mut self) -> bool {

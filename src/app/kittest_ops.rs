@@ -9,6 +9,11 @@ use crate::app::types::{
     SampleValueKind, SortDir, SortKey, ToolKind, ToolState, ViewMode,
 };
 
+/// Rate a test hook gives a row whose metadata has not been read. Any real
+/// rate would do; 44.1 kHz is simply a different one from the output
+/// default, so a test cannot pass by the two coinciding.
+const TEST_HOOK_SAMPLE_RATE: u32 = 44_100;
+
 /// Counters for the work a UI surface must not repeat per frame.
 ///
 /// Both of these are O(selection): building the selection's paths, and the
@@ -1464,31 +1469,9 @@ impl super::WavesPreviewer {
 
     pub fn test_sort_key_name(&self) -> &'static str {
         match self.sort_key {
-            SortKey::File => "File",
-            SortKey::Folder => "Folder",
-            SortKey::Transcript => "Transcript",
-            SortKey::Type => "Type",
-            SortKey::Length => "Length",
-            SortKey::Channels => "Channels",
-            SortKey::SampleRate => "SampleRate",
-            SortKey::Bits => "Bits",
-            SortKey::BitRate => "BitRate",
-            SortKey::Level => "Level",
-            SortKey::Lufs => "Lufs",
-            SortKey::TruePeak => "TruePeak",
-            SortKey::LufsShort => "LufsShort",
-            SortKey::LufsMomentary => "LufsMomentary",
-            SortKey::SilenceLead => "SilenceLead",
-            SortKey::SilenceTail => "SilenceTail",
-            SortKey::EdgeZero => "EdgeZero",
-            SortKey::OverPeak => "OverPeak",
-            SortKey::BlankPad => "BlankPad",
-            SortKey::Bpm => "Bpm",
-            SortKey::CreatedAt => "CreatedAt",
-            SortKey::ModifiedAt => "ModifiedAt",
-            SortKey::Comments => "Comments",
             SortKey::External(_) => "External",
             SortKey::Metadata(_) => "Metadata",
+            key => key.builtin_name().unwrap_or("File"),
         }
     }
 
@@ -1720,6 +1703,11 @@ impl super::WavesPreviewer {
         }
         self.open_or_activate_tab(path);
         true
+    }
+
+    /// Test-only: whether any metadata is held for the path.
+    pub fn test_meta_loaded(&self, path: &Path) -> bool {
+        self.meta_for_path(path).is_some()
     }
 
     pub fn test_clear_meta_for_path(&mut self, path: &Path) {
@@ -3211,7 +3199,7 @@ impl super::WavesPreviewer {
             audio_track_absent: false,
             audio_track_unsupported: false,
             channels: 1,
-            sample_rate: 44_100,
+            sample_rate: TEST_HOOK_SAMPLE_RATE,
             bits_per_sample: 16,
             sample_value_kind: SampleValueKind::Unknown,
             bit_rate_bps: None,
@@ -3415,6 +3403,129 @@ impl super::WavesPreviewer {
         };
         self.select_and_load(row, true);
         true
+    }
+
+    /// Test-only: the files the multi-selection highlights, sorted -- by file,
+    /// not by row, which is what has to survive a re-sort.
+    pub fn test_selected_multi_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self
+            .selected_multi
+            .iter()
+            .filter_map(|&row| self.path_for_row(row).cloned())
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// Test-only: select these files in the list, the first as primary and
+    /// anchor, without opening anything (a click would also load a preview).
+    pub fn test_set_list_selection(&mut self, paths: &[PathBuf]) -> bool {
+        let rows: Vec<usize> = paths.iter().filter_map(|p| self.row_for_path(p)).collect();
+        if rows.len() != paths.len() || rows.is_empty() {
+            return false;
+        }
+        self.selected_multi = rows.iter().copied().collect();
+        self.selected = Some(rows[0]);
+        self.select_anchor = Some(rows[0]);
+        true
+    }
+
+    /// Test-only: set a condition filter on a column, the operator named by
+    /// its label in the dialog ("contains", "top N items", ...).
+    pub fn test_set_condition_filter(
+        &mut self,
+        key: SortKey,
+        op_label: &str,
+        a: &str,
+        b: &str,
+    ) -> Result<(), String> {
+        use crate::app::list_filter::{ColumnFilter, CompiledColumnFilter, Condition, FilterRule};
+        let kind = self.column_value_kind(key);
+        let op = kind
+            .ops()
+            .into_iter()
+            .find(|op| op.label() == op_label)
+            .ok_or_else(|| format!("no operator \"{op_label}\" for {kind:?}"))?;
+        let rule = FilterRule::Conditions {
+            first: Condition { op, a: a.into(), b: b.into() },
+            second: None,
+        };
+        CompiledColumnFilter::compile(kind, &rule, chrono::Local::now()).map_err(|e| e.message)?;
+        self.set_column_filter(key, Some(ColumnFilter { key, kind, rule }));
+        Ok(())
+    }
+
+    /// Test-only: how many column filters are set.
+    pub fn test_column_filter_count(&self) -> usize {
+        self.column_filters.len()
+    }
+
+    /// Test-only: whether the column filter dialog is open.
+    pub fn test_list_filter_dialog_open(&self) -> bool {
+        self.list_filter_dialog.is_some()
+    }
+
+    /// Test-only: the dialog's value list as (value, rows); `None` while it
+    /// is still being collected or the dialog is closed.
+    pub fn test_list_filter_dialog_values(&self) -> Option<Vec<(String, usize)>> {
+        self.list_filter_dialog.as_ref()?.test_values()
+    }
+
+    /// Test-only: tick exactly these values (and not "(Blanks)").
+    pub fn test_list_filter_dialog_check_only(&mut self, values: &[&str]) -> bool {
+        match self.list_filter_dialog.as_mut() {
+            Some(dialog) => {
+                dialog.test_check_only(values);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Test-only: the error the dialog shows, if any.
+    pub fn test_list_filter_dialog_error(&self) -> Option<String> {
+        self.list_filter_dialog
+            .as_ref()?
+            .error
+            .as_ref()
+            .map(|e| e.message.clone())
+    }
+
+    /// Test-only: switch the dialog to its Conditions tab with one condition.
+    pub fn test_list_filter_dialog_use_condition(&mut self, op_label: &str, a: &str) -> bool {
+        let Some(dialog) = self.list_filter_dialog.as_mut() else {
+            return false;
+        };
+        dialog.test_use_condition(op_label, a)
+    }
+
+    /// Test-only: what Explorer leaves on the clipboard after Ctrl+C -- a
+    /// file list and no text. `None` goes back to the real clipboard.
+    pub fn test_set_clipboard_files(&mut self, files: Option<Vec<PathBuf>>) {
+        super::clipboard_ops::set_test_clipboard_files(files);
+    }
+
+    /// Test-only: how many list pastes this thread has run.
+    pub fn test_list_paste_count(&self) -> usize {
+        super::clipboard_ops::test_list_paste_count()
+    }
+
+    /// Test-only: the Ctrl+V the keyboard hook would see, which egui does not
+    /// report when the clipboard has no text.
+    pub fn test_note_os_paste_key(&mut self) {
+        super::os_paste_key::note_for_test();
+    }
+
+    /// Test-only: the file the shift-click anchor sits on.
+    pub fn test_anchor_path(&self) -> Option<PathBuf> {
+        self.select_anchor
+            .and_then(|row| self.path_for_row(row).cloned())
+    }
+
+    /// Test-only: pin the lowest performance tier, whose small sync threshold
+    /// sends a few hundred rows down the sliced / worker sort and filter path.
+    pub fn test_pin_low_perf_tier(&mut self) {
+        self.perf.tier = crate::app::perf_profile::PerfTier::Low;
     }
 
     pub fn test_select_paths_multi(&mut self, paths: &[PathBuf]) -> bool {
@@ -4757,11 +4868,7 @@ impl super::WavesPreviewer {
 
     pub fn test_nearest_zero_cross(&self, sample: usize) -> Option<usize> {
         let tab = self.tabs.get(self.active_tab?)?;
-        Some(super::ui::editor::zc_snap_nearest(
-            &tab.ch_samples,
-            self.zero_cross_epsilon,
-            sample,
-        ))
+        Some(super::ui::editor::zc_snap_nearest(&tab.ch_samples, tab.buffer_sample_rate, self.zero_cross_epsilon, sample))
     }
 
     pub fn test_set_mock_transcript_model_download_progress(&mut self, done: usize, total: usize) {
@@ -4881,6 +4988,90 @@ impl super::WavesPreviewer {
     pub fn test_set_last_recording_path(&mut self, path: &Path) {
         self.recording_tab.last_recording_path = Some(path.to_path_buf());
         self.recording_tab.state = crate::app::types::RecordingState::Idle;
+    }
+
+    /// Test-only: what the worker's `Finalized` does for a real take -- the
+    /// finished WAV becomes a take and a `(virtual)` list row at once.
+    /// Returns that row's path.
+    pub fn test_finish_recording_take(&mut self, path: &Path) -> Option<PathBuf> {
+        self.recording_tab.last_recording_path = Some(path.to_path_buf());
+        self.recording_tab.state = crate::app::types::RecordingState::Idle;
+        self.attach_finished_take(path);
+        let take = self.recording_tab.takes.last()?;
+        self.item_for_id(take.item?).map(|item| item.path.clone())
+    }
+
+    /// Test-only: each take's state as "recording" / "stopped" /
+    /// "saved:<path>", oldest first. Retired takes are pruned first, as the
+    /// Recording view does every frame.
+    pub fn test_recording_take_states(&mut self) -> Vec<String> {
+        self.prune_recording_takes();
+        self.recording_tab
+            .takes
+            .iter()
+            .filter_map(|take| self.recording_take_state(take))
+            .map(|state| match state {
+                crate::app::types::RecordingTakeState::Recording => "recording".to_string(),
+                crate::app::types::RecordingTakeState::Stopped => "stopped".to_string(),
+                crate::app::types::RecordingTakeState::Saved(p) => {
+                    format!("saved:{}", p.display())
+                }
+            })
+            .collect()
+    }
+
+    /// Test-only: the take list's "Save As…" with the dialog answered.
+    pub fn test_save_recording_take_as(&mut self, take_index: usize, dst: &Path) -> bool {
+        let Some(take) = self.recording_tab.takes.get(take_index) else {
+            return false;
+        };
+        let Some(path) = take
+            .item
+            .and_then(|id| self.item_for_id(id))
+            .map(|item| item.path.clone())
+        else {
+            return false;
+        };
+        self.spawn_save_virtual_as(path, dst.to_path_buf());
+        true
+    }
+
+    /// Test-only: the take list's "Discard" with the confirmation accepted.
+    pub fn test_discard_recording_take(&mut self, take_index: usize) -> bool {
+        let Some(id) = self.recording_tab.takes.get(take_index).map(|t| t.id) else {
+            return false;
+        };
+        self.discard_recording_take(id);
+        true
+    }
+
+    /// Test-only: how many list rows carry exactly this path. The one thing
+    /// a virtual-to-file save must keep at 1.
+    pub fn test_rows_with_path(&self, path: &Path) -> usize {
+        self.items.iter().filter(|item| item.path == path).count()
+    }
+
+    /// Test-only: whether the row at `path` is a file row with no virtual
+    /// leftovers.
+    pub fn test_row_is_plain_file(&self, path: &Path) -> bool {
+        self.item_for_path(path)
+            .map(|item| {
+                item.source == crate::app::types::MediaSource::File && item.virtual_state.is_none()
+            })
+            .unwrap_or(false)
+    }
+
+    /// Test-only: removes list rows the way the list's Delete does.
+    pub fn test_remove_rows(&mut self, paths: &[PathBuf]) {
+        self.remove_paths_from_list_with_undo(paths);
+    }
+
+    /// Test-only: marker count on the active editor tab.
+    pub fn test_active_tab_marker_count(&self) -> usize {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .map(|tab| tab.markers.len())
+            .unwrap_or(0)
     }
 
     /// Test-only: mirrors the "Open in Editor" button in the Recording tab,

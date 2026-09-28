@@ -2349,9 +2349,8 @@ impl crate::app::WavesPreviewer {
                     None
                 }
             })
-            .or_else(|| self.effective_sample_rate_for_path(&source_path))
             .filter(|v| *v > 0)
-            .unwrap_or(out_sr);
+            .unwrap_or_else(|| self.resolve_effective_sample_rate(&source_path).hz);
         let bits_per_sample = self
             .bit_depth_override
             .get(&source_path)
@@ -2639,9 +2638,8 @@ impl crate::app::WavesPreviewer {
                     None
                 }
             })
-            .or_else(|| self.effective_sample_rate_for_path(&source_path))
             .filter(|v| *v > 0)
-            .unwrap_or(out_sr);
+            .unwrap_or_else(|| self.resolve_effective_sample_rate(&source_path).hz);
         let bits_per_sample = self
             .bit_depth_override
             .get(&source_path)

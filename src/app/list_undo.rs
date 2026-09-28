@@ -24,31 +24,18 @@ impl crate::app::WavesPreviewer {
         }
     }
 
+    /// Undo keeps the selection by path (its rows may have been removed and
+    /// re-added in between); paths become ids through the index, and the
+    /// rows are found in one pass by `restore_selection_ids`.
     pub(super) fn restore_list_selection_snapshot(&mut self, snap: &ListSelectionSnapshot) {
-        self.selected = snap
-            .selected_path
-            .as_ref()
-            .and_then(|p| self.row_for_path(p));
-        self.selected_multi.clear();
-        for p in &snap.selected_paths {
-            if let Some(row) = self.row_for_path(p) {
-                self.selected_multi.insert(row);
-            }
-        }
-        if let Some(sel) = self.selected {
-            if self.selected_multi.is_empty() {
-                self.selected_multi.insert(sel);
-            }
-        } else if let Some(first) = self.selected_multi.iter().next().copied() {
-            self.selected = Some(first);
-        }
-        self.select_anchor = snap.anchor_path.as_ref().and_then(|p| self.row_for_path(p));
+        let id_of = |p: &PathBuf| self.path_index.get(p);
+        let ids = super::types::SelectionIds {
+            primary: snap.selected_path.as_ref().and_then(id_of),
+            multi: snap.selected_paths.iter().filter_map(id_of).collect(),
+            anchor: snap.anchor_path.as_ref().and_then(id_of),
+        };
+        self.restore_selection_ids(&ids);
         self.playing_path = snap.playing_path.clone();
-        if self.files.is_empty() {
-            self.selected = None;
-            self.selected_multi.clear();
-            self.select_anchor = None;
-        }
     }
 
     pub(super) fn capture_list_undo_items(&self, paths: &[PathBuf]) -> Vec<ListUndoItem> {

@@ -270,13 +270,7 @@ impl super::WavesPreviewer {
                 return;
             }
             let audio = item.virtual_audio.clone().expect("checked resident asset");
-            let virtual_in_sr = item
-                .virtual_state
-                .as_ref()
-                .map(|v| v.sample_rate)
-                .or_else(|| item.meta.as_ref().map(|m| m.sample_rate))
-                .filter(|v| *v > 0)
-                .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+            let virtual_in_sr = self.resolve_file_sample_rate(path).hz;
             let default_bpm = self
                 .meta_for_path(path)
                 .and_then(|m| m.bpm)

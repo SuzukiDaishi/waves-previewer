@@ -153,7 +153,7 @@ fn draw_waveform_preview(
     painter.rect_stroke(
         rect,
         6.0,
-        Stroke::new(1.0, Color32::from_rgb(44, 54, 68)),
+        Stroke::new(1.0_f32, Color32::from_rgb(44, 54, 68)),
         StrokeKind::Inside,
     );
     if mono.is_empty() {
@@ -182,7 +182,7 @@ fn draw_waveform_preview(
             egui::pos2(plot_rect.left(), center_y),
             egui::pos2(plot_rect.right(), center_y),
         ],
-        Stroke::new(1.0, Color32::from_rgb(42, 70, 96)),
+        Stroke::new(1.0_f32, Color32::from_rgb(42, 70, 96)),
     );
     let width = plot_rect.width() / minmax.len().max(1) as f32;
     for (index, (lo, hi)) in minmax.iter().enumerate() {
@@ -206,7 +206,7 @@ fn draw_waveform_preview(
             egui::pos2(plot_rect.left(), plot_rect.bottom()),
             egui::pos2(plot_rect.right(), plot_rect.bottom()),
         ],
-        Stroke::new(1.0, Color32::from_rgb(58, 66, 78)),
+        Stroke::new(1.0_f32, Color32::from_rgb(58, 66, 78)),
     );
     let total_duration = mono.len() as f32 / sample_rate.max(1) as f32;
     let visible_duration = (end.saturating_sub(start)) as f32 / sample_rate.max(1) as f32;
@@ -220,7 +220,7 @@ fn draw_waveform_preview(
                 egui::pos2(x, plot_rect.bottom()),
                 egui::pos2(x, plot_rect.bottom() + 4.0),
             ],
-            Stroke::new(1.0, Color32::from_rgb(84, 96, 108)),
+            Stroke::new(1.0_f32, Color32::from_rgb(84, 96, 108)),
         );
         let label = format_time_axis_label(start_time + visible_duration * frac);
         painter.text(
@@ -255,7 +255,7 @@ fn draw_spectrum_preview(
     painter.rect_stroke(
         rect,
         6.0,
-        Stroke::new(1.0, Color32::from_rgb(44, 54, 68)),
+        Stroke::new(1.0_f32, Color32::from_rgb(44, 54, 68)),
         StrokeKind::Inside,
     );
     if spectrogram.frames == 0
@@ -336,8 +336,8 @@ fn draw_spectrum_preview(
                 .values_db
                 .get(base + bin.min(max_bin))
                 .copied()
-                .unwrap_or(-120.0)
-                .clamp(-120.0, 6.0);
+                .unwrap_or(crate::levels::NO_SIGNAL_DB)
+                .clamp(crate::levels::NO_SIGNAL_DB, crate::levels::METER_CEILING_DB);
             let x0 = plot_rect.left() + x as f32 * cell_w;
             let y0 = plot_rect.bottom() - (y as f32 + 1.0) * cell_h;
             painter.rect_filled(
@@ -356,14 +356,14 @@ fn draw_spectrum_preview(
             egui::pos2(plot_rect.left(), plot_rect.bottom()),
             egui::pos2(plot_rect.right(), plot_rect.bottom()),
         ],
-        Stroke::new(1.0, Color32::from_rgb(58, 66, 78)),
+        Stroke::new(1.0_f32, Color32::from_rgb(58, 66, 78)),
     );
     painter.line_segment(
         [
             egui::pos2(plot_rect.left(), plot_rect.top()),
             egui::pos2(plot_rect.left(), plot_rect.bottom()),
         ],
-        Stroke::new(1.0, Color32::from_rgb(58, 66, 78)),
+        Stroke::new(1.0_f32, Color32::from_rgb(58, 66, 78)),
     );
     let frame_step_seconds = spectrogram.frame_step as f32 / spectrogram.sample_rate.max(1) as f32;
     let visible_duration = visible_frames as f32 * frame_step_seconds;
@@ -377,7 +377,7 @@ fn draw_spectrum_preview(
                 egui::pos2(x, plot_rect.bottom()),
                 egui::pos2(x, plot_rect.bottom() + 4.0),
             ],
-            Stroke::new(1.0, Color32::from_rgb(84, 96, 108)),
+            Stroke::new(1.0_f32, Color32::from_rgb(84, 96, 108)),
         );
         painter.text(
             egui::pos2(x, rect.bottom() - 1.0),
@@ -400,7 +400,7 @@ fn draw_spectrum_preview(
                 egui::pos2(plot_rect.left() - 4.0, y),
                 egui::pos2(plot_rect.left(), y),
             ],
-            Stroke::new(1.0, Color32::from_rgb(84, 96, 108)),
+            Stroke::new(1.0_f32, Color32::from_rgb(84, 96, 108)),
         );
         painter.text(
             egui::pos2(plot_rect.left() - 6.0, y),
@@ -1138,9 +1138,9 @@ impl crate::app::WavesPreviewer {
                 ],
                 Stroke::new(
                     if ((x - canvas_rect.left()) / major).fract().abs() < 0.01 {
-                        1.2
+                        1.2_f32
                     } else {
-                        1.0
+                        1.0_f32
                     },
                     if ((x - canvas_rect.left()) / major).fract().abs() < 0.01 {
                         Color32::from_rgb(40, 48, 58)
@@ -1160,9 +1160,9 @@ impl crate::app::WavesPreviewer {
                 ],
                 Stroke::new(
                     if ((y - canvas_rect.top()) / major).fract().abs() < 0.01 {
-                        1.2
+                        1.2_f32
                     } else {
-                        1.0
+                        1.0_f32
                     },
                     if ((y - canvas_rect.top()) / major).fract().abs() < 0.01 {
                         Color32::from_rgb(40, 48, 58)
@@ -1291,11 +1291,11 @@ impl crate::app::WavesPreviewer {
             // Dark underlay gives cables depth against the grid.
             painter.add(egui::Shape::line(
                 points.clone(),
-                Stroke::new(4.0, Color32::from_black_alpha(120)),
+                Stroke::new(4.0_f32, Color32::from_black_alpha(120)),
             ));
             painter.add(egui::Shape::line(
                 points,
-                Stroke::new(2.0, Color32::from_rgb(110, 170, 255)),
+                Stroke::new(2.0_f32, Color32::from_rgb(110, 170, 255)),
             ));
         }
 
@@ -1310,7 +1310,7 @@ impl crate::app::WavesPreviewer {
                     }
                     painter.add(egui::Shape::line(
                         points,
-                        Stroke::new(2.0, Color32::from_rgb(255, 196, 96)),
+                        Stroke::new(2.0_f32, Color32::from_rgb(255, 196, 96)),
                     ));
                 }
             }
@@ -1385,12 +1385,12 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(rect.left() + 1.0, title_rect.bottom()),
                     egui::pos2(rect.right() - 1.0, title_rect.bottom()),
                 ],
-                Stroke::new(2.0, accent),
+                Stroke::new(2.0_f32, accent),
             );
             painter.rect_stroke(
                 rect,
                 corner,
-                Stroke::new(if selected { 2.5 } else { 1.2 }, border),
+                Stroke::new(if selected { 2.5_f32 } else { 1.2_f32 }, border),
                 StrokeKind::Outside,
             );
             if selected {
@@ -1398,7 +1398,7 @@ impl crate::app::WavesPreviewer {
                     rect.expand(3.0),
                     corner + 3.0,
                     Stroke::new(
-                        1.0,
+                        1.0_f32,
                         Color32::from_rgba_unmultiplied(border.r(), border.g(), border.b(), 90),
                     ),
                     StrokeKind::Outside,
@@ -1479,7 +1479,7 @@ impl crate::app::WavesPreviewer {
                 painter.circle_stroke(
                     *pin_pos,
                     7.0,
-                    Stroke::new(1.0, Color32::from_rgb(70, 80, 92)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(70, 80, 92)),
                 );
                 let input_label = if matches!(&node.data, EffectGraphNodeData::CombineChannels)
                     && matches!(
@@ -1546,7 +1546,7 @@ impl crate::app::WavesPreviewer {
                 painter.circle_stroke(
                     *pin_pos,
                     7.0,
-                    Stroke::new(1.0, Color32::from_rgb(70, 80, 92)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(70, 80, 92)),
                 );
                 painter.text(
                     egui::pos2(pin_pos.x - 10.0, pin_pos.y),
@@ -2520,7 +2520,11 @@ impl crate::app::WavesPreviewer {
                                 let mut changed = false;
                                 changed |= ui
                                     .add(
-                                        egui::Slider::new(&mut low_hz, 20.0..=8_000.0)
+                                        egui::Slider::new(
+                                            &mut low_hz,
+                                            crate::sample_rate::AUDIBLE_LOW_HZ
+                                                ..=crate::app::effect_graph_ops::BAND_SPLIT_LOW_MAX_HZ,
+                                        )
                                             .logarithmic(true)
                                             .text("Low/Mid Hz"),
                                     )
@@ -2528,7 +2532,11 @@ impl crate::app::WavesPreviewer {
                                     .changed();
                                 changed |= ui
                                     .add(
-                                        egui::Slider::new(&mut high_hz, 40.0..=20_000.0)
+                                        egui::Slider::new(
+                                            &mut high_hz,
+                                            crate::app::effect_graph_ops::BAND_SPLIT_HIGH_MIN_HZ
+                                                ..=crate::sample_rate::AUDIBLE_HIGH_HZ,
+                                        )
                                             .logarithmic(true)
                                             .text("Mid/High Hz"),
                                     )
@@ -2536,7 +2544,7 @@ impl crate::app::WavesPreviewer {
                                     .changed();
                                 if changed {
                                     if high_hz <= low_hz {
-                                        high_hz = low_hz * 1.01;
+                                        high_hz = low_hz * crate::app::effect_graph_ops::BAND_SPLIT_MIN_RATIO;
                                     }
                                     self.effect_graph_push_undo_snapshot();
                                     if let Some(node_mut) =
@@ -2806,15 +2814,15 @@ impl crate::app::WavesPreviewer {
                             }
                         }
                         changed |= ui
-                            .add(egui::Slider::new(&mut threshold_db, -80.0..=0.0).text("Threshold dB"))
+                            .add(egui::Slider::new(&mut threshold_db, crate::wave::NoiseGateParams::THRESHOLD_DB).text("Threshold dB"))
                             .on_hover_text("Signal below this level is faded toward silence")
                             .changed();
                         changed |= ui
-                            .add(egui::Slider::new(&mut attack_ms, 0.1..=500.0).logarithmic(true).text("Attack ms"))
+                            .add(egui::Slider::new(&mut attack_ms, crate::wave::NoiseGateParams::ATTACK_MS).logarithmic(true).text("Attack ms"))
                             .on_hover_text("How fast the gate opens once the signal crosses the threshold")
                             .changed();
                         changed |= ui
-                            .add(egui::Slider::new(&mut release_ms, 1.0..=2000.0).logarithmic(true).text("Release ms"))
+                            .add(egui::Slider::new(&mut release_ms, crate::wave::NoiseGateParams::RELEASE_MS).logarithmic(true).text("Release ms"))
                             .on_hover_text("How fast the gate closes once the signal drops below the threshold")
                             .changed();
                         if changed {
@@ -2855,7 +2863,11 @@ impl crate::app::WavesPreviewer {
                                 ui,
                                 egui::Id::new(("fx_eq_plot", idx)),
                                 &mut plot_params,
-                                48_000,
+                                // A graph runs each file at its own rate, so
+                                // there is no single one to draw against; the
+                                // curve only bends near Nyquist, and preview
+                                // plays at the output rate.
+                                self.audio.shared.out_sample_rate.max(1),
                                 self.ui_input_focus
                                     .is_active(UiSurface::EffectGraph),
                             ) {
@@ -2872,35 +2884,35 @@ impl crate::app::WavesPreviewer {
                         ui.label(RichText::new("Low shelf").small().weak())
                             .on_hover_text("Boosts or cuts everything below this frequency");
                         changed |= ui
-                            .add(egui::Slider::new(&mut low_shelf_freq_hz, 20.0..=2000.0).logarithmic(true).text("Freq Hz"))
+                            .add(egui::Slider::new(&mut low_shelf_freq_hz, crate::wave::ThreeBandEqParams::LOW_SHELF_HZ).logarithmic(true).text("Freq Hz"))
                             .on_hover_text("Low shelf corner frequency")
                             .changed();
                         changed |= ui
-                            .add(egui::Slider::new(&mut low_shelf_gain_db, -24.0..=24.0).text("Gain dB"))
+                            .add(egui::Slider::new(&mut low_shelf_gain_db, crate::wave::ThreeBandEqParams::GAIN_DB).text("Gain dB"))
                             .on_hover_text("Low shelf gain")
                             .changed();
                         ui.label(RichText::new("Mid").small().weak())
                             .on_hover_text("Boosts or cuts a band centered on this frequency");
                         changed |= ui
-                            .add(egui::Slider::new(&mut mid_freq_hz, 50.0..=12_000.0).logarithmic(true).text("Freq Hz"))
+                            .add(egui::Slider::new(&mut mid_freq_hz, crate::wave::ThreeBandEqParams::MID_HZ).logarithmic(true).text("Freq Hz"))
                             .on_hover_text("Mid band center frequency")
                             .changed();
                         changed |= ui
-                            .add(egui::Slider::new(&mut mid_gain_db, -24.0..=24.0).text("Gain dB"))
+                            .add(egui::Slider::new(&mut mid_gain_db, crate::wave::ThreeBandEqParams::GAIN_DB).text("Gain dB"))
                             .on_hover_text("Mid band gain")
                             .changed();
                         changed |= ui
-                            .add(egui::Slider::new(&mut mid_q, 0.1..=10.0).logarithmic(true).text("Q"))
+                            .add(egui::Slider::new(&mut mid_q, crate::wave::ThreeBandEqParams::MID_Q).logarithmic(true).text("Q"))
                             .on_hover_text("Mid band width: higher Q = narrower band")
                             .changed();
                         ui.label(RichText::new("High shelf").small().weak())
                             .on_hover_text("Boosts or cuts everything above this frequency");
                         changed |= ui
-                            .add(egui::Slider::new(&mut high_shelf_freq_hz, 500.0..=20_000.0).logarithmic(true).text("Freq Hz"))
+                            .add(egui::Slider::new(&mut high_shelf_freq_hz, crate::wave::ThreeBandEqParams::HIGH_SHELF_HZ).logarithmic(true).text("Freq Hz"))
                             .on_hover_text("High shelf corner frequency")
                             .changed();
                         changed |= ui
-                            .add(egui::Slider::new(&mut high_shelf_gain_db, -24.0..=24.0).text("Gain dB"))
+                            .add(egui::Slider::new(&mut high_shelf_gain_db, crate::wave::ThreeBandEqParams::GAIN_DB).text("Gain dB"))
                             .on_hover_text("High shelf gain")
                             .changed();
                         if changed {
@@ -2943,23 +2955,23 @@ impl crate::app::WavesPreviewer {
                             }
                         }
                         changed |= ui
-                            .add(egui::Slider::new(&mut threshold_db, -60.0..=0.0).text("Threshold dB"))
+                            .add(egui::Slider::new(&mut threshold_db, crate::wave::CompressorParams::THRESHOLD_DB).text("Threshold dB"))
                             .on_hover_text("Signal above this level gets compressed")
                             .changed();
                         changed |= ui
-                            .add(egui::Slider::new(&mut ratio, 1.0..=20.0).text("Ratio"))
+                            .add(egui::Slider::new(&mut ratio, crate::wave::CompressorParams::RATIO).text("Ratio"))
                             .on_hover_text("How strongly signal above the threshold is reduced (4:1 = 4 dB in becomes 1 dB out)")
                             .changed();
                         changed |= ui
-                            .add(egui::Slider::new(&mut attack_ms, 0.1..=500.0).logarithmic(true).text("Attack ms"))
+                            .add(egui::Slider::new(&mut attack_ms, crate::wave::NoiseGateParams::ATTACK_MS).logarithmic(true).text("Attack ms"))
                             .on_hover_text("How fast the compressor reacts once the signal crosses the threshold")
                             .changed();
                         changed |= ui
-                            .add(egui::Slider::new(&mut release_ms, 1.0..=2000.0).logarithmic(true).text("Release ms"))
+                            .add(egui::Slider::new(&mut release_ms, crate::wave::NoiseGateParams::RELEASE_MS).logarithmic(true).text("Release ms"))
                             .on_hover_text("How fast the compressor lets go once the signal drops below the threshold")
                             .changed();
                         changed |= ui
-                            .add(egui::Slider::new(&mut makeup_db, 0.0..=24.0).text("Makeup dB"))
+                            .add(egui::Slider::new(&mut makeup_db, crate::wave::CompressorParams::MAKEUP_DB).text("Makeup dB"))
                             .on_hover_text("Gain applied after compression to restore overall level")
                             .changed();
                         if changed {
@@ -3037,7 +3049,11 @@ impl crate::app::WavesPreviewer {
                         let mut sr_f = target_sample_rate as f32;
                         changed |= ui
                             .add(
-                                egui::Slider::new(&mut sr_f, 8_000.0..=192_000.0)
+                                egui::Slider::new(
+                                    &mut sr_f,
+                                    crate::sample_rate::MIN_SAMPLE_RATE as f32
+                                        ..=crate::sample_rate::MAX_SAMPLE_RATE as f32,
+                                )
                                     .logarithmic(true)
                                     .text("Target Hz"),
                             )

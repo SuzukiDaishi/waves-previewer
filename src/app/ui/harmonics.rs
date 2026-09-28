@@ -1,5 +1,11 @@
 use egui::RichText;
 
+/// Fundamentals the harmonic action accepts: from the bottom of hearing to
+/// 8 kHz, above which no voice or instrument has its fundamental and only
+/// one or two harmonics would still fit under Nyquist.
+const HARMONIC_F0_RANGE_HZ: std::ops::RangeInclusive<f32> =
+    crate::sample_rate::AUDIBLE_LOW_HZ..=8_000.0;
+
 impl crate::app::WavesPreviewer {
     /// Popup for the transient harmonic action (Ctrl+click in Spec/Log):
     /// adjust the fundamental / harmonic count, then Mute or Attenuate all
@@ -37,7 +43,7 @@ impl crate::app::WavesPreviewer {
                     ui.label("f0");
                     ui.add(
                         egui::DragValue::new(&mut action.f0)
-                            .range(20.0..=8_000.0)
+                            .range(HARMONIC_F0_RANGE_HZ)
                             .speed(0.5)
                             .suffix(" Hz"),
                     );

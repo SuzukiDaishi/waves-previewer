@@ -14,6 +14,7 @@ pub(super) mod keymap_settings;
 pub(super) mod licenses;
 pub(super) mod list;
 pub(super) mod list_columns;
+pub(super) mod list_filter_dialog;
 pub(super) mod metadata_inspector;
 pub(super) mod plugin_manager;
 pub(super) mod recording;

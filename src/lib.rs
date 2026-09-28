@@ -12,6 +12,7 @@ pub mod flac_meta;
 pub mod ipc;
 #[cfg(feature = "mp3_lame")]
 pub mod lame;
+pub mod levels;
 pub mod loop_markers;
 pub mod markers;
 pub mod media_kind;
@@ -20,6 +21,7 @@ pub mod meter;
 #[cfg(windows)]
 pub(crate) mod mf;
 pub mod plugin;
+pub mod sample_rate;
 pub mod ui_wake;
 pub mod video;
 pub mod wav_stream;

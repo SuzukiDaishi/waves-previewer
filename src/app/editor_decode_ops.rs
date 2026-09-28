@@ -1025,7 +1025,22 @@ impl super::WavesPreviewer {
         if !marker_updates.is_empty() {
             let out_sr = self.audio.shared.out_sample_rate;
             for (idx, path) in marker_updates {
-                let file_sr = self.sample_rate_for_path(&path, out_sr);
+                let file_sr = self.sample_rate_for_path(&path);
+                // A `(virtual)` row has no file of its own at `path`. One that
+                // is a straight wrap of a file (a recording's temp WAV) keeps
+                // its markers in that file.
+                let marker_source = self.item_for_path(&path).and_then(|item| {
+                    let state = item.virtual_state.as_ref()?;
+                    if item.source != crate::app::types::MediaSource::Virtual
+                        || !state.op_chain.is_empty()
+                    {
+                        return None;
+                    }
+                    match &state.source {
+                        crate::app::types::VirtualSourceRef::FilePath(file) => Some(file.clone()),
+                        _ => None,
+                    }
+                });
                 if let Some(tab) = self.tabs.get_mut(idx) {
                     if tab.loop_region.is_none() && tab.loop_markers_saved.is_none() {
                         Self::set_loop_region_from_file_markers(tab, &path, file_sr, out_sr);
@@ -1035,7 +1050,8 @@ impl super::WavesPreviewer {
                     // file's marker set when the ready-channel decode
                     // finalizes.
                     if !tab.markers_dirty {
-                        Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
+                        let marker_path = marker_source.as_deref().unwrap_or(&path);
+                        Self::load_markers_for_tab(tab, marker_path, out_sr, file_sr);
                     }
                 }
             }

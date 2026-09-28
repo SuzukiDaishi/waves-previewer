@@ -327,12 +327,12 @@ impl WavesPreviewer {
             let cut = hovered_cable == Some((*o, *s));
             painter.add(egui::Shape::line(
                 points.clone(),
-                Stroke::new(if cut { 6.0 } else { 4.0 }, Color32::from_black_alpha(120)),
+                Stroke::new(if cut { 6.0_f32 } else { 4.0_f32 }, Color32::from_black_alpha(120)),
             ));
             painter.add(egui::Shape::line(
                 points.clone(),
                 Stroke::new(
-                    if cut { 3.0 } else { 2.0 },
+                    if cut { 3.0_f32 } else { 2.0_f32 },
                     if cut { COLOR_CABLE_CUT } else { COLOR_CABLE },
                 ),
             ));
@@ -356,7 +356,7 @@ impl WavesPreviewer {
             let cursor = pointer.unwrap_or(*from);
             painter.add(egui::Shape::line(
                 cable_points(*from, cursor),
-                Stroke::new(2.5, COLOR_CABLE_LIVE),
+                Stroke::new(2.5_f32, COLOR_CABLE_LIVE),
             ));
         }
 
@@ -380,7 +380,7 @@ impl WavesPreviewer {
                 *pos,
                 PIN_HALO_R,
                 Stroke::new(
-                    if hovered { 2.0 } else { 1.0 },
+                    if hovered { 2.0_f32 } else { 1.0_f32 },
                     if hovered {
                         COLOR_CABLE_LIVE
                     } else {
@@ -409,7 +409,7 @@ impl WavesPreviewer {
                 *pos,
                 PIN_HALO_R,
                 Stroke::new(
-                    if hovered { 2.0 } else { 1.0 },
+                    if hovered { 2.0_f32 } else { 1.0_f32 },
                     if hovered {
                         COLOR_CABLE_LIVE
                     } else {

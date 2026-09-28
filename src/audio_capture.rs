@@ -8,7 +8,21 @@ pub struct RecordingDeviceInfo {
     pub id: String,
     pub display_name: String,
     pub channels: u16,
+    /// 0 when the device would not report its default config. What a take
+    /// is recorded at is `CaptureStream::sample_rate` (`capture_sr`), read
+    /// when the stream opens; this is only for showing the device in a list.
     pub default_sample_rate: u32,
+}
+
+impl RecordingDeviceInfo {
+    /// "48000 Hz, 2 ch", or a plain statement that the rate is unknown.
+    pub fn format_label(&self) -> String {
+        if self.default_sample_rate == 0 {
+            "rate unknown".to_string()
+        } else {
+            format!("{} Hz, {} ch", self.default_sample_rate, self.channels)
+        }
+    }
 }
 
 pub struct CaptureStream {
@@ -29,10 +43,13 @@ fn device_name(device: &cpal::Device) -> Option<String> {
 
 fn device_info(device: &cpal::Device) -> Option<RecordingDeviceInfo> {
     let name = device_name(device)?;
+    // A device that will not report its default config is still listed (it
+    // may open fine with an explicit one); its rate is shown as unknown
+    // rather than made up.
     let (channels, sr) = if let Ok(cfg) = device.default_input_config() {
         (cfg.channels(), cfg.sample_rate())
     } else {
-        (1, 44100)
+        (1, 0)
     };
     Some(RecordingDeviceInfo {
         id: name.clone(),

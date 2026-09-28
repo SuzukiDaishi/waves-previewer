@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Color32, ColorImage, TextureOptions};
 
-use super::helpers::{db_to_color, lerp_color};
+use super::helpers::lerp_color;
 use super::render::waveform_pyramid as wf_cache;
 use super::types::{
     ChromagramData, EditorAnalysisKey, EditorAnalysisKind, EditorFeatureAnalysisData, EditorTab,
@@ -1134,7 +1134,7 @@ impl super::WavesPreviewer {
                         _ => 0,
                     };
                     let idx = base + bin.min(max_bin);
-                    let db_raw = (spec.values_db.get(idx).copied().unwrap_or(-120.0) - ref_db)
+                    let db_raw = (spec.values_db.get(idx).copied().unwrap_or(crate::levels::NO_SIGNAL_DB) - ref_db)
                         .clamp(cfg.db_floor, cfg.db_ceiling);
                     let norm = if (cfg.db_ceiling - cfg.db_floor).abs() < f32::EPSILON {
                         0.0
@@ -1144,7 +1144,7 @@ impl super::WavesPreviewer {
                     let image_y = lane_y0 + y.min(target_lane_h.saturating_sub(1));
                     let pixel_idx = image_y * target_w + x;
                     if let Some(pixel) = image.pixels.get_mut(pixel_idx) {
-                        *pixel = db_to_color(-80.0 + norm.clamp(0.0, 1.0) * 80.0);
+                        *pixel = crate::app::helpers::colormap_at(norm.clamp(0.0, 1.0));
                     }
                 }
             }
@@ -1263,7 +1263,7 @@ impl super::WavesPreviewer {
                     let pixel_idx =
                         (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
                     if let Some(pixel) = image.pixels.get_mut(pixel_idx) {
-                        *pixel = db_to_color(-80.0 + norm * 80.0);
+                        *pixel = crate::app::helpers::colormap_at(norm);
                     }
                 }
             }
@@ -1330,7 +1330,7 @@ impl super::WavesPreviewer {
                     let pixel_idx =
                         (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
                     if let Some(pixel) = image.pixels.get_mut(pixel_idx) {
-                        *pixel = db_to_color(-80.0 + norm * 80.0);
+                        *pixel = crate::app::helpers::colormap_at(norm);
                     }
                 }
             }
@@ -1443,7 +1443,7 @@ impl super::WavesPreviewer {
                     let pixel_idx =
                         (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
                     if let Some(pixel) = image.pixels.get_mut(pixel_idx) {
-                        *pixel = db_to_color(-80.0 + norm * 80.0);
+                        *pixel = crate::app::helpers::colormap_at(norm);
                     }
                 }
             }
@@ -1536,7 +1536,7 @@ impl super::WavesPreviewer {
                     );
                     painter.line_segment(
                         [points[idx - 1].0, points[idx].0],
-                        egui::Stroke::new(1.0, col),
+                        egui::Stroke::new(1.0_f32, col),
                     );
                 }
                 if samples.len() <= wave_width as usize {
@@ -1548,7 +1548,7 @@ impl super::WavesPreviewer {
                         );
                         painter.line_segment(
                             [egui::pos2(point.x, base_y), point],
-                            egui::Stroke::new(1.0, col),
+                            egui::Stroke::new(1.0_f32, col),
                         );
                     }
                 }

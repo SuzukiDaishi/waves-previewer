@@ -3,6 +3,12 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// A headless command waits for its background job by polling this often:
+/// fine enough not to add visible latency, coarse enough not to spin a core.
+pub(crate) const CLI_JOB_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+/// Longest a headless command waits for one background job before giving up.
+pub(crate) const CLI_JOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -3298,6 +3304,7 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
             sort_dir: "Asc".to_string(),
             search_query: String::new(),
             search_regex: false,
+            column_filters: Vec::new(),
             selected_path: None,
             list_columns: project_list_columns_from_config(cols),
             list_columns_window_pos: None,
@@ -3417,34 +3424,8 @@ fn default_project_tab_for_path(
             selected: Vec::new(),
         },
         active_tool: "LoopEdit".to_string(),
-        tool_state: ProjectToolState {
-            fade_in_ms: 0.0,
-            fade_out_ms: 0.0,
-            gain_db: 0.0,
-            normalize_target_db: -6.0,
-            loudness_target_lufs: -14.0,
-            pitch_semitones: 0.0,
-            stretch_rate: 1.0,
-            speed_rate: 1.0,
-            warp_time_radius_ms: 150.0,
-            warp_freq_radius_hz: 300.0,
-            loop_repeat: 2,
-            noise_gate_threshold_db: -40.0,
-            noise_gate_attack_ms: 2.0,
-            noise_gate_release_ms: 100.0,
-            eq_low_shelf_freq_hz: 120.0,
-            eq_low_shelf_gain_db: 0.0,
-            eq_mid_freq_hz: 1000.0,
-            eq_mid_gain_db: 0.0,
-            eq_mid_q: 1.0,
-            eq_high_shelf_freq_hz: 8000.0,
-            eq_high_shelf_gain_db: 0.0,
-            compressor_threshold_db: -18.0,
-            compressor_ratio: 3.0,
-            compressor_attack_ms: 10.0,
-            compressor_release_ms: 150.0,
-            compressor_makeup_db: 0.0,
-        },
+        // A tab the GUI would open fresh: the same defaults, not a copy of them.
+        tool_state: ProjectToolState::from(&crate::app::types::ToolState::default_values()),
         bpm_enabled: false,
         bpm_value: 0.0,
         bpm_user_set: false,
@@ -3861,17 +3842,12 @@ fn apply_list_query_filter_sort(
     sort_key: Option<&str>,
     sort_dir: Option<&str>,
 ) {
-    if let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) {
-        let query = query.to_ascii_lowercase();
+    if let Some(matcher) = query.and_then(|q| crate::app::text_match::TextMatcher::search(q, false)) {
         rows.retain(|row| {
-            row.values().any(|value| {
-                value
-                    .as_str()
-                    .map(|value| value.to_ascii_lowercase().contains(&query))
-                    .unwrap_or_else(|| {
-                        matches!(value, Value::Number(_) | Value::Bool(_))
-                            && value.to_string().to_ascii_lowercase().contains(&query)
-                    })
+            row.values().any(|value| match value {
+                Value::String(text) => matcher.is_match(text),
+                Value::Number(_) | Value::Bool(_) => matcher.is_match(&value.to_string()),
+                _ => false,
             })
         });
     }
@@ -5109,7 +5085,7 @@ fn play_exact_stream(
             engine.stop();
             bail!("playback timed out");
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
     }
     engine.stop();
     Ok(())
@@ -5151,7 +5127,7 @@ fn play_buffer_range(
             engine.stop();
             bail!("playback timed out");
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
     }
     Ok(())
 }
@@ -6817,10 +6793,10 @@ fn wait_for_transcript_model_download_app(app: &mut WavesPreviewer) -> Result<()
     let started = Instant::now();
     while app.transcript_model_download_state.is_some() {
         app.drain_transcript_model_download_results(&ctx);
-        if started.elapsed() > Duration::from_secs(120) {
+        if started.elapsed() > crate::app::cli_ops::CLI_JOB_TIMEOUT {
             bail!("transcript model download timed out");
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
     }
     Ok(())
 }
@@ -6830,10 +6806,10 @@ fn wait_for_music_model_download_app(app: &mut WavesPreviewer) -> Result<()> {
     let started = Instant::now();
     while app.music_model_download_state.is_some() {
         app.drain_music_model_download_results(&ctx);
-        if started.elapsed() > Duration::from_secs(120) {
+        if started.elapsed() > crate::app::cli_ops::CLI_JOB_TIMEOUT {
             bail!("music model download timed out");
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
     }
     Ok(())
 }
@@ -6843,10 +6819,10 @@ fn wait_for_plugin_scan_app(app: &mut WavesPreviewer) -> Result<()> {
     let started = Instant::now();
     while app.plugin_scan_state.is_some() {
         app.drain_plugin_jobs(&ctx);
-        if started.elapsed() > Duration::from_secs(120) {
+        if started.elapsed() > crate::app::cli_ops::CLI_JOB_TIMEOUT {
             bail!("plugin scan timed out");
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
     }
     Ok(())
 }

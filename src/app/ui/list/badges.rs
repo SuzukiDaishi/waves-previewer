@@ -168,7 +168,7 @@ impl WavesPreviewer {
         ui.painter().rect_stroke(
             rect,
             5.0,
-            egui::Stroke::new(1.0, stroke),
+            egui::Stroke::new(1.0_f32, stroke),
             egui::StrokeKind::Outside,
         );
         let size = (text_height * 0.88).max(9.0);

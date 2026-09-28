@@ -1365,7 +1365,7 @@ fn harvest_refine_f0_candidates(
             if finished >= f0_length {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(30));
+            std::thread::sleep(crate::app::ui_timing::SMOOTH_REFRESH);
         }
     });
 }

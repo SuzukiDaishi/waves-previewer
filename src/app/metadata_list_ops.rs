@@ -444,26 +444,17 @@ impl WavesPreviewer {
     pub(super) fn metadata_search_matches(
         &self,
         path: &Path,
-        query_lower: &str,
-        regex: Option<&regex::Regex>,
+        matcher: &crate::app::text_match::TextMatcher,
     ) -> bool {
         let Some(summary) = self.metadata_summary_cache.peek(path) else {
             return false;
         };
-        let values = summary
+        summary
             .fields
             .iter()
             .filter_map(|field| field.resolved.as_ref())
-            .chain(summary.raw_fields.values().flatten());
-        if let Some(regex) = regex {
-            values
-                .map(MetadataValue::display)
-                .any(|value| regex.is_match(&value))
-        } else {
-            values
-                .map(MetadataValue::display)
-                .any(|value| value.to_lowercase().contains(query_lower))
-        }
+            .chain(summary.raw_fields.values().flatten())
+            .any(|value| matcher.is_match(&value.display()))
     }
 }
 

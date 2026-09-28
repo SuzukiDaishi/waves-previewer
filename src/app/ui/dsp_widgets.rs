@@ -20,9 +20,12 @@ const HANDLE_MID: Color32 = Color32::from_rgb(120, 220, 160);
 const HANDLE_HIGH: Color32 = Color32::from_rgb(220, 140, 255);
 const HANDLE_HIT_RADIUS: f32 = 10.0;
 
-const EQ_FREQ_MIN: f32 = 20.0;
-const EQ_FREQ_MAX: f32 = 20_000.0;
-const EQ_DB_RANGE: f32 = 24.0;
+/// Frequency span of the EQ plot: the audible range.
+const EQ_FREQ_MIN: f32 = crate::sample_rate::AUDIBLE_LOW_HZ;
+const EQ_FREQ_MAX: f32 = crate::sample_rate::AUDIBLE_HIGH_HZ;
+/// The plot's vertical span: the largest boost or cut any EQ band takes.
+const EQ_DB_RANGE: f32 = *ThreeBandEqParams::GAIN_DB.end();
+
 
 fn plot_frame(ui: &mut egui::Ui, height: f32) -> (egui::Response, egui::Painter, Rect) {
     let width = ui.available_width().max(120.0);
@@ -32,7 +35,7 @@ fn plot_frame(ui: &mut egui::Ui, height: f32) -> (egui::Response, egui::Painter,
     painter.rect_stroke(
         rect,
         4.0,
-        Stroke::new(1.0, PLOT_GRID),
+        Stroke::new(1.0_f32, PLOT_GRID),
         egui::StrokeKind::Inside,
     );
     (resp, painter, rect)
@@ -83,7 +86,7 @@ fn handle_label(painter: &egui::Painter, ui: &egui::Ui, rect: Rect, pos: Pos2, t
 fn draw_handle(painter: &egui::Painter, pos: Pos2, color: Color32, active: bool) {
     let r = if active { 6.0 } else { 4.5 };
     painter.circle_filled(pos, r, color);
-    painter.circle_stroke(pos, r, Stroke::new(1.5, Color32::from_rgb(20, 20, 24)));
+    painter.circle_stroke(pos, r, Stroke::new(1.5_f32, Color32::from_rgb(20, 20, 24)));
 }
 
 /// Which EQ handle a drag is grabbing (persisted in egui temp memory keyed
@@ -112,7 +115,7 @@ pub(crate) fn eq_response_plot(
         let x = freq_to_x(inner, hz);
         painter.line_segment(
             [Pos2::new(x, inner.top()), Pos2::new(x, inner.bottom())],
-            Stroke::new(1.0, PLOT_GRID),
+            Stroke::new(1.0_f32, PLOT_GRID),
         );
         let font = egui::TextStyle::Small.resolve(ui.style());
         let label = if hz >= 1000.0 {
@@ -133,7 +136,7 @@ pub(crate) fn eq_response_plot(
         let color = if db == 0.0 { PLOT_GRID_ZERO } else { PLOT_GRID };
         painter.line_segment(
             [Pos2::new(inner.left(), y), Pos2::new(inner.right(), y)],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
     }
     // Response curve.
@@ -148,7 +151,7 @@ pub(crate) fn eq_response_plot(
             db_to_y(inner, db, EQ_DB_RANGE),
         ));
     }
-    painter.add(egui::Shape::line(pts, Stroke::new(2.0, PLOT_CURVE)));
+    painter.add(egui::Shape::line(pts, Stroke::new(2.0_f32, PLOT_CURVE)));
 
     // Handles at each band's (freq, gain).
     let handles = [
@@ -195,15 +198,15 @@ pub(crate) fn eq_response_plot(
             let db = y_to_db(inner, pos.y, EQ_DB_RANGE).clamp(-EQ_DB_RANGE, EQ_DB_RANGE);
             match handle {
                 EqHandle::Low => {
-                    params.low_shelf_freq_hz = hz.clamp(20.0, 2_000.0);
+                    params.low_shelf_freq_hz = hz.clamp(*ThreeBandEqParams::LOW_SHELF_HZ.start(), *ThreeBandEqParams::LOW_SHELF_HZ.end());
                     params.low_shelf_gain_db = db;
                 }
                 EqHandle::Mid => {
-                    params.mid_freq_hz = hz.clamp(50.0, 12_000.0);
+                    params.mid_freq_hz = hz.clamp(*ThreeBandEqParams::MID_HZ.start(), *ThreeBandEqParams::MID_HZ.end());
                     params.mid_gain_db = db;
                 }
                 EqHandle::High => {
-                    params.high_shelf_freq_hz = hz.clamp(500.0, 20_000.0);
+                    params.high_shelf_freq_hz = hz.clamp(*ThreeBandEqParams::HIGH_SHELF_HZ.start(), *ThreeBandEqParams::HIGH_SHELF_HZ.end());
                     params.high_shelf_gain_db = db;
                 }
             }
@@ -296,12 +299,12 @@ fn dyn_grid(ui: &egui::Ui, painter: &egui::Painter, inner: Rect) {
         let x = dyn_to_x(inner, db);
         painter.line_segment(
             [Pos2::new(x, inner.top()), Pos2::new(x, inner.bottom())],
-            Stroke::new(1.0, PLOT_GRID),
+            Stroke::new(1.0_f32, PLOT_GRID),
         );
         let y = dyn_to_y(inner, db);
         painter.line_segment(
             [Pos2::new(inner.left(), y), Pos2::new(inner.right(), y)],
-            Stroke::new(1.0, PLOT_GRID),
+            Stroke::new(1.0_f32, PLOT_GRID),
         );
         painter.text(
             Pos2::new(x + 2.0, inner.bottom() - 2.0),
@@ -317,7 +320,7 @@ fn dyn_grid(ui: &egui::Ui, painter: &egui::Painter, inner: Rect) {
             Pos2::new(dyn_to_x(inner, DYN_DB_MIN), dyn_to_y(inner, DYN_DB_MIN)),
             Pos2::new(dyn_to_x(inner, 0.0), dyn_to_y(inner, 0.0)),
         ],
-        Stroke::new(1.0, PLOT_REFERENCE),
+        Stroke::new(1.0_f32, PLOT_REFERENCE),
     );
 }
 
@@ -353,7 +356,7 @@ pub(crate) fn compressor_transfer_plot(
             dyn_to_y(inner, out_db(in_db, params).clamp(DYN_DB_MIN, 0.0)),
         ));
     }
-    painter.add(egui::Shape::line(pts, Stroke::new(2.0, PLOT_CURVE)));
+    painter.add(egui::Shape::line(pts, Stroke::new(2.0_f32, PLOT_CURVE)));
 
     // Handles: knee (threshold) and ceiling endpoint (ratio).
     let knee = Pos2::new(
@@ -386,7 +389,8 @@ pub(crate) fn compressor_transfer_plot(
         if let (Some(handle), Some(pos)) = (dragging, resp.interact_pointer_pos()) {
             match handle {
                 0 => {
-                    params.threshold_db = dyn_x_to_db(inner, pos.x).clamp(-60.0, 0.0);
+                    params.threshold_db = dyn_x_to_db(inner, pos.x)
+                        .clamp(*CompressorParams::THRESHOLD_DB.start(), *CompressorParams::THRESHOLD_DB.end());
                     changed = true;
                 }
                 _ => {
@@ -399,7 +403,7 @@ pub(crate) fn compressor_transfer_plot(
                     let over = -params.threshold_db;
                     if over > 0.5 {
                         let ratio = over / reduced.max(over / 20.0);
-                        params.ratio = ratio.clamp(1.0, 20.0);
+                        params.ratio = ratio.clamp(*CompressorParams::RATIO.start(), *CompressorParams::RATIO.end());
                         changed = true;
                     }
                 }
@@ -474,7 +478,7 @@ pub(crate) fn noise_gate_plot(
     ];
     painter.add(egui::Shape::line(
         std::mem::take(&mut pts),
-        Stroke::new(2.0, PLOT_CURVE),
+        Stroke::new(2.0_f32, PLOT_CURVE),
     ));
 
     let handle = Pos2::new(thr_x, dyn_to_y(inner, thr));
@@ -491,7 +495,8 @@ pub(crate) fn noise_gate_plot(
     }
     if resp.dragged() && dragging {
         if let Some(pos) = resp.interact_pointer_pos() {
-            params.threshold_db = dyn_x_to_db(inner, pos.x).clamp(-80.0, 0.0);
+            params.threshold_db = dyn_x_to_db(inner, pos.x)
+                .clamp(*NoiseGateParams::THRESHOLD_DB.start(), *NoiseGateParams::THRESHOLD_DB.end());
             changed = true;
         }
     }

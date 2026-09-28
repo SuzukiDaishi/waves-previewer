@@ -240,7 +240,8 @@ impl DecodeByteGate {
             }
             let (next, _) = self
                 .ready
-                .wait_timeout(used, std::time::Duration::from_millis(50))
+                // Wake now and then to notice cancellation.
+                .wait_timeout(used, crate::app::meta::POOL_IDLE_RECHECK)
                 .unwrap_or_else(|e| e.into_inner());
             used = next;
         }
@@ -1747,6 +1748,7 @@ impl super::WavesPreviewer {
         // then show every filename in discovery order so there is immediately
         // something useful to select and scroll.
         self.search_query.clear();
+        self.column_filters.clear();
         self.search_dirty = false;
         self.filter_job = None;
         self.sort_dir = super::types::SortDir::None;
@@ -2449,37 +2451,7 @@ impl super::WavesPreviewer {
                 super::types::ThemeMode::Light => "light".to_string(),
                 _ => "dark".to_string(),
             },
-            sort_key: match self.sort_key {
-                super::types::SortKey::File => "File".to_string(),
-                super::types::SortKey::Folder => "Folder".to_string(),
-                super::types::SortKey::Transcript => "Transcript".to_string(),
-                super::types::SortKey::Type => "Type".to_string(),
-                super::types::SortKey::Length => "Length".to_string(),
-                super::types::SortKey::Channels => "Channels".to_string(),
-                super::types::SortKey::SampleRate => "SampleRate".to_string(),
-                super::types::SortKey::Bits => "Bits".to_string(),
-                super::types::SortKey::BitRate => "BitRate".to_string(),
-                super::types::SortKey::Level => "Level".to_string(),
-                super::types::SortKey::Lufs => "Lufs".to_string(),
-                super::types::SortKey::TruePeak => "TruePeak".to_string(),
-                super::types::SortKey::LufsShort => "LufsShort".to_string(),
-                super::types::SortKey::LufsMomentary => "LufsMomentary".to_string(),
-                super::types::SortKey::Bpm => "Bpm".to_string(),
-                super::types::SortKey::SilenceLead => "SilenceLead".to_string(),
-                super::types::SortKey::SilenceTail => "SilenceTail".to_string(),
-                super::types::SortKey::EdgeZero => "EdgeZero".to_string(),
-                super::types::SortKey::OverPeak => "OverPeak".to_string(),
-                super::types::SortKey::BlankPad => "BlankPad".to_string(),
-                super::types::SortKey::CreatedAt => "CreatedAt".to_string(),
-                super::types::SortKey::ModifiedAt => "ModifiedAt".to_string(),
-                super::types::SortKey::Comments => "Comments".to_string(),
-                super::types::SortKey::External(_) => "External".to_string(),
-                super::types::SortKey::Metadata(index) => self
-                    .metadata_list_columns
-                    .get(index)
-                    .map(|column| column.key.serialized_name())
-                    .unwrap_or_else(|| "File".to_string()),
-            },
+            sort_key: self.sort_key_name(self.sort_key),
             sort_dir: match self.sort_dir {
                 super::types::SortDir::Asc => "Asc",
                 super::types::SortDir::Desc => "Desc",
@@ -2488,6 +2460,15 @@ impl super::WavesPreviewer {
             .to_string(),
             search_query: self.search_query.clone(),
             search_regex: self.search_use_regex,
+            column_filters: self
+                .column_filters
+                .iter()
+                .map(|f| super::project::ProjectColumnFilter {
+                    column: self.sort_key_name(f.key),
+                    kind: f.kind,
+                    rule: f.rule.clone(),
+                })
+                .collect(),
             selected_path: self
                 .selected_path_buf()
                 .as_ref()
@@ -2689,34 +2670,7 @@ impl super::WavesPreviewer {
                 fade_in_shape: format!("{:?}", cached.fade_in_shape),
                 fade_out_shape: format!("{:?}", cached.fade_out_shape),
                 loop_mode: format!("{:?}", cached.loop_mode),
-                tool_state: ProjectToolState {
-                    fade_in_ms: cached.tool_state.fade_in_ms,
-                    fade_out_ms: cached.tool_state.fade_out_ms,
-                    gain_db: cached.tool_state.gain_db,
-                    normalize_target_db: cached.tool_state.normalize_target_db,
-                    loudness_target_lufs: cached.tool_state.loudness_target_lufs,
-                    pitch_semitones: cached.tool_state.pitch_semitones,
-                    stretch_rate: cached.tool_state.stretch_rate,
-                    speed_rate: cached.tool_state.speed_rate,
-                    warp_time_radius_ms: cached.tool_state.warp_time_radius_ms,
-                    warp_freq_radius_hz: cached.tool_state.warp_freq_radius_hz,
-                    loop_repeat: cached.tool_state.loop_repeat,
-                    noise_gate_threshold_db: cached.tool_state.noise_gate_threshold_db,
-                    noise_gate_attack_ms: cached.tool_state.noise_gate_attack_ms,
-                    noise_gate_release_ms: cached.tool_state.noise_gate_release_ms,
-                    eq_low_shelf_freq_hz: cached.tool_state.eq_low_shelf_freq_hz,
-                    eq_low_shelf_gain_db: cached.tool_state.eq_low_shelf_gain_db,
-                    eq_mid_freq_hz: cached.tool_state.eq_mid_freq_hz,
-                    eq_mid_gain_db: cached.tool_state.eq_mid_gain_db,
-                    eq_mid_q: cached.tool_state.eq_mid_q,
-                    eq_high_shelf_freq_hz: cached.tool_state.eq_high_shelf_freq_hz,
-                    eq_high_shelf_gain_db: cached.tool_state.eq_high_shelf_gain_db,
-                    compressor_threshold_db: cached.tool_state.compressor_threshold_db,
-                    compressor_ratio: cached.tool_state.compressor_ratio,
-                    compressor_attack_ms: cached.tool_state.compressor_attack_ms,
-                    compressor_release_ms: cached.tool_state.compressor_release_ms,
-                    compressor_makeup_db: cached.tool_state.compressor_makeup_db,
-                },
+                tool_state: ProjectToolState::from(&cached.tool_state),
                 active_tool: format!("{:?}", cached.active_tool),
                 show_waveform_overlay: cached.show_waveform_overlay,
                 bpm_enabled: cached.bpm_enabled,
@@ -4542,37 +4496,24 @@ impl super::WavesPreviewer {
         ordered_metadata.extend(available_metadata);
         self.metadata_list_columns = ordered_metadata;
         self.sanitize_list_column_layout();
-        self.sort_key = match project.app.sort_key.as_str() {
-            "Folder" => super::types::SortKey::Folder,
-            "Transcript" => super::types::SortKey::Transcript,
-            "Type" => super::types::SortKey::Type,
-            "Length" => super::types::SortKey::Length,
-            "Channels" => super::types::SortKey::Channels,
-            "SampleRate" => super::types::SortKey::SampleRate,
-            "Bits" => super::types::SortKey::Bits,
-            "BitRate" => super::types::SortKey::BitRate,
-            "Level" => super::types::SortKey::Level,
-            "Lufs" => super::types::SortKey::Lufs,
-            "TruePeak" => super::types::SortKey::TruePeak,
-            "LufsShort" => super::types::SortKey::LufsShort,
-            "LufsMomentary" => super::types::SortKey::LufsMomentary,
-            "Bpm" => super::types::SortKey::Bpm,
-            "SilenceLead" => super::types::SortKey::SilenceLead,
-            "SilenceTail" => super::types::SortKey::SilenceTail,
-            "EdgeZero" => super::types::SortKey::EdgeZero,
-            "OverPeak" => super::types::SortKey::OverPeak,
-            "BlankPad" => super::types::SortKey::BlankPad,
-            "CreatedAt" => super::types::SortKey::CreatedAt,
-            "ModifiedAt" => super::types::SortKey::ModifiedAt,
-            "Comments" => super::types::SortKey::Comments,
-            value if value.starts_with("normalized:") || value.starts_with("raw:") => self
-                .metadata_list_columns
-                .iter()
-                .position(|column| column.key.serialized_name() == value)
-                .map(super::types::SortKey::Metadata)
-                .unwrap_or(super::types::SortKey::File),
-            _ => super::types::SortKey::File,
-        };
+        self.sort_key = self
+            .sort_key_from_name(&project.app.sort_key)
+            .unwrap_or(super::types::SortKey::File);
+        // A filter on a column this session no longer has is dropped rather
+        // than left to hide rows no header can clear.
+        self.column_filters = project
+            .app
+            .column_filters
+            .iter()
+            .filter_map(|stored| {
+                self.sort_key_from_name(&stored.column)
+                    .map(|key| super::list_filter::ColumnFilter {
+                        key,
+                        kind: stored.kind,
+                        rule: stored.rule.clone(),
+                    })
+            })
+            .collect();
         self.sort_dir = match project.app.sort_dir.as_str() {
             "Asc" => super::types::SortDir::Asc,
             "Desc" => super::types::SortDir::Desc,
@@ -4975,7 +4916,7 @@ impl super::WavesPreviewer {
         }
 
         self.note_files_membership_changed();
-        if self.search_query.trim().is_empty() {
+        if self.search_query.trim().is_empty() && self.column_filters.is_empty() {
             if self.sort_dir != super::types::SortDir::None {
                 self.request_sort();
             }
@@ -5592,53 +5533,57 @@ impl super::WavesPreviewer {
         if self.comments_window_absorbs_drop(ctx) {
             return;
         }
+        let paths: Vec<PathBuf> = dropped.into_iter().filter_map(|f| f.path).collect();
+        self.open_external_paths(paths);
+    }
+
+    /// Opens paths brought in from outside the app -- dropped on the window
+    /// or pasted into the list after a copy in Explorer. Both arrive the same
+    /// way, so they are handled the same way: a session file opens the
+    /// session, a CSV / Excel sheet opens the import dialog, and everything
+    /// else -- audio files and folders, whose audio is added recursively --
+    /// joins the list and is selected, with a toast saying what was added and
+    /// what was turned away. Nothing here touches the filesystem: the scan
+    /// worker sorts files from folders from missing paths.
+    pub(super) fn open_external_paths(&mut self, dropped: Vec<PathBuf>) {
         let mut project_path: Option<PathBuf> = None;
         let mut external_path: Option<PathBuf> = None;
         let mut paths: Vec<PathBuf> = Vec::new();
-        for f in dropped {
-            if let Some(p) = f.path {
-                let is_project = Self::is_session_path(&p);
-                let is_external = p
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| {
-                        let s = s.to_ascii_lowercase();
-                        s == "csv" || s == "xlsx" || s == "xls"
-                    })
-                    .unwrap_or(false);
-                if is_project && project_path.is_none() {
-                    project_path = Some(p);
-                } else if is_external && external_path.is_none() {
-                    external_path = Some(p);
-                } else if !is_project {
-                    if !self.try_restore_virtual_drag_path(&p) {
-                        paths.push(p);
-                    }
-                }
+        for p in dropped {
+            let is_project = Self::is_session_path(&p);
+            let is_external = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| {
+                    let s = s.to_ascii_lowercase();
+                    s == "csv" || s == "xlsx" || s == "xls"
+                })
+                .unwrap_or(false);
+            if is_project && project_path.is_none() {
+                project_path = Some(p);
+            } else if is_external && external_path.is_none() {
+                external_path = Some(p);
+            } else if !is_project && !self.try_restore_virtual_drag_path(&p) {
+                paths.push(p);
             }
         }
         if let Some(project) = project_path {
             self.queue_project_open(project);
-        } else {
-            if let Some(data_path) = external_path {
-                self.external_sheet_selected = None;
-                self.external_sheet_names.clear();
-                self.external_settings_dirty = false;
-                self.external_load_queue.clear();
-                self.pending_external_restore = None;
-                self.external_load_error = None;
-                self.external_load_target = Some(external_ops::ExternalLoadTarget::New);
-                self.show_external_dialog = true;
-                self.begin_external_load(data_path);
-            }
-            if !paths.is_empty() {
-                self.start_explicit_file_load(
-                    paths,
-                    false,
-                    Some(super::types::PendingListLoadTargetKind::Select),
-                    true,
-                );
-            }
+            return;
+        }
+        if let Some(data_path) = external_path {
+            self.external_sheet_selected = None;
+            self.external_sheet_names.clear();
+            self.external_settings_dirty = false;
+            self.external_load_queue.clear();
+            self.pending_external_restore = None;
+            self.external_load_error = None;
+            self.external_load_target = Some(external_ops::ExternalLoadTarget::New);
+            self.show_external_dialog = true;
+            self.begin_external_load(data_path);
+        }
+        if !paths.is_empty() {
+            self.start_reported_file_load(paths);
         }
     }
 }

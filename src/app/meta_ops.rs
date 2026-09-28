@@ -80,20 +80,14 @@ impl super::WavesPreviewer {
     /// Whether the current sort key can only be resolved by decoding the
     /// whole file. Header metadata (duration, channels, SR, bits, bitrate,
     /// BPM tag, file times) covers every other key.
+    /// Whether the sort or a column filter needs values only a full decode
+    /// gives (levels, loudness, silence, QA).
     fn sort_key_needs_full_decode(&self) -> bool {
-        matches!(
-            self.sort_key,
-            crate::app::types::SortKey::Level
-                | crate::app::types::SortKey::Lufs
-                | crate::app::types::SortKey::TruePeak
-                | crate::app::types::SortKey::LufsShort
-                | crate::app::types::SortKey::LufsMomentary
-                | crate::app::types::SortKey::SilenceLead
-                | crate::app::types::SortKey::SilenceTail
-                | crate::app::types::SortKey::EdgeZero
-                | crate::app::types::SortKey::OverPeak
-                | crate::app::types::SortKey::BlankPad
-        )
+        (self.sort_key_uses_meta() && self.sort_key.needs_full_decode())
+            || self
+                .column_filters
+                .iter()
+                .any(|f| f.key.needs_full_decode())
     }
 
     pub(super) fn prime_sort_metadata_prefetch(&mut self) {
@@ -321,6 +315,48 @@ impl super::WavesPreviewer {
         }
     }
 
+    /// A `(virtual)` row made from a file rather than from samples in memory
+    /// -- a recording take, a pasted or dragged-in copy -- has no metadata
+    /// until something reads that file. The row's path is only a label, so
+    /// the task reads the backing file and reports under the row.
+    ///
+    /// Rows built from samples get their metadata when they are made, and
+    /// rows with any metadata at all are left alone: asking only while there
+    /// is none is what keeps an empty take from being re-queued forever.
+    /// Returns whether a task was queued.
+    pub(super) fn queue_virtual_file_meta_for_path(&mut self, path: &PathBuf, priority: bool) -> bool {
+        let Some(item) = self.item_for_path(path) else {
+            return false;
+        };
+        if item.source != crate::app::types::MediaSource::Virtual || item.meta.is_some() {
+            return false;
+        }
+        let Some(file) = item.audio_asset.backing.file_path().map(PathBuf::from) else {
+            return false;
+        };
+        self.ensure_meta_pool();
+        let Some(pool) = &self.meta_pool else {
+            return false;
+        };
+        if self.meta_inflight.contains(path) {
+            if priority {
+                pool.promote_path(path);
+            }
+            return false;
+        }
+        self.meta_inflight.insert(path.clone());
+        let task = meta::MetaTask::VirtualFile {
+            row: path.clone(),
+            file,
+        };
+        if priority {
+            pool.enqueue_front(task);
+        } else {
+            pool.enqueue(task);
+        }
+        true
+    }
+
     pub(super) fn queue_transcript_for_path(&mut self, path: &PathBuf, priority: bool) {
         if self.is_virtual_path(path) {
             return;
@@ -365,12 +401,24 @@ impl super::WavesPreviewer {
         if self.scan_in_progress {
             return;
         }
-        let sort_meta_prefetch = self.sort_key_uses_meta();
-        let sort_transcript_prefetch = self.sort_key_uses_transcript();
+        // A column filter on metadata needs the value of *every* row, the
+        // hidden ones most of all: a row whose metadata was never read is
+        // blank, fails the filter, and -- were only visible rows walked --
+        // would never be read and never come back.
+        let filter_meta = self.column_filters_use_meta();
+        let filter_transcript = self.column_filters_use_transcript();
+        let sort_meta_prefetch = self.sort_key_uses_meta() || filter_meta;
+        let sort_transcript_prefetch = self.sort_key_uses_transcript() || filter_transcript;
+        let walk_all_items = filter_meta || filter_transcript;
+        let row_count = if walk_all_items {
+            self.items.len()
+        } else {
+            self.files.len()
+        };
         let need_prefetch = self.item_bg_mode != crate::app::types::ItemBgMode::Standard
             || sort_meta_prefetch
             || sort_transcript_prefetch;
-        if !self.is_list_workspace_active() || self.files.is_empty() || !need_prefetch {
+        if !self.is_list_workspace_active() || row_count == 0 || !need_prefetch {
             self.list_meta_prefetch_cursor = 0;
             return;
         }
@@ -382,7 +430,7 @@ impl super::WavesPreviewer {
             self.list_meta_prefetch_cursor = 0;
             return;
         }
-        let total = self.files.len();
+        let total = row_count;
         self.list_meta_prefetch_cursor %= total;
         let queue_budget =
             self.perf
@@ -411,10 +459,21 @@ impl super::WavesPreviewer {
             }
             let idx = (self.list_meta_prefetch_cursor + scanned) % total;
             scanned += 1;
-            let Some(path) = self.path_for_row(idx).cloned() else {
+            let path = if walk_all_items {
+                self.items.get(idx).map(|item| item.path.clone())
+            } else {
+                self.path_for_row(idx).cloned()
+            };
+            let Some(path) = path else {
                 continue;
             };
             if self.is_virtual_path(&path) {
+                // Off-screen virtual rows need values too, for the same sort
+                // or filter; one read of the file behind the row is all
+                // they ever take.
+                if self.queue_virtual_file_meta_for_path(&path, false) {
+                    queued += 1;
+                }
                 continue;
             }
             if sort_meta_prefetch && !self.meta_inflight.contains(&path) {
@@ -494,7 +553,7 @@ impl super::WavesPreviewer {
             if self.sort_job_active() {
                 // An async sort is already running; let it finish and pick up
                 // the accumulated changes on the next interval.
-                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                ctx.request_repaint_after(crate::app::ui_timing::PROGRESS_REFRESH);
                 return;
             }
             self.request_sort();
@@ -576,7 +635,9 @@ impl super::WavesPreviewer {
                 meta::MetaUpdate::Transcript(p, t) => {
                     self.transcript_inflight.remove(&p);
                     if self.set_transcript_for_path(&p, t) {
-                        if !self.search_query.trim().is_empty() {
+                        if !self.search_query.trim().is_empty()
+                            || self.column_filters_use_transcript()
+                        {
                             refilter = true;
                         } else if self.sort_key_uses_transcript() {
                             transcript_sort_dirty = true;
@@ -587,6 +648,12 @@ impl super::WavesPreviewer {
                     self.meta_inflight.remove(&p);
                 }
             }
+        }
+        // A column filter on a metadata column is re-evaluated as values
+        // arrive, so rows whose metadata was not read yet join (or leave) the
+        // list once it is. The selection is kept by id through the refilter.
+        if meta_sort_dirty && self.column_filters_use_meta() {
+            refilter = true;
         }
         if refilter {
             // Transcripts can stream in once per frame for thousands of files;

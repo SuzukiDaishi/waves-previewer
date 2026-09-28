@@ -1044,7 +1044,8 @@ mod native {
         let mut out_channels = in_channels.clone();
         let frame_count = out_channels.get(0).map(|c| c.len()).unwrap_or(0);
         let ch_count = out_channels.len().max(1);
-        let block = max_block_size.clamp(16, 4096);
+        // VST 3 hosts conventionally never go below 16 frames per block.
+        let block = max_block_size.clamp(16, crate::plugin::BACKEND_MAX_BLOCK_SIZE);
         let saved_state_b64: Option<String>;
 
         unsafe {

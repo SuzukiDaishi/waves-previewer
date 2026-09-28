@@ -165,14 +165,14 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(start_x, wave_rect.top()),
                     egui::pos2(start_x, wave_rect.bottom()),
                 ],
-                egui::Stroke::new(1.0, band_line),
+                egui::Stroke::new(1.0_f32, band_line),
             );
             ui.painter().line_segment(
                 [
                     egui::pos2(end_x, wave_rect.top()),
                     egui::pos2(end_x, wave_rect.bottom()),
                 ],
-                egui::Stroke::new(1.0, band_line),
+                egui::Stroke::new(1.0_f32, band_line),
             );
         }
         let marker_fracs =
@@ -189,7 +189,7 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(x, wave_rect.top()),
                     egui::pos2(x, wave_rect.bottom()),
                 ],
-                egui::Stroke::new(1.0, marker_color),
+                egui::Stroke::new(1.0_f32, marker_color),
             );
         }
     }
@@ -250,7 +250,7 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(x, wave_rect.bottom()),
                 ],
                 egui::Stroke::new(
-                    1.0,
+                    1.0_f32,
                     ui.style()
                         .visuals
                         .widgets
@@ -270,7 +270,7 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(x, wave_rect.top()),
                     egui::pos2(x, wave_rect.bottom()),
                 ],
-                egui::Stroke::new(1.0, palette.attention_fill_weak),
+                egui::Stroke::new(1.0_f32, palette.attention_fill_weak),
             );
         }
 
@@ -281,7 +281,7 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(x, wave_rect.top()),
                     egui::pos2(x, wave_rect.bottom()),
                 ],
-                egui::Stroke::new(if info.playing { 2.0 } else { 1.0 }, palette.playing_text),
+                egui::Stroke::new(if info.playing { 2.0_f32 } else { 1.0_f32 }, palette.playing_text),
             );
         }
     }
@@ -386,7 +386,7 @@ impl crate::app::WavesPreviewer {
                     let col = amp_to_color(a);
                     ui.painter().line_segment(
                         [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
-                        egui::Stroke::new(1.0, col),
+                        egui::Stroke::new(1.0_f32, col),
                     );
                 }
             }

@@ -578,7 +578,7 @@ impl super::WavesPreviewer {
     }
 
     fn adjust_volume_db(&mut self, delta_db: f32) {
-        let next = (self.volume_db + delta_db).clamp(-80.0, 6.0);
+        let next = (self.volume_db + delta_db).clamp(crate::levels::VOLUME_MIN_DB, crate::levels::VOLUME_MAX_DB);
         if (next - self.volume_db).abs() >= f32::EPSILON {
             self.volume_db = next;
             self.apply_effective_volume();

@@ -1,5 +1,30 @@
 # Clipboard Hotkey Issue (Ctrl+C/V not received, Ctrl+Z works)
 
+## Resolution (2026-09-27)
+
+The cause is in egui-winit, not in this app's focus handling. On a key
+press, egui-winit (0.34.3, `src/lib.rs` around line 1019) checks for the
+clipboard chords *before* it records the key:
+
+- Ctrl+C / Ctrl+X become `Event::Copy` / `Event::Cut` and it `return`s --
+  no `Event::Key` for C or X is ever pushed.
+- Ctrl+V reads the clipboard's **text**; if there is some it pushes
+  `Event::Paste(text)`, and either way it `return`s. So when the clipboard
+  holds no text -- which is exactly what Explorer's Ctrl+C leaves, a file
+  list (CF_HDROP) and nothing else -- Ctrl+V produces no event at all.
+
+That is why `raw.events` never showed C or V while Ctrl+Z (not a clipboard
+chord) came through normally. The app's own copy already works around it by
+putting a marker string beside its file list.
+
+The paste of an Explorer copy is now seen by `src/app/os_paste_key.rs`: a
+keyboard hook scoped to the UI thread notes Ctrl+V / Shift+Insert as Windows
+delivers them and raises a flag the list's clipboard handler takes once per
+frame (and ignores when egui did report a `Event::Paste` for the same press).
+Pasting no longer needs a selection, so it works on an empty list, and pasted
+paths open exactly as dropped ones do (`open_external_paths`). The rest of
+this document is the original investigation, kept for the record.
+
 ## Summary
 List view hotkeys are mostly fixed (arrow keys, Enter, Space), but **Ctrl+C / Ctrl+V are not being detected**.
 Ctrl+Z **does work**, which implies the app is receiving at least some Ctrl-modified key events.

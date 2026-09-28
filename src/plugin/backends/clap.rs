@@ -667,7 +667,7 @@ mod native {
             }
         }
 
-        let block_size = max_block_size.clamp(1, 4096);
+        let block_size = max_block_size.clamp(1, crate::plugin::BACKEND_MAX_BLOCK_SIZE);
         let processor = instance
             .activate(
                 |_, _| (),

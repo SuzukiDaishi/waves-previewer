@@ -2,7 +2,8 @@ use egui::{Align, Color32, RichText};
 use egui_extras::{TableBuilder, TableRow};
 
 use crate::app::{
-    helpers::sortable_header, input_focus::UiSurface, types::SortKey, WavesPreviewer,
+    helpers::{column_header, HeaderMenuAction}, input_focus::UiSurface, types::SortKey,
+    WavesPreviewer,
 };
 
 use super::{ListInteractionState, ListRenderState, ListViewMetrics};
@@ -403,6 +404,31 @@ impl WavesPreviewer {
     ) {
         let cols = self.list_columns;
         self.list_col_widths_seen.clear();
+        // Read once: the header closures below borrow the sort fields
+        // mutably, and a menu must not ask the list anything per frame.
+        let filtered_keys: Vec<SortKey> = self.column_filters.iter().map(|f| f.key).collect();
+        let any_filters = !filtered_keys.is_empty();
+        let mut menu: Option<(SortKey, String, HeaderMenuAction)> = None;
+        macro_rules! header_button {
+            ($ui:expr, $label:expr, $key:expr, $asc:expr) => {{
+                let key = $key;
+                let label: &str = $label;
+                let resp = column_header(
+                    $ui,
+                    label,
+                    &mut self.sort_key,
+                    &mut self.sort_dir,
+                    key,
+                    $asc,
+                    filtered_keys.contains(&key),
+                    any_filters,
+                );
+                *sort_changed |= resp.sort_changed;
+                if let Some(action) = resp.menu {
+                    menu = Some((key, label.to_string(), action));
+                }
+            }};
+        }
         macro_rules! sized_col {
             ($key:expr, $body:expr) => {{
                 let (rect, _resp) = header.col($body);
@@ -418,14 +444,7 @@ impl WavesPreviewer {
                         let width_key = column.key.serialized_name();
                         let label = column.label.clone();
                         let (rect, _response) = header.col(|ui| {
-                            *sort_changed |= sortable_header(
-                                ui,
-                                &label,
-                                &mut self.sort_key,
-                                &mut self.sort_dir,
-                                SortKey::Metadata(index),
-                                true,
-                            );
+                            header_button!(ui, &label, SortKey::Metadata(index), true);
                         });
                         self.list_col_widths_seen.push((width_key, rect.width()));
                     }
@@ -464,18 +483,17 @@ impl WavesPreviewer {
                 // Descending first: one click brings the rows somebody has
                 // said something about to the top.
                 C::Comments => Some(("\u{1F4AC}", SortKey::Comments, false)),
+                C::TranscriptLanguage => Some(("Lang", SortKey::TranscriptLanguage, true)),
+                // Descending first: the largest pending change on top.
+                C::Gain => Some(("Gain (dB)", SortKey::Gain, false)),
+                C::Status => Some(("Status", SortKey::Status, true)),
+                C::Tags => Some(("Tags", SortKey::Tags, true)),
+                C::Note => Some(("Note", SortKey::Note, true)),
                 _ => None,
             };
             if let Some((label, key, asc)) = sortable {
                 sized_col!(sorted_col.name(), |ui| {
-                    *sort_changed |= sortable_header(
-                        ui,
-                        label,
-                        &mut self.sort_key,
-                        &mut self.sort_dir,
-                        key,
-                        asc,
-                    );
+                    header_button!(ui, label, key, asc);
                 });
                 continue;
             }
@@ -499,45 +517,13 @@ impl WavesPreviewer {
                 C::External => {
                     for (idx, name) in metrics.external_cols.iter().enumerate() {
                         header.col(|ui| {
-                            *sort_changed |= sortable_header(
-                                ui,
-                                name,
-                                &mut self.sort_key,
-                                &mut self.sort_dir,
-                                SortKey::External(idx),
-                                true,
-                            );
+                            header_button!(ui, name, SortKey::External(idx), true);
                         });
                     }
-                }
-                C::TranscriptLanguage => {
-                    sized_col!("transcript_language", |ui| {
-                        ui.label(RichText::new("Lang").strong());
-                    });
-                }
-                C::Gain => {
-                    sized_col!("gain", |ui| {
-                        ui.label(RichText::new("Gain (dB)").strong());
-                    });
                 }
                 C::Wave => {
                     sized_col!("wave", |ui| {
                         ui.label(RichText::new("Wave").strong());
-                    });
-                }
-                C::Status => {
-                    sized_col!("status", |ui| {
-                        ui.label(RichText::new("Status").strong());
-                    });
-                }
-                C::Tags => {
-                    sized_col!("tags", |ui| {
-                        ui.label(RichText::new("Tags").strong());
-                    });
-                }
-                C::Note => {
-                    sized_col!("note", |ui| {
-                        ui.label(RichText::new("Note").strong());
                     });
                 }
                 _ => unreachable!("sortable columns handled above"),
@@ -545,6 +531,9 @@ impl WavesPreviewer {
         }
 
         header.col(|_ui| {});
+        if menu.is_some() {
+            self.list_header_menu = menu;
+        }
     }
 
     pub(super) fn finish_list_view(
@@ -573,6 +562,7 @@ impl WavesPreviewer {
                     continue;
                 };
                 if self.is_virtual_path(&path) {
+                    self.queue_virtual_file_meta_for_path(&path, false);
                     continue;
                 }
                 self.queue_list_meta_for_path(&path, false);
@@ -591,6 +581,14 @@ impl WavesPreviewer {
             self.list_meta_prefetch_cursor = 0;
             self.prime_sort_metadata_prefetch();
             self.request_sort();
+        }
+        if let Some((key, label, action)) = self.list_header_menu.take() {
+            match action {
+                HeaderMenuAction::OpenFilter => self.open_list_filter_dialog(key, &label),
+                HeaderMenuAction::ClearFilter => self.set_column_filter(key, None),
+                HeaderMenuAction::ClearAllFilters => self.clear_all_column_filters(),
+                HeaderMenuAction::ReapplyFilters => self.refresh_filter_then_sort(),
+            }
         }
         if let Some(path) = render.to_open.as_ref() {
             self.open_or_activate_tab(path);

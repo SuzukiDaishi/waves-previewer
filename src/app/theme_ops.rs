@@ -313,31 +313,39 @@ impl WavesPreviewer {
         if !cfg.fft_size.is_power_of_two() {
             cfg.fft_size = cfg.fft_size.next_power_of_two();
         }
-        cfg.fft_size = cfg.fft_size.clamp(256, 65536);
+        cfg.fft_size = cfg
+            .fft_size
+            .clamp(SpectrogramConfig::FFT_SIZE_MIN, SpectrogramConfig::FFT_SIZE_MAX);
         if cfg.hop_size == 0 {
             let overlap = if cfg.overlap.is_finite() {
-                cfg.overlap.clamp(0.0, 0.95)
+                cfg.overlap.clamp(0.0, SpectrogramConfig::OVERLAP_MAX)
             } else {
-                0.875
+                SpectrogramConfig::default().overlap
             };
             cfg.hop_size = ((cfg.fft_size as f32) * (1.0 - overlap)).round().max(1.0) as usize;
         }
         let max_hop = cfg.fft_size.saturating_sub(1).max(1);
         cfg.hop_size = cfg.hop_size.clamp(1, max_hop);
-        cfg.overlap = (1.0 - (cfg.hop_size as f32 / cfg.fft_size as f32)).clamp(0.0, 0.95);
+        cfg.overlap = (1.0 - (cfg.hop_size as f32 / cfg.fft_size as f32))
+            .clamp(0.0, SpectrogramConfig::OVERLAP_MAX);
         if cfg.max_frames == 0 {
-            cfg.max_frames = 4096;
+            cfg.max_frames = SpectrogramConfig::MAX_FRAMES_DEFAULT;
         }
-        cfg.max_frames = cfg.max_frames.clamp(256, 8192);
+        cfg.max_frames = cfg
+            .max_frames
+            .clamp(SpectrogramConfig::MAX_FRAMES_MIN, SpectrogramConfig::MAX_FRAMES_MAX);
         if !cfg.db_floor.is_finite() {
-            cfg.db_floor = -120.0;
+            cfg.db_floor = crate::levels::SPECTRO_DB_FLOOR_DEFAULT;
         }
-        cfg.db_floor = cfg.db_floor.clamp(-160.0, -20.0);
+        cfg.db_floor = cfg.db_floor.clamp(crate::levels::SPECTRO_DB_FLOOR_MIN, crate::levels::SPECTRO_DB_FLOOR_MAX);
         if !cfg.db_ceiling.is_finite() {
-            cfg.db_ceiling = 0.0;
+            cfg.db_ceiling = crate::levels::SPECTRO_DB_CEILING_MAX;
         }
-        cfg.db_ceiling = cfg.db_ceiling.clamp(-80.0, 0.0);
-        cfg.db_floor = cfg.db_floor.min(cfg.db_ceiling - 10.0).clamp(-160.0, -20.0);
+        cfg.db_ceiling = cfg.db_ceiling.clamp(crate::levels::SPECTRO_DB_CEILING_MIN, crate::levels::SPECTRO_DB_CEILING_MAX);
+        cfg.db_floor = cfg
+            .db_floor
+            .min(cfg.db_ceiling - crate::levels::SPECTRO_MIN_SPAN_DB)
+            .clamp(crate::levels::SPECTRO_DB_FLOOR_MIN, crate::levels::SPECTRO_DB_FLOOR_MAX);
         if !cfg.max_freq_hz.is_finite() || cfg.max_freq_hz < 0.0 {
             cfg.max_freq_hz = 0.0;
         }
@@ -408,7 +416,7 @@ impl WavesPreviewer {
             } else if let Some(rest) = line.strip_prefix("monitor_volume_db=") {
                 if let Ok(v) = rest.trim().parse::<f32>() {
                     if v.is_finite() {
-                        self.volume_db = v.clamp(-80.0, 6.0);
+                        self.volume_db = v.clamp(crate::levels::VOLUME_MIN_DB, crate::levels::VOLUME_MAX_DB);
                     }
                 }
             } else if let Some(rest) = line.strip_prefix("zero_cross_eps=") {
@@ -420,7 +428,7 @@ impl WavesPreviewer {
             } else if let Some(rest) = line.strip_prefix("blank_threshold_dbfs=") {
                 if let Ok(v) = rest.trim().parse::<f32>() {
                     if v.is_finite() {
-                        self.blank_threshold_dbfs = v.clamp(-120.0, 0.0);
+                        self.blank_threshold_dbfs = v.clamp(crate::levels::BLANK_THRESHOLD_MIN_DBFS, crate::levels::BLANK_THRESHOLD_MAX_DBFS);
                     }
                 }
             } else if let Some(rest) = line.strip_prefix("blank_min_ms=") {
@@ -1109,7 +1117,7 @@ zoo_speed={:.1}\n\
 zoo_flip_manual={}\n",
             theme,
             skip,
-            self.volume_db.clamp(-80.0, 6.0),
+            self.volume_db.clamp(crate::levels::VOLUME_MIN_DB, crate::levels::VOLUME_MAX_DB),
             self.zero_cross_epsilon,
             self.blank_threshold_dbfs,
             self.blank_min_ms,

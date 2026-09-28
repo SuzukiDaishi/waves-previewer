@@ -6,15 +6,104 @@ use super::*;
 const RECORDING_COMMAND_RUN: u8 = 0;
 const RECORDING_COMMAND_STOP: u8 = 1;
 const RECORDING_COMMAND_DISCARD: u8 = 2;
-const LIVE_WAVEFORM_WINDOW_SECS: f32 = 40.0;
+/// How long the worker waits for audio before rechecking Stop/Discard and
+/// device errors: short enough that Stop feels immediate.
+const RECORDING_COMMAND_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+/// How often the WAV header is rewritten mid-take, so a crash or power cut
+/// loses at most this much of the recording.
+const RECORDING_CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// Seconds of the take the live waveform shows.
+pub(super) const LIVE_WAVEFORM_WINDOW_SECS: f32 = 10.0;
+/// Overview blocks per second: 2.5 ms each, finer than one pixel of a
+/// 10-second window on any display this runs on.
+const LIVE_WAVEFORM_BLOCKS_PER_SEC: usize = 400;
+
+pub(super) fn live_waveform_block_frames(sample_rate: u32) -> usize {
+    (sample_rate as usize / LIVE_WAVEFORM_BLOCKS_PER_SEC).max(64)
+}
+
+/// Folds mono samples into fixed-size (min, max) blocks and hands them to the
+/// UI a capture buffer at a time.
+struct WaveformAccumulator {
+    block_frames: usize,
+    /// Absolute frame of the first finished-but-unsent block.
+    out_start: Option<u64>,
+    out: Vec<(f32, f32)>,
+    /// The block being filled.
+    len: usize,
+    min: f32,
+    max: f32,
+}
+
+impl WaveformAccumulator {
+    fn new(block_frames: usize) -> Self {
+        Self {
+            block_frames: block_frames.max(1),
+            out_start: None,
+            out: Vec::new(),
+            len: 0,
+            min: f32::MAX,
+            max: f32::MIN,
+        }
+    }
+
+    fn push(&mut self, frame: u64, value: f32) {
+        if self.out_start.is_none() && self.out.is_empty() && self.len == 0 {
+            self.out_start = Some(frame);
+        }
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+        self.len += 1;
+        if self.len >= self.block_frames {
+            self.close_block();
+        }
+    }
+
+    fn close_block(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+        self.out.push((self.min, self.max));
+        self.len = 0;
+        self.min = f32::MAX;
+        self.max = f32::MIN;
+    }
+
+    /// Sends the finished blocks; with `include_partial`, the one still
+    /// filling as well (end of take).
+    fn send(
+        &mut self,
+        include_partial: bool,
+        tx: &std::sync::mpsc::Sender<crate::app::types::RecordingWorkerMsg>,
+    ) {
+        if include_partial {
+            self.close_block();
+        }
+        if self.out.is_empty() {
+            return;
+        }
+        let start_frame = self.out_start.unwrap_or(0);
+        let blocks = std::mem::take(&mut self.out);
+        // A short final block is counted as full; only drawing reads this,
+        // and the writer's frame count stays the authority on length.
+        let end_frame =
+            start_frame.saturating_add(blocks.len() as u64 * self.block_frames as u64);
+        // The block still filling (if any) starts where these end.
+        self.out_start = if self.len > 0 { Some(end_frame) } else { None };
+        let _ = tx.send(crate::app::types::RecordingWorkerMsg::WaveformBlocks {
+            start_frame,
+            block_frames: self.block_frames as u64,
+            blocks,
+            end_frame,
+        });
+    }
+}
 
 fn write_recording_buffer(
     writer: &mut crate::wav_stream::StreamingWaveWriter,
     interleaved: &[f32],
     channels: u16,
-    overview_block: usize,
-    waveform_buf: &mut Vec<f32>,
-    waveform_start_frame: &mut Option<u64>,
+    waveform: &mut WaveformAccumulator,
     tx: &std::sync::mpsc::Sender<crate::app::types::RecordingWorkerMsg>,
 ) -> anyhow::Result<()> {
     use crate::app::types::RecordingWorkerMsg;
@@ -38,60 +127,39 @@ fn write_recording_buffer(
     let _ = tx.send(RecordingWorkerMsg::Level(peak_l, peak_r));
 
     for frame in 0..frame_count {
-        if waveform_buf.is_empty() {
-            *waveform_start_frame = Some(buffer_start_frame + frame as u64);
-        }
         let mono = (0..ch)
             .map(|channel| interleaved[frame * ch + channel])
             .sum::<f32>()
             / ch as f32;
-        waveform_buf.push(mono);
-        if waveform_buf.len() >= overview_block {
-            flush_recording_waveform(waveform_buf, waveform_start_frame, tx);
-        }
+        waveform.push(buffer_start_frame + frame as u64, mono);
     }
+    waveform.send(false, tx);
     let _ = tx.send(RecordingWorkerMsg::WrittenFrames(writer.frames()));
     Ok(())
 }
 
-fn flush_recording_waveform(
-    waveform_buf: &mut Vec<f32>,
-    waveform_start_frame: &mut Option<u64>,
-    tx: &std::sync::mpsc::Sender<crate::app::types::RecordingWorkerMsg>,
-) {
-    use crate::app::types::RecordingWorkerMsg;
-    if waveform_buf.is_empty() {
-        return;
-    }
-    let start_frame = waveform_start_frame.take().unwrap_or(0);
-    let end_frame = start_frame.saturating_add(waveform_buf.len() as u64);
-    let min = waveform_buf.iter().copied().fold(f32::MAX, f32::min);
-    let max = waveform_buf.iter().copied().fold(f32::MIN, f32::max);
-    let _ = tx.send(RecordingWorkerMsg::WaveformBlock {
-        min,
-        max,
-        start_frame,
-        end_frame,
-    });
-    waveform_buf.clear();
-}
-
-fn push_live_waveform_block(
+fn push_live_waveform_blocks(
     overview: &mut std::collections::VecDeque<(f32, f32)>,
     first_frame: &mut u64,
     block_frames: u64,
     capacity: usize,
     start_frame: u64,
-    value: (f32, f32),
+    blocks: &[(f32, f32)],
 ) {
     if overview.is_empty() {
         *first_frame = start_frame;
     }
-    overview.push_back(value);
-    while overview.len() > capacity.max(1) {
-        overview.pop_front();
-        *first_frame = first_frame.saturating_add(block_frames);
+    overview.extend(blocks.iter().copied());
+    let excess = overview.len().saturating_sub(capacity.max(1));
+    if excess > 0 {
+        overview.drain(..excess);
+        *first_frame = first_frame.saturating_add(block_frames * excess as u64);
     }
+}
+
+/// Name for the next marker on a take: M01, M02, ...
+pub(super) fn next_marker_label(existing: &[crate::markers::MarkerEntry]) -> String {
+    format!("M{:02}", existing.len() + 1)
 }
 
 impl super::WavesPreviewer {
@@ -155,6 +223,11 @@ impl super::WavesPreviewer {
 
         let channels = capture_stream.channels;
         let sample_rate = capture_stream.sample_rate;
+        let overview_block = live_waveform_block_frames(sample_rate);
+        let live_markers = Arc::new(std::sync::Mutex::new(
+            Vec::<crate::markers::MarkerEntry>::new(),
+        ));
+        let markers_worker = live_markers.clone();
 
         // Worker thread: drain cap_rx → write temp WAV, update level/waveform
         let worker_tx_clone = worker_tx.clone();
@@ -184,9 +257,7 @@ impl super::WavesPreviewer {
                 }
             };
 
-            let mut waveform_buf: Vec<f32> = Vec::new();
-            let mut waveform_start_frame: Option<u64> = None;
-            let overview_block = (sample_rate as usize / 50).max(512); // ~50 blocks/s
+            let mut waveform = WaveformAccumulator::new(overview_block);
             let mut last_checkpoint = std::time::Instant::now();
             let mut stopping = false;
             let mut partial_error: Option<String> = None;
@@ -228,7 +299,7 @@ impl super::WavesPreviewer {
                         .recv()
                         .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
                 } else {
-                    cap_rx.recv_timeout(std::time::Duration::from_millis(100))
+                    cap_rx.recv_timeout(RECORDING_COMMAND_POLL)
                 };
                 match received {
                     Ok(interleaved) => {
@@ -247,9 +318,7 @@ impl super::WavesPreviewer {
                             &mut writer,
                             &interleaved,
                             channels,
-                            overview_block,
-                            &mut waveform_buf,
-                            &mut waveform_start_frame,
+                            &mut waveform,
                             &worker_tx_clone,
                         ) {
                             let message = format!("recording write failed: {err}");
@@ -260,7 +329,7 @@ impl super::WavesPreviewer {
                             partial_error = Some(message);
                             capture_stream.take();
                             stopping = true;
-                        } else if last_checkpoint.elapsed() >= std::time::Duration::from_secs(1) {
+                        } else if last_checkpoint.elapsed() >= RECORDING_CHECKPOINT_INTERVAL {
                             if let Err(err) = writer.checkpoint() {
                                 let message = format!("recording checkpoint failed: {err}");
                                 let _ = worker_tx_clone
@@ -285,11 +354,7 @@ impl super::WavesPreviewer {
                 }
             }
 
-            flush_recording_waveform(
-                &mut waveform_buf,
-                &mut waveform_start_frame,
-                &worker_tx_clone,
-            );
+            waveform.send(true, &worker_tx_clone);
             let frames_before_finalize = writer.frames();
             let final_state = match writer.finalize() {
                 Ok(state) => Some(state),
@@ -312,6 +377,25 @@ impl super::WavesPreviewer {
                     });
                 }
             }
+            // Markers go in only once the file is final: the cue chunk is
+            // written by rewriting the RIFF, which must not race the writer.
+            // Past the inline-rewrite limit they land in a sidecar instead,
+            // which `markers::read_markers` finds the same way.
+            let markers = markers_worker
+                .lock()
+                .map(|m| m.clone())
+                .unwrap_or_default();
+            if !markers.is_empty() {
+                let markers: Vec<_> = markers
+                    .into_iter()
+                    .filter(|m| (m.sample as u64) <= frames)
+                    .collect();
+                if let Err(err) =
+                    crate::markers::write_markers(&tmp_path, sample_rate, sample_rate, &markers)
+                {
+                    partial_error.get_or_insert_with(|| format!("write markers failed: {err}"));
+                }
+            }
             if !error_reported {
                 if let Some(error) = partial_error.as_ref() {
                     let _ = worker_tx_clone.send(RecordingWorkerMsg::Error(error.clone()));
@@ -324,7 +408,23 @@ impl super::WavesPreviewer {
             });
         });
 
-        let overview_block = (sample_rate as usize / 50).max(512);
+        let display_name = format!(
+            "Recording {}.wav",
+            chrono::Local::now().format("%Y-%m-%d %H-%M-%S")
+        );
+        let take_id = self.recording_tab.next_take_id;
+        self.recording_tab.next_take_id += 1;
+        self.recording_tab.takes.push(crate::app::types::RecordingTake {
+            id: take_id,
+            display_name: display_name.clone(),
+            temp_path: None,
+            item: None,
+            frames: 0,
+            sample_rate,
+            markers: Vec::new(),
+        });
+        self.recording_tab.current_take = Some(take_id);
+        self.recording_tab.live_markers = live_markers;
 
         self.recording_tab.state = RecordingState::Recording;
         self.recording_tab.recording_command = recording_command;
@@ -339,10 +439,7 @@ impl super::WavesPreviewer {
         self.recording_tab.overview_block_secs = overview_block as f32 / sample_rate.max(1) as f32;
         self.recording_tab.written_frames = 0;
         self.recording_tab.recording_sample_rate = sample_rate;
-        self.recording_tab.recording_display_name = format!(
-            "Recording {}.wav",
-            chrono::Local::now().format("%Y-%m-%d %H-%M-%S")
-        );
+        self.recording_tab.recording_display_name = display_name;
         self.recording_tab.level_l = 0.0;
         self.recording_tab.level_r = 0.0;
         self.recording_tab.peak_hold_l = 0.0;
@@ -387,8 +484,23 @@ impl super::WavesPreviewer {
         self.recording_tab.progress_message = "Recording…".to_string();
     }
 
+    /// Throws away the take being captured. Takes that already stopped are
+    /// discarded with `discard_take`.
     pub(super) fn discard_recording(&mut self) {
         use crate::app::types::RecordingState;
+        if !matches!(
+            self.recording_tab.state,
+            RecordingState::Recording | RecordingState::Paused
+        ) {
+            self.recording_tab.confirm_discard = false;
+            return;
+        }
+        if let Some(take_id) = self.recording_tab.current_take.take() {
+            self.recording_tab.takes.retain(|take| take.id != take_id);
+        }
+        if let Ok(mut markers) = self.recording_tab.live_markers.lock() {
+            markers.clear();
+        }
         self.recording_tab
             .recording_command
             .store(RECORDING_COMMAND_DISCARD, Ordering::Release);
@@ -407,40 +519,128 @@ impl super::WavesPreviewer {
         self.recording_tab.progress_message = "Discarding recording...".to_string();
     }
 
-    /// Copies the finished temp recording to a user-chosen location.
-    pub(super) fn save_recording_as(&mut self) {
+    /// Where a take stands, read off its list row. `None` once the row is gone
+    /// (removed from the list), which retires the take.
+    pub(super) fn recording_take_state(
+        &self,
+        take: &crate::app::types::RecordingTake,
+    ) -> Option<crate::app::types::RecordingTakeState> {
+        use crate::app::types::{RecordingState, RecordingTakeState};
+        if self.recording_tab.current_take == Some(take.id) {
+            // A worker that failed before finalizing leaves nothing behind;
+            // the take would otherwise read "Recording" forever.
+            let capturing = matches!(
+                self.recording_tab.state,
+                RecordingState::Recording | RecordingState::Paused | RecordingState::Finalizing
+            );
+            if capturing && take.item.is_none() {
+                return Some(RecordingTakeState::Recording);
+            }
+        }
+        let item = self.item_for_id(take.item?)?;
+        Some(match item.source {
+            MediaSource::Virtual => RecordingTakeState::Stopped,
+            _ => RecordingTakeState::Saved(item.path.clone()),
+        })
+    }
+
+    /// Drops takes whose row has left the list, so removing the row there
+    /// removes the take here. A handful of hash lookups; safe per frame.
+    pub(super) fn prune_recording_takes(&mut self) {
+        let keep: Vec<bool> = self
+            .recording_tab
+            .takes
+            .iter()
+            .map(|take| self.recording_take_state(take).is_some())
+            .collect();
+        let mut keep = keep.into_iter();
+        self.recording_tab
+            .takes
+            .retain(|_| keep.next().unwrap_or(true));
+    }
+
+    fn recording_take_path(&self, take_id: u64) -> Option<PathBuf> {
+        let take = self.recording_tab.takes.iter().find(|t| t.id == take_id)?;
+        self.item_for_id(take.item?).map(|item| item.path.clone())
+    }
+
+    /// Drops a marker on the take being captured, at the frame written so far.
+    pub(super) fn add_recording_marker(&mut self) {
         use crate::app::types::RecordingState;
-        let Some(src) = self.recording_tab.last_recording_path.clone() else {
+        if !matches!(
+            self.recording_tab.state,
+            RecordingState::Recording | RecordingState::Paused
+        ) {
+            return;
+        }
+        let sample = self.recording_tab.written_frames as usize;
+        let Ok(mut markers) = self.recording_tab.live_markers.lock() else {
             return;
         };
-        let default_name = if self.recording_tab.recording_display_name.is_empty() {
-            "Recording.wav".to_string()
-        } else {
-            self.recording_tab.recording_display_name.clone()
+        // A second press on the same frame (paused, or a double click) would
+        // only stack an invisible duplicate.
+        if markers.iter().any(|m| m.sample == sample) {
+            return;
+        }
+        let label = next_marker_label(&markers);
+        markers.push(crate::markers::MarkerEntry { sample, label });
+    }
+
+    pub(super) fn open_recording_take_in_editor(&mut self, take_id: u64) {
+        let Some(path) = self.recording_take_path(take_id) else {
+            return;
         };
+        self.open_or_activate_tab(&path);
+        self.workspace_view = WorkspaceView::Editor;
+    }
+
+    /// Saves a stopped take where the user says. It goes through the list's
+    /// save job, so the take's `(virtual)` row becomes the saved file's row --
+    /// one row, not a virtual row plus a copy.
+    pub(super) fn save_recording_take_as(&mut self, take_id: u64) {
+        let Some(path) = self.recording_take_path(take_id) else {
+            return;
+        };
+        if !self.is_virtual_path(&path) {
+            return;
+        }
+        let default_name = self
+            .item_for_path(&path)
+            .map(|item| item.display_name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Recording.wav".to_string());
         let Some(dest) = self.pick_recording_save_dialog(&default_name) else {
             return;
         };
-        // The temp take is a WAV byte stream; copying it under another
-        // extension would produce a mislabeled, undecodable file.
-        let is_wav = dest
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("wav"))
-            .unwrap_or(false);
-        let dest = if is_wav {
+        let dest = if dest.extension().is_some() {
             dest
         } else {
             dest.with_extension("wav")
         };
-        match std::fs::copy(&src, &dest) {
-            Ok(_) => {
-                self.recording_tab.progress_message = format!("Saved: {}", dest.display());
-            }
-            Err(err) => {
-                self.recording_tab.state = RecordingState::Error(format!("save failed: {err}"));
+        self.spawn_save_virtual_as(path, dest);
+    }
+
+    /// Discards a stopped take: its `(virtual)` row goes with it (undoable
+    /// from the list). A saved take only leaves this list; its file and row
+    /// stay.
+    pub(super) fn discard_recording_take(&mut self, take_id: u64) {
+        use crate::app::types::RecordingTakeState;
+        self.recording_tab.confirm_discard_take = None;
+        let Some(take) = self
+            .recording_tab
+            .takes
+            .iter()
+            .find(|t| t.id == take_id)
+            .cloned()
+        else {
+            return;
+        };
+        if self.recording_take_state(&take) == Some(RecordingTakeState::Stopped) {
+            if let Some(path) = self.recording_take_path(take_id) {
+                self.remove_paths_from_list_with_undo(&[path]);
             }
         }
+        self.recording_tab.takes.retain(|t| t.id != take_id);
     }
 
     pub(super) fn drain_recording_events(&mut self) {
@@ -461,26 +661,23 @@ impl super::WavesPreviewer {
                         self.recording_tab.level_l = self.recording_tab.level_l * 0.85 + l * 0.15;
                         self.recording_tab.level_r = self.recording_tab.level_r * 0.85 + r * 0.15;
                     }
-                    RecordingWorkerMsg::WaveformBlock {
-                        min,
-                        max,
+                    RecordingWorkerMsg::WaveformBlocks {
                         start_frame,
+                        block_frames,
+                        blocks,
                         end_frame,
                     } => {
                         let capacity = (LIVE_WAVEFORM_WINDOW_SECS
                             / self.recording_tab.overview_block_secs.max(0.0001))
                         .ceil()
                         .max(1.0) as usize;
-                        let block_frames = (self.recording_tab.overview_block_secs
-                            * self.recording_tab.recording_sample_rate.max(1) as f32)
-                            .round() as u64;
-                        push_live_waveform_block(
+                        push_live_waveform_blocks(
                             &mut self.recording_tab.waveform_overview,
                             &mut self.recording_tab.waveform_start_frame,
                             block_frames,
                             capacity,
                             start_frame,
-                            (min, max),
+                            &blocks,
                         );
                         self.recording_tab.written_frames =
                             self.recording_tab.written_frames.max(end_frame);
@@ -506,6 +703,7 @@ impl super::WavesPreviewer {
                     }
                     RecordingWorkerMsg::Discarded => {
                         self.recording_tab.state = RecordingState::Idle;
+                        self.recording_tab.current_take = None;
                         self.recording_tab.last_recording_path = None;
                         self.recording_tab.rx = None;
                         self.recording_tab.progress_message.clear();
@@ -534,6 +732,7 @@ impl super::WavesPreviewer {
         }
         if let Some(path) = finalized_path {
             self.recording_tab.last_recording_path = Some(path.clone());
+            self.attach_finished_take(&path);
             if matches!(self.recording_tab.state, RecordingState::Error(_)) {
                 // Keep the error visible; the partial take is still available.
                 self.recording_tab.progress_message =
@@ -548,15 +747,66 @@ impl super::WavesPreviewer {
         }
     }
 
-    pub(super) fn open_recording_in_editor(&mut self, _ctx: &egui::Context) {
-        let Some(tmp_path) = self.recording_tab.last_recording_path.clone() else {
-            return;
+    /// A take just stopped: it becomes a `(virtual)` row in the list right
+    /// away, and the take remembers that row.
+    pub(super) fn attach_finished_take(&mut self, tmp_path: &std::path::Path) {
+        let in_flight = self
+            .recording_tab
+            .current_take
+            .take()
+            .filter(|id| self.recording_tab.takes.iter().any(|t| t.id == *id));
+        let take_id = match in_flight {
+            Some(id) => id,
+            None => {
+                // No take to attach to: a test injecting a finished file, or
+                // a partial take whose entry was pruned while the worker
+                // reported an error before finalizing. Stand one up.
+                let id = self.recording_tab.next_take_id;
+                self.recording_tab.next_take_id += 1;
+                let display_name = if self.recording_tab.recording_display_name.is_empty() {
+                    "Recording.wav".to_string()
+                } else {
+                    self.recording_tab.recording_display_name.clone()
+                };
+                self.recording_tab.takes.push(crate::app::types::RecordingTake {
+                    id,
+                    display_name,
+                    temp_path: None,
+                    item: None,
+                    frames: self.recording_tab.written_frames,
+                    sample_rate: self.recording_tab.recording_sample_rate,
+                    markers: Vec::new(),
+                });
+                id
+            }
         };
-        let Some(item_path) = self.ensure_virtual_item_for_recording(&tmp_path) else {
-            return;
-        };
-        self.open_or_activate_tab(&item_path);
-        self.workspace_view = WorkspaceView::Editor;
+        let markers = self
+            .recording_tab
+            .live_markers
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        let item_path = self.ensure_virtual_item_for_recording(tmp_path);
+        let item_id = item_path.as_ref().and_then(|p| self.path_index.get(p));
+        let frames = self.recording_tab.written_frames;
+        let row_name = item_path
+            .as_ref()
+            .and_then(|p| self.item_for_path(p))
+            .map(|item| item.display_name.clone());
+        if let Some(take) = self
+            .recording_tab
+            .takes
+            .iter_mut()
+            .find(|take| take.id == take_id)
+        {
+            take.temp_path = Some(tmp_path.to_path_buf());
+            take.item = item_id;
+            take.frames = frames;
+            take.markers = markers;
+            if let Some(name) = row_name {
+                take.display_name = name;
+            }
+        }
     }
 
     /// Wraps a recorded temp WAV as a `(virtual)` list item (in-memory audio +
@@ -612,26 +862,89 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_waveform_scrolls_one_block_without_500_point_jump() {
+    fn live_waveform_scrolls_one_block_without_jump() {
         let mut overview = std::collections::VecDeque::new();
         let mut first_frame = 0u64;
-        let block_frames = 960u64;
-        let capacity = 2_000usize;
-        for index in 0..2_500u64 {
+        let block_frames = 120u64;
+        let capacity = 4_000usize;
+        for index in 0..5_000u64 {
             let previous_first = first_frame;
-            push_live_waveform_block(
+            push_live_waveform_blocks(
                 &mut overview,
                 &mut first_frame,
                 block_frames,
                 capacity,
                 index * block_frames,
-                (-0.5, 0.5),
+                &[(-0.5, 0.5)],
             );
             assert!(overview.len() <= capacity);
             assert!(first_frame.saturating_sub(previous_first) <= block_frames);
         }
         assert_eq!(overview.len(), capacity);
-        assert_eq!(first_frame, 500 * block_frames);
-        assert_eq!(overview.len() as u64 * block_frames, 40 * 48_000);
+        assert_eq!(first_frame, 1_000 * block_frames);
+        assert_eq!(overview.len() as u64 * block_frames, 10 * 48_000);
+    }
+
+    #[test]
+    fn a_batch_larger_than_the_window_keeps_only_its_newest_blocks() {
+        let mut overview = std::collections::VecDeque::new();
+        let mut first_frame = 0u64;
+        let blocks: Vec<(f32, f32)> = (0..10).map(|i| (i as f32, i as f32)).collect();
+        push_live_waveform_blocks(&mut overview, &mut first_frame, 100, 4, 0, &blocks);
+        assert_eq!(overview.len(), 4);
+        assert_eq!(overview.front(), Some(&(6.0, 6.0)));
+        assert_eq!(first_frame, 600);
+    }
+
+    #[test]
+    fn block_size_gives_about_400_blocks_per_second() {
+        assert_eq!(live_waveform_block_frames(48_000), 120);
+        assert_eq!(live_waveform_block_frames(44_100), 110);
+        assert_eq!(live_waveform_block_frames(8_000), 64);
+    }
+
+    #[test]
+    fn accumulator_reports_contiguous_frames_across_buffers() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut acc = WaveformAccumulator::new(4);
+        // Two buffers of 6 frames: the second block straddles them.
+        for f in 0..6u64 {
+            acc.push(f, f as f32);
+        }
+        acc.send(false, &tx);
+        for f in 6..12u64 {
+            acc.push(f, -(f as f32));
+        }
+        acc.send(false, &tx);
+        acc.send(true, &tx);
+        let mut next = 0u64;
+        let mut all = Vec::new();
+        while let Ok(crate::app::types::RecordingWorkerMsg::WaveformBlocks {
+            start_frame,
+            block_frames,
+            blocks,
+            end_frame,
+        }) = rx.try_recv()
+        {
+            assert_eq!(start_frame, next, "blocks must not overlap or leave gaps");
+            assert_eq!(block_frames, 4);
+            next = end_frame;
+            all.extend(blocks);
+        }
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0], (0.0, 3.0));
+        assert_eq!(all[1], (-7.0, 5.0));
+        assert_eq!(all[2], (-11.0, -8.0));
+    }
+
+    #[test]
+    fn marker_labels_count_up() {
+        let mut markers = Vec::new();
+        for sample in [10usize, 20, 30] {
+            let label = next_marker_label(&markers);
+            markers.push(crate::markers::MarkerEntry { sample, label });
+        }
+        let labels: Vec<_> = markers.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["M01", "M02", "M03"]);
     }
 }

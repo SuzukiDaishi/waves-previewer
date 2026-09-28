@@ -392,7 +392,7 @@ impl crate::app::WavesPreviewer {
             ui.label("Collecting frame samples...");
             if profiler.enabled && !profiler.paused {
                 ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(16));
+                    .request_repaint_after(crate::app::ui_timing::ANIMATION_FRAME);
             }
             return;
         }
@@ -540,7 +540,7 @@ fn chart_frame(ui: &mut egui::Ui, height: f32) -> (egui::Response, egui::Painter
     painter.rect_stroke(
         rect,
         4.0,
-        Stroke::new(1.0, Color32::from_gray(55)),
+        Stroke::new(1.0_f32, Color32::from_gray(55)),
         egui::StrokeKind::Inside,
     );
     (response, painter, rect.shrink2(Vec2::new(8.0, 7.0)))
@@ -558,7 +558,7 @@ fn draw_fps_history(ui: &mut egui::Ui, samples: &[crate::app::frame_profiler::Fr
         let y = map_y(fps);
         painter.line_segment(
             [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
         painter.text(
             egui::pos2(rect.left() + 3.0, y - 2.0),
@@ -585,7 +585,7 @@ fn draw_fps_history(ui: &mut egui::Ui, samples: &[crate::app::frame_profiler::Fr
                     egui::pos2(rect.left() + (index - 1) as f32 * x_step, map_y(previous)),
                     egui::pos2(rect.left() + index as f32 * x_step, map_y(current)),
                 ],
-                Stroke::new(1.5, color),
+                Stroke::new(1.5_f32, color),
             );
         }
     }
@@ -597,7 +597,7 @@ fn draw_fps_history(ui: &mut egui::Ui, samples: &[crate::app::frame_profiler::Fr
                 + index as f32 / samples.len().saturating_sub(1).max(1) as f32 * rect.width();
             painter.line_segment(
                 [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                Stroke::new(1.0, Color32::WHITE),
+                Stroke::new(1.0_f32, Color32::WHITE),
             );
             response.clone().on_hover_text(format!(
                 "FPS {:.1}\nCadence {:.2} ms\nApp UI {:.2} ms\nDeferred drains {}",
@@ -638,7 +638,7 @@ fn draw_cpu_history(ui: &mut egui::Ui, samples: &[crate::app::frame_profiler::Fr
             let y = map_y(ms);
             painter.line_segment(
                 [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
             painter.text(
                 egui::pos2(rect.left() + 3.0, y - 2.0),

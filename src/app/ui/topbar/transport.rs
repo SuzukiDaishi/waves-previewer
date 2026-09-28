@@ -243,5 +243,26 @@ impl WavesPreviewer {
             self.search_query.clear();
             self.ui_topbar_apply_search_now();
         }
+        if self.has_column_filters() {
+            let names: Vec<String> = self
+                .column_filters
+                .iter()
+                .map(|f| self.sort_key_name(f.key))
+                .collect();
+            let chip = egui::Button::new(
+                egui::RichText::new(format!("Filters ({}) \u{00D7}", names.len()))
+                    .color(ui.visuals().selection.stroke.color),
+            );
+            if ui
+                .add(chip)
+                .on_hover_text(format!(
+                    "Column filters on: {}\nClick to clear them all (right-click a column header for one).",
+                    names.join(", ")
+                ))
+                .clicked()
+            {
+                self.clear_all_column_filters();
+            }
+        }
     }
 }

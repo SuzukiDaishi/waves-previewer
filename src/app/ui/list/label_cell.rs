@@ -85,7 +85,7 @@ impl crate::app::WavesPreviewer {
             ui.painter().rect_stroke(
                 rect,
                 4.0,
-                egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_stroke.color),
+                egui::Stroke::new(1.0_f32, ui.visuals().widgets.hovered.bg_stroke.color),
                 egui::StrokeKind::Inside,
             );
         }
@@ -202,7 +202,7 @@ impl crate::app::WavesPreviewer {
             ui.painter().rect_stroke(
                 rect,
                 4.0,
-                egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_stroke.color),
+                egui::Stroke::new(1.0_f32, ui.visuals().widgets.hovered.bg_stroke.color),
                 egui::StrokeKind::Inside,
             );
         }

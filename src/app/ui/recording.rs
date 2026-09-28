@@ -1,6 +1,6 @@
 use egui::{Color32, RichText, Stroke, Ui};
 
-use crate::app::types::{RecordingSourceKind, RecordingState};
+use crate::app::types::{RecordingSourceKind, RecordingState, RecordingTakeState};
 
 const CARD_FILL: Color32 = Color32::from_rgb(24, 24, 27);
 const REC_RED: Color32 = Color32::from_rgb(220, 60, 60);
@@ -80,7 +80,7 @@ fn draw_db_meter(ui: &mut Ui, label: &str, level: f32, peak_hold: f32) {
                     egui::pos2(x, rect.bottom() - 5.0),
                     egui::pos2(x, rect.bottom() - 1.0),
                 ],
-                Stroke::new(1.0, Color32::from_gray(75)),
+                Stroke::new(1.0_f32, Color32::from_gray(75)),
             );
         }
         if peak_hold > 0.0 {
@@ -96,7 +96,7 @@ fn draw_db_meter(ui: &mut Ui, label: &str, level: f32, peak_hold: f32) {
                     egui::pos2(x, rect.top() + 1.0),
                     egui::pos2(x, rect.bottom() - 1.0),
                 ],
-                Stroke::new(2.0, color),
+                Stroke::new(2.0_f32, color),
             );
         }
 
@@ -150,7 +150,7 @@ fn record_toggle_button(ui: &mut Ui, state: &RecordingState) -> egui::Response {
             }
         }
         RecordingState::Paused => {
-            painter.circle_stroke(center, r, Stroke::new(2.0, REC_RED));
+            painter.circle_stroke(center, r, Stroke::new(2.0_f32, REC_RED));
             let s = 9.0;
             painter.add(egui::Shape::convex_polygon(
                 vec![
@@ -163,11 +163,11 @@ fn record_toggle_button(ui: &mut Ui, state: &RecordingState) -> egui::Response {
             ));
         }
         RecordingState::Finalizing => {
-            painter.circle_stroke(center, r, Stroke::new(2.0, Color32::from_gray(90)));
+            painter.circle_stroke(center, r, Stroke::new(2.0_f32, Color32::from_gray(90)));
             painter.circle_filled(center, r * 0.42, Color32::from_gray(90));
         }
         RecordingState::Idle | RecordingState::Error(_) => {
-            painter.circle_stroke(center, r, Stroke::new(2.0, Color32::from_gray(130)));
+            painter.circle_stroke(center, r, Stroke::new(2.0_f32, Color32::from_gray(130)));
             painter.circle_filled(center, r * 0.42, REC_RED);
         }
     }
@@ -192,41 +192,298 @@ fn format_elapsed(elapsed: f32, with_tenths: bool) -> String {
     }
 }
 
+/// Painter-drawn microphone: capsule, cradle, stem and base. A glyph would
+/// depend on the fallback font having U+1F399, which the bundled one does not
+/// (it rendered as a box).
+fn paint_mic_icon(painter: &egui::Painter, center: egui::Pos2, size: f32, color: Color32) {
+    let stroke = Stroke::new((size * 0.1).max(1.2), color);
+    let body_w = size * 0.36;
+    let body_h = size * 0.52;
+    let body = egui::Rect::from_center_size(
+        egui::pos2(center.x, center.y - size * 0.18),
+        egui::vec2(body_w, body_h),
+    );
+    painter.rect_filled(body, body_w * 0.5, color);
+    // Cradle: the lower half of a circle around the capsule's bottom.
+    let r = size * 0.3;
+    let cy = body.bottom() - body_w * 0.5;
+    let points: Vec<egui::Pos2> = (0..=12)
+        .map(|i| {
+            let a = std::f32::consts::PI * (i as f32 / 12.0);
+            egui::pos2(center.x + r * a.cos(), cy + r * a.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, stroke));
+    let base_y = center.y + size * 0.48;
+    painter.line_segment(
+        [egui::pos2(center.x, cy + r), egui::pos2(center.x, base_y)],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(center.x - size * 0.2, base_y),
+            egui::pos2(center.x + size * 0.2, base_y),
+        ],
+        stroke,
+    );
+}
+
+/// Painter-drawn speaker with two sound waves, to match the microphone.
+fn paint_speaker_icon(painter: &egui::Painter, center: egui::Pos2, size: f32, color: Color32) {
+    let left = center.x - size * 0.45;
+    let box_w = size * 0.2;
+    let box_h = size * 0.34;
+    let cone_x = left + box_w + size * 0.24;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(left, center.y - box_h * 0.5),
+            egui::pos2(left + box_w, center.y - box_h * 0.5),
+            egui::pos2(cone_x, center.y - size * 0.4),
+            egui::pos2(cone_x, center.y + size * 0.4),
+            egui::pos2(left + box_w, center.y + box_h * 0.5),
+            egui::pos2(left, center.y + box_h * 0.5),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+    let stroke = Stroke::new((size * 0.09).max(1.1), color);
+    for r in [size * 0.2, size * 0.38] {
+        let points: Vec<egui::Pos2> = (0..=10)
+            .map(|i| {
+                let a = -0.8 + 1.6 * (i as f32 / 10.0);
+                egui::pos2(cone_x + r * a.cos(), center.y + r * a.sin())
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, stroke));
+    }
+}
+
+/// A selectable source button with a painted icon in front of its label.
+fn source_button(
+    ui: &mut Ui,
+    enabled: bool,
+    selected: bool,
+    label: &str,
+    icon: fn(&egui::Painter, egui::Pos2, f32, Color32),
+) -> egui::Response {
+    // Leading spaces reserve the icon's room inside the button's own layout,
+    // so its hover/selection frame covers the icon too.
+    let resp = ui.add_enabled(
+        enabled,
+        egui::Button::selectable(selected, format!("      {label}")),
+    );
+    let color = if !enabled {
+        ui.visuals().weak_text_color()
+    } else if selected {
+        ui.visuals().selection.stroke.color
+    } else {
+        ui.visuals().widgets.inactive.fg_stroke.color
+    };
+    let size = (resp.rect.height() * 0.62).min(14.0);
+    let center = egui::pos2(resp.rect.left() + 6.0 + size * 0.5, resp.rect.center().y);
+    icon(ui.painter(), center, size, color);
+    resp
+}
+
+/// Small painted status badge for a take (no glyphs, for the same reason).
+fn take_badge(ui: &mut Ui, state: &RecordingTakeState) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let c = rect.center();
+    match state {
+        RecordingTakeState::Recording => {
+            painter.circle_filled(c, 5.0, REC_RED);
+        }
+        RecordingTakeState::Stopped => {
+            painter.rect_filled(
+                egui::Rect::from_center_size(c, egui::vec2(9.0, 9.0)),
+                1.5,
+                Color32::from_gray(150),
+            );
+        }
+        RecordingTakeState::Saved(_) => {
+            painter.add(egui::Shape::line(
+                vec![
+                    egui::pos2(c.x - 5.0, c.y),
+                    egui::pos2(c.x - 1.5, c.y + 4.0),
+                    egui::pos2(c.x + 5.5, c.y - 4.5),
+                ],
+                Stroke::new(2.0_f32, METER_GREEN),
+            ));
+        }
+    }
+}
+
+enum TakeAction {
+    Open(u64),
+    SaveAs(u64),
+    Discard(u64),
+    Forget(u64),
+}
+
+/// Folds overview blocks into one (min, max) per pixel column of the window
+/// `[start_secs, start_secs + window_secs)`, `width` columns wide. Columns no
+/// block reaches are `None`.
+fn waveform_columns(
+    blocks: &std::collections::VecDeque<(f32, f32)>,
+    first_frame: u64,
+    block_frames: u64,
+    sample_rate: u32,
+    start_secs: f32,
+    window_secs: f32,
+    width: usize,
+) -> Vec<Option<(f32, f32)>> {
+    let mut cols: Vec<Option<(f32, f32)>> = vec![None; width];
+    if width == 0 || window_secs <= 0.0 {
+        return cols;
+    }
+    let sr = sample_rate.max(1) as f64;
+    let px_per_sec = width as f64 / window_secs as f64;
+    for (i, &(mn, mx)) in blocks.iter().enumerate() {
+        let t = (first_frame + i as u64 * block_frames) as f64 / sr;
+        let x = ((t - start_secs as f64) * px_per_sec).floor();
+        if x < 0.0 || x >= width as f64 {
+            continue;
+        }
+        let col = &mut cols[x as usize];
+        *col = Some(match *col {
+            Some((a, b)) => (a.min(mn), b.max(mx)),
+            None => (mn, mx),
+        });
+    }
+    cols
+}
+
 impl super::super::WavesPreviewer {
     pub(in crate::app) fn ui_recording_view(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        self.prune_recording_takes();
         let state = self.recording_tab.state.clone();
-        let idle = matches!(state, RecordingState::Idle | RecordingState::Error(_));
         let recording = state == RecordingState::Recording;
         let paused = state == RecordingState::Paused;
         let finalizing = state == RecordingState::Finalizing;
         let transport_locked = recording || paused || finalizing;
 
+        // M drops a marker, unless something is taking typed text.
+        if (recording || paused)
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input(|i| i.key_pressed(egui::Key::M) && i.modifiers.is_none())
+        {
+            self.add_recording_marker();
+        }
+
         ui.heading("Recording");
         ui.add_space(4.0);
 
-        // ---- Source / device card ----
+        egui::ScrollArea::vertical()
+            .id_salt("recording_view_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.ui_recording_source_card(ui, transport_locked);
+                self.ui_recording_monitor_card(ui, &state);
+                self.ui_recording_transport_card(ui, &state);
+                self.ui_recording_takes_card(ui);
+            });
+
+        // ---- Discard confirmation for the take being captured ----
+        if self.recording_tab.confirm_discard {
+            let modal =
+                egui::Modal::new(egui::Id::new("recording_discard_confirm")).show(ctx, |ui| {
+                    ui.set_width(280.0);
+                    ui.heading("Discard recording?");
+                    ui.label("The current take will be deleted.");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.recording_tab.confirm_discard = false;
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("Discard").color(Color32::WHITE))
+                                    .fill(Color32::from_rgb(170, 40, 40)),
+                            )
+                            .clicked()
+                        {
+                            self.discard_recording();
+                        }
+                    });
+                });
+            if modal.should_close() {
+                self.recording_tab.confirm_discard = false;
+            }
+        }
+
+        // ---- Discard confirmation for a stopped take ----
+        if let Some(take_id) = self.recording_tab.confirm_discard_take {
+            let name = self
+                .recording_tab
+                .takes
+                .iter()
+                .find(|t| t.id == take_id)
+                .map(|t| t.display_name.clone())
+                .unwrap_or_default();
+            let modal = egui::Modal::new(egui::Id::new("recording_take_discard_confirm")).show(
+                ctx,
+                |ui| {
+                    ui.set_width(300.0);
+                    ui.heading("Discard take?");
+                    ui.label(format!(
+                        "{name} and its (virtual) row in the list will be removed."
+                    ));
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.recording_tab.confirm_discard_take = None;
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("Discard").color(Color32::WHITE))
+                                    .fill(Color32::from_rgb(170, 40, 40)),
+                            )
+                            .clicked()
+                        {
+                            self.discard_recording_take(take_id);
+                        }
+                    });
+                },
+            );
+            if modal.should_close() {
+                self.recording_tab.confirm_discard_take = None;
+            }
+        }
+
+        // Request repaint while active to animate meters/waveform/clock.
+        if transport_locked {
+            ctx.request_repaint_after(crate::app::ui_timing::SMOOTH_REFRESH);
+        }
+    }
+
+    fn ui_recording_source_card(&mut self, ui: &mut Ui, transport_locked: bool) {
         recording_card(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Source").strong());
                 ui.add_space(6.0);
                 let selected_mic = self.recording_tab.source == RecordingSourceKind::Microphone;
-                if ui
-                    .add_enabled(
-                        !transport_locked,
-                        egui::Button::selectable(selected_mic, "🎙 Microphone"),
-                    )
-                    .clicked()
+                if source_button(
+                    ui,
+                    !transport_locked,
+                    selected_mic,
+                    "Microphone",
+                    paint_mic_icon,
+                )
+                .clicked()
                 {
                     self.recording_tab.source = RecordingSourceKind::Microphone;
                 }
                 if cfg!(target_os = "windows") {
                     let selected_sys = self.recording_tab.source == RecordingSourceKind::System;
-                    if ui
-                        .add_enabled(
-                            !transport_locked,
-                            egui::Button::selectable(selected_sys, "🔊 System Audio"),
-                        )
-                        .clicked()
+                    if source_button(
+                        ui,
+                        !transport_locked,
+                        selected_sys,
+                        "System Audio",
+                        paint_speaker_icon,
+                    )
+                    .clicked()
                     {
                         self.recording_tab.source = RecordingSourceKind::System;
                     }
@@ -270,7 +527,17 @@ impl super::super::WavesPreviewer {
                                 for dev in &self.recording_tab.input_devices.clone() {
                                     let sel = self.recording_tab.selected_mic_id.as_deref()
                                         == Some(&dev.id);
-                                    if ui.selectable_label(sel, &dev.display_name).clicked() {
+                                    if ui
+                                        .selectable_label(
+                                            sel,
+                                            format!(
+                                                "{}  ({})",
+                                                dev.display_name,
+                                                dev.format_label()
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
                                         self.recording_tab.selected_mic_id = Some(dev.id.clone());
                                     }
                                 }
@@ -289,8 +556,12 @@ impl super::super::WavesPreviewer {
                 });
             }
         });
+    }
 
-        // ---- Monitor card: meters, waveform, elapsed time ----
+    fn ui_recording_monitor_card(&mut self, ui: &mut Ui, state: &RecordingState) {
+        let recording = *state == RecordingState::Recording;
+        let paused = *state == RecordingState::Paused;
+        let transport_locked = recording || paused || *state == RecordingState::Finalizing;
         recording_card(ui, |ui| {
             let level_l = self.recording_tab.level_l;
             let level_r = self.recording_tab.level_r;
@@ -345,7 +616,7 @@ impl super::super::WavesPreviewer {
                     );
                 });
             }
-            if let RecordingState::Error(msg) = &state {
+            if let RecordingState::Error(msg) = state {
                 ui.vertical_centered(|ui| {
                     ui.label(
                         RichText::new(format!("Error: {msg}"))
@@ -354,11 +625,13 @@ impl super::super::WavesPreviewer {
                 });
             }
         });
+    }
 
-        // ---- Transport card ----
+    fn ui_recording_transport_card(&mut self, ui: &mut Ui, state: &RecordingState) {
+        let capturing = matches!(state, RecordingState::Recording | RecordingState::Paused);
         recording_card(ui, |ui| {
             ui.horizontal(|ui| {
-                let toggle = record_toggle_button(ui, &state);
+                let toggle = record_toggle_button(ui, state);
                 if toggle.clicked() {
                     match state {
                         RecordingState::Recording => self.pause_recording(),
@@ -370,7 +643,7 @@ impl super::super::WavesPreviewer {
                 ui.add_space(10.0);
                 if ui
                     .add_enabled(
-                        recording || paused,
+                        capturing,
                         egui::Button::new("■ Stop").min_size(egui::vec2(90.0, 32.0)),
                     )
                     .on_hover_text("Stop and keep the take")
@@ -380,7 +653,17 @@ impl super::super::WavesPreviewer {
                 }
                 if ui
                     .add_enabled(
-                        recording || paused,
+                        capturing,
+                        egui::Button::new("Add Marker").min_size(egui::vec2(110.0, 32.0)),
+                    )
+                    .on_hover_text("Mark this moment of the take (M)")
+                    .clicked()
+                {
+                    self.add_recording_marker();
+                }
+                if ui
+                    .add_enabled(
+                        capturing,
                         // U+00D7, not U+2715: only the system faces carry the
                         // heavier X, so it renders as a box until the async
                         // font upgrade lands.
@@ -393,86 +676,144 @@ impl super::super::WavesPreviewer {
                 }
             });
         });
+    }
 
-        // ---- Result card ----
-        let has_recording = self.recording_tab.last_recording_path.is_some();
-        if has_recording && !recording && !finalizing {
-            recording_card(ui, |ui| {
-                let name = self
-                    .recording_tab
-                    .last_recording_path
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("recording.wav")
-                    .to_string();
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Last take").strong());
-                    ui.label(RichText::new(name).monospace().weak());
-                });
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(egui::Button::new("Open in Editor").min_size(egui::vec2(120.0, 28.0)))
-                        .clicked()
-                    {
-                        self.open_recording_in_editor(ctx);
-                    }
-                    if ui
-                        .add(egui::Button::new("Save As…").min_size(egui::vec2(100.0, 28.0)))
-                        .on_hover_text("Copy the recorded WAV to a file")
-                        .clicked()
-                    {
-                        self.save_recording_as();
-                    }
-                    if ui
-                        .add_enabled(idle, egui::Button::new("Discard take"))
-                        .on_hover_text("Forget this recording")
-                        .clicked()
-                    {
-                        self.recording_tab.confirm_discard = true;
-                    }
-                });
-            });
+    fn ui_recording_takes_card(&mut self, ui: &mut Ui) {
+        if self.recording_tab.takes.is_empty() {
+            return;
         }
-
-        // ---- Discard confirmation modal ----
-        if self.recording_tab.confirm_discard {
-            let modal =
-                egui::Modal::new(egui::Id::new("recording_discard_confirm")).show(ctx, |ui| {
-                    ui.set_width(280.0);
-                    ui.heading("Discard recording?");
-                    ui.label("The current take will be deleted.");
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() {
-                            self.recording_tab.confirm_discard = false;
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new("Discard").color(Color32::WHITE))
-                                    .fill(Color32::from_rgb(170, 40, 40)),
-                            )
-                            .clicked()
-                        {
-                            self.discard_recording();
-                        }
-                    });
-                });
-            if modal.should_close() {
-                self.recording_tab.confirm_discard = false;
-            }
+        struct Row {
+            id: u64,
+            name: String,
+            state: RecordingTakeState,
+            secs: f32,
+            markers: usize,
         }
-
-        // Request repaint while active to animate meters/waveform/clock.
-        if recording || paused || finalizing {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        let live_markers = self
+            .recording_tab
+            .live_markers
+            .lock()
+            .map(|m| m.len())
+            .unwrap_or(0);
+        // Newest first: the take just recorded is the one being acted on.
+        let rows: Vec<Row> = self
+            .recording_tab
+            .takes
+            .iter()
+            .rev()
+            .filter_map(|take| {
+                let state = self.recording_take_state(take)?;
+                let capturing = state == RecordingTakeState::Recording;
+                Some(Row {
+                    id: take.id,
+                    name: take.display_name.clone(),
+                    secs: if capturing {
+                        self.recording_tab.elapsed_secs
+                    } else {
+                        take.frames as f32 / take.sample_rate.max(1) as f32
+                    },
+                    markers: if capturing {
+                        live_markers
+                    } else {
+                        take.markers.len()
+                    },
+                    state,
+                })
+            })
+            .collect();
+        let mut action: Option<TakeAction> = None;
+        recording_card(ui, |ui| {
+            ui.label(RichText::new("Takes").strong());
+            ui.add_space(4.0);
+            egui::Grid::new("recording_takes_grid")
+                .num_columns(6)
+                .spacing(egui::vec2(14.0, 6.0))
+                .striped(true)
+                .show(ui, |ui| {
+                    for row in &rows {
+                        ui.horizontal(|ui| {
+                            take_badge(ui, &row.state);
+                            ui.label(match &row.state {
+                                RecordingTakeState::Recording => "Recording",
+                                RecordingTakeState::Stopped => "Stopped",
+                                RecordingTakeState::Saved(_) => "Saved",
+                            });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&row.name).monospace());
+                            if row.state == RecordingTakeState::Stopped {
+                                ui.label(RichText::new("(virtual)").weak());
+                            }
+                        });
+                        ui.label(RichText::new(format_elapsed(row.secs, true)).monospace());
+                        ui.label(if row.markers == 0 {
+                            RichText::new("no markers").weak()
+                        } else {
+                            RichText::new(format!("{} marker(s)", row.markers))
+                        });
+                        match &row.state {
+                            RecordingTakeState::Saved(path) => {
+                                let shown = path.display().to_string();
+                                ui.label(RichText::new(&shown).weak().small())
+                                    .on_hover_text(shown);
+                            }
+                            _ => {
+                                ui.label("");
+                            }
+                        }
+                        ui.horizontal(|ui| match &row.state {
+                            RecordingTakeState::Recording => {}
+                            RecordingTakeState::Stopped => {
+                                if ui.button("Open in Editor").clicked() {
+                                    action = Some(TakeAction::Open(row.id));
+                                }
+                                if ui
+                                    .button("Save As…")
+                                    .on_hover_text(
+                                        "Save to a file; the list row becomes that file",
+                                    )
+                                    .clicked()
+                                {
+                                    action = Some(TakeAction::SaveAs(row.id));
+                                }
+                                if ui
+                                    .button("Discard")
+                                    .on_hover_text("Delete this take and its list row")
+                                    .clicked()
+                                {
+                                    action = Some(TakeAction::Discard(row.id));
+                                }
+                            }
+                            RecordingTakeState::Saved(_) => {
+                                if ui.button("Open in Editor").clicked() {
+                                    action = Some(TakeAction::Open(row.id));
+                                }
+                                if ui
+                                    .button("Remove from takes")
+                                    .on_hover_text(
+                                        "Only hides it here; the file and its list row stay",
+                                    )
+                                    .clicked()
+                                {
+                                    action = Some(TakeAction::Forget(row.id));
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+        });
+        match action {
+            Some(TakeAction::Open(id)) => self.open_recording_take_in_editor(id),
+            Some(TakeAction::SaveAs(id)) => self.save_recording_take_as(id),
+            Some(TakeAction::Discard(id)) => self.recording_tab.confirm_discard_take = Some(id),
+            Some(TakeAction::Forget(id)) => self.recording_tab.takes.retain(|t| t.id != id),
+            None => {}
         }
     }
 
     fn ui_recording_waveform(&mut self, ui: &mut Ui) {
-        let overview = self.recording_tab.waveform_overview.clone();
-        let desired = egui::vec2(ui.available_width(), 96.0);
+        let desired = egui::vec2(ui.available_width(), 140.0);
         let (rect, _resp) = ui.allocate_exact_size(desired, egui::Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 4.0, Color32::from_gray(20));
@@ -481,9 +822,10 @@ impl super::super::WavesPreviewer {
         // Zero line
         painter.line_segment(
             [egui::pos2(rect.left(), mid), egui::pos2(rect.right(), mid)],
-            Stroke::new(1.0, Color32::from_gray(70)),
+            Stroke::new(1.0_f32, Color32::from_gray(70)),
         );
 
+        let overview = &self.recording_tab.waveform_overview;
         if overview.is_empty() {
             painter.text(
                 rect.center(),
@@ -495,28 +837,26 @@ impl super::super::WavesPreviewer {
             return;
         }
 
-        let n = overview.len();
+        let sr = self.recording_tab.recording_sample_rate.max(1);
+        let window = crate::app::recording_ops::LIVE_WAVEFORM_WINDOW_SECS;
+        let block_frames = crate::app::recording_ops::live_waveform_block_frames(sr) as u64;
+        let now_secs = self.recording_tab.written_frames as f32 / sr as f32;
+        // Fixed-length window: the take grows in from the left, and once it
+        // is longer than the window it scrolls with "now" at the right edge.
+        let start_secs = (now_secs - window).max(0.0);
         let w = rect.width();
         let h = rect.height();
+        let x_of = |t: f32| rect.left() + (t - start_secs) / window * w;
 
-        // Time grid (labelled vertical gridlines covering the visible window)
-        let block_secs = self.recording_tab.overview_block_secs.max(0.0001);
-        let now_secs = self.recording_tab.elapsed_secs;
-        let start_secs = self.recording_tab.waveform_start_frame as f32
-            / self.recording_tab.recording_sample_rate.max(1) as f32;
-        let span_secs = (now_secs - start_secs)
-            .max(n as f32 * block_secs)
-            .min(40.0 + block_secs);
-        let step = recording_grid_time_step(span_secs);
-        if step > 0.0 && span_secs > 0.0 {
-            let first_tick = (start_secs / step).ceil() * step;
-            let mut t = first_tick;
-            while t <= now_secs + 0.0001 {
-                let frac = ((t - start_secs) / span_secs).clamp(0.0, 1.0);
-                let x = rect.left() + frac * w;
+        // Time grid
+        let step = recording_grid_time_step(window);
+        if step > 0.0 {
+            let mut t = (start_secs / step).ceil() * step;
+            while t <= start_secs + window + 0.0001 {
+                let x = x_of(t);
                 painter.line_segment(
                     [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                    Stroke::new(1.0, Color32::from_gray(50)),
+                    Stroke::new(1.0_f32, Color32::from_gray(45)),
                 );
                 painter.text(
                     egui::pos2(x + 2.0, rect.top() + 2.0),
@@ -529,26 +869,72 @@ impl super::super::WavesPreviewer {
             }
         }
 
-        // Waveform (clipping blocks highlighted in red)
-        for (i, &(mn, mx)) in overview.iter().enumerate() {
-            let x = rect.left() + (i as f32 / n as f32) * w;
-            let y_top = mid - mx.clamp(-1.0, 1.0) * h * 0.5;
-            let y_bot = mid - mn.clamp(-1.0, 1.0) * h * 0.5;
+        // Waveform: one (min, max) per physical pixel column, clipping in red.
+        let ppp = ui.ctx().pixels_per_point();
+        let columns = (w * ppp).round().max(1.0) as usize;
+        let cols = waveform_columns(
+            overview,
+            self.recording_tab.waveform_start_frame,
+            block_frames,
+            sr,
+            start_secs,
+            window,
+            columns,
+        );
+        let col_w = w / columns as f32;
+        for (i, col) in cols.iter().enumerate() {
+            let Some((mn, mx)) = *col else {
+                continue;
+            };
+            let x = rect.left() + (i as f32 + 0.5) * col_w;
+            let mut y_top = mid - mx.clamp(-1.0, 1.0) * h * 0.5;
+            let mut y_bot = mid - mn.clamp(-1.0, 1.0) * h * 0.5;
+            if y_bot - y_top < 1.0 {
+                // Keep near-silence visible as a hairline.
+                let c = (y_top + y_bot) * 0.5;
+                y_top = c - 0.5;
+                y_bot = c + 0.5;
+            }
             let clipping = mn.abs() >= 0.98 || mx.abs() >= 0.98;
             let color = if clipping { REC_RED } else { METER_GREEN };
             painter.line_segment(
                 [egui::pos2(x, y_top), egui::pos2(x, y_bot)],
-                Stroke::new(1.0, color),
+                Stroke::new(col_w.max(1.0 / ppp), color),
             );
         }
 
-        // Current-position indicator (right edge = "now")
+        // Markers dropped on the take being captured.
+        let markers = self
+            .recording_tab
+            .live_markers
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_default();
+        let marker_col = Color32::from_rgb(255, 196, 72);
+        for marker in &markers {
+            let t = marker.sample as f32 / sr as f32;
+            if t < start_secs || t > start_secs + window {
+                continue;
+            }
+            let x = x_of(t);
+            painter.line_segment(
+                [egui::pos2(x, rect.top() + 14.0), egui::pos2(x, rect.bottom())],
+                Stroke::new(1.5_f32, marker_col),
+            );
+            painter.text(
+                egui::pos2(x + 3.0, rect.bottom() - 2.0),
+                egui::Align2::LEFT_BOTTOM,
+                &marker.label,
+                egui::FontId::monospace(10.0),
+                marker_col,
+            );
+        }
+
+        // "Now"
+        let now_x = x_of(now_secs).min(rect.right() - 1.0);
         painter.line_segment(
-            [
-                egui::pos2(rect.right() - 1.0, rect.top()),
-                egui::pos2(rect.right() - 1.0, rect.bottom()),
-            ],
-            Stroke::new(1.5, Color32::from_rgb(230, 230, 120)),
+            [egui::pos2(now_x, rect.top()), egui::pos2(now_x, rect.bottom())],
+            Stroke::new(1.5_f32, Color32::from_rgb(230, 230, 120)),
         );
     }
 }
@@ -571,7 +957,28 @@ fn recording_grid_time_step(span_secs: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_elapsed, meter_frac, recording_grid_time_step};
+    use super::{format_elapsed, meter_frac, recording_grid_time_step, waveform_columns};
+
+    #[test]
+    fn waveform_columns_fold_blocks_per_pixel_and_skip_outside_window() {
+        // 400 blocks/s at 48 kHz, 2 s of blocks starting at t=1 s.
+        let blocks: std::collections::VecDeque<(f32, f32)> =
+            (0..800).map(|i| (-(i as f32) / 800.0, i as f32 / 800.0)).collect();
+        // Window 0..10 s over 100 columns: 10 px/s, 40 blocks per column.
+        let cols = waveform_columns(&blocks, 48_000, 120, 48_000, 0.0, 10.0, 100);
+        assert_eq!(cols.len(), 100);
+        assert!(cols[..10].iter().all(Option::is_none), "nothing before 1 s");
+        assert!(cols[10..30].iter().all(Option::is_some));
+        assert!(cols[30..].iter().all(Option::is_none), "nothing after 3 s");
+        // Column 10 holds blocks 0..40: max of those is 39/800.
+        let (mn, mx) = cols[10].unwrap();
+        assert!((mx - 39.0 / 800.0).abs() < 1e-6);
+        assert!((mn + 39.0 / 800.0).abs() < 1e-6);
+
+        // Scrolled so the window starts mid-take: earlier blocks drop out.
+        let cols = waveform_columns(&blocks, 48_000, 120, 48_000, 2.0, 10.0, 100);
+        assert!(cols[0].is_some() && cols[9].is_some() && cols[10].is_none());
+    }
 
     #[test]
     fn returns_zero_for_non_positive_or_non_finite_span() {

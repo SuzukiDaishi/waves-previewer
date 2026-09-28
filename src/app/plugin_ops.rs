@@ -1446,7 +1446,7 @@ impl crate::app::WavesPreviewer {
                 input_audio_path: input_path_text.clone(),
                 output_audio_path: output_path_text.clone(),
                 sample_rate: out_sr,
-                max_block_size: 1024,
+                max_block_size: crate::plugin::OFFLINE_MAX_BLOCK_SIZE,
                 chain_bypass,
             };
             let mut error: Option<String> = None;
@@ -1492,7 +1492,7 @@ impl crate::app::WavesPreviewer {
                             slots: chain_slots.clone(),
                             sample_rate: out_sr,
                             channels: channels.len().max(1) as u16,
-                            max_block_size: 1024,
+                            max_block_size: crate::plugin::OFFLINE_MAX_BLOCK_SIZE,
                             render_ahead_ms,
                         })
                         .and_then(|_| {

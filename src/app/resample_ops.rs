@@ -32,8 +32,12 @@ impl super::WavesPreviewer {
             return Ok(());
         }
         let target = self.resample_target_sr.max(1);
-        if target < 8000 || target > 384_000 {
-            return Err("Sample rate must be between 8000 and 384000 Hz.".to_string());
+        if !crate::sample_rate::is_supported_target(target) {
+            return Err(format!(
+                "Sample rate must be between {} and {} Hz.",
+                crate::sample_rate::MIN_SAMPLE_RATE,
+                crate::sample_rate::MAX_SAMPLE_RATE
+            ));
         }
         let targets = self.resample_targets.clone();
         if targets.len() >= BULK_RESAMPLE_THRESHOLD {
@@ -44,9 +48,8 @@ impl super::WavesPreviewer {
         }
         let before = self.capture_list_selection_snapshot();
         let before_items = self.capture_list_undo_items_by_paths(&targets);
-        let out_sr = self.audio.shared.out_sample_rate.max(1);
         for p in &targets {
-            let file_sr = self.sample_rate_for_path(p, out_sr);
+            let file_sr = self.sample_rate_for_path(p);
             if target == file_sr {
                 self.sample_rate_override.remove(p);
             } else {
@@ -156,14 +159,13 @@ impl super::WavesPreviewer {
         budget: std::time::Duration,
     ) {
         let total = state.targets.len();
-        let out_sr = self.audio.shared.out_sample_rate.max(1);
         while state.index < total && start.elapsed() < budget {
             let end = (state.index + state.chunk).min(total);
             let slice = &state.targets[state.index..end];
             let before_chunk = self.capture_list_undo_items_by_paths(slice);
             state.before_items.extend(before_chunk);
             for p in slice {
-                let file_sr = self.sample_rate_for_path(p, out_sr);
+                let file_sr = self.sample_rate_for_path(p);
                 if state.target_sr == file_sr {
                     self.sample_rate_override.remove(p);
                 } else {

@@ -1,11 +1,11 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::WavesPreviewer;
 
 impl WavesPreviewer {
     pub(super) fn schedule_search_refresh(&mut self) {
         self.search_dirty = true;
-        self.search_deadline = Some(Instant::now() + Duration::from_millis(300));
+        self.search_deadline = Some(Instant::now() + crate::app::ui_timing::TYPING_DEBOUNCE);
     }
 
     /// Compiled highlight regex for the current search query. Rebuilds only

@@ -1,6 +1,5 @@
 use crate::audio_io;
 use crate::loop_markers;
-use regex::RegexBuilder;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,8 +8,8 @@ use walkdir::WalkDir;
 
 use super::types::{
     ChannelView, ChannelViewMode, EditorDecodeStage, EditorDecodeStrategy, EditorDecodeUiStatus,
-    EditorTab, MediaId, OfflineRenderSpec, ProcessingResult, ProcessingState, ProcessingTarget,
-    RateMode, ScanMessage, ScanRequestKind, SortDir, SortKey,
+    EditorTab, OfflineRenderSpec, ProcessingResult, ProcessingState, ProcessingTarget,
+    RateMode, ScanMessage, ScanRequestKind, SortDir,
 };
 
 const LIST_PREVIEW_PREFIX_SECS: f32 = 0.35;
@@ -90,8 +89,7 @@ impl super::WavesPreviewer {
                 let source_sr = self
                     .audio
                     .streaming_wav_sample_rate()
-                    .or_else(|| self.cached_source_sample_rate_for_path(path))
-                    .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+                    .unwrap_or_else(|| self.resolve_file_sample_rate(path).hz);
                 self.playing_path = Some(path.to_path_buf());
                 self.audio.set_loop_enabled(false);
                 self.cancel_list_preview_job();
@@ -263,17 +261,6 @@ impl super::WavesPreviewer {
         };
     }
 
-    fn cached_source_sample_rate_for_path(&self, path: &Path) -> Option<u32> {
-        self.meta_for_path(path)
-            .map(|meta| meta.sample_rate)
-            .filter(|v| *v > 0)
-            .or_else(|| {
-                self.item_for_path(path)
-                    .map(|item| item.audio_asset.sample_rate)
-                    .filter(|value| *value > 0)
-            })
-    }
-
     pub(super) fn resolved_audio_file_path(&self, path: &Path) -> Option<PathBuf> {
         self.item_for_path(path)
             .and_then(|item| item.audio_asset.backing.file_path().map(Path::to_path_buf))
@@ -357,8 +344,7 @@ impl super::WavesPreviewer {
             let source_sr = self
                 .audio
                 .streaming_wav_sample_rate()
-                .or_else(|| self.cached_source_sample_rate_for_path(&tab_path))
-                .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+                .unwrap_or_else(|| self.resolve_file_sample_rate(&tab_path).hz);
             self.invalidate_processing_for_target(&target, "editor exact stream retained");
             self.playback_mark_source(
                 super::PlaybackSourceKind::EditorTab(tab_path.clone()),
@@ -379,8 +365,7 @@ impl super::WavesPreviewer {
                 let source_sr = self
                     .audio
                     .streaming_wav_sample_rate()
-                    .or_else(|| self.cached_source_sample_rate_for_path(&tab_path))
-                    .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+                    .unwrap_or_else(|| self.resolve_file_sample_rate(&tab_path).hz);
                 self.invalidate_processing_for_target(&target, "editor exact stream activated");
                 self.playback_mark_source(
                     super::PlaybackSourceKind::EditorTab(tab_path.clone()),
@@ -1547,12 +1532,7 @@ impl super::WavesPreviewer {
             };
             (item.display_name.clone(), audio)
         };
-        let virtual_in_sr = self
-            .item_for_path(&path)
-            .and_then(|item| item.virtual_state.as_ref().map(|v| v.sample_rate))
-            .or_else(|| self.meta_for_path(&path).map(|m| m.sample_rate))
-            .filter(|v| *v > 0)
-            .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+        let virtual_in_sr = self.resolve_file_sample_rate(&path).hz;
         let mut editor_channels = (*audio.channels).clone();
         self.apply_sample_rate_preview_for_path(&path, &mut editor_channels, virtual_in_sr);
         let samples_len = editor_channels.get(0).map(|c| c.len()).unwrap_or(0);
@@ -1773,32 +1753,23 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn sort_key_uses_meta(&self) -> bool {
-        self.sort_dir != SortDir::None
-            && matches!(
-                self.sort_key,
-                SortKey::Length
-                    | SortKey::Channels
-                    | SortKey::SampleRate
-                    | SortKey::Bits
-                    | SortKey::BitRate
-                    | SortKey::Level
-                    | SortKey::Lufs
-                    | SortKey::TruePeak
-                    | SortKey::LufsShort
-                    | SortKey::LufsMomentary
-                    | SortKey::SilenceLead
-                    | SortKey::SilenceTail
-                    | SortKey::EdgeZero
-                    | SortKey::OverPeak
-                    | SortKey::BlankPad
-                    | SortKey::Bpm
-                    | SortKey::CreatedAt
-                    | SortKey::ModifiedAt
-            )
+        // Metadata columns were left out here before; their values stream in
+        // like any other metadata, so a sort on one has to follow them too.
+        self.sort_dir != SortDir::None && self.sort_key.depends_on_metadata()
     }
 
     pub(super) fn sort_key_uses_transcript(&self) -> bool {
-        self.sort_dir != SortDir::None && matches!(self.sort_key, SortKey::Transcript)
+        self.sort_dir != SortDir::None && self.sort_key.depends_on_transcript()
+    }
+
+    /// Whether a column filter has to be re-evaluated as metadata arrives.
+    pub(super) fn column_filters_use_meta(&self) -> bool {
+        self.column_filters.iter().any(|f| f.key.depends_on_metadata())
+    }
+
+    /// Whether a column filter has to be re-evaluated as transcripts arrive.
+    pub(super) fn column_filters_use_transcript(&self) -> bool {
+        self.column_filters.iter().any(|f| f.key.depends_on_transcript())
     }
 
     fn reset_tab_defaults(tab: &mut EditorTab) {
@@ -2007,28 +1978,28 @@ impl super::WavesPreviewer {
         tab.loop_markers_dirty = false;
     }
 
-    pub(super) fn sample_rate_for_path(&mut self, path: &Path, fallback: u32) -> u32 {
-        if let Some(sr) = self
-            .meta_for_path(path)
-            .map(|m| m.sample_rate)
-            .filter(|&sr| sr > 0)
-        {
-            self.sample_rate_probe_cache.insert(path.to_path_buf(), sr);
-            return sr;
-        }
-        if let Some(sr) = self.sample_rate_probe_cache.get(path).copied() {
-            return sr;
+    /// The file's own rate (`file_sr`), reading its header when nothing has
+    /// reported it yet. Only a rate the header actually gave is cached: caching
+    /// the stand-in would turn "unknown" into a rate every later caller trusts.
+    pub(super) fn sample_rate_for_path(&mut self, path: &Path) -> u32 {
+        let resolved = self.resolve_file_sample_rate(path);
+        if !resolved.is_assumed() || self.is_virtual_path(path) {
+            return resolved.hz;
         }
         let probe_started = std::time::Instant::now();
-        let sr = audio_io::read_audio_info(path)
+        let probed = audio_io::read_audio_info(path)
             .ok()
             .map(|i| i.sample_rate)
-            .filter(|v| *v > 0)
-            .unwrap_or(fallback.max(1));
+            .filter(|v| *v > 0);
         let elapsed_ms = probe_started.elapsed().as_secs_f32() * 1000.0;
         self.debug_push_metadata_probe_sample(elapsed_ms);
-        self.sample_rate_probe_cache.insert(path.to_path_buf(), sr);
-        sr
+        match probed {
+            Some(sr) => {
+                self.sample_rate_probe_cache.insert(path.to_path_buf(), sr);
+                sr
+            }
+            None => resolved.hz,
+        }
     }
 
     pub(super) fn load_markers_for_tab(
@@ -2284,13 +2255,7 @@ impl super::WavesPreviewer {
                 self.apply_effective_volume();
                 return;
             }
-            let virtual_in_sr = item_snapshot
-                .virtual_state
-                .as_ref()
-                .map(|v| v.sample_rate)
-                .or_else(|| item_snapshot.meta.as_ref().map(|m| m.sample_rate))
-                .filter(|v| *v > 0)
-                .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+            let virtual_in_sr = self.resolve_file_sample_rate(&p_owned).hz;
             let mut render_spec = self.offline_render_spec_for_path(&p_owned);
             render_spec.master_gain_db = 0.0;
             render_spec.file_gain_db = 0.0;
@@ -2570,6 +2535,35 @@ impl super::WavesPreviewer {
         true
     }
 
+    /// After rows were removed: the selection goes back onto the files that
+    /// are still listed, and if the primary row itself was removed, its
+    /// neighbour above takes over so the keyboard focus has somewhere to be.
+    fn restore_selection_after_removal(
+        &mut self,
+        snap: &super::types::SelectionIds,
+        selected_row_before: Option<usize>,
+    ) {
+        self.restore_selection_ids(snap);
+        let primary_removed = snap.primary.is_some()
+            && !snap
+                .primary
+                .is_some_and(|id| self.files.iter().any(|&row_id| row_id == id));
+        if self.files.is_empty() {
+            self.selected = None;
+            self.selected_multi.clear();
+            self.select_anchor = None;
+        } else if self.selected.is_none() && primary_removed {
+            let target = selected_row_before
+                .unwrap_or(0)
+                .saturating_sub(1)
+                .min(self.files.len() - 1);
+            self.selected = Some(target);
+            self.selected_multi.clear();
+            self.selected_multi.insert(target);
+            self.select_anchor = Some(target);
+        }
+    }
+
     pub(super) fn remove_missing_path(&mut self, path: &Path) {
         if self.is_virtual_path(path) {
             return;
@@ -2580,20 +2574,8 @@ impl super::WavesPreviewer {
         let Some(id) = self.path_index.get(path) else {
             return;
         };
-        let selected_path = self.selected_path_buf();
+        let selection = self.capture_selection_ids();
         let selected_row_before = self.selected;
-        let selected_removed = selected_path
-            .as_ref()
-            .map(|p| p.as_path() == path)
-            .unwrap_or(false);
-        let selected_paths: Vec<PathBuf> = self
-            .selected_multi
-            .iter()
-            .filter_map(|&row| self.path_for_row(row).cloned())
-            .collect();
-        let anchor_path = self
-            .select_anchor
-            .and_then(|row| self.path_for_row(row).cloned());
         let path_buf = path.to_path_buf();
         let was_playing = self.playing_path.as_ref() == Some(&path_buf);
 
@@ -2632,34 +2614,7 @@ impl super::WavesPreviewer {
             self.apply_external_mapping();
         }
         self.refresh_filter_then_sort();
-        self.selected = selected_path.and_then(|p| self.row_for_path(&p));
-        self.selected_multi.clear();
-        for p in selected_paths {
-            if let Some(row) = self.row_for_path(&p) {
-                self.selected_multi.insert(row);
-            }
-        }
-        if let Some(sel) = self.selected {
-            if self.selected_multi.is_empty() {
-                self.selected_multi.insert(sel);
-            }
-        }
-        self.select_anchor = anchor_path.and_then(|p| self.row_for_path(&p));
-        if self.files.is_empty() {
-            self.selected = None;
-            self.selected_multi.clear();
-            self.select_anchor = None;
-        } else if self.selected.is_none() && selected_removed {
-            let len = self.files.len();
-            let target = selected_row_before
-                .unwrap_or(0)
-                .saturating_sub(1)
-                .min(len.saturating_sub(1));
-            self.selected = Some(target);
-            self.selected_multi.clear();
-            self.selected_multi.insert(target);
-            self.select_anchor = Some(target);
-        }
+        self.restore_selection_after_removal(&selection, selected_row_before);
     }
 
     pub(super) fn remove_paths_from_list(&mut self, paths: &[PathBuf]) {
@@ -2670,22 +2625,10 @@ impl super::WavesPreviewer {
         if unique.is_empty() {
             return;
         }
-        let selected_path = self.selected_path_buf();
+        let selection = self.capture_selection_ids();
         let selected_row_before = self.selected;
-        let selected_paths: Vec<PathBuf> = self
-            .selected_multi
-            .iter()
-            .filter_map(|&row| self.path_for_row(row).cloned())
-            .collect();
-        let anchor_path = self
-            .select_anchor
-            .and_then(|row| self.path_for_row(row).cloned());
         let was_playing = self
             .playing_path
-            .as_ref()
-            .map(|p| unique.contains(p))
-            .unwrap_or(false);
-        let selected_removed = selected_path
             .as_ref()
             .map(|p| unique.contains(p))
             .unwrap_or(false);
@@ -2730,34 +2673,7 @@ impl super::WavesPreviewer {
             self.apply_external_mapping();
         }
         self.refresh_filter_then_sort();
-        self.selected = selected_path.and_then(|p| self.row_for_path(&p));
-        self.selected_multi.clear();
-        for p in selected_paths {
-            if let Some(row) = self.row_for_path(&p) {
-                self.selected_multi.insert(row);
-            }
-        }
-        if let Some(sel) = self.selected {
-            if self.selected_multi.is_empty() {
-                self.selected_multi.insert(sel);
-            }
-        }
-        self.select_anchor = anchor_path.and_then(|p| self.row_for_path(&p));
-        if self.files.is_empty() {
-            self.selected = None;
-            self.selected_multi.clear();
-            self.select_anchor = None;
-        } else if self.selected.is_none() && selected_removed {
-            let len = self.files.len();
-            let target = selected_row_before
-                .unwrap_or(0)
-                .saturating_sub(1)
-                .min(len.saturating_sub(1));
-            self.selected = Some(target);
-            self.selected_multi.clear();
-            self.selected_multi.insert(target);
-            self.select_anchor = Some(target);
-        }
+        self.restore_selection_after_removal(&selection, selected_row_before);
     }
     pub fn rescan(&mut self) {
         self.note_files_membership_changed();
@@ -2783,91 +2699,6 @@ impl super::WavesPreviewer {
         } else {
             self.refresh_filter_then_sort();
         }
-    }
-
-    pub(super) fn apply_filter_from_search(&mut self) {
-        // Preserve selection index if possible
-        let selected_idx = self.selected.and_then(|i| self.files.get(i).copied());
-        let query = self.search_query.trim().to_string();
-        // Search spans display name, folder, note, transcript, meta summary,
-        // and external fields.
-        if query.is_empty() {
-            self.files = self.items.iter().map(|item| item.id).collect();
-        } else {
-            // Invalid regexes fall back to case-insensitive substring matching.
-            let regex = if self.search_use_regex {
-                RegexBuilder::new(&query)
-                    .case_insensitive(true)
-                    .build()
-                    .ok()
-            } else {
-                None
-            };
-            let q = query.to_lowercase();
-            self.files = self
-                .items
-                .iter()
-                .filter(|item| self.item_matches_filter(item, &q, regex.as_ref()))
-                .map(|item| item.id)
-                .collect();
-        }
-        self.original_files = self.files.clone();
-        self.note_files_membership_changed();
-        // restore selected index
-        self.selected = selected_idx.and_then(|idx| self.files.iter().position(|&x| x == idx));
-        self.search_dirty = false;
-        self.search_deadline = None;
-    }
-
-    pub(super) fn apply_sort(&mut self) {
-        if self.files.is_empty() {
-            return;
-        }
-        let sort_started = std::time::Instant::now();
-        self.sort_loading_started_at = Some(sort_started);
-        // Keep selection stable while reordering the visible file list.
-        let selected_idx = self.selected.and_then(|i| self.files.get(i).copied());
-        let key = self.sort_key;
-        let dir = self.sort_dir;
-        if dir == SortDir::None {
-            self.files = self.original_files.clone();
-        } else {
-            use super::sort_filter_jobs::OwnedKey;
-            // Decorate-sort-undecorate with owned keys, shared with the async
-            // sort job. The owned clones only cost on this small-list path;
-            // large lists go through request_sort() and sort off-thread.
-            let mut decorated: Vec<(OwnedKey, String, MediaId)> = self
-                .files
-                .iter()
-                .map(|&id| match self.item_for_id(id) {
-                    Some(item) => (
-                        self.owned_sort_key(item, key),
-                        item.display_name.clone(),
-                        id,
-                    ),
-                    None => (OwnedKey::Missing, String::new(), id),
-                })
-                .collect();
-            decorated.sort_unstable_by(|a, b| Self::compare_decorated_rows(a, b, dir));
-            self.files = decorated.into_iter().map(|e| e.2).collect();
-        }
-
-        // restore selection to the same path if possible
-        self.selected = selected_idx.and_then(|idx| self.files.iter().position(|&x| x == idx));
-        let elapsed = sort_started.elapsed();
-        self.sort_loading_last_ms = elapsed.as_secs_f32() * 1000.0;
-        // Any sort counts as "just sorted" for the streaming-metadata resort
-        // debounce; without this the first metadata batch after a header
-        // click re-sorted the whole list a second time in the same frame.
-        self.meta_sort_last_applied = Some(std::time::Instant::now());
-        let hold_ms = if elapsed >= std::time::Duration::from_millis(120) {
-            900
-        } else {
-            500
-        };
-        self.sort_loading_hold_until =
-            Some(std::time::Instant::now() + std::time::Duration::from_millis(hold_ms));
-        self.sort_loading_started_at = None;
     }
 
     pub(super) fn current_path_for_rebuild(&self) -> Option<PathBuf> {
@@ -2979,9 +2810,7 @@ impl super::WavesPreviewer {
                     return;
                 };
                 let channels = (*audio.channels).clone();
-                let buffer_sr = self
-                    .effective_sample_rate_for_path(&p)
-                    .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+                let buffer_sr = self.resolve_effective_sample_rate(&p).hz;
                 let source_time_sec = self.playback_current_source_time_sec();
                 if self.mode_requires_offline_processing() {
                     self.audio.stop();
@@ -3179,6 +3008,7 @@ impl super::WavesPreviewer {
             };
 
             let _ = send_progress(&tx, visited, matched, &mut io_elapsed, &mut io_samples);
+            let mut skipped = super::types::ScanSkipped::default();
             match request {
                 ScanRequestKind::Folder { root } => {
                     let mut walker = WalkDir::new(root)
@@ -3257,12 +3087,16 @@ impl super::WavesPreviewer {
                             {
                                 return;
                             }
+                            let supported = path
+                                .extension()
+                                .and_then(|s| s.to_str())
+                                .map(audio_io::is_supported_extension)
+                                .unwrap_or(false);
+                            if !supported {
+                                skipped.unsupported += 1;
+                                continue;
+                            }
                             if (!skip_dotfiles || !Self::is_dotfile_path(&path))
-                                && path
-                                    .extension()
-                                    .and_then(|s| s.to_str())
-                                    .map(audio_io::is_supported_extension)
-                                    .unwrap_or(false)
                                 && push_file(&tx, path, &mut seen, &mut matched, &mut batch)
                                     .is_err()
                             {
@@ -3274,6 +3108,7 @@ impl super::WavesPreviewer {
                             io_elapsed = io_elapsed.saturating_add(io_started.elapsed());
                             io_samples = io_samples.saturating_add(1);
                             if !is_dir {
+                                skipped.missing += 1;
                                 continue;
                             }
                             let mut walker = WalkDir::new(path)
@@ -3339,7 +3174,7 @@ impl super::WavesPreviewer {
                 return;
             }
             let _ = send_progress(&tx, visited, matched, &mut io_elapsed, &mut io_samples);
-            let _ = tx.send(ScanMessage::Done);
+            let _ = tx.send(ScanMessage::Done(skipped));
         });
         rx
     }

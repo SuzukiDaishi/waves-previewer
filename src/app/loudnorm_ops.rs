@@ -1,13 +1,17 @@
 use std::path::PathBuf;
 
+/// How long edits to a file must settle before its LUFS is recomputed: a
+/// gain drag produces a change per frame, and each recompute decodes the file.
+const LUFS_RECALC_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
+
 impl super::WavesPreviewer {
     pub(super) fn schedule_lufs_for_path(&mut self, path: PathBuf) {
-        use std::time::{Duration, Instant};
+        use std::time::Instant;
         if self.is_virtual_path(&path) {
             return;
         }
         // Debounce repeated edits so we compute LUFS only after changes settle.
-        let dl = Instant::now() + Duration::from_millis(400);
+        let dl = Instant::now() + LUFS_RECALC_DEBOUNCE;
         self.lufs_recalc_deadline.insert(path, dl);
     }
 

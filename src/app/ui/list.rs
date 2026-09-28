@@ -207,6 +207,11 @@ impl crate::app::WavesPreviewer {
                                     },
                                 );
                             }
+                        } else {
+                            // Re-asked while visible, as file rows are, so a
+                            // task lost to a metadata pool reset is not lost
+                            // for good.
+                            self.queue_virtual_file_meta_for_path(&path_owned, near_selected);
                         }
                         // Borrow the item once and extract only what the row
                         // needs. Cloning the whole MediaItem (strings, external
@@ -828,19 +833,24 @@ impl crate::app::WavesPreviewer {
                                         ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                     }
                                     ui.visuals_mut().override_text_color = row_fg;
-                                    let sr = self.effective_sample_rate_for_path(&path_owned);
-                                    let resp = ui
-                                        .add(
-                                            egui::Label::new(
-                                                RichText::new(
-                                                    sr.map(|v| format!("{v}"))
-                                                        .unwrap_or_else(|| "-".into()),
-                                                )
-                                                .monospace(),
-                                            )
-                                            .sense(Sense::click()),
-                                        )
+                                    // "-" while the header has not been read,
+                                    // "?" once it has and still gave no rate.
+                                    let rate = self.resolve_effective_sample_rate(&path_owned);
+                                    let header_read = self.meta_for_path(&path_owned).is_some();
+                                    let shown = (!rate.is_assumed() || header_read).then_some(rate);
+                                    let mut text = RichText::new(crate::sample_rate::rate_label(shown))
+                                        .monospace();
+                                    if rate.is_assumed() && header_read {
+                                        text = text.color(ui.visuals().warn_fg_color);
+                                    }
+                                    let mut resp = ui
+                                        .add(egui::Label::new(text).sense(Sense::click()))
                                         .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    if rate.is_assumed() && header_read {
+                                        resp = resp.on_hover_text(
+                                            crate::sample_rate::assumed_rate_hint(rate),
+                                        );
+                                    }
                                     let resp = self.attach_row_context_menu(resp, row_idx, ctx);
                                     if resp.clicked_by(egui::PointerButton::Primary) {
                                         clicked_to_load = true;

@@ -352,6 +352,16 @@ pub struct ProjectEdit {
     pub music_analysis: Option<ProjectMusicAnalysisDraft>,
 }
 
+/// A column filter as a session stores it: the column by name (built-in,
+/// `external:<column>` or a metadata key -- never an index, which shifts as
+/// columns come and go) and the rule exactly as the user typed it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectColumnFilter {
+    pub column: String,
+    pub kind: super::list_filter::ColumnValueKind,
+    pub rule: super::list_filter::FilterRule,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectApp {
     pub theme: String,
@@ -359,6 +369,10 @@ pub struct ProjectApp {
     pub sort_dir: String,
     pub search_query: String,
     pub search_regex: bool,
+    /// Column filters set from the list headers, beside the search they
+    /// apply together with. Absent in sessions written before they existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub column_filters: Vec<ProjectColumnFilter>,
     #[serde(default)]
     pub selected_path: Option<String>,
     pub list_columns: ProjectListColumns,
@@ -781,6 +795,41 @@ pub struct ProjectToolState {
     pub compressor_release_ms: f32,
     #[serde(default)]
     pub compressor_makeup_db: f32,
+}
+
+/// The session form of an editor tab's tool settings. One conversion, so
+/// saving a tab, saving a cached edit and the CLI's fresh tab cannot drift.
+impl From<&super::types::ToolState> for ProjectToolState {
+    fn from(t: &super::types::ToolState) -> Self {
+        Self {
+            fade_in_ms: t.fade_in_ms,
+            fade_out_ms: t.fade_out_ms,
+            gain_db: t.gain_db,
+            normalize_target_db: t.normalize_target_db,
+            loudness_target_lufs: t.loudness_target_lufs,
+            pitch_semitones: t.pitch_semitones,
+            stretch_rate: t.stretch_rate,
+            speed_rate: t.speed_rate,
+            warp_time_radius_ms: t.warp_time_radius_ms,
+            warp_freq_radius_hz: t.warp_freq_radius_hz,
+            loop_repeat: t.loop_repeat,
+            noise_gate_threshold_db: t.noise_gate_threshold_db,
+            noise_gate_attack_ms: t.noise_gate_attack_ms,
+            noise_gate_release_ms: t.noise_gate_release_ms,
+            eq_low_shelf_freq_hz: t.eq_low_shelf_freq_hz,
+            eq_low_shelf_gain_db: t.eq_low_shelf_gain_db,
+            eq_mid_freq_hz: t.eq_mid_freq_hz,
+            eq_mid_gain_db: t.eq_mid_gain_db,
+            eq_mid_q: t.eq_mid_q,
+            eq_high_shelf_freq_hz: t.eq_high_shelf_freq_hz,
+            eq_high_shelf_gain_db: t.eq_high_shelf_gain_db,
+            compressor_threshold_db: t.compressor_threshold_db,
+            compressor_ratio: t.compressor_ratio,
+            compressor_attack_ms: t.compressor_attack_ms,
+            compressor_release_ms: t.compressor_release_ms,
+            compressor_makeup_db: t.compressor_makeup_db,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1366,68 +1415,70 @@ fn project_assets_dir(path: &Path) -> PathBuf {
     project_sidecar_dir(path).join("assets")
 }
 
+// Fields a session written before they existed are read back with the
+// same defaults a fresh editor tab gets.
 fn default_loop_repeat() -> u32 {
-    2
+    super::types::ToolState::default_values().loop_repeat
 }
 
 fn default_speed_rate() -> f32 {
-    1.0
+    super::types::ToolState::default_values().speed_rate
 }
 
 fn default_warp_time_radius_ms() -> f32 {
-    150.0
+    super::types::ToolState::default_values().warp_time_radius_ms
 }
 
 fn default_warp_freq_radius_hz() -> f32 {
-    300.0
+    super::types::ToolState::default_values().warp_freq_radius_hz
 }
 
 fn default_loudness_target_lufs() -> f32 {
-    -14.0
+    super::types::ToolState::default_values().loudness_target_lufs
 }
 
 fn default_noise_gate_threshold_db() -> f32 {
-    -40.0
+    super::types::ToolState::default_values().noise_gate_threshold_db
 }
 
 fn default_noise_gate_attack_ms() -> f32 {
-    2.0
+    super::types::ToolState::default_values().noise_gate_attack_ms
 }
 
 fn default_noise_gate_release_ms() -> f32 {
-    100.0
+    super::types::ToolState::default_values().noise_gate_release_ms
 }
 
 fn default_eq_low_shelf_freq_hz() -> f32 {
-    120.0
+    super::types::ToolState::default_values().eq_low_shelf_freq_hz
 }
 
 fn default_eq_mid_freq_hz() -> f32 {
-    1000.0
+    super::types::ToolState::default_values().eq_mid_freq_hz
 }
 
 fn default_eq_mid_q() -> f32 {
-    1.0
+    super::types::ToolState::default_values().eq_mid_q
 }
 
 fn default_eq_high_shelf_freq_hz() -> f32 {
-    8000.0
+    super::types::ToolState::default_values().eq_high_shelf_freq_hz
 }
 
 fn default_compressor_threshold_db() -> f32 {
-    -18.0
+    super::types::ToolState::default_values().compressor_threshold_db
 }
 
 fn default_compressor_ratio() -> f32 {
-    3.0
+    super::types::ToolState::default_values().compressor_ratio
 }
 
 fn default_compressor_attack_ms() -> f32 {
-    10.0
+    super::types::ToolState::default_values().compressor_attack_ms
 }
 
 fn default_compressor_release_ms() -> f32 {
-    150.0
+    super::types::ToolState::default_values().compressor_release_ms
 }
 
 fn default_bpm_value() -> f32 {
@@ -1624,34 +1675,7 @@ pub fn project_tab_from_tab(
             selected: tab.channel_view.selected.clone(),
         },
         active_tool: format!("{:?}", tab.active_tool),
-        tool_state: ProjectToolState {
-            fade_in_ms: tab.tool_state.fade_in_ms,
-            fade_out_ms: tab.tool_state.fade_out_ms,
-            gain_db: tab.tool_state.gain_db,
-            normalize_target_db: tab.tool_state.normalize_target_db,
-            loudness_target_lufs: tab.tool_state.loudness_target_lufs,
-            pitch_semitones: tab.tool_state.pitch_semitones,
-            stretch_rate: tab.tool_state.stretch_rate,
-            speed_rate: tab.tool_state.speed_rate,
-            warp_time_radius_ms: tab.tool_state.warp_time_radius_ms,
-            warp_freq_radius_hz: tab.tool_state.warp_freq_radius_hz,
-            loop_repeat: tab.tool_state.loop_repeat,
-            noise_gate_threshold_db: tab.tool_state.noise_gate_threshold_db,
-            noise_gate_attack_ms: tab.tool_state.noise_gate_attack_ms,
-            noise_gate_release_ms: tab.tool_state.noise_gate_release_ms,
-            eq_low_shelf_freq_hz: tab.tool_state.eq_low_shelf_freq_hz,
-            eq_low_shelf_gain_db: tab.tool_state.eq_low_shelf_gain_db,
-            eq_mid_freq_hz: tab.tool_state.eq_mid_freq_hz,
-            eq_mid_gain_db: tab.tool_state.eq_mid_gain_db,
-            eq_mid_q: tab.tool_state.eq_mid_q,
-            eq_high_shelf_freq_hz: tab.tool_state.eq_high_shelf_freq_hz,
-            eq_high_shelf_gain_db: tab.tool_state.eq_high_shelf_gain_db,
-            compressor_threshold_db: tab.tool_state.compressor_threshold_db,
-            compressor_ratio: tab.tool_state.compressor_ratio,
-            compressor_attack_ms: tab.tool_state.compressor_attack_ms,
-            compressor_release_ms: tab.tool_state.compressor_release_ms,
-            compressor_makeup_db: tab.tool_state.compressor_makeup_db,
-        },
+        tool_state: ProjectToolState::from(&tab.tool_state),
         bpm_enabled: tab.bpm_enabled,
         bpm_value: tab.bpm_value,
         bpm_user_set: tab.bpm_user_set,
@@ -1924,12 +1948,12 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         warp_time_radius_ms: if t.warp_time_radius_ms > 0.0 {
             t.warp_time_radius_ms
         } else {
-            150.0
+            ToolState::default_values().warp_time_radius_ms
         },
         warp_freq_radius_hz: if t.warp_freq_radius_hz > 0.0 {
             t.warp_freq_radius_hz
         } else {
-            300.0
+            ToolState::default_values().warp_freq_radius_hz
         },
         // Brush/de-click params are session-transient; projects load defaults.
         brush_cut_db: 24.0,

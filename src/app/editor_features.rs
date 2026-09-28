@@ -299,7 +299,7 @@ impl super::WavesPreviewer {
                         (shared.load(std::sync::atomic::Ordering::Relaxed) as usize).min(100);
                 }
             }
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(crate::app::ui_timing::PROGRESS_REFRESH);
         }
         // Applying one result rebuilds a viewport cache, so a burst of
         // finished analyses must not all land on the same frame.

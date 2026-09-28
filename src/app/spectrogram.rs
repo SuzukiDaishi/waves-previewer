@@ -142,7 +142,7 @@ impl super::WavesPreviewer {
                         spec.bins = tile.bins;
                         spec.frame_step = tile.frame_step;
                         spec.sample_rate = tile.sample_rate;
-                        spec.values_db = vec![-120.0; tile.frames.saturating_mul(tile.bins)];
+                        spec.values_db = vec![crate::levels::NO_SIGNAL_DB; tile.frames.saturating_mul(tile.bins)];
                         spec.values_max_db = f32::MIN;
                         size_changed = true;
                     }

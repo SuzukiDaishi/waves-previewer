@@ -1,6 +1,5 @@
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -152,7 +151,7 @@ impl CliWorkspace {
             if started.elapsed() > CLI_APPLY_TIMEOUT {
                 bail!("editor apply timed out");
             }
-            thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
         }
         Ok(())
     }
@@ -171,7 +170,7 @@ impl CliWorkspace {
             if started.elapsed() > CLI_JOB_TIMEOUT {
                 bail!("external load timed out");
             }
-            thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
         }
     }
 
@@ -184,7 +183,7 @@ impl CliWorkspace {
             if started.elapsed() > CLI_JOB_TIMEOUT {
                 bail!("transcript model download timed out");
             }
-            thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
         }
         Ok(())
     }
@@ -197,7 +196,7 @@ impl CliWorkspace {
             if started.elapsed() > CLI_JOB_TIMEOUT {
                 bail!("transcript generate timed out");
             }
-            thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
         }
         Ok(())
     }
@@ -211,7 +210,7 @@ impl CliWorkspace {
             if started.elapsed() > CLI_JOB_TIMEOUT {
                 bail!("music model download timed out");
             }
-            thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
         }
         Ok(())
     }
@@ -224,7 +223,7 @@ impl CliWorkspace {
             if started.elapsed() > CLI_JOB_TIMEOUT {
                 bail!("music analysis timed out");
             }
-            thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
         }
         Ok(())
     }
@@ -237,7 +236,7 @@ impl CliWorkspace {
             if started.elapsed() > CLI_JOB_TIMEOUT {
                 bail!("plugin scan timed out");
             }
-            thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
         }
         Ok(())
     }
@@ -251,7 +250,7 @@ impl CliWorkspace {
             if started.elapsed() > CLI_JOB_TIMEOUT {
                 bail!("plugin probe timed out");
             }
-            thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
         }
         Ok(())
     }
@@ -264,7 +263,7 @@ impl CliWorkspace {
             if started.elapsed() > CLI_JOB_TIMEOUT {
                 bail!("plugin processing timed out");
             }
-            thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
         }
         Ok(())
     }
@@ -605,7 +604,7 @@ impl CliWorkspace {
             if started.elapsed() > CLI_DECODE_TIMEOUT {
                 bail!("editor decode timed out: {}", target.display());
             }
-            thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(crate::app::cli_ops::CLI_JOB_POLL);
         }
     }
 

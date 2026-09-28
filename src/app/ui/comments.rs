@@ -1264,7 +1264,7 @@ fn comment_detach_button(
     let icon_top = rect.center().y - icon * 0.5;
     let back = egui::Rect::from_min_size(egui::pos2(icon_left + step, icon_top), body);
     let front = egui::Rect::from_min_size(egui::pos2(icon_left, icon_top + step), body);
-    let outline = egui::Stroke::new(1.0, visuals.fg_stroke.color);
+    let outline = egui::Stroke::new(1.0_f32, visuals.fg_stroke.color);
     ui.painter()
         .rect_stroke(back, 1.0, outline, egui::StrokeKind::Inside);
     // The front square is filled with the button's own face before it is

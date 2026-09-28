@@ -252,7 +252,7 @@ impl crate::app::WavesPreviewer {
                                 ui.painter().rect_stroke(
                                     zone.response.rect,
                                     6.0,
-                                    egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                                    egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill),
                                     egui::StrokeKind::Inside,
                                 );
                             }

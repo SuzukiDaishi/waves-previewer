@@ -1314,7 +1314,7 @@ fn draw_metadata_surface<R>(
 ) -> egui::InnerResponse<R> {
     let response = egui::Frame::NONE
         .fill(metadata_surface_fill())
-        .stroke(Stroke::new(1.0, metadata_surface_stroke()))
+        .stroke(Stroke::new(1.0_f32, metadata_surface_stroke()))
         .corner_radius(6.0)
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
@@ -1465,7 +1465,7 @@ fn draw_hex_grid_header_at(
                     rect.bottom() - 2.0,
                 ),
             ],
-            Stroke::new(1.0, metadata_surface_stroke()),
+            Stroke::new(1.0_f32, metadata_surface_stroke()),
         );
         painter.text(
             egui::pos2(content_left + metrics.waveform_x, rect.center().y),
@@ -1484,7 +1484,7 @@ fn draw_hex_grid_header_at(
             egui::pos2(rect.left(), rect.bottom()),
             egui::pos2(rect.right(), rect.bottom()),
         ],
-        Stroke::new(1.0, metadata_surface_stroke()),
+        Stroke::new(1.0_f32, metadata_surface_stroke()),
     );
 }
 
@@ -1501,7 +1501,7 @@ fn draw_fixed_hex_waveform_header(
     painter.rect_filled(rect, 0.0, Color32::from_rgb(18, 31, 34));
     painter.line_segment(
         [rect.left_top(), rect.left_bottom()],
-        Stroke::new(1.0, metadata_surface_stroke()),
+        Stroke::new(1.0_f32, metadata_surface_stroke()),
     );
     painter.text(
         egui::pos2(rect.left() + 10.0, rect.center().y),
@@ -1512,7 +1512,7 @@ fn draw_fixed_hex_waveform_header(
     );
     painter.line_segment(
         [rect.left_bottom(), rect.right_bottom()],
-        Stroke::new(1.0, metadata_surface_stroke()),
+        Stroke::new(1.0_f32, metadata_surface_stroke()),
     );
 }
 
@@ -1627,7 +1627,7 @@ fn draw_hex_grid_row(
             egui::pos2(separator_x, rect.top() + 2.0),
             egui::pos2(separator_x, rect.bottom() - 2.0),
         ],
-        Stroke::new(1.0, metadata_surface_stroke()),
+        Stroke::new(1.0_f32, metadata_surface_stroke()),
     );
     if metrics.waveform_width > 0.0 {
         let waveform_separator_x = rect.left() + metrics.waveform_x - metrics.char_width * 1.5;
@@ -1636,7 +1636,7 @@ fn draw_hex_grid_row(
                 egui::pos2(waveform_separator_x, rect.top() + 2.0),
                 egui::pos2(waveform_separator_x, rect.bottom() - 2.0),
             ],
-            Stroke::new(1.0, metadata_surface_stroke()),
+            Stroke::new(1.0_f32, metadata_surface_stroke()),
         );
     }
     if live {
@@ -1860,14 +1860,14 @@ fn draw_hex_vertical_waveform(
     painter.rect_filled(rail_rect, 0.0, Color32::from_rgb(11, 20, 23));
     painter.line_segment(
         [rail_rect.left_top(), rail_rect.left_bottom()],
-        Stroke::new(1.0, metadata_surface_stroke()),
+        Stroke::new(1.0_f32, metadata_surface_stroke()),
     );
     painter.line_segment(
         [
             egui::pos2(rail_rect.center().x, rail_rect.top()),
             egui::pos2(rail_rect.center().x, rail_rect.bottom()),
         ],
-        Stroke::new(1.0, Color32::from_rgb(35, 71, 68)),
+        Stroke::new(1.0_f32, Color32::from_rgb(35, 71, 68)),
     );
 
     let half_width = rail_rect.width() * 0.46;
@@ -1890,16 +1890,16 @@ fn draw_hex_vertical_waveform(
             ));
             painter.line_segment(
                 [previous_left, left],
-                Stroke::new(1.2, Color32::from_rgb(69, 209, 176)),
+                Stroke::new(1.2_f32, Color32::from_rgb(69, 209, 176)),
             );
             painter.line_segment(
                 [previous_right, right],
-                Stroke::new(1.2, Color32::from_rgb(69, 209, 176)),
+                Stroke::new(1.2_f32, Color32::from_rgb(69, 209, 176)),
             );
         } else {
             painter.line_segment(
                 [left, right],
-                Stroke::new(1.2, Color32::from_rgb(69, 209, 176)),
+                Stroke::new(1.2_f32, Color32::from_rgb(69, 209, 176)),
             );
         }
         previous = Some((left, right));
@@ -1921,7 +1921,7 @@ fn draw_hex_vertical_waveform(
                 egui::pos2(rail_rect.left(), y),
                 egui::pos2(rail_rect.right(), y),
             ],
-            Stroke::new(1.8, Color32::WHITE),
+            Stroke::new(1.8_f32, Color32::WHITE),
         );
         painter.circle_filled(egui::pos2(rail_rect.right() - 6.0, y), 3.5, Color32::WHITE);
     }
@@ -1972,14 +1972,14 @@ fn draw_inline_waveform(ui: &mut egui::Ui, waveform: &[(f32, f32)], play_fractio
         let y2 = rect.center().y - min.clamp(-1.0, 1.0) * rect.height() * 0.45;
         ui.painter().line_segment(
             [egui::pos2(px, y1), egui::pos2(px, y2)],
-            Stroke::new(1.0, Color32::from_rgb(80, 195, 165)),
+            Stroke::new(1.0_f32, Color32::from_rgb(80, 195, 165)),
         );
     }
     if let Some(fraction) = play_fraction {
         let x = rect.left() + fraction.clamp(0.0, 1.0) * rect.width();
         ui.painter().line_segment(
             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            Stroke::new(1.5, Color32::WHITE),
+            Stroke::new(1.5_f32, Color32::WHITE),
         );
     }
 }

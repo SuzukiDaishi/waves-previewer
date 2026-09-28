@@ -5,6 +5,60 @@ use super::types::{ClipboardItem, ClipboardPayload, MediaSource, VirtualSourceRe
 
 const LIST_CLIPBOARD_MARKER: &str = "neowaves://clipboard";
 
+// Tests stand in for the OS clipboard here: a file list as Explorer leaves
+// it, with no text. Per thread, so parallel tests cannot see each other's.
+#[cfg(feature = "kittest")]
+thread_local! {
+    static TEST_CLIPBOARD_FILES: std::cell::RefCell<Option<Vec<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "kittest")]
+thread_local! {
+    /// The stand-in's change counter, which moves on every write the way the
+    /// OS clipboard's does.
+    static TEST_CLIPBOARD_SEQ: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+}
+
+#[cfg(feature = "kittest")]
+pub(crate) fn set_test_clipboard_files(files: Option<Vec<PathBuf>>) {
+    TEST_CLIPBOARD_FILES.with(|cell| *cell.borrow_mut() = files);
+    TEST_CLIPBOARD_SEQ.with(|c| c.set(c.get().wrapping_add(1).max(1)));
+}
+
+#[cfg(feature = "kittest")]
+thread_local! {
+    /// List pastes run on this thread, so a test can tell one press that
+    /// pasted once from one that pasted twice.
+    static TEST_LIST_PASTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(feature = "kittest")]
+pub(crate) fn test_list_paste_count() -> usize {
+    TEST_LIST_PASTES.with(|c| c.get())
+}
+
+#[cfg(feature = "kittest")]
+fn test_clipboard_files() -> Option<Vec<PathBuf>> {
+    TEST_CLIPBOARD_FILES.with(|cell| cell.borrow().clone())
+}
+
+/// The OS clipboard's change counter, where the platform keeps one.
+///
+/// Windows moves it whenever anyone replaces what the clipboard holds, and
+/// reading it takes no clipboard lock. `None` where there is no counter, or
+/// no access to it.
+fn os_clipboard_seq() -> Option<u32> {
+    #[cfg(feature = "kittest")]
+    if test_clipboard_files().is_some() {
+        return Some(TEST_CLIPBOARD_SEQ.with(|c| c.get()));
+    }
+    #[cfg(windows)]
+    return clipboard_win::raw::seq_num().map(|seq| seq.get());
+    #[cfg(not(windows))]
+    None
+}
+
 impl super::WavesPreviewer {
     #[cfg(windows)]
     fn set_clipboard_files(&self, paths: &[PathBuf]) -> Result<(), String> {
@@ -58,6 +112,10 @@ impl super::WavesPreviewer {
 
     #[cfg(windows)]
     pub(super) fn get_clipboard_files(&self) -> Vec<PathBuf> {
+        #[cfg(feature = "kittest")]
+        if let Some(files) = test_clipboard_files() {
+            return files;
+        }
         use clipboard_win::formats::FileList;
         let list: Vec<String> = clipboard_win::get_clipboard(FileList).unwrap_or_default();
         list.into_iter().map(PathBuf::from).collect()
@@ -65,11 +123,20 @@ impl super::WavesPreviewer {
 
     #[cfg(not(windows))]
     pub(super) fn get_clipboard_files(&self) -> Vec<PathBuf> {
+        #[cfg(feature = "kittest")]
+        if let Some(files) = test_clipboard_files() {
+            return files;
+        }
         Vec::new()
     }
 
     #[cfg(windows)]
     fn get_clipboard_text(&self) -> Option<String> {
+        // An Explorer copy has no text; neither does its stand-in.
+        #[cfg(feature = "kittest")]
+        if test_clipboard_files().is_some() {
+            return None;
+        }
         use clipboard_win::formats::Unicode;
         clipboard_win::get_clipboard(Unicode).ok()
     }
@@ -330,18 +397,33 @@ impl super::WavesPreviewer {
             self.debug.last_copy_count = count;
             self.debug_trace_input(format!("copy_selected_to_clipboard items={count}"));
         }
+        self.write_os_clipboard(&os_paths);
+        self.clipboard_payload_seq = os_clipboard_seq();
+        ctx.request_repaint();
+    }
+
+    /// Put a list copy on the OS clipboard: the files, for other programs,
+    /// beside the marker text that makes the list's own Ctrl+V recognisable.
+    fn write_os_clipboard(&mut self, os_paths: &[PathBuf]) {
+        // A test that stands in for the clipboard gets the copy there, not
+        // on the real clipboard of the machine running it.
+        #[cfg(feature = "kittest")]
+        if test_clipboard_files().is_some() {
+            set_test_clipboard_files(Some(os_paths.to_vec()));
+            return;
+        }
         if !os_paths.is_empty() {
             #[cfg(windows)]
             {
                 if let Err(err) =
-                    self.set_clipboard_files_with_marker(&os_paths, LIST_CLIPBOARD_MARKER)
+                    self.set_clipboard_files_with_marker(os_paths, LIST_CLIPBOARD_MARKER)
                 {
                     self.debug_log(format!("clipboard error: {err}"));
                 }
             }
             #[cfg(not(windows))]
             {
-                if let Err(err) = self.set_clipboard_files(&os_paths) {
+                if let Err(err) = self.set_clipboard_files(os_paths) {
                     self.debug_log(format!("clipboard error: {err}"));
                 }
             }
@@ -353,7 +435,37 @@ impl super::WavesPreviewer {
                 }
             }
         }
-        ctx.request_repaint();
+    }
+
+    /// Is the list's own copy still what the clipboard holds?
+    ///
+    /// The copy keeps decoded audio in the app, so a paste prefers it -- but
+    /// only while nobody has copied anything since. Copying files in Explorer
+    /// after copying rows here must paste those files, not the rows again.
+    fn clipboard_payload_is_current(&self, pasted_text: Option<&str>) -> bool {
+        if !self
+            .clipboard_payload
+            .as_ref()
+            .is_some_and(|p| !p.items.is_empty())
+        {
+            return false;
+        }
+        let Some(copied_at) = self.clipboard_payload_seq else {
+            // No counter to ask (not Windows, or no access to it): the app's
+            // own copy is the best guess, as it always was.
+            return true;
+        };
+        if os_clipboard_seq() == Some(copied_at) {
+            return true;
+        }
+        // Something rewrote the clipboard. A clipboard manager that only
+        // adds a format leaves the marker text; an Explorer copy, or anyone's
+        // text copy, replaces it.
+        let text = match pasted_text {
+            Some(text) => Some(text.to_owned()),
+            None => self.get_clipboard_text(),
+        };
+        text.is_some_and(|text| text.trim() == LIST_CLIPBOARD_MARKER)
     }
 
     /// Is there anything a list paste could bring in right now?
@@ -385,11 +497,7 @@ impl super::WavesPreviewer {
     /// The un-throttled question. Everything that asks goes through
     /// `can_paste_into_list`; this is what it caches.
     fn probe_clipboard_for_paste(&self) -> bool {
-        if self
-            .clipboard_payload
-            .as_ref()
-            .is_some_and(|p| !p.items.is_empty())
-        {
+        if self.clipboard_payload_is_current(None) {
             return true;
         }
         if !self.get_clipboard_files().is_empty() {
@@ -406,7 +514,18 @@ impl super::WavesPreviewer {
     /// reader for it. `None` is fine: the OS file list is tried first anyway,
     /// and where a text reader exists it is asked directly.
     pub(super) fn paste_clipboard_to_list(&mut self, pasted_text: Option<&str>) {
+        #[cfg(feature = "kittest")]
+        TEST_LIST_PASTES.with(|c| c.set(c.get() + 1));
         let before = self.capture_list_selection_snapshot();
+        if self.clipboard_payload.is_some() && !self.clipboard_payload_is_current(pasted_text) {
+            // Replaced on the clipboard since, and it can never be current
+            // again; let its decoded audio go.
+            self.clipboard_payload = None;
+            self.clipboard_payload_seq = None;
+            if self.debug.cfg.enabled {
+                self.debug_trace_input("paste: list copy superseded by a newer clipboard");
+            }
+        }
         let payload = self.clipboard_payload.clone();
         let mut added_any = false;
         let mut added_paths: Vec<PathBuf> = Vec::new();
@@ -591,20 +710,12 @@ impl super::WavesPreviewer {
             }
             return;
         }
-        // Even one path may be a directory on a sleeping disk or an
-        // unavailable network share. Always let the bounded scanner classify
-        // pasted paths instead of using is_file/is_dir on the UI thread.
+        // Pasted paths open exactly as dropped ones do: a session opens, a
+        // sheet goes to the import dialog, files and folders join the list
+        // (the bounded scanner tells them apart, never the UI thread) and a
+        // toast reports what was added once the load is done.
         let requested = files.len();
-        self.start_explicit_file_load(
-            files,
-            false,
-            Some(super::types::PendingListLoadTargetKind::Select),
-            true,
-        );
-        self.push_toast(
-            super::types::ToastSeverity::Info,
-            format!("Loading {requested} pasted path(s) in the background"),
-        );
+        self.open_external_paths(files);
         if self.debug.cfg.enabled {
             self.debug.last_paste_at = Some(std::time::Instant::now());
             self.debug.last_paste_count = 0;
@@ -811,6 +922,9 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn handle_clipboard_hotkeys(&mut self, ctx: &egui::Context) {
+        // Taken every frame, whoever owns the keys, so a Ctrl+V pressed in
+        // the editor or a dialog cannot fire into the list later.
+        let os_paste = super::os_paste_key::take();
         if self.is_effect_graph_workspace_active() {
             self.handle_effect_graph_clipboard_hotkeys(ctx);
             return;
@@ -826,8 +940,11 @@ impl super::WavesPreviewer {
         let list_focus = self.list_has_focus || ctx.memory(|m| m.has_focus(Self::list_focus_id()));
         // Ctrl+C/V belong to whatever text field has the caret, and to the
         // dialog on top when one is up -- not to the list behind them.
-        let allow = self.surface_keys_allowed(super::input_focus::UiSurface::List)
-            && !search_focused
+        let allow_paste =
+            self.surface_keys_allowed(super::input_focus::UiSurface::List) && !search_focused;
+        // Copying needs something to copy; pasting does not -- an empty list
+        // is exactly where a file manager's Ctrl+V is used most.
+        let allow = allow_paste
             && (list_focus || self.selected.is_some() || !self.selected_multi.is_empty());
         let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
         let down_c = ctx.input(|i| i.key_down(egui::Key::C));
@@ -848,12 +965,12 @@ impl super::WavesPreviewer {
         let mut consumed_copy_event = false;
         let mut consumed_paste_event = false;
         let mut paste_text: Option<String> = None; // Some(text) only if OS clipboard provides non-empty text.
-        if allow {
+        if allow_paste {
             ctx.input_mut(|i| {
                 let mut idx = 0;
                 while idx < i.events.len() {
                     match &i.events[idx] {
-                        egui::Event::Copy => {
+                        egui::Event::Copy if allow => {
                             consumed_copy_event = true;
                             i.events.remove(idx);
                             continue;
@@ -871,13 +988,17 @@ impl super::WavesPreviewer {
             });
         }
         let edge_c = allow && ctrl && down_c && !self.clipboard_c_was_down;
-        let edge_v = allow && ctrl && down_v && !self.clipboard_v_was_down;
+        let edge_v = allow_paste && ctrl && down_v && !self.clipboard_v_was_down;
         let consumed_copy =
             allow && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C));
-        let consumed_paste =
-            allow && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
+        let consumed_paste = allow_paste
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
+        // The press Windows saw and egui did not report (a clipboard with
+        // files and no text). When the clipboard also holds text, egui does
+        // report it, and that one press must not paste twice.
+        let os_paste_trigger = allow_paste && os_paste && !event_paste;
         let copy_trigger = consumed_copy_event || consumed_copy || edge_c;
-        let paste_trigger = consumed_paste_event || consumed_paste || edge_v;
+        let paste_trigger = consumed_paste_event || consumed_paste || edge_v || os_paste_trigger;
         let copy_source = if consumed_copy_event {
             "Event::Copy"
         } else if consumed_copy {
@@ -893,13 +1014,15 @@ impl super::WavesPreviewer {
             "consume_key"
         } else if edge_v {
             "edge"
+        } else if os_paste_trigger {
+            "os-keyboard-hook"
         } else {
             "none"
         };
         self.clipboard_c_was_down = down_c;
         self.clipboard_v_was_down = down_v;
         if self.debug.cfg.enabled {
-            self.debug.last_clip_allow = allow;
+            self.debug.last_clip_allow = allow_paste;
             self.debug.last_clip_wants_kb = ctx.egui_wants_keyboard_input();
             self.debug.last_clip_ctrl = ctrl;
             self.debug.last_clip_event_copy = event_copy;

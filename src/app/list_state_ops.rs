@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use super::types::{
-    ColumnId, FileMeta, MediaId, MediaItem, MediaSource, SampleValueKind, SortDir, SortKey,
-    Transcript, TranscriptDocument,
+    ColumnId, FileMeta, MediaId, MediaItem, MediaSource, SampleValueKind, SelectionIds, SortDir,
+    SortKey, Transcript, TranscriptDocument,
 };
 use super::WavesPreviewer;
 
@@ -254,12 +254,61 @@ impl WavesPreviewer {
         }
     }
 
+    /// The rate the file's audio is at now (`file_sr`), from the most
+    /// trustworthy source that knows it. A pending conversion
+    /// (`sample_rate_override`) is deliberately not one of them: decoding and
+    /// playback need the rate the samples have, not the one they will get on
+    /// save -- that is `resolve_effective_sample_rate`.
+    ///
+    /// Never touches the filesystem: a probe result counts only once
+    /// `sample_rate_for_path` has cached it. With nothing known, the file is
+    /// assumed to be at the output device's rate -- and the result says so,
+    /// so the UI can show that it is a guess.
+    pub(super) fn resolve_file_sample_rate(
+        &self,
+        path: &Path,
+    ) -> crate::sample_rate::ResolvedSampleRate {
+        use crate::sample_rate::SampleRateOrigin as O;
+        let item = self.item_for_path(path);
+        crate::sample_rate::resolve_first(
+            [
+                (self.meta_for_path(path).map(|m| m.sample_rate), O::File),
+                (
+                    item.and_then(|i| i.virtual_state.as_ref())
+                        .map(|v| v.sample_rate),
+                    O::Virtual,
+                ),
+                // The descriptor of the audio the row plays: set from the
+                // header (or the virtual state) when the row was built.
+                (item.map(|i| i.audio_asset.sample_rate), O::File),
+                (self.sample_rate_probe_cache.get(path).copied(), O::Probed),
+            ],
+            self.audio.shared.out_sample_rate,
+        )
+    }
+
+    /// The rate the file has once pending edits are saved: the conversion
+    /// target if one is set, else `resolve_file_sample_rate`. What the list
+    /// shows and what an export writes.
+    pub(super) fn resolve_effective_sample_rate(
+        &self,
+        path: &Path,
+    ) -> crate::sample_rate::ResolvedSampleRate {
+        match self.sample_rate_override.get(path).copied().filter(|v| *v > 0) {
+            Some(hz) => crate::sample_rate::ResolvedSampleRate::new(
+                hz,
+                crate::sample_rate::SampleRateOrigin::Override,
+            ),
+            None => self.resolve_file_sample_rate(path),
+        }
+    }
+
+    /// The effective rate when something actually reported it; `None` when
+    /// it would only be assumed.
     pub(super) fn effective_sample_rate_for_path(&self, path: &Path) -> Option<u32> {
-        self.sample_rate_override
-            .get(path)
-            .copied()
-            .or_else(|| self.meta_for_path(path).map(|m| m.sample_rate))
-            .filter(|v| *v > 0)
+        Some(self.resolve_effective_sample_rate(path))
+            .filter(|r| !r.is_assumed())
+            .map(|r| r.hz)
     }
 
     pub(super) fn effective_bits_for_path(&self, path: &Path) -> Option<u16> {
@@ -515,6 +564,53 @@ impl WavesPreviewer {
             .and_then(|p| p.to_str())
             .unwrap_or("")
             .to_string()
+    }
+
+    /// The selection by identity, so it can survive the rows moving.
+    ///
+    /// `selected`, `selected_multi` and `select_anchor` are row numbers into
+    /// `files`. Anything that reorders or re-filters `files` must take this
+    /// before and hand it to `restore_selection_ids` after -- otherwise the
+    /// highlight stays on the same row *number* and lands on another file.
+    pub(super) fn capture_selection_ids(&self) -> SelectionIds {
+        let id_at = |row: usize| self.files.get(row).copied();
+        SelectionIds {
+            primary: self.selected.and_then(id_at),
+            multi: self.selected_multi.iter().filter_map(|&row| id_at(row)).collect(),
+            anchor: self.select_anchor.and_then(id_at),
+        }
+    }
+
+    /// Puts the selection back on the same files in the current `files`.
+    /// One pass over `files`, whatever the size of the selection. Files that
+    /// are no longer listed (filtered out, removed) simply drop out of it.
+    pub(super) fn restore_selection_ids(&mut self, snap: &SelectionIds) {
+        self.selected = None;
+        self.selected_multi.clear();
+        self.select_anchor = None;
+        if !snap.is_empty() {
+            for (row, id) in self.files.iter().enumerate() {
+                if snap.primary == Some(*id) {
+                    self.selected = Some(row);
+                }
+                if snap.anchor == Some(*id) {
+                    self.select_anchor = Some(row);
+                }
+                if snap.multi.contains(id) {
+                    self.selected_multi.insert(row);
+                }
+            }
+        }
+        // The same invariants `restore_list_selection_snapshot` keeps: a lone
+        // primary is also the set, and a non-empty set has a primary.
+        match self.selected {
+            Some(sel) if self.selected_multi.is_empty() => {
+                self.selected_multi.insert(sel);
+            }
+            Some(_) => {}
+            None => self.selected = self.selected_multi.iter().next().copied(),
+        }
+        self.invalidate_selection_summary();
     }
 
     pub(super) fn rebuild_item_indexes(&mut self) {
@@ -823,6 +919,48 @@ impl WavesPreviewer {
             .collect()
     }
 
+    /// The name a session stores a column key under: the built-in name, a
+    /// metadata column's serialized key, or `external:<column>` for a column
+    /// of the external sheet.
+    pub(super) fn sort_key_name(&self, key: SortKey) -> String {
+        match key {
+            SortKey::Metadata(index) => self
+                .metadata_list_columns
+                .get(index)
+                .map(|column| column.key.serialized_name())
+                .unwrap_or_else(|| "File".to_string()),
+            SortKey::External(index) => self
+                .external_visible_columns
+                .get(index)
+                .map(|name| format!("external:{name}"))
+                .unwrap_or_else(|| "External".to_string()),
+            key => key.builtin_name().unwrap_or("File").to_string(),
+        }
+    }
+
+    /// Inverse of `sort_key_name` against the columns that exist now; `None`
+    /// for a column that is gone.
+    pub(super) fn sort_key_from_name(&self, name: &str) -> Option<SortKey> {
+        if let Some(key) = SortKey::from_builtin_name(name) {
+            return Some(key);
+        }
+        if let Some(column) = name.strip_prefix("external:") {
+            return self
+                .external_visible_columns
+                .iter()
+                .position(|c| c == column)
+                .map(SortKey::External);
+        }
+        if name.starts_with("normalized:") || name.starts_with("raw:") {
+            return self
+                .metadata_list_columns
+                .iter()
+                .position(|column| column.key.serialized_name() == name)
+                .map(SortKey::Metadata);
+        }
+        None
+    }
+
     pub(super) fn ensure_sort_key_visible(&mut self) {
         let cols = self.list_columns;
         let external_visible = cols.external && !self.external_visible_columns.is_empty();
@@ -850,6 +988,11 @@ impl WavesPreviewer {
             SortKey::CreatedAt => cols.created_at,
             SortKey::ModifiedAt => cols.modified_at,
             SortKey::Comments => cols.comments,
+            SortKey::Status => cols.status,
+            SortKey::Tags => cols.tags,
+            SortKey::Note => cols.note,
+            SortKey::Gain => cols.gain,
+            SortKey::TranscriptLanguage => cols.transcript_language,
             SortKey::External(idx) => external_visible && idx < self.external_visible_columns.len(),
             SortKey::Metadata(index) => self
                 .metadata_list_columns

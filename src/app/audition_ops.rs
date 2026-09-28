@@ -105,7 +105,7 @@ impl crate::app::WavesPreviewer {
         if self.variation_audition.is_none() {
             return;
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ctx.request_repaint_after(crate::app::ui_timing::PROGRESS_REFRESH);
         let playing = self
             .audio
             .shared
@@ -406,7 +406,7 @@ impl crate::app::WavesPreviewer {
                 self.push_toast(ToastSeverity::Error, format!("Play together failed: {msg}"));
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                ctx.request_repaint_after(crate::app::ui_timing::PROGRESS_REFRESH);
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.mix_audition_state = None;

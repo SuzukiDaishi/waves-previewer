@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -8,6 +8,26 @@ use std::time::{Duration, Instant};
 use crate::plugin::protocol::{WorkerRequest, WorkerResponse};
 
 static WORKER_TIMEOUT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// How long each kind of worker request may take before the worker is
+/// presumed hung and killed. `NEOWAVES_PLUGIN_WORKER_TIMEOUT_MS` overrides all.
+/// A ping only proves the process started.
+const TIMEOUT_PING: Duration = Duration::from_millis(2_000);
+/// Scanning, probing or opening a plugin: some installers' plugins spend
+/// seconds on licence checks at load.
+const TIMEOUT_PLUGIN_LOAD: Duration = Duration::from_secs(30);
+/// Rendering a whole file through a chain offline.
+const TIMEOUT_OFFLINE_RENDER: Duration = Duration::from_secs(120);
+/// One round trip to a plugin's editor window.
+const TIMEOUT_GUI_ROUNDTRIP: Duration = Duration::from_secs(10);
+const TIMEOUT_HEARTBEAT: Duration = Duration::from_secs(5);
+/// Wait before retrying a spawn that hit a sharing violation (the temp copy
+/// of the worker still being scanned by antivirus, typically).
+const SPAWN_RETRY_DELAY: Duration = Duration::from_millis(40);
+/// How often a one-shot request checks whether its worker has answered.
+const WORKER_POLL: Duration = Duration::from_millis(8);
+/// Longest single wait on the GUI worker, so a heartbeat can be sent between.
+const GUI_WORKER_WAIT_SLICE: Duration = Duration::from_millis(250);
 // Disambiguates per-spawn temp copies of the worker exe (Windows-only path).
 #[cfg(windows)]
 static WORKER_SPAWN_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -20,6 +40,29 @@ fn apply_no_window(cmd: &mut Command) {
         use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+}
+
+/// Builds the command for a worker executable that may be running from a temp copy.
+///
+/// The worker links the same library as the app, so its loader needs the DLLs
+/// installed beside `neowaves.exe` (`libmp3lame.dll`). A copy in `%TEMP%` no
+/// longer has them in its application directory, so the app's own directory is
+/// put at the front of the child's `PATH`. `cargo run` hides this by adding the
+/// build output directories to `PATH`; an installed build has no such help.
+fn worker_command(worker_path: &Path) -> Command {
+    let mut cmd = Command::new(worker_path);
+    apply_no_window(&mut cmd);
+    if let Some(app_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let dirs = std::iter::once(app_dir).chain(std::env::split_paths(&inherited));
+        if let Ok(path) = std::env::join_paths(dirs) {
+            cmd.env("PATH", path);
+        }
+    }
+    cmd
 }
 
 pub fn worker_timeout_count() -> u64 {
@@ -79,22 +122,22 @@ fn request_timeout(request: &WorkerRequest) -> Duration {
         }
     }
     match request {
-        WorkerRequest::Ping => Duration::from_millis(2_000),
-        WorkerRequest::Scan { .. } => Duration::from_millis(30_000),
-        WorkerRequest::Probe { .. } => Duration::from_millis(30_000),
-        WorkerRequest::ProcessFx { .. } => Duration::from_millis(120_000),
+        WorkerRequest::Ping => TIMEOUT_PING,
+        WorkerRequest::Scan { .. } => TIMEOUT_PLUGIN_LOAD,
+        WorkerRequest::Probe { .. } => TIMEOUT_PLUGIN_LOAD,
+        WorkerRequest::ProcessFx { .. } => TIMEOUT_OFFLINE_RENDER,
         WorkerRequest::ProcessChain { .. } | WorkerRequest::ChainSessionProcess { .. } => {
-            Duration::from_millis(120_000)
+            TIMEOUT_OFFLINE_RENDER
         }
         WorkerRequest::ChainSessionOpen { .. }
         | WorkerRequest::ChainSessionConfigure { .. }
         | WorkerRequest::ChainSessionSeek { .. }
         | WorkerRequest::ChainSessionFlush { .. }
-        | WorkerRequest::ChainSessionClose { .. } => Duration::from_millis(30_000),
-        WorkerRequest::GuiSessionOpen { .. } => Duration::from_millis(30_000),
-        WorkerRequest::GuiSessionPoll { .. } => Duration::from_millis(10_000),
-        WorkerRequest::GuiSessionClose { .. } => Duration::from_millis(10_000),
-        WorkerRequest::Heartbeat { .. } => Duration::from_millis(5_000),
+        | WorkerRequest::ChainSessionClose { .. } => TIMEOUT_PLUGIN_LOAD,
+        WorkerRequest::GuiSessionOpen { .. } => TIMEOUT_PLUGIN_LOAD,
+        WorkerRequest::GuiSessionPoll { .. } => TIMEOUT_GUI_ROUNDTRIP,
+        WorkerRequest::GuiSessionClose { .. } => TIMEOUT_GUI_ROUNDTRIP,
+        WorkerRequest::Heartbeat { .. } => TIMEOUT_HEARTBEAT,
     }
 }
 
@@ -149,8 +192,7 @@ fn run_worker_process(request: &WorkerRequest) -> Result<WorkerResponse, String>
     let mut last_spawn_err: Option<std::io::Error> = None;
     let mut child_opt = None;
     for attempt in 0..5usize {
-        let mut cmd = Command::new(&worker_path);
-        apply_no_window(&mut cmd);
+        let mut cmd = worker_command(&worker_path);
         match cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -167,7 +209,7 @@ fn run_worker_process(request: &WorkerRequest) -> Result<WorkerResponse, String>
                 if !sharing_violation || attempt == 4 {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(40));
+                std::thread::sleep(SPAWN_RETRY_DELAY);
             }
         }
     }
@@ -220,7 +262,7 @@ fn run_worker_process(request: &WorkerRequest) -> Result<WorkerResponse, String>
                     let _ = child.wait();
                     break Err(format!("worker timeout after {} ms", timeout.as_millis()));
                 }
-                std::thread::sleep(Duration::from_millis(8));
+                std::thread::sleep(WORKER_POLL);
             }
             Err(e) => {
                 let _ = child.kill();
@@ -295,8 +337,7 @@ pub struct RackWorkerClient {
 impl RackWorkerClient {
     pub fn spawn() -> Result<Self, String> {
         let (worker_path, cleanup_temp) = prepare_worker_executable()?;
-        let mut command = Command::new(&worker_path);
-        apply_no_window(&mut command);
+        let mut command = worker_command(&worker_path);
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -377,8 +418,7 @@ impl GuiWorkerClient {
             return Err("gui worker path resolve failed".to_string());
         };
         let (worker_path, cleanup_temp) = prepare_worker_executable_named(path)?;
-        let mut cmd = Command::new(&worker_path);
-        apply_no_window(&mut cmd);
+        let mut cmd = worker_command(&worker_path);
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -461,7 +501,7 @@ impl GuiWorkerClient {
             }
             match self
                 .rx
-                .recv_timeout(remaining.min(Duration::from_millis(250)))
+                .recv_timeout(remaining.min(GUI_WORKER_WAIT_SLICE))
             {
                 Ok(Ok(resp)) => return Ok(resp),
                 Ok(Err(e)) => return Err(e),

@@ -19,6 +19,7 @@ impl WavesPreviewer {
         self.scan_load_kind = None;
         self.scan_pending_target = None;
         self.scan_found_live = None;
+        self.scan_report = None;
         self.clear_list_seek_runtime();
     }
 
@@ -170,6 +171,52 @@ impl WavesPreviewer {
         );
     }
 
+    /// Loads paths the user brought in from outside -- pasted or dropped --
+    /// and reports what happened to them when the load finishes: how many
+    /// were added, and which were turned away and why.
+    pub(super) fn start_reported_file_load(&mut self, paths: Vec<PathBuf>) {
+        self.start_explicit_file_load(
+            paths,
+            false,
+            Some(PendingListLoadTargetKind::Select),
+            true,
+        );
+        self.scan_report = Some(super::list_ops::ScanReport::default());
+    }
+
+    /// The toast for a reported load, once it is complete.
+    fn finish_scan_report(&mut self) {
+        let Some(report) = self.scan_report.take() else {
+            return;
+        };
+        let Some(mut message) = report.counts.summary() else {
+            return;
+        };
+        // A pasted file the current search or a column filter hides looks
+        // exactly like a paste that did nothing; say where it went. Only
+        // knowable once the refilter has run, so a large list whose refilter
+        // is still in flight skips the note.
+        if !self.filter_job_active() {
+            let visible: std::collections::HashSet<_> = self.files.iter().copied().collect();
+            let hidden = report
+                .added_ids
+                .iter()
+                .filter(|id| !visible.contains(id))
+                .count();
+            if hidden > 0 {
+                message.push_str(&format!(
+                    " -- {hidden} hidden by the current search or filters"
+                ));
+            }
+        }
+        let severity = if report.counts.added == 0 {
+            super::types::ToastSeverity::Warning
+        } else {
+            super::types::ToastSeverity::Info
+        };
+        self.push_toast(severity, message);
+    }
+
     fn maybe_apply_pending_list_load_target(&mut self) -> bool {
         let Some(target) = self.scan_pending_target.clone() else {
             return false;
@@ -202,7 +249,7 @@ impl WavesPreviewer {
         if !self.external_sources.is_empty() {
             self.apply_external_mapping();
         }
-        if self.search_query.trim().is_empty() {
+        if self.search_query.trim().is_empty() && self.column_filters.is_empty() {
             // files/original_files were maintained incrementally during the
             // scan; re-collecting 1M ids here just stalled the finish frame.
             self.note_files_membership_changed();
@@ -210,8 +257,12 @@ impl WavesPreviewer {
                 self.request_sort();
             }
         } else {
+            // Column filters are not checked row by row during the scan (a
+            // new row's metadata is not read yet), so the rows it added are
+            // filtered here, with the search, in one pass.
             self.refresh_filter_then_sort();
         }
+        self.finish_scan_report();
     }
 
     /// Files the walker has found so far, including the ones still queued in
@@ -242,6 +293,10 @@ impl WavesPreviewer {
         }
         self.note_files_membership_changed();
         let has_search = !self.search_query.trim().is_empty();
+        // With column filters on, a row cannot be judged yet (its metadata is
+        // not read), so it waits for the refilter at the end of the load
+        // instead of appearing now and vanishing then.
+        let has_column_filters = !self.column_filters.is_empty();
         let query = self.search_query.to_lowercase();
         while batch.next < batch.paths.len() {
             if batch.next > 0 && started.elapsed() >= budget {
@@ -250,6 +305,9 @@ impl WavesPreviewer {
             let p = std::mem::take(&mut batch.paths[batch.next]);
             batch.next += 1;
             if self.path_index.contains_key(&p) {
+                if let Some(report) = self.scan_report.as_mut() {
+                    report.counts.duplicates += 1;
+                }
                 continue;
             }
             let item = self.make_media_item(p.clone());
@@ -265,6 +323,13 @@ impl WavesPreviewer {
             }
             self.path_index.insert(p.clone(), id);
             self.item_index.insert(id, row);
+            if let Some(report) = self.scan_report.as_mut() {
+                report.counts.added += 1;
+                report.added_ids.push(id);
+            }
+            if has_column_filters {
+                continue;
+            }
             if !has_search {
                 self.files.push(id);
                 self.original_files.push(id);
@@ -344,7 +409,11 @@ impl WavesPreviewer {
                             .note_io_latency(std::time::Duration::from_micros(micros));
                     }
                 }
-                Ok(ScanMessage::Done) => {
+                Ok(ScanMessage::Done(skipped)) => {
+                    if let Some(report) = self.scan_report.as_mut() {
+                        report.counts.unsupported += skipped.unsupported;
+                        report.counts.missing += skipped.missing;
+                    }
                     self.scan_rx = None;
                     self.scan_worker_done = true;
                     break;

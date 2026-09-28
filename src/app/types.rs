@@ -71,7 +71,13 @@ impl PlaybackTimelineMap {
 
 impl Default for PlaybackTimelineMap {
     fn default() -> Self {
-        Self::new(0, 0, 48_000, 48_000, 0)
+        Self::new(
+            0,
+            0,
+            crate::sample_rate::FALLBACK_SAMPLE_RATE,
+            crate::sample_rate::FALLBACK_SAMPLE_RATE,
+            0,
+        )
     }
 }
 
@@ -823,7 +829,9 @@ impl TranscriptDocument {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// A list column that can be sorted and filtered. The same key names the
+/// column for both: a filter is keyed by the column it applies to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum SortKey {
     File,
     Folder,
@@ -851,6 +859,154 @@ pub enum SortKey {
     Metadata(usize),
     /// How many comments the session's conversation has about the row.
     Comments,
+    /// The workflow status, by its label.
+    Status,
+    /// The row's tags, by label; a row matches a tag filter if any tag does.
+    Tags,
+    /// The list note.
+    Note,
+    /// Pending list gain in dB.
+    Gain,
+    /// Language of the transcript.
+    TranscriptLanguage,
+}
+
+impl SortKey {
+    /// Every built-in key with the name sessions store it under. External
+    /// and metadata columns are named by their column definitions instead.
+    pub const BUILTIN: [(SortKey, &'static str); 28] = [
+        (SortKey::File, "File"),
+        (SortKey::Folder, "Folder"),
+        (SortKey::Transcript, "Transcript"),
+        (SortKey::Type, "Type"),
+        (SortKey::Length, "Length"),
+        (SortKey::Channels, "Channels"),
+        (SortKey::SampleRate, "SampleRate"),
+        (SortKey::Bits, "Bits"),
+        (SortKey::BitRate, "BitRate"),
+        (SortKey::Level, "Level"),
+        (SortKey::Lufs, "Lufs"),
+        (SortKey::TruePeak, "TruePeak"),
+        (SortKey::LufsShort, "LufsShort"),
+        (SortKey::LufsMomentary, "LufsMomentary"),
+        (SortKey::Bpm, "Bpm"),
+        (SortKey::SilenceLead, "SilenceLead"),
+        (SortKey::SilenceTail, "SilenceTail"),
+        (SortKey::EdgeZero, "EdgeZero"),
+        (SortKey::OverPeak, "OverPeak"),
+        (SortKey::BlankPad, "BlankPad"),
+        (SortKey::CreatedAt, "CreatedAt"),
+        (SortKey::ModifiedAt, "ModifiedAt"),
+        (SortKey::Comments, "Comments"),
+        (SortKey::Status, "Status"),
+        (SortKey::Tags, "Tags"),
+        (SortKey::Note, "Note"),
+        (SortKey::Gain, "Gain"),
+        (SortKey::TranscriptLanguage, "TranscriptLanguage"),
+    ];
+
+    /// The stored name of a built-in key; `None` for external and metadata
+    /// columns.
+    pub fn builtin_name(self) -> Option<&'static str> {
+        Self::BUILTIN
+            .iter()
+            .find(|(key, _)| *key == self)
+            .map(|(_, name)| *name)
+    }
+
+    pub fn from_builtin_name(name: &str) -> Option<SortKey> {
+        Self::BUILTIN
+            .iter()
+            .find(|(_, n)| *n == name)
+            .map(|(key, _)| *key)
+    }
+
+    /// Whether the column's values come from reading the file (so they
+    /// change as metadata streams in, and sorting or filtering on it has to
+    /// wait for, and follow, that).
+    pub fn depends_on_metadata(self) -> bool {
+        matches!(
+            self,
+            SortKey::Length
+                | SortKey::Channels
+                | SortKey::SampleRate
+                | SortKey::Bits
+                | SortKey::BitRate
+                | SortKey::Level
+                | SortKey::Lufs
+                | SortKey::TruePeak
+                | SortKey::LufsShort
+                | SortKey::LufsMomentary
+                | SortKey::SilenceLead
+                | SortKey::SilenceTail
+                | SortKey::EdgeZero
+                | SortKey::OverPeak
+                | SortKey::BlankPad
+                | SortKey::Bpm
+                | SortKey::CreatedAt
+                | SortKey::ModifiedAt
+                | SortKey::Metadata(_)
+        )
+    }
+
+    /// Whether the column's value needs the whole file decoded (levels,
+    /// loudness, silence, QA), not just its header.
+    pub fn needs_full_decode(self) -> bool {
+        matches!(
+            self,
+            SortKey::Level
+                | SortKey::Lufs
+                | SortKey::TruePeak
+                | SortKey::LufsShort
+                | SortKey::LufsMomentary
+                | SortKey::SilenceLead
+                | SortKey::SilenceTail
+                | SortKey::EdgeZero
+                | SortKey::OverPeak
+                | SortKey::BlankPad
+        )
+    }
+
+    /// Whether the column's values arrive with a transcript.
+    pub fn depends_on_transcript(self) -> bool {
+        matches!(self, SortKey::Transcript | SortKey::TranscriptLanguage)
+    }
+
+    /// What the column holds, for the conditions its filter offers.
+    /// Metadata columns are typed by their values at runtime
+    /// (`WavesPreviewer::column_value_kind`).
+    pub fn value_kind(self) -> crate::app::list_filter::ColumnValueKind {
+        use crate::app::list_filter::ColumnValueKind as K;
+        match self {
+            SortKey::Length | SortKey::SilenceLead | SortKey::SilenceTail => K::Duration,
+            SortKey::CreatedAt | SortKey::ModifiedAt => K::DateTime,
+            SortKey::Channels
+            | SortKey::SampleRate
+            | SortKey::Bits
+            | SortKey::BitRate
+            | SortKey::Level
+            | SortKey::Lufs
+            | SortKey::TruePeak
+            | SortKey::LufsShort
+            | SortKey::LufsMomentary
+            | SortKey::Bpm
+            | SortKey::Comments
+            | SortKey::Gain => K::Number,
+            SortKey::File
+            | SortKey::Folder
+            | SortKey::Transcript
+            | SortKey::Type
+            | SortKey::EdgeZero
+            | SortKey::OverPeak
+            | SortKey::BlankPad
+            | SortKey::Status
+            | SortKey::Tags
+            | SortKey::Note
+            | SortKey::TranscriptLanguage
+            | SortKey::External(_)
+            | SortKey::Metadata(_) => K::Text,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -865,6 +1021,21 @@ pub enum UndoScope {
     Editor,
     List,
     EffectGraph,
+}
+
+/// The list selection held by `MediaId` rather than by row, taken before the
+/// rows move and applied after (see `capture_selection_ids`).
+#[derive(Clone, Debug, Default)]
+pub struct SelectionIds {
+    pub primary: Option<MediaId>,
+    pub multi: std::collections::HashSet<MediaId>,
+    pub anchor: Option<MediaId>,
+}
+
+impl SelectionIds {
+    pub fn is_empty(&self) -> bool {
+        self.primary.is_none() && self.multi.is_empty() && self.anchor.is_none()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1524,6 +1695,22 @@ pub struct SpectrogramConfig {
     pub show_note_labels: bool,
 }
 
+impl SpectrogramConfig {
+    /// FFT sizes offered: 256 (fine time, 5 ms at 48 kHz) up to 65536 (fine
+    /// frequency, under 1 Hz per bin). Powers of two only.
+    pub const FFT_SIZES: [usize; 9] = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
+    pub const FFT_SIZE_MIN: usize = Self::FFT_SIZES[0];
+    pub const FFT_SIZE_MAX: usize = Self::FFT_SIZES[Self::FFT_SIZES.len() - 1];
+    /// Most frames one spectrogram keeps; longer files are decimated to fit.
+    /// Bounds the texture and the analysis memory, not the file length.
+    pub const MAX_FRAMES_DEFAULT: usize = 4096;
+    pub const MAX_FRAMES_MIN: usize = 256;
+    pub const MAX_FRAMES_MAX: usize = 8192;
+    /// Highest overlap allowed; above this the hop is so small that the
+    /// analysis cost explodes for no visible gain.
+    pub const OVERLAP_MAX: f32 = 0.95;
+}
+
 impl Default for SpectrogramConfig {
     fn default() -> Self {
         Self {
@@ -1531,10 +1718,10 @@ impl Default for SpectrogramConfig {
             window: WindowFunction::BlackmanHarris,
             hop_size: 256,
             overlap: 0.875,
-            max_frames: 4096,
+            max_frames: Self::MAX_FRAMES_DEFAULT,
             scale: SpectrogramScale::Linear,
             mel_scale: SpectrogramScale::Linear,
-            db_floor: -120.0,
+            db_floor: crate::levels::SPECTRO_DB_FLOOR_DEFAULT,
             db_ceiling: 0.0,
             db_ref: SpectrogramDbRef::Absolute,
             max_freq_hz: 0.0,
@@ -1914,20 +2101,20 @@ impl ToolState {
             denoise_reduction_db: 12.0,
             denoise_strength: 2.0,
             loop_repeat: 2,
-            noise_gate_threshold_db: -40.0,
-            noise_gate_attack_ms: 2.0,
-            noise_gate_release_ms: 100.0,
-            eq_low_shelf_freq_hz: 120.0,
-            eq_low_shelf_gain_db: 0.0,
-            eq_mid_freq_hz: 1000.0,
-            eq_mid_gain_db: 0.0,
-            eq_mid_q: 1.0,
-            eq_high_shelf_freq_hz: 8000.0,
-            eq_high_shelf_gain_db: 0.0,
-            compressor_threshold_db: -18.0,
-            compressor_ratio: 3.0,
-            compressor_attack_ms: 10.0,
-            compressor_release_ms: 150.0,
+            noise_gate_threshold_db: crate::wave::NoiseGateParams::default().threshold_db,
+            noise_gate_attack_ms: crate::wave::NoiseGateParams::default().attack_ms,
+            noise_gate_release_ms: crate::wave::NoiseGateParams::default().release_ms,
+            eq_low_shelf_freq_hz: crate::wave::ThreeBandEqParams::default().low_shelf_freq_hz,
+            eq_low_shelf_gain_db: crate::wave::ThreeBandEqParams::default().low_shelf_gain_db,
+            eq_mid_freq_hz: crate::wave::ThreeBandEqParams::default().mid_freq_hz,
+            eq_mid_gain_db: crate::wave::ThreeBandEqParams::default().mid_gain_db,
+            eq_mid_q: crate::wave::ThreeBandEqParams::default().mid_q,
+            eq_high_shelf_freq_hz: crate::wave::ThreeBandEqParams::default().high_shelf_freq_hz,
+            eq_high_shelf_gain_db: crate::wave::ThreeBandEqParams::default().high_shelf_gain_db,
+            compressor_threshold_db: crate::wave::CompressorParams::default().threshold_db,
+            compressor_ratio: crate::wave::CompressorParams::default().ratio,
+            compressor_attack_ms: crate::wave::CompressorParams::default().attack_ms,
+            compressor_release_ms: crate::wave::CompressorParams::default().release_ms,
             compressor_makeup_db: 0.0,
             insert_silence_ms: 1000.0,
             invert_smooth_boundaries: false,
@@ -3637,6 +3824,18 @@ pub struct PendingListLoadTarget {
     pub auto_scroll: bool,
 }
 
+/// Explicitly listed paths the scanner turned away. What a listed *folder*
+/// contains is never counted: a folder is opened for the audio in it, and the
+/// rest of it is not something the user asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScanSkipped {
+    /// Files that exist but are not a supported audio format.
+    pub unsupported: usize,
+    /// Paths that are neither a file nor a folder (moved, deleted, a
+    /// volume since ejected).
+    pub missing: usize,
+}
+
 pub enum ScanMessage {
     Batch(Vec<PathBuf>),
     Progress {
@@ -3646,7 +3845,7 @@ pub enum ScanMessage {
         /// previous update. Channel backpressure time is excluded.
         io_sample_micros: Option<u64>,
     },
-    Done,
+    Done(ScanSkipped),
 }
 
 /// A scanner batch may be more work than the current frame can afford. Keep
@@ -4652,27 +4851,36 @@ impl EffectGraphNodeData {
             EffectGraphNodeKind::PitchShift => Self::PitchShift { semitones: 0.0 },
             EffectGraphNodeKind::TimeStretch => Self::TimeStretch { rate: 1.0 },
             EffectGraphNodeKind::Speed => Self::Speed { rate: 1.0 },
-            EffectGraphNodeKind::NoiseGate => Self::NoiseGate {
-                threshold_db: -40.0,
-                attack_ms: 2.0,
-                release_ms: 100.0,
-            },
-            EffectGraphNodeKind::Eq => Self::Eq {
-                low_shelf_freq_hz: 120.0,
-                low_shelf_gain_db: 0.0,
-                mid_freq_hz: 1000.0,
-                mid_gain_db: 0.0,
-                mid_q: 1.0,
-                high_shelf_freq_hz: 8000.0,
-                high_shelf_gain_db: 0.0,
-            },
-            EffectGraphNodeKind::Compressor => Self::Compressor {
-                threshold_db: -18.0,
-                ratio: 3.0,
-                attack_ms: 10.0,
-                release_ms: 150.0,
-                makeup_db: 0.0,
-            },
+            EffectGraphNodeKind::NoiseGate => {
+                let gate = crate::wave::NoiseGateParams::default();
+                Self::NoiseGate {
+                    threshold_db: gate.threshold_db,
+                    attack_ms: gate.attack_ms,
+                    release_ms: gate.release_ms,
+                }
+            }
+            EffectGraphNodeKind::Eq => {
+                let eq = crate::wave::ThreeBandEqParams::default();
+                Self::Eq {
+                    low_shelf_freq_hz: eq.low_shelf_freq_hz,
+                    low_shelf_gain_db: eq.low_shelf_gain_db,
+                    mid_freq_hz: eq.mid_freq_hz,
+                    mid_gain_db: eq.mid_gain_db,
+                    mid_q: eq.mid_q,
+                    high_shelf_freq_hz: eq.high_shelf_freq_hz,
+                    high_shelf_gain_db: eq.high_shelf_gain_db,
+                }
+            }
+            EffectGraphNodeKind::Compressor => {
+                let comp = crate::wave::CompressorParams::default();
+                Self::Compressor {
+                    threshold_db: comp.threshold_db,
+                    ratio: comp.ratio,
+                    attack_ms: comp.attack_ms,
+                    release_ms: comp.release_ms,
+                    makeup_db: comp.makeup_db,
+                }
+            }
             EffectGraphNodeKind::Trim => Self::Trim {
                 threshold_below_peak_db: 40.0,
                 pre_roll_ms: 50.0,
@@ -4682,7 +4890,7 @@ impl EffectGraphNodeData {
                 depth: EffectGraphBitDepth::Pcm16,
             },
             EffectGraphNodeKind::Resampler => Self::Resampler {
-                target_sample_rate: 48_000,
+                target_sample_rate: crate::sample_rate::DEFAULT_CONVERSION_TARGET_SAMPLE_RATE,
                 quality: EffectGraphResampleQuality::Good,
             },
             EffectGraphNodeKind::PluginFx => Self::PluginFx {
@@ -6096,11 +6304,16 @@ impl Default for RecordingState {
 pub enum RecordingWorkerMsg {
     /// Level update (peak L, peak R)
     Level(f32, f32),
-    /// Waveform overview block (min, max)
-    WaveformBlock {
-        min: f32,
-        max: f32,
+    /// Consecutive waveform overview blocks, oldest first. Batched per capture
+    /// buffer: at ~400 blocks/s one message per block would be a channel
+    /// send per 2.5 ms for the UI to drain.
+    WaveformBlocks {
+        /// Absolute frame of the first block.
         start_frame: u64,
+        /// Frames covered by every block (the last one may be shorter).
+        block_frames: u64,
+        /// (min, max) per block.
+        blocks: Vec<(f32, f32)>,
         end_frame: u64,
     },
     /// Number of complete audio frames accepted by the writer.
@@ -6115,6 +6328,36 @@ pub enum RecordingWorkerMsg {
     Discarded,
     /// Error from worker
     Error(String),
+}
+
+/// One take in the Recording tab's result list.
+///
+/// Its state is not stored: it is read off the list row the take points at
+/// (`item`), so the tab and the list can never disagree. A stopped take is a
+/// `(virtual)` row; saving it turns that same row into the file's row, which
+/// is what makes the take "saved". A row removed from the list removes the
+/// take.
+#[derive(Clone, Debug)]
+pub struct RecordingTake {
+    pub id: u64,
+    pub display_name: String,
+    /// The finalized temp WAV (None while still recording).
+    pub temp_path: Option<std::path::PathBuf>,
+    /// The list row this take became when it stopped.
+    pub item: Option<MediaId>,
+    pub frames: u64,
+    pub sample_rate: u32,
+    pub markers: Vec<crate::markers::MarkerEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecordingTakeState {
+    /// Being captured (recording, paused or finalizing).
+    Recording,
+    /// Stopped: a `(virtual)` row in the list.
+    Stopped,
+    /// Saved: the row is now this file.
+    Saved(std::path::PathBuf),
 }
 
 pub struct RecordingTabState {
@@ -6162,6 +6405,17 @@ pub struct RecordingTabState {
     /// whether the Recording tab is open in the workspace tab strip (stays open
     /// when navigating to other workspaces, mirroring `EffectGraphState::workspace_open`)
     pub tab_open: bool,
+    /// Every take of this run of the app, oldest first.
+    pub takes: Vec<RecordingTake>,
+    pub next_take_id: u64,
+    /// The take being captured right now.
+    pub current_take: Option<u64>,
+    /// Markers dropped on the take being captured, in its frames. Shared with
+    /// the worker, which writes them into the WAV's cue chunk once the file
+    /// is final -- file I/O that must not happen on the UI thread.
+    pub live_markers: Arc<std::sync::Mutex<Vec<crate::markers::MarkerEntry>>>,
+    /// Take awaiting the "discard take?" confirmation.
+    pub confirm_discard_take: Option<u64>,
 }
 
 impl Default for RecordingTabState {
@@ -6195,6 +6449,11 @@ impl Default for RecordingTabState {
             pause_started_at: None,
             paused_accum: std::time::Duration::ZERO,
             tab_open: false,
+            takes: Vec::new(),
+            next_take_id: 1,
+            current_take: None,
+            live_markers: Arc::new(std::sync::Mutex::new(Vec::new())),
+            confirm_discard_take: None,
         }
     }
 }

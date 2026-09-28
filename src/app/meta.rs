@@ -6,6 +6,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use super::transcript;
 use super::types::{FileMeta, SampleValueKind, Transcript};
 use crate::audio_io;
+/// An idle metadata worker rechecks whether the pool still wants it this often.
+pub(crate) const POOL_IDLE_RECHECK: std::time::Duration = std::time::Duration::from_millis(50);
+
 
 fn map_sample_value_kind(kind: audio_io::SampleValueKind) -> SampleValueKind {
     match kind {
@@ -123,6 +126,10 @@ pub enum MetaTask {
     Decode(PathBuf),
     Transcript(PathBuf),
     External(PathBuf),
+    /// A `(virtual)` row whose audio lives in a file the app manages -- a
+    /// recording take, a pasted or dragged-in copy. Reads `file`, reports
+    /// under `row`: the row's path is only a label, and nothing is there.
+    VirtualFile { row: PathBuf, file: PathBuf },
 }
 
 #[derive(Clone, Debug)]
@@ -145,7 +152,8 @@ fn task_path(task: &MetaTask) -> &PathBuf {
         | MetaTask::HeaderOnly(path)
         | MetaTask::Decode(path)
         | MetaTask::Transcript(path)
-        | MetaTask::External(path) => path,
+        | MetaTask::External(path)
+        | MetaTask::VirtualFile { row: path, .. } => path,
     }
 }
 
@@ -319,7 +327,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
                 peak_abs = a;
             }
         }
-        let silent_thresh = 10.0_f32.powf(-80.0 / 20.0);
+        let silent_thresh = crate::levels::silence_amplitude();
         Some(if peak_abs > silent_thresh {
             20.0 * peak_abs.log10()
         } else {
@@ -495,7 +503,7 @@ fn decode_full_meta(
         let rms_db = if rms > 0.0 {
             20.0 * rms.log10()
         } else {
-            -120.0
+            crate::levels::NO_SIGNAL_DB
         };
         // Peak across channels (per-sample max of abs across all channels)
         let mut peak_abs = 0.0f32;
@@ -515,7 +523,7 @@ fn decode_full_meta(
                 }
             }
         }
-        let silent_thresh = 10.0_f32.powf(-80.0 / 20.0);
+        let silent_thresh = crate::levels::silence_amplitude();
         let peak_db = if peak_abs > silent_thresh {
             20.0 * peak_abs.log10()
         } else {
@@ -614,7 +622,7 @@ fn decode_full_meta(
         let rms_db = if rms > 0.0 {
             20.0 * rms.log10()
         } else {
-            -120.0
+            crate::levels::NO_SIGNAL_DB
         };
         let mut peak_abs = 0.0f32;
         for &v in &mono {
@@ -623,7 +631,7 @@ fn decode_full_meta(
                 peak_abs = a;
             }
         }
-        let silent_thresh = 10.0_f32.powf(-80.0 / 20.0);
+        let silent_thresh = crate::levels::silence_amplitude();
         let peak_db = if peak_abs > silent_thresh {
             20.0 * peak_abs.log10()
         } else {
@@ -726,7 +734,8 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                         if worker_index >= shared.active_workers.load(Ordering::Relaxed) {
                             let (next, _) = shared
                                 .cv
-                                .wait_timeout(guard, std::time::Duration::from_millis(50))
+                                // Wake now and then to notice the pool being resized.
+                                .wait_timeout(guard, crate::app::meta::POOL_IDLE_RECHECK)
                                 .unwrap_or_else(|error| error.into_inner());
                             guard = next;
                             continue;
@@ -782,10 +791,13 @@ fn run_meta_task(
     blank_threshold_dbfs: f32,
     allow_video_poster: bool,
 ) {
-    let (p, do_header, do_decode) = match task {
-        MetaTask::Header(path) => (path, true, true),
-        MetaTask::HeaderOnly(path) => (path, true, false),
-        MetaTask::Decode(path) => (path, false, true),
+    // `p` is the path the update is reported under, `src` the file read.
+    // They differ only for a virtual row.
+    let (p, src, do_header, do_decode) = match task {
+        MetaTask::Header(path) => (path.clone(), path, true, true),
+        MetaTask::HeaderOnly(path) => (path.clone(), path, true, false),
+        MetaTask::Decode(path) => (path.clone(), path, false, true),
+        MetaTask::VirtualFile { row, file } => (row, file, true, true),
         MetaTask::Transcript(path) => {
             let transcript_data =
                 transcript::srt_path_for_audio(&path).and_then(|p| transcript::load_srt(&p));
@@ -805,7 +817,7 @@ fn run_meta_task(
     // Stage 1: quick header-only metadata
     let mut header_meta_opt: Option<FileMeta> = None;
     if do_header {
-        match header_meta(&p) {
+        match header_meta(&src) {
             Ok(meta) => {
                 let _ = tx.send(MetaUpdate::Header {
                     path: p.clone(),
@@ -829,7 +841,7 @@ fn run_meta_task(
             return;
         }
         // Stage 2: decode and compute RMS/thumbnail/LUFS(I)
-        if let Some(full) = decode_full_meta(&p, blank_threshold_dbfs, allow_video_poster) {
+        if let Some(full) = decode_full_meta(&src, blank_threshold_dbfs, allow_video_poster) {
             let _ = tx.send(MetaUpdate::Full(p.clone(), full));
         } else if let Some(mut header_meta) = header_meta_opt {
             if header_meta.decode_error.is_none() {
@@ -958,6 +970,43 @@ mod tests {
             rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(),
             "queued work must resume after playback protection ends"
         );
+    }
+
+    /// A virtual row's metadata comes from the file behind it, and arrives
+    /// under the row's own path -- the only key the list can apply it by.
+    #[test]
+    fn a_virtual_file_task_reads_the_file_and_reports_the_row() {
+        use super::MetaUpdate;
+        let dir = make_temp_dir("virtual_file");
+        let file = dir.join("take.wav");
+        let sr = 48_000;
+        crate::wave::export_channels_audio(&synth_stereo(sr, 1.5), sr, &file).expect("export wav");
+        let row = PathBuf::from("__virtual__").join("7_take.wav");
+
+        let (pool, rx) = spawn_meta_pool(1);
+        pool.enqueue(MetaTask::VirtualFile {
+            row: row.clone(),
+            file: file.clone(),
+        });
+        let full = loop {
+            match rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the task reports")
+            {
+                MetaUpdate::Header { path, .. } => assert_eq!(path, row),
+                MetaUpdate::Full(path, meta) => {
+                    assert_eq!(path, row);
+                    break meta;
+                }
+                other => panic!("unexpected update: {other:?}"),
+            }
+        };
+        assert_eq!(full.channels, 2);
+        assert!(approx_eq(full.duration_secs.unwrap_or_default(), 1.5));
+        assert!(full.decode_error.is_none());
+        assert!(!full.thumb.is_empty(), "the row gets a waveform");
+        assert!(full.lufs_i.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn write_annotations_and_read(

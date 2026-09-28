@@ -331,7 +331,7 @@ impl crate::app::WavesPreviewer {
             self.refresh_music_ai_status();
         }
         if self.music_model_download_state.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            ctx.request_repaint_after(crate::app::ui_timing::SMOOTH_REFRESH);
         } else {
             ctx.request_repaint();
         }
@@ -467,7 +467,7 @@ impl crate::app::WavesPreviewer {
             ctx.request_repaint();
             return;
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        ctx.request_repaint_after(crate::app::ui_timing::SMOOTH_REFRESH);
     }
 
     pub(super) fn rebuild_music_provisional_markers_for_tab(&mut self, tab_idx: usize) {
@@ -861,7 +861,7 @@ impl crate::app::WavesPreviewer {
                 ctx.request_repaint();
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+                ctx.request_repaint_after(crate::app::ui_timing::ANIMATION_FRAME);
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 let path = state.tab_path.clone();
@@ -965,7 +965,8 @@ fn remap_sample(pos: usize, src_len: usize, dst_len: usize) -> usize {
 }
 
 fn gain_to_amp(db: f32) -> f32 {
-    if !db.is_finite() || db <= -80.0 {
+    // At or below the volume floor a stem gain means "muted".
+    if !db.is_finite() || db <= crate::levels::VOLUME_MIN_DB {
         0.0
     } else {
         (10.0f32).powf(db / 20.0)

@@ -254,13 +254,7 @@ impl WavesPreviewer {
                 .virtual_audio
                 .clone()
                 .ok_or_else(|| "virtual audio is not available".to_string())?;
-            let sample_rate = item
-                .virtual_state
-                .as_ref()
-                .map(|state| state.sample_rate)
-                .or_else(|| item.meta.as_ref().map(|meta| meta.sample_rate))
-                .unwrap_or(self.audio.shared.out_sample_rate)
-                .max(1);
+            let sample_rate = self.resolve_file_sample_rate(path).hz;
             return self.external_drag_postprocess_audio(path, audio, sample_rate);
         }
         let (channels, sample_rate) = crate::audio_io::decode_audio_multi(path)

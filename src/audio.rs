@@ -9,6 +9,11 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use memmap2::Mmap;
 
 use crate::audio_channels::{ChannelMapMode, ChannelMixMatrix, MAX_SOURCE_CHANNELS};
+/// How long the output meter keeps its last reading once samples stop
+/// arriving, before it resets. Bridges the gap between two clips in a
+/// playlist without a visible drop to the floor.
+const METER_HOLD_AFTER_SILENCE: std::time::Duration = std::time::Duration::from_millis(500);
+
 
 #[derive(Debug)]
 pub struct AudioBuffer {
@@ -632,7 +637,7 @@ impl AudioEngine {
                     if buf_l.is_empty() {
                         // Silence/stopped: hold the last reading briefly, then
                         // invalidate and reset so the next playback starts clean.
-                        if last_data.elapsed() > std::time::Duration::from_millis(500) {
+                        if last_data.elapsed() > METER_HOLD_AFTER_SILENCE {
                             shared
                                 .lufs_m_milli
                                 .store(METER_VALUE_INVALID, Ordering::Relaxed);
@@ -887,7 +892,7 @@ impl AudioEngine {
     }
 
     pub fn new_for_test() -> Self {
-        let shared = Self::new_shared(2, 48_000);
+        let shared = Self::new_shared(2, crate::sample_rate::FALLBACK_SAMPLE_RATE);
         Self {
             _stream: None,
             shared,

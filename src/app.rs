@@ -47,6 +47,7 @@ mod editor_features;
 mod editor_ops;
 mod editor_viewport;
 mod effect_graph_ops;
+pub(crate) mod ui_timing;
 pub mod engine_export;
 mod export_ops;
 mod external;
@@ -69,6 +70,7 @@ pub mod keymap;
 mod kittest_ops;
 mod licenses;
 mod list_ops;
+pub(crate) mod os_paste_key;
 mod list_preview_ops;
 mod list_seek_ops;
 mod list_state_ops;
@@ -104,6 +106,8 @@ mod session_store;
 mod session_sync;
 mod session_watch;
 mod sort_filter_jobs;
+pub(crate) mod list_filter;
+pub(crate) mod text_match;
 mod spectral_ops;
 mod spectrogram;
 mod spectrogram_jobs;
@@ -416,7 +420,8 @@ impl Default for PlaybackSessionState {
             source: PlaybackSourceKind::None,
             transport: PlaybackTransportKind::Buffer,
             user_speed: 1.0,
-            transport_sr: 48_000,
+            // Replaced by the device's rate as soon as playback starts.
+            transport_sr: crate::sample_rate::FALLBACK_SAMPLE_RATE,
             is_playing: false,
             last_play_start_display_sample: None,
             applied_mode: RateMode::Speed,
@@ -791,6 +796,10 @@ pub struct WavesPreviewer {
     pub select_anchor: Option<usize>,
     // clipboard (list copy/paste)
     pub clipboard_payload: Option<ClipboardPayload>,
+    /// The OS clipboard's change counter just after `clipboard_payload` was
+    /// put there. A different number at paste time means somebody -- an
+    /// Explorer copy, a text copy anywhere -- replaced it since.
+    clipboard_payload_seq: Option<u32>,
     pub clipboard_temp_files: Vec<PathBuf>,
     pending_external_drag: Option<PendingExternalDrag>,
     external_drag_temp_files: VecDeque<ExternalDragTempFile>,
@@ -898,6 +907,17 @@ pub struct WavesPreviewer {
     search_use_regex: bool,
     search_dirty: bool,
     search_deadline: Option<std::time::Instant>,
+    /// Per-column filters set from the column headers (Excel-style). Applied
+    /// together with the search box, in the same pass.
+    column_filters: Vec<crate::app::list_filter::ColumnFilter>,
+    /// What a load of pasted / dropped paths has done so far; reported as a
+    /// toast when it finishes. `None` for loads nobody asked to hear about.
+    scan_report: Option<crate::app::list_ops::ScanReport>,
+    /// The column filter dialog, while it is open.
+    list_filter_dialog: Option<crate::app::ui::list_filter_dialog::ListFilterDialog>,
+    /// A header menu choice made while drawing the list header, acted on
+    /// once the table is drawn (the header cannot borrow the whole app).
+    list_header_menu: Option<(SortKey, String, crate::app::helpers::HeaderMenuAction)>,
     // list filtering
     skip_dotfiles: bool,
     zero_cross_epsilon: f32,
@@ -1764,7 +1784,7 @@ impl WavesPreviewer {
 
     fn current_output_meter_db(&self) -> f32 {
         if !self.playback_is_playing_now() {
-            return -80.0;
+            return crate::levels::METER_FLOOR_DB;
         }
         let callback_rms = self
             .audio
@@ -1777,9 +1797,9 @@ impl WavesPreviewer {
             self.audio.current_source_meter_rms_fallback(1024)
         };
         if rms > 0.0 {
-            (20.0 * rms.max(1.0e-8).log10()).clamp(-80.0, 6.0)
+            (20.0 * rms.max(1.0e-8).log10()).clamp(crate::levels::METER_FLOOR_DB, crate::levels::METER_CEILING_DB)
         } else {
-            -80.0
+            crate::levels::METER_FLOOR_DB
         }
     }
 
@@ -2195,7 +2215,7 @@ impl WavesPreviewer {
         let rms_db = if rms > 0.0 {
             20.0 * rms.log10()
         } else {
-            -120.0
+            crate::levels::NO_SIGNAL_DB
         };
         let mut peak_abs = 0.0f32;
         for ch in channels {
@@ -2206,7 +2226,7 @@ impl WavesPreviewer {
                 }
             }
         }
-        let silent_thresh = 10.0_f32.powf(-80.0 / 20.0);
+        let silent_thresh = crate::levels::silence_amplitude();
         let peak_db = if peak_abs > silent_thresh {
             20.0 * peak_abs.log10()
         } else {
@@ -2293,11 +2313,18 @@ impl WavesPreviewer {
         meta: Option<FileMeta>,
         virtual_state: Option<VirtualState>,
     ) -> MediaItem {
+        // The asset's rate is later read back as the row's `file_sr`, so it
+        // must come from something that knows it; the output rate is only the
+        // last resort, as for any file whose rate nobody reported.
+        let asset_sr = meta
+            .as_ref()
+            .map(|value| value.sample_rate)
+            .or_else(|| virtual_state.as_ref().map(|state| state.sample_rate))
+            .filter(|sr| *sr > 0)
+            .unwrap_or(self.audio.shared.out_sample_rate.max(1));
         let audio_asset = crate::audio_asset::AudioAssetDescriptor::resident(
             audio.clone(),
-            meta.as_ref()
-                .map(|value| value.sample_rate)
-                .unwrap_or(48_000),
+            asset_sr,
             meta.as_ref()
                 .map(|value| value.bits_per_sample)
                 .unwrap_or(32),
@@ -2352,11 +2379,15 @@ impl WavesPreviewer {
         let path = item.path.clone();
         let idx = insert_idx.unwrap_or(self.items.len()).min(self.items.len());
         self.items.insert(idx, item);
-        self.path_index.insert(path, id);
+        self.path_index.insert(path.clone(), id);
         for i in idx..self.items.len() {
             let id = self.items[i].id;
             self.item_index.insert(id, i);
         }
+        // A row backed by a file starts without metadata; start reading it
+        // now rather than when the list next draws the row, which it may not
+        // while the Recording tab is in front.
+        self.queue_virtual_file_meta_for_path(&path, true);
     }
 
     fn unique_virtual_display_name(&self, base: &str) -> String {
@@ -3042,6 +3073,7 @@ impl WavesPreviewer {
         self.selected_multi.clear();
         self.select_anchor = None;
         self.search_query.clear();
+        self.column_filters.clear();
         self.search_dirty = false;
         self.search_deadline = None;
         self.files.clear();

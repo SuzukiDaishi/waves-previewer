@@ -51,7 +51,7 @@ pub struct ToolLogEntry {
 pub fn run_tool_command(job: ToolJob) -> ToolRunResult {
     let start = SystemTime::now();
     let output = run_shell_command(&job.command);
-    let duration = start.elapsed().unwrap_or(Duration::from_secs(0));
+    let duration = start.elapsed().unwrap_or(Duration::ZERO);
     let ok = output.status.success();
     ToolRunResult {
         job,

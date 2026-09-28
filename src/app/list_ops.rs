@@ -4,11 +4,10 @@ use std::path::{Path, PathBuf};
 use crate::audio_io;
 use walkdir::WalkDir;
 
-/// What a merge did with the paths it was handed.
+/// What a load of pasted or dropped paths did with them.
 ///
 /// `missing` covers paths that are neither a file nor a directory — a stale
 /// clipboard from a since-ejected volume, most often.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct FileMergeCounts {
     pub added: usize,
@@ -17,7 +16,14 @@ pub(super) struct FileMergeCounts {
     pub missing: usize,
 }
 
-#[allow(dead_code)]
+/// A reported load in progress (`start_reported_file_load`): the counts so
+/// far and the rows it added, to tell afterwards whether a filter hides them.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ScanReport {
+    pub counts: FileMergeCounts,
+    pub added_ids: Vec<crate::app::types::MediaId>,
+}
+
 impl FileMergeCounts {
     /// How the result reads in a toast, or `None` when there is nothing worth
     /// interrupting the user for.

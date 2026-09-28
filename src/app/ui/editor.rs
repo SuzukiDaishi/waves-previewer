@@ -301,9 +301,59 @@ fn selection_stretch_rate(source_len: usize, target_len: usize) -> f32 {
     ) as f32
 }
 
-/// Find the nearest zero crossing (in either direction, max 48001 samples) using mixdown.
+/// Spectral warp brush falloff (Gaussian sigma). In time: from a single
+/// transient (10 ms) to a phrase (2 s). In frequency: from one harmonic's
+/// width to most of the spectrum.
+const WARP_TIME_RADIUS_MS: std::ops::RangeInclusive<f32> = 10.0..=2_000.0;
+const WARP_FREQ_RADIUS_HZ: std::ops::RangeInclusive<f32> =
+    crate::sample_rate::AUDIBLE_LOW_HZ..=8_000.0;
+
+/// Held arrow-key seeking in the editor: the first step is immediate, the
+/// next waits `SEEK_REPEAT_DELAY` (so a tap moves one step), then steps come
+/// every `SEEK_REPEAT_SLOW`, and every `SEEK_REPEAT_FAST` once the key has
+/// been held for `SEEK_REPEAT_ACCELERATE_AFTER`.
+const SEEK_REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(220);
+const SEEK_REPEAT_SLOW: std::time::Duration = std::time::Duration::from_millis(70);
+const SEEK_REPEAT_FAST: std::time::Duration = std::time::Duration::from_millis(35);
+const SEEK_REPEAT_ACCELERATE_AFTER: std::time::Duration = std::time::Duration::from_millis(650);
+
+/// Mini meter analysis windows, in time so they read the same at any rate:
+/// the oscilloscope shows 40 ms (a couple of cycles of a low voice), the
+/// level meter integrates 50 ms (a fast PPM), the vectorscope 30 ms. The
+/// frame bounds stop a very low or very high rate from making the window
+/// uselessly short or expensively long.
+const MINI_SCOPE_WINDOW_SECS: f64 = 0.04;
+const MINI_LEVEL_WINDOW_SECS: f64 = 0.05;
+const MINI_VECTOR_WINDOW_SECS: f64 = 0.03;
+const MINI_METER_MIN_WINDOW_FRAMES: usize = 256;
+const MINI_METER_MAX_WINDOW_FRAMES: usize = 8_192;
+const MINI_VECTOR_MAX_WINDOW_FRAMES: usize = 4_096;
+
+/// Loop seam preview: the shortest window asked for (2 ms, about one period
+/// of a 500 Hz tone), the fewest frames shown each side of the seam however
+/// short that is, and the longest stretch each side -- one second, whatever
+/// the rate, so a long crossfade cannot turn the preview into a whole-file
+/// copy.
+const LOOP_SEAM_MIN_WINDOW_SECS: f32 = 0.002;
+const LOOP_SEAM_MIN_SIDE_FRAMES: usize = 64;
+const LOOP_SEAM_MAX_SIDE_SECS: f64 = 1.0;
+
+/// How far a zero-crossing snap may move the cursor, each way. A second is
+/// far beyond any real waveform's next crossing; the bound only stops a long
+/// run of DC or silence from scanning the whole file.
+const ZERO_CROSS_SNAP_MAX_SECS: f64 = 1.0;
+
+/// Find the nearest zero crossing (in either direction, within
+/// `ZERO_CROSS_SNAP_MAX_SECS`) using mixdown. `buffer_sr` is the rate of
+/// `ch_samples`, so the window is the same length of time at any rate.
 /// Used for Alt+drag snapping without holding a `&self` borrow.
-pub(in crate::app) fn zc_snap_nearest(ch_samples: &[Vec<f32>], eps: f32, cur: usize) -> usize {
+pub(in crate::app) fn zc_snap_nearest(
+    ch_samples: &[Vec<f32>],
+    buffer_sr: u32,
+    eps: f32,
+    cur: usize,
+) -> usize {
+    let max_dist = crate::sample_rate::frames_for_secs(ZERO_CROSS_SNAP_MAX_SECS, buffer_sr);
     let ch_count = ch_samples.len();
     if ch_count == 0 {
         return cur;
@@ -320,31 +370,34 @@ pub(in crate::app) fn zc_snap_nearest(ch_samples: &[Vec<f32>], eps: f32, cur: us
     };
     let is_cross =
         |a: f32, b: f32| -> bool { b.abs() <= eps || a.abs() <= eps || (a > 0.0) != (b > 0.0) };
+    // `None` when that side has no crossing within reach. (It used to be
+    // `cur`, which at distance 0 always beat a crossing found on the other
+    // side, so a one-sided crossing was never snapped to.)
     let fwd = if cur + 1 < min_len {
         let mut prev = mix_at(cur);
-        let mut found = cur;
-        let limit = min_len.min(cur + 48001);
+        let mut found = None;
+        let limit = min_len.min(cur + max_dist + 1);
         for i in (cur + 1)..limit {
             let s = mix_at(i);
             if is_cross(prev, s) {
-                found = i;
+                found = Some(i);
                 break;
             }
             prev = s;
         }
         found
     } else {
-        cur
+        None
     };
     let bwd = if cur > 0 {
         let mut next = mix_at(cur);
-        let mut found = cur;
-        let lo = cur.saturating_sub(48000);
+        let mut found = None;
+        let lo = cur.saturating_sub(max_dist);
         let mut i = cur - 1;
         loop {
             let s = mix_at(i);
             if is_cross(s, next) {
-                found = i;
+                found = Some(i);
                 break;
             }
             next = s;
@@ -355,12 +408,13 @@ pub(in crate::app) fn zc_snap_nearest(ch_samples: &[Vec<f32>], eps: f32, cur: us
         }
         found
     } else {
-        cur
+        None
     };
-    if cur.abs_diff(fwd) <= cur.abs_diff(bwd) {
-        fwd
-    } else {
-        bwd
+    match (fwd, bwd) {
+        (Some(f), Some(b)) if cur.abs_diff(f) <= cur.abs_diff(b) => f,
+        (_, Some(b)) => b,
+        (Some(f), None) => f,
+        (None, None) => cur,
     }
 }
 
@@ -497,7 +551,7 @@ impl crate::app::WavesPreviewer {
                     && tab.editor_note_last_click.is_some_and(|(id, time)| {
                         id == note.id
                             && click_time.saturating_duration_since(time)
-                                <= std::time::Duration::from_millis(400)
+                                <= crate::app::ui_timing::DOUBLE_CLICK_WINDOW
                     });
                 if location_response.clicked() {
                     tab.editor_note_last_click = Some((note.id, click_time));
@@ -635,7 +689,7 @@ impl crate::app::WavesPreviewer {
         }
         let raw = geom.x_to_display_sample(x);
         if snap_to_zero_cross {
-            return zc_snap_nearest(&tab.ch_samples, zero_cross_epsilon, raw);
+            return zc_snap_nearest(&tab.ch_samples, tab.buffer_sample_rate, zero_cross_epsilon, raw);
         }
         raw
     }
@@ -676,10 +730,17 @@ impl crate::app::WavesPreviewer {
         let sr = sample_rate.max(1);
         let effective_xfade_samples =
             Self::effective_loop_xfade_samples(start, end, available_len, tab.loop_xfade_samples);
-        let base_side_samples = ((sr as f32) * window_secs.max(0.002)).round() as usize;
+        let base_side_samples = crate::sample_rate::frames_for_secs(
+            window_secs.max(LOOP_SEAM_MIN_WINDOW_SECS) as f64,
+            sr,
+        );
         let side_samples = base_side_samples
             .max(effective_xfade_samples.saturating_mul(2))
-            .clamp(64, 48_000);
+            .clamp(
+                LOOP_SEAM_MIN_SIDE_FRAMES,
+                crate::sample_rate::frames_for_secs(LOOP_SEAM_MAX_SIDE_SECS, sr)
+                    .max(LOOP_SEAM_MIN_SIDE_FRAMES),
+            );
         let clamped_end = end.min(available_len);
         let left_start = clamped_end.saturating_sub(side_samples);
         let right_end = start.saturating_add(side_samples).min(available_len);
@@ -761,7 +822,7 @@ impl crate::app::WavesPreviewer {
         ui.painter().hline(
             rect.x_range(),
             rect.center().y,
-            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+            egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
         );
         ui.add_space(2.0);
     }
@@ -1358,7 +1419,7 @@ impl crate::app::WavesPreviewer {
                 painter.rect_stroke(
                     rect,
                     6.0,
-                    Stroke::new(1.0, Color32::from_rgb(46, 54, 66)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(46, 54, 66)),
                     egui::StrokeKind::Outside,
                 );
                 let wave_rect = rect.shrink2(egui::vec2(8.0, 8.0));
@@ -1376,7 +1437,7 @@ impl crate::app::WavesPreviewer {
                         let y1 = center_y - lo.clamp(-1.0, 1.0) * amp;
                         painter.line_segment(
                             [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
-                            Stroke::new(1.0, Color32::from_rgb(120, 138, 162)),
+                            Stroke::new(1.0_f32, Color32::from_rgb(120, 138, 162)),
                         );
                     }
                 } else {
@@ -1385,7 +1446,7 @@ impl crate::app::WavesPreviewer {
                             egui::pos2(wave_rect.left(), center_y),
                             egui::pos2(wave_rect.right(), center_y),
                         ],
-                        Stroke::new(1.0, Color32::from_rgb(84, 94, 110)),
+                        Stroke::new(1.0_f32, Color32::from_rgb(84, 94, 110)),
                     );
                 }
 
@@ -1413,7 +1474,7 @@ impl crate::app::WavesPreviewer {
                 painter.rect_stroke(
                     viewport_rect,
                     4.0,
-                    Stroke::new(1.5, Color32::from_rgb(92, 188, 255)),
+                    Stroke::new(1.5_f32, Color32::from_rgb(92, 188, 255)),
                     egui::StrokeKind::Outside,
                 );
 
@@ -1491,7 +1552,7 @@ impl crate::app::WavesPreviewer {
         painter.rect_stroke(
             rail_rect,
             5.0,
-            Stroke::new(1.0, Color32::from_rgb(46, 54, 66)),
+            Stroke::new(1.0_f32, Color32::from_rgb(46, 54, 66)),
             egui::StrokeKind::Outside,
         );
         let zero_y = Self::amplitude_nav_y_from_amp(rail_rect, 0.0);
@@ -1500,7 +1561,7 @@ impl crate::app::WavesPreviewer {
                 egui::pos2(rail_rect.left(), zero_y),
                 egui::pos2(rail_rect.right(), zero_y),
             ],
-            Stroke::new(1.0, Color32::from_rgb(86, 98, 116)),
+            Stroke::new(1.0_f32, Color32::from_rgb(86, 98, 116)),
         );
         painter.rect_filled(
             viewport_rect,
@@ -1510,7 +1571,7 @@ impl crate::app::WavesPreviewer {
         painter.rect_stroke(
             viewport_rect,
             4.0,
-            Stroke::new(1.5, Color32::from_rgb(92, 188, 255)),
+            Stroke::new(1.5_f32, Color32::from_rgb(92, 188, 255)),
             egui::StrokeKind::Outside,
         );
         for y in [viewport_rect.top(), viewport_rect.bottom()] {
@@ -1519,7 +1580,7 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(viewport_rect.left() + 2.0, y),
                     egui::pos2(viewport_rect.right() - 2.0, y),
                 ],
-                Stroke::new(2.0, Color32::from_rgb(110, 210, 255)),
+                Stroke::new(2.0_f32, Color32::from_rgb(110, 210, 255)),
             );
         }
 
@@ -1654,12 +1715,15 @@ impl crate::app::WavesPreviewer {
     }
 
     fn spectro_color_range_y(rect: egui::Rect, db: f32) -> f32 {
-        rect.top() + ((0.0 - db.clamp(-160.0, 0.0)) / 160.0) * rect.height()
+        // The colour-range bar spans the whole adjustable range, 0 dB at the
+        // top down to the lowest floor at the bottom.
+        let span = -crate::levels::SPECTRO_DB_FLOOR_MIN;
+        rect.top() + ((0.0 - db.clamp(crate::levels::SPECTRO_DB_FLOOR_MIN, 0.0)) / span) * rect.height()
     }
 
     fn spectro_color_range_db(rect: egui::Rect, y: f32) -> f32 {
         let t = ((y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0);
-        -160.0 * t
+        crate::levels::SPECTRO_DB_FLOOR_MIN * t
     }
 
     fn set_spectro_color_range_handle(
@@ -1670,13 +1734,19 @@ impl crate::app::WavesPreviewer {
         match handle {
             SpectroColorRangeHandle::Ceiling => {
                 cfg.db_ceiling = db
-                    .clamp((cfg.db_floor + 10.0).max(-80.0), 0.0)
-                    .clamp(-80.0, 0.0);
+                    .clamp(
+                        (cfg.db_floor + crate::levels::SPECTRO_MIN_SPAN_DB).max(crate::levels::SPECTRO_DB_CEILING_MIN),
+                        crate::levels::SPECTRO_DB_CEILING_MAX,
+                    )
+                    .clamp(crate::levels::SPECTRO_DB_CEILING_MIN, crate::levels::SPECTRO_DB_CEILING_MAX);
             }
             SpectroColorRangeHandle::Floor => {
                 cfg.db_floor = db
-                    .clamp(-160.0, (cfg.db_ceiling - 10.0).min(-20.0))
-                    .clamp(-160.0, -20.0);
+                    .clamp(
+                        crate::levels::SPECTRO_DB_FLOOR_MIN,
+                        (cfg.db_ceiling - crate::levels::SPECTRO_MIN_SPAN_DB).min(crate::levels::SPECTRO_DB_FLOOR_MAX),
+                    )
+                    .clamp(crate::levels::SPECTRO_DB_FLOOR_MIN, crate::levels::SPECTRO_DB_FLOOR_MAX);
             }
         }
     }
@@ -1771,8 +1841,8 @@ impl crate::app::WavesPreviewer {
         }
 
         if response.double_clicked() || repeated_click {
-            cfg.db_floor = -120.0;
-            cfg.db_ceiling = 0.0;
+            cfg.db_floor = crate::levels::SPECTRO_DB_FLOOR_DEFAULT;
+            cfg.db_ceiling = crate::levels::SPECTRO_DB_CEILING_MAX;
             committed = true;
             ui.ctx().memory_mut(|mem| {
                 mem.data.remove::<SpectroColorRangeHandle>(drag_id);
@@ -1814,7 +1884,7 @@ impl crate::app::WavesPreviewer {
         painter.rect_stroke(
             rect,
             4.0,
-            Stroke::new(1.0, Color32::from_rgb(46, 54, 66)),
+            Stroke::new(1.0_f32, Color32::from_rgb(46, 54, 66)),
             egui::StrokeKind::Inside,
         );
         let gradient_rect = egui::Rect::from_min_max(
@@ -1834,7 +1904,7 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(gradient_rect.right(), y1 + 1.0),
                 ),
                 0.0,
-                db_to_color(-80.0 + brightness * 80.0),
+                crate::app::helpers::colormap_at(brightness),
             );
         }
         let ceiling_y = Self::spectro_color_range_y(rect, cfg.db_ceiling);
@@ -1862,7 +1932,7 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(rect.left() + 12.0, y),
                     egui::pos2(rect.left() + 15.0, y),
                 ],
-                Stroke::new(1.0, Color32::from_rgb(112, 122, 138)),
+                Stroke::new(1.0_f32, Color32::from_rgb(112, 122, 138)),
             );
             painter.text(
                 egui::pos2(rect.left() + 17.0, y),
@@ -1881,7 +1951,7 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(rect.left() + 1.0, y),
                     egui::pos2(rect.right() - 1.0, y),
                 ],
-                Stroke::new(2.0, color),
+                Stroke::new(2.0_f32, color),
             );
             painter.circle_filled(egui::pos2(rect.left() + 8.0, y), 3.0, color);
         }
@@ -1940,7 +2010,7 @@ impl crate::app::WavesPreviewer {
         painter.rect_stroke(
             rect,
             6.0,
-            Stroke::new(1.0, Color32::from_rgb(52, 62, 78)),
+            Stroke::new(1.0_f32, Color32::from_rgb(52, 62, 78)),
             egui::StrokeKind::Outside,
         );
         let wave_rect = rect.shrink2(egui::vec2(8.0, 8.0));
@@ -1957,7 +2027,7 @@ impl crate::app::WavesPreviewer {
                 egui::pos2(wave_rect.left(), mid_y),
                 egui::pos2(wave_rect.right(), mid_y),
             ],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 140, 170, 36)),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(120, 140, 170, 36)),
         );
         let seam_x = wave_rect.center().x;
         painter.line_segment(
@@ -1965,7 +2035,7 @@ impl crate::app::WavesPreviewer {
                 egui::pos2(seam_x, wave_rect.top()),
                 egui::pos2(seam_x, wave_rect.bottom()),
             ],
-            Stroke::new(1.5, Color32::from_rgb(255, 196, 72)),
+            Stroke::new(1.5_f32, Color32::from_rgb(255, 196, 72)),
         );
         let draw_trace = |painter: &egui::Painter, samples: &[f32], stroke: Stroke| {
             let total = samples.len();
@@ -1997,7 +2067,7 @@ impl crate::app::WavesPreviewer {
                     let x = egui::lerp(wave_rect.x_range(), i as f32 / denom);
                     painter.line_segment(
                         [egui::pos2(x, amp_to_y(*mn)), egui::pos2(x, amp_to_y(*mx))],
-                        Stroke::new(1.0, stroke.color.gamma_multiply(0.4)),
+                        Stroke::new(1.0_f32, stroke.color.gamma_multiply(0.4)),
                     );
                     mids.push(egui::pos2(x, amp_to_y((mn + mx) * 0.5)));
                 }
@@ -2007,13 +2077,13 @@ impl crate::app::WavesPreviewer {
         draw_trace(
             &painter,
             &joined_raw,
-            Stroke::new(1.2, Color32::from_rgb(120, 176, 255)),
+            Stroke::new(1.2_f32, Color32::from_rgb(120, 176, 255)),
         );
         if let Some(blended) = &blended {
             draw_trace(
                 &painter,
                 blended,
-                Stroke::new(1.6, Color32::from_rgb(92, 255, 224)),
+                Stroke::new(1.6_f32, Color32::from_rgb(92, 255, 224)),
             );
         }
         let label_font = TextStyle::Small.resolve(ui.style());
@@ -2142,7 +2212,7 @@ impl crate::app::WavesPreviewer {
                 painter.rect_stroke(
                     frame_rect,
                     0.0,
-                    Stroke::new(1.0, Color32::from_rgb(40, 46, 56)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(40, 46, 56)),
                     egui::StrokeKind::Inside,
                 );
             })
@@ -2312,7 +2382,7 @@ impl crate::app::WavesPreviewer {
         painter.rect_stroke(
             rect,
             6.0,
-            Stroke::new(1.0, Color32::from_rgb(40, 46, 56)),
+            Stroke::new(1.0_f32, Color32::from_rgb(40, 46, 56)),
             egui::StrokeKind::Outside,
         );
 
@@ -2364,9 +2434,14 @@ impl crate::app::WavesPreviewer {
         let spectrum_time_due = tab.mini_meter.spectrum_db.is_empty()
             || now - tab.mini_meter.spectrum_last_time >= spectrum_interval_secs;
         let spec_n = mini_meter::spectrum_history_len(sr).min(buf_len);
-        let scope_n = ((srf * 0.04) as usize).clamp(256, 8_192).min(buf_len);
-        let level_n = ((srf * 0.05) as usize).clamp(256, 8_192).min(buf_len);
-        let vector_n = ((srf * 0.03) as usize).clamp(256, 4_096).min(buf_len);
+        let meter_window = |secs: f64, max: usize| {
+            crate::sample_rate::frames_for_secs(secs, sr)
+                .clamp(MINI_METER_MIN_WINDOW_FRAMES, max)
+                .min(buf_len)
+        };
+        let scope_n = meter_window(MINI_SCOPE_WINDOW_SECS, MINI_METER_MAX_WINDOW_FRAMES);
+        let level_n = meter_window(MINI_LEVEL_WINDOW_SECS, MINI_METER_MAX_WINDOW_FRAMES);
+        let vector_n = meter_window(MINI_VECTOR_WINDOW_SECS, MINI_VECTOR_MAX_WINDOW_FRAMES);
         let spectrum_need = if spectrum_time_due { spec_n } else { 0 };
         let need = spectrum_need.max(scope_n).max(level_n).min(end);
         let start = end - need;
@@ -2470,7 +2545,7 @@ impl crate::app::WavesPreviewer {
                             painter.line_segment(
                                 [prev, pt],
                                 Stroke::new(
-                                    1.2,
+                                    1.2_f32,
                                     crate::app::helpers::lerp_color(
                                         Color32::from_rgb(96, 200, 255),
                                         Color32::from_rgb(255, 96, 128),
@@ -2517,7 +2592,7 @@ impl crate::app::WavesPreviewer {
                         egui::pos2(spectrum_rect.left() + 1.0, y),
                         egui::pos2(spectrum_rect.right() - 1.0, y),
                     ],
-                    Stroke::new(1.0, Color32::from_rgb(26, 29, 36)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(26, 29, 36)),
                 );
             }
             let col_w = (spectrum_rect.width() / cols.max(1) as f32).max(1.0);
@@ -2562,7 +2637,7 @@ impl crate::app::WavesPreviewer {
                             egui::pos2(x, spectrum_rect.bottom() - 4.0),
                             egui::pos2(x, spectrum_rect.bottom()),
                         ],
-                        Stroke::new(1.0, label_col),
+                        Stroke::new(1.0_f32, label_col),
                     );
                     painter.text(
                         egui::pos2(x + 2.0, spectrum_rect.bottom() - 4.0),
@@ -2595,7 +2670,7 @@ impl crate::app::WavesPreviewer {
             );
             let radius = (scope_area.width().min(scope_area.height()) * 0.5 - 2.0).max(8.0);
             let center = scope_area.center();
-            let guide = Stroke::new(1.0, Color32::from_rgb(34, 39, 48));
+            let guide = Stroke::new(1.0_f32, Color32::from_rgb(34, 39, 48));
             painter.circle_stroke(center, radius, guide);
             let diag = radius * std::f32::consts::FRAC_1_SQRT_2;
             // L / R axes (45 degrees).
@@ -2652,7 +2727,7 @@ impl crate::app::WavesPreviewer {
                 for &(x, y) in pts.iter() {
                     let pt = egui::pos2(center.x + x * radius, center.y - y * radius);
                     if let Some(prev) = last {
-                        painter.line_segment([prev, pt], Stroke::new(1.0, trace));
+                        painter.line_segment([prev, pt], Stroke::new(1.0_f32, trace));
                     }
                     last = Some(pt);
                 }
@@ -2704,7 +2779,7 @@ impl crate::app::WavesPreviewer {
             );
             painter.line_segment(
                 [egui::pos2(cx, bar.top()), egui::pos2(cx, bar.bottom())],
-                Stroke::new(1.0, Color32::from_rgb(70, 78, 92)),
+                Stroke::new(1.0_f32, Color32::from_rgb(70, 78, 92)),
             );
             painter.text(
                 egui::pos2(bar.left() - 1.0, bar.center().y),
@@ -2839,7 +2914,7 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(bar_rect.left(), rms_y),
                     egui::pos2(bar_rect.right(), rms_y),
                 ],
-                Stroke::new(1.5, Color32::WHITE),
+                Stroke::new(1.5_f32, Color32::WHITE),
             );
             let hold_y = bar_rect.bottom() - norm_of(*hold) * bar_rect.height();
             painter.line_segment(
@@ -2847,7 +2922,7 @@ impl crate::app::WavesPreviewer {
                     egui::pos2(bar_rect.left(), hold_y),
                     egui::pos2(bar_rect.right(), hold_y),
                 ],
-                Stroke::new(1.0, Color32::from_rgb(255, 196, 72)),
+                Stroke::new(1.0_f32, Color32::from_rgb(255, 196, 72)),
             );
             if show_ch_labels {
                 let label = match (n_ch, c) {
@@ -2899,7 +2974,7 @@ impl crate::app::WavesPreviewer {
         tab.mini_meter.active = playing || decaying;
         if tab.mini_meter.active {
             ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(33));
+                .request_repaint_after(crate::app::ui_timing::SMOOTH_REFRESH);
         }
     }
 
@@ -3313,7 +3388,7 @@ impl crate::app::WavesPreviewer {
                             let col = amp_to_color(v.abs().clamp(0.0, 1.0));
                             shapes.push(egui::Shape::line_segment(
                                 [line_points[i - 1], line_points[i]],
-                                egui::Stroke::new(1.0, col),
+                                egui::Stroke::new(1.0_f32, col),
                             ));
                         }
                         if let Some(radius) = sample_point_radius {
@@ -3361,7 +3436,7 @@ impl crate::app::WavesPreviewer {
                             let col = amp_to_color(v.abs().clamp(0.0, 1.0));
                             shapes.push(egui::Shape::line_segment(
                                 [line_points[i - 1], line_points[i]],
-                                egui::Stroke::new(1.0, col),
+                                egui::Stroke::new(1.0_f32, col),
                             ));
                         }
                         if let Some(radius) = sample_point_radius {
@@ -3879,9 +3954,9 @@ impl crate::app::WavesPreviewer {
             if dir != 0 {
                 let now = std::time::Instant::now();
                 let pressed = if dir > 0 { pressed_right } else { pressed_left };
-                let repeat_delay = std::time::Duration::from_millis(220);
-                let repeat_fast = std::time::Duration::from_millis(35);
-                let repeat_slow = std::time::Duration::from_millis(70);
+                let repeat_delay = SEEK_REPEAT_DELAY;
+                let repeat_fast = SEEK_REPEAT_FAST;
+                let repeat_slow = SEEK_REPEAT_SLOW;
                 let mut should_step = pressed;
                 let mut hold_state = match hold.take() {
                     Some(mut state) => {
@@ -3895,7 +3970,7 @@ impl crate::app::WavesPreviewer {
                         } else if !pressed {
                             let elapsed = now.saturating_duration_since(state.started_at);
                             let since = now.saturating_duration_since(state.last_step_at);
-                            let interval = if elapsed >= std::time::Duration::from_millis(650) {
+                            let interval = if elapsed >= SEEK_REPEAT_ACCELERATE_AFTER {
                                 repeat_fast
                             } else {
                                 repeat_slow
@@ -4641,7 +4716,7 @@ impl crate::app::WavesPreviewer {
                             painter.line_segment(
                                 [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
                                 egui::Stroke::new(
-                                    if is_bar { 1.5 } else { 1.0 },
+                                    if is_bar { 1.5_f32 } else { 1.0_f32 },
                                     if is_bar { bar_line_col } else { beat_line_col },
                                 ),
                             );
@@ -4677,7 +4752,7 @@ impl crate::app::WavesPreviewer {
                         while t <= t1 + step*0.5 {
                             let s_idx = (t * sr).round() as isize;
                             let x = geom.sample_boundary_x(s_idx.max(0) as usize);
-                            painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(1.0, grid_col));
+                            painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(1.0_f32, grid_col));
                             // Label near top; avoid overcrowding by skipping when too dense
                             if px_per_sec * step >= 70.0 {
                                 let label = crate::app::helpers::format_time_s(t);
@@ -4755,7 +4830,9 @@ impl crate::app::WavesPreviewer {
                                 .as_ref()
                                 .and_then(|specs| specs.first())
                                 .map(|spec| spec.sample_rate)
-                                .unwrap_or(self.audio.shared.out_sample_rate);
+                                // Before the spectrogram exists: the rate it
+                                // will be computed at, the tab's buffer rate.
+                                .unwrap_or(tab.buffer_sample_rate);
                             let mut max_freq = (sr.max(1) as f32) * 0.5;
                             if self.spectro_cfg.max_freq_hz > 0.0 {
                                 max_freq = self.spectro_cfg.max_freq_hz.min(max_freq).max(1.0);
@@ -4767,7 +4844,7 @@ impl crate::app::WavesPreviewer {
                             ];
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let tick_col = Color32::from_rgb(140, 150, 165);
-                            let tick_stroke = egui::Stroke::new(1.0, tick_col);
+                            let tick_stroke = egui::Stroke::new(1.0_f32, tick_col);
                             let freq_to_note_label = |freq: f32| -> String {
                                 if freq <= 0.0 {
                                     return String::new();
@@ -4934,7 +5011,7 @@ impl crate::app::WavesPreviewer {
                         {
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let tick_col = Color32::from_rgb(140, 150, 165);
-                            let tick_stroke = egui::Stroke::new(1.0, tick_col);
+                            let tick_stroke = egui::Stroke::new(1.0_f32, tick_col);
                             let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
                                 view_mode,
                                 tab.vertical_zoom,
@@ -4984,7 +5061,7 @@ impl crate::app::WavesPreviewer {
                                                 egui::pos2(lane_rect.left(), y),
                                                 egui::pos2(lane_rect.right(), y),
                                             ],
-                                            egui::Stroke::new(1.0, accent),
+                                            egui::Stroke::new(1.0_f32, accent),
                                         );
                                         painter.text(
                                             egui::pos2(lane_rect.right() - 4.0, y - 2.0),
@@ -5044,7 +5121,7 @@ impl crate::app::WavesPreviewer {
                         {
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let tick_col = Color32::from_rgb(140, 150, 165);
-                            let tick_stroke = egui::Stroke::new(1.0, tick_col);
+                            let tick_stroke = egui::Stroke::new(1.0_f32, tick_col);
                             let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
                                 view_mode,
                                 tab.vertical_zoom,
@@ -5159,7 +5236,7 @@ impl crate::app::WavesPreviewer {
                             // Frequency axis ticks along the left gutter.
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let tick_col = Color32::from_rgb(140, 150, 165);
-                            let tick_stroke = egui::Stroke::new(1.0, tick_col);
+                            let tick_stroke = egui::Stroke::new(1.0_f32, tick_col);
                             let nyquist = data.sample_rate.max(1) as f32 * 0.5;
                             for (freq, label) in [
                                 (100.0f32, "100"),
@@ -6661,7 +6738,8 @@ impl crate::app::WavesPreviewer {
                 .get(&tab.path)
                 .and_then(|specs| specs.first())
                 .map(|spec| spec.sample_rate)
-                .unwrap_or(self.audio.shared.out_sample_rate);
+                // Before the spectrogram exists: the tab's buffer rate.
+                .unwrap_or(tab.buffer_sample_rate);
             let spec_axis_max_freq = Self::editor_spec_axis_max_freq(&self.spectro_cfg, spec_axis_sr);
             let spec_mel_scale = self.spectro_cfg.mel_scale;
             let (spec_vis_min, spec_vis_max) = Self::editor_vertical_range_for_view(
@@ -6984,11 +7062,7 @@ impl crate::app::WavesPreviewer {
                                 {
                                     let raw = to_range_selection_display_sample(pos.x);
                                     let samp = if alt_now {
-                                        zc_snap_nearest(
-                                            &tab.ch_samples,
-                                            self.zero_cross_epsilon,
-                                            raw,
-                                        )
+                                        zc_snap_nearest(&tab.ch_samples, tab.buffer_sample_rate, self.zero_cross_epsilon, raw)
                                     } else {
                                         raw
                                     };
@@ -7046,7 +7120,7 @@ impl crate::app::WavesPreviewer {
                     {
                         let raw = to_range_selection_display_sample(pos.x);
                         let samp = if alt_now {
-                            zc_snap_nearest(&tab.ch_samples, self.zero_cross_epsilon, raw)
+                            zc_snap_nearest(&tab.ch_samples, tab.buffer_sample_rate, self.zero_cross_epsilon, raw)
                         } else {
                             raw
                         };
@@ -7079,7 +7153,7 @@ impl crate::app::WavesPreviewer {
                     if let (Some(anchor), Some(pos)) = (anchor, resp.interact_pointer_pos()) {
                         let raw = to_range_selection_display_sample(pos.x);
                         let samp = if alt_now {
-                            zc_snap_nearest(&tab.ch_samples, self.zero_cross_epsilon, raw)
+                            zc_snap_nearest(&tab.ch_samples, tab.buffer_sample_rate, self.zero_cross_epsilon, raw)
                         } else {
                             raw
                         };
@@ -7257,8 +7331,8 @@ impl crate::app::WavesPreviewer {
                         tab.vertical_view_center,
                         -a,
                     );
-                    painter.line_segment([egui::pos2(lane_rect.left(), y0), egui::pos2(lane_rect.right(), y0)], egui::Stroke::new(1.0, WAVE_DB_GRID_COL));
-                    painter.line_segment([egui::pos2(lane_rect.left(), y1), egui::pos2(lane_rect.right(), y1)], egui::Stroke::new(1.0, WAVE_DB_GRID_COL));
+                    painter.line_segment([egui::pos2(lane_rect.left(), y0), egui::pos2(lane_rect.right(), y0)], egui::Stroke::new(1.0_f32, WAVE_DB_GRID_COL));
+                    painter.line_segment([egui::pos2(lane_rect.left(), y1), egui::pos2(lane_rect.right(), y1)], egui::Stroke::new(1.0_f32, WAVE_DB_GRID_COL));
                     // labels on the left gutter
                     painter.text(egui::pos2(rect.left() + 2.0, y0), egui::Align2::LEFT_CENTER, format!("{db:.0} dB"), gutter_font.clone(), Color32::GRAY);
                 }
@@ -7694,7 +7768,7 @@ impl crate::app::WavesPreviewer {
                                         let tick_h = (lane_rect.height() * 0.10).max(2.0);
                                         painter.line_segment(
                                             [egui::pos2(sx, sy - tick_h*0.5), egui::pos2(sx, sy + tick_h*0.5)],
-                                            egui::Stroke::new(1.8, Color32::from_rgb(80, 240, 160))
+                                            egui::Stroke::new(1.8_f32, Color32::from_rgb(80, 240, 160))
                                         );
                                     #[cfg(debug_assertions)]
                                     if self.debug.cfg.enabled && self.debug.overlay_trace {
@@ -7715,7 +7789,7 @@ impl crate::app::WavesPreviewer {
                                             v,
                                         );
                                         let p = egui::pos2(sx, sy);
-                                        if let Some(lp) = last { painter.line_segment([lp, p], egui::Stroke::new(1.8, Color32::from_rgb(80, 240, 160))); }
+                                        if let Some(lp) = last { painter.line_segment([lp, p], egui::Stroke::new(1.8_f32, Color32::from_rgb(80, 240, 160))); }
                                         last = Some(p);
                                     }
                                 };
@@ -7798,7 +7872,7 @@ impl crate::app::WavesPreviewer {
                                                     tab.vertical_view_center,
                                                     mn,
                                                 );
-                                                painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.6, Color32::from_rgb(80, 240, 160)));
+                                                painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.6_f32, Color32::from_rgb(80, 240, 160)));
                                             }
                                         }
                                     }
@@ -7849,7 +7923,7 @@ impl crate::app::WavesPreviewer {
                                                     tab.vertical_view_center,
                                                     mn,
                                                 );
-                                                painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.6, Color32::from_rgb(80, 240, 160)));
+                                                painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.6_f32, Color32::from_rgb(80, 240, 160)));
                                             }
                                         }
                                     }
@@ -7877,7 +7951,7 @@ impl crate::app::WavesPreviewer {
                                             v,
                                         );
                                         let p = egui::pos2(sx, sy);
-                                        if let Some(lp) = last { painter.line_segment([lp, p], egui::Stroke::new(1.5, Color32::from_rgb(80, 240, 160))); }
+                                        if let Some(lp) = last { painter.line_segment([lp, p], egui::Stroke::new(1.5_f32, Color32::from_rgb(80, 240, 160))); }
                                         last = Some(p);
                                     }
                                     if let Some(radius) = Self::waveform_sample_point_radius(spp) {
@@ -8012,7 +8086,7 @@ impl crate::app::WavesPreviewer {
                         painter.rect_stroke(
                             sel_rect,
                             0.0,
-                            egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(70, 140, 255, 100)),
+                            egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(70, 140, 255, 100)),
                             egui::StrokeKind::Inside,
                         );
                     }
@@ -8081,7 +8155,7 @@ impl crate::app::WavesPreviewer {
                                 painter.rect_stroke(
                                     sel_rect,
                                     0.0,
-                                    egui::Stroke::new(1.0, stroke),
+                                    egui::Stroke::new(1.0_f32, stroke),
                                     egui::StrokeKind::Inside,
                                 );
                             }
@@ -8102,7 +8176,7 @@ impl crate::app::WavesPreviewer {
                                             egui::pos2(x, rect.top()),
                                             egui::pos2(x, rect.bottom()),
                                         ],
-                                        egui::Stroke::new(2.0, handle_col),
+                                        egui::Stroke::new(2.0_f32, handle_col),
                                     );
                                     painter.rect_filled(
                                         egui::Rect::from_min_max(
@@ -8126,7 +8200,7 @@ impl crate::app::WavesPreviewer {
                                                 egui::pos2(x + dir * 3.5, cy),
                                                 egui::pos2(x + dir * 1.0, cy + 2.5),
                                             ],
-                                            egui::Stroke::new(1.2, arrow_col),
+                                            egui::Stroke::new(1.2_f32, arrow_col),
                                         ));
                                     }
                                 };
@@ -8185,7 +8259,7 @@ impl crate::app::WavesPreviewer {
                                 painter.rect_stroke(
                                     band_rect,
                                     0.0,
-                                    egui::Stroke::new(1.0, stroke),
+                                    egui::Stroke::new(1.0_f32, stroke),
                                     egui::StrokeKind::Inside,
                                 );
                             }
@@ -8224,7 +8298,7 @@ impl crate::app::WavesPreviewer {
                         };
                         painter.line_segment(
                             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                            egui::Stroke::new(1.0, col),
+                            egui::Stroke::new(1.0_f32, col),
                         );
                     }
                 }
@@ -8242,7 +8316,7 @@ impl crate::app::WavesPreviewer {
                     if a == b {
                         painter.line_segment(
                             [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
-                            egui::Stroke::new(1.5, line),
+                            egui::Stroke::new(1.5_f32, line),
                         );
                         painter.text(
                             egui::pos2(ax + 6.0, rect.top() + 2.0),
@@ -8259,11 +8333,11 @@ impl crate::app::WavesPreviewer {
                         painter.rect_filled(applied_rect, 0.0, shade);
                         painter.line_segment(
                             [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
-                            egui::Stroke::new(1.5, line),
+                            egui::Stroke::new(1.5_f32, line),
                         );
                         painter.line_segment(
                             [egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())],
-                            egui::Stroke::new(1.5, line),
+                            egui::Stroke::new(1.5_f32, line),
                         );
                         painter.text(
                             egui::pos2(ax + 6.0, rect.top() + 2.0),
@@ -8283,7 +8357,7 @@ impl crate::app::WavesPreviewer {
                     if b == a {
                         painter.line_segment(
                             [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
-                            egui::Stroke::new(2.0, line),
+                            egui::Stroke::new(2.0_f32, line),
                         );
                         draw_loop_handle(ax, line);
                         painter.text(
@@ -8304,11 +8378,11 @@ impl crate::app::WavesPreviewer {
                         painter.rect_filled(r, 0.0, shade);
                         painter.line_segment(
                             [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
-                            egui::Stroke::new(2.0, line),
+                            egui::Stroke::new(2.0_f32, line),
                         );
                         painter.line_segment(
                             [egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())],
-                            egui::Stroke::new(2.0, line),
+                            egui::Stroke::new(2.0_f32, line),
                         );
                         draw_loop_handle(ax, line);
                         draw_loop_handle(bx, line);
@@ -8388,14 +8462,14 @@ impl crate::app::WavesPreviewer {
                                 if let Some(lp) = last_in_up {
                                     painter.line_segment(
                                         [lp, p_in_up],
-                                        egui::Stroke::new(2.0, curve_col),
+                                        egui::Stroke::new(2.0_f32, curve_col),
                                     );
                                 }
                                 if !uses_dip {
                                     if let Some(lp) = last_in_down {
                                         painter.line_segment(
                                             [lp, p_in_down],
-                                            egui::Stroke::new(2.0, curve_col),
+                                            egui::Stroke::new(2.0_f32, curve_col),
                                         );
                                     }
                                 }
@@ -8408,14 +8482,14 @@ impl crate::app::WavesPreviewer {
                                 if let Some(lp) = last_out_down {
                                     painter.line_segment(
                                         [lp, p_out_down],
-                                        egui::Stroke::new(2.0, curve_col),
+                                        egui::Stroke::new(2.0_f32, curve_col),
                                     );
                                 }
                                 if !uses_dip {
                                     if let Some(lp) = last_out_up {
                                         painter.line_segment(
                                             [lp, p_out_up],
-                                            egui::Stroke::new(2.0, curve_col),
+                                            egui::Stroke::new(2.0_f32, curve_col),
                                         );
                                     }
                                 }
@@ -8458,7 +8532,7 @@ impl crate::app::WavesPreviewer {
                         let y = rect.bottom() - vol * rect.height();
                         let p = egui::pos2(x, y);
                         if let Some(lp) = last {
-                            painter.line_segment([lp, p], egui::Stroke::new(2.0, curve_col));
+                            painter.line_segment([lp, p], egui::Stroke::new(2.0_f32, curve_col));
                         }
                         last = Some(p);
                     }
@@ -8621,7 +8695,7 @@ impl crate::app::WavesPreviewer {
                         .min(len);
                     let pos = map_audio_to_display(tab, pos_audio);
                     let x = geom.sample_center_x(pos.min(display_samples_len.saturating_sub(1)));
-                    painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(2.0, Color32::from_rgb(70,140,255)));
+                    painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(2.0_f32, Color32::from_rgb(70,140,255)));
                     // Playhead time label
                     let sr_f = sr_ctx.max(1.0);
                     let pos_time = (pos as f32) / sr_f;
@@ -8652,7 +8726,7 @@ impl crate::app::WavesPreviewer {
                             egui::pos2(wave_left + wave_w, zero_y),
                         ],
                         egui::Stroke::new(
-                            1.0,
+                            1.0_f32,
                             Color32::from_rgba_unmultiplied(255, 170, 60, 50),
                         ),
                     );
@@ -8682,7 +8756,7 @@ impl crate::app::WavesPreviewer {
                     line.push(egui::pos2(wave_left + wave_w, env_y(vis_end)));
                     painter.add(egui::Shape::line(
                         line,
-                        egui::Stroke::new(2.0, curve_color),
+                        egui::Stroke::new(2.0_f32, curve_color),
                     ));
                     let hover = ui.input(|i| i.pointer.hover_pos());
                     for (idx, p) in tab.gain_env_points.iter().enumerate() {
@@ -8700,7 +8774,7 @@ impl crate::app::WavesPreviewer {
                         painter.circle_stroke(
                             sp,
                             r,
-                            egui::Stroke::new(1.0, Color32::from_rgb(40, 30, 10)),
+                            egui::Stroke::new(1.0_f32, Color32::from_rgb(40, 30, 10)),
                         );
                         if grabbed || hovered {
                             painter.text(
@@ -8728,7 +8802,7 @@ impl crate::app::WavesPreviewer {
                             egui::pos2(wave_left + wave_w, zero_y),
                         ],
                         egui::Stroke::new(
-                            1.0,
+                            1.0_f32,
                             Color32::from_rgba_unmultiplied(220, 140, 255, 50),
                         ),
                     );
@@ -8761,7 +8835,7 @@ impl crate::app::WavesPreviewer {
                         line.push(egui::pos2(wave_left + wave_w, env_y(vis_end)));
                         painter.add(egui::Shape::line(
                             line,
-                            egui::Stroke::new(2.0, pitch_color),
+                            egui::Stroke::new(2.0_f32, pitch_color),
                         ));
                         let hover = ui.input(|input| input.pointer.hover_pos());
                         for (index, point) in tab.pitch_env_points.iter().enumerate() {
@@ -8781,7 +8855,7 @@ impl crate::app::WavesPreviewer {
                             painter.circle_stroke(
                                 position,
                                 radius,
-                                egui::Stroke::new(1.0, Color32::from_rgb(35, 20, 45)),
+                                egui::Stroke::new(1.0_f32, Color32::from_rgb(35, 20, 45)),
                             );
                             if grabbed || hovered {
                                 painter.text(
@@ -8795,7 +8869,7 @@ impl crate::app::WavesPreviewer {
                         }
                     } else {
                         let y = semi_to_y(semi);
-                        let width = if tab.pitch_drag_active { 2.5 } else { 2.0 };
+                        let width = if tab.pitch_drag_active { 2.5_f32 } else { 2.0_f32 };
                         painter.line_segment(
                             [
                                 egui::pos2(wave_left, y),
@@ -8842,7 +8916,7 @@ impl crate::app::WavesPreviewer {
                             egui::pos2(clipped_target_x, rect.top()),
                             egui::pos2(clipped_target_x, rect.bottom()),
                         ],
-                        egui::Stroke::new(2.5, stretch_color),
+                        egui::Stroke::new(2.5_f32, stretch_color),
                     );
                     let source_len = gesture.source_range.1 - gesture.source_range.0;
                     let rate = selection_stretch_rate(source_len, gesture.target_len);
@@ -8897,7 +8971,7 @@ impl crate::app::WavesPreviewer {
                         );
                         painter.line_segment(
                             [egui::pos2(x0, rect.top()), egui::pos2(x0, rect.bottom())],
-                            egui::Stroke::new(1.0, edge),
+                            egui::Stroke::new(1.0_f32, edge),
                         );
                     }
                 }
@@ -8935,16 +9009,16 @@ impl crate::app::WavesPreviewer {
                         let y1 = spec_freq_to_y(p.freq_hz + p.delta_hz, lane);
                         painter.line_segment(
                             [egui::pos2(x, y0), egui::pos2(x, y1)],
-                            egui::Stroke::new(3.5, halo),
+                            egui::Stroke::new(3.5_f32, halo),
                         );
                         painter.line_segment(
                             [egui::pos2(x, y0), egui::pos2(x, y1)],
-                            egui::Stroke::new(1.8, warp_color),
+                            egui::Stroke::new(1.8_f32, warp_color),
                         );
                         painter.circle_stroke(
                             egui::pos2(x, y0),
                             3.5,
-                            egui::Stroke::new(1.5, warp_color),
+                            egui::Stroke::new(1.5_f32, warp_color),
                         );
                         let grabbed = tab.spectral_warp_drag == Some(idx);
                         let hovered = hover
@@ -8963,7 +9037,7 @@ impl crate::app::WavesPreviewer {
                                     egui::pos2(x, y1),
                                     egui::pos2(x + 4.0, y1 - dir * 6.0),
                                 ],
-                                egui::Stroke::new(1.8, warp_color),
+                                egui::Stroke::new(1.8_f32, warp_color),
                             ));
                         }
                         if grabbed || hovered {
@@ -9019,7 +9093,7 @@ impl crate::app::WavesPreviewer {
                             egui::pos2(x, y),
                             r,
                             egui::Stroke::new(
-                                1.0,
+                                1.0_f32,
                                 Color32::from_rgba_unmultiplied(255, 110, 110, alpha),
                             ),
                         );
@@ -9193,7 +9267,7 @@ impl crate::app::WavesPreviewer {
                         divider_rect.center().x,
                         divider_rect.y_range(),
                         egui::Stroke::new(
-                            if hovered { 2.0 } else { 1.0 },
+                            if hovered { 2.0_f32 } else { 1.0_f32 },
                             if hovered {
                                 Color32::from_rgb(90, 170, 255)
                             } else {
@@ -10942,7 +11016,7 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                                         }
                                         if at_live_pending || at_cfg_changed {
                                             ui.ctx().request_repaint_after(
-                                                std::time::Duration::from_millis(120),
+                                                crate::app::ui_timing::BUSY_INDICATOR_DELAY,
                                             );
                                         }
                                         let at_range_count = {
@@ -11117,7 +11191,7 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                                         egui::Frame::NONE
                                             .fill(Color32::from_rgba_unmultiplied(65, 155, 235, 20))
                                             .stroke(egui::Stroke::new(
-                                                1.0,
+                                                1.0_f32,
                                                 Color32::from_rgba_unmultiplied(80, 180, 255, 120),
                                             ))
                                             .corner_radius(6.0)
@@ -11190,7 +11264,7 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                                         egui::Frame::NONE
                                             .fill(Color32::from_rgba_unmultiplied(235, 125, 55, 20))
                                             .stroke(egui::Stroke::new(
-                                                1.0,
+                                                1.0_f32,
                                                 Color32::from_rgba_unmultiplied(255, 160, 90, 120),
                                             ))
                                             .corner_radius(6.0)
@@ -11663,15 +11737,15 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                                     ui.label("Threshold (dB)").on_hover_text(
                                         "Signal below this level is faded toward silence",
                                     );
-                                    ui.add(egui::DragValue::new(&mut threshold_db).range(-80.0..=0.0).speed(0.5))
+                                    ui.add(egui::DragValue::new(&mut threshold_db).range(crate::wave::NoiseGateParams::THRESHOLD_DB).speed(0.5))
                                         .on_hover_text("Signal below this level is faded toward silence");
                                     ui.label("Attack (ms)")
                                         .on_hover_text("How fast the gate opens once the signal crosses the threshold");
-                                    ui.add(egui::DragValue::new(&mut attack_ms).range(0.1..=500.0).speed(0.1))
+                                    ui.add(egui::DragValue::new(&mut attack_ms).range(crate::wave::NoiseGateParams::ATTACK_MS).speed(0.1))
                                         .on_hover_text("How fast the gate opens once the signal crosses the threshold");
                                     ui.label("Release (ms)")
                                         .on_hover_text("How fast the gate closes once the signal drops below the threshold");
-                                    ui.add(egui::DragValue::new(&mut release_ms).range(1.0..=2000.0).speed(1.0))
+                                    ui.add(egui::DragValue::new(&mut release_ms).range(crate::wave::NoiseGateParams::RELEASE_MS).speed(1.0))
                                         .on_hover_text("How fast the gate closes once the signal drops below the threshold");
                                     tab.tool_state = ToolState {
                                         noise_gate_threshold_db: threshold_db,
@@ -11740,35 +11814,35 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                                         .on_hover_text("Boosts or cuts everything below this frequency");
                                     ui.horizontal(|ui| {
                                         ui.label("Freq");
-                                        ui.add(egui::DragValue::new(&mut low_shelf_freq_hz).range(20.0..=2000.0).speed(1.0).suffix(" Hz"))
+                                        ui.add(egui::DragValue::new(&mut low_shelf_freq_hz).range(crate::wave::ThreeBandEqParams::LOW_SHELF_HZ).speed(1.0).suffix(" Hz"))
                                             .on_hover_text("Low shelf corner frequency");
                                         ui.label("Gain");
-                                        ui.add(egui::DragValue::new(&mut low_shelf_gain_db).range(-24.0..=24.0).speed(0.1).suffix(" dB"))
+                                        ui.add(egui::DragValue::new(&mut low_shelf_gain_db).range(crate::wave::ThreeBandEqParams::GAIN_DB).speed(0.1).suffix(" dB"))
                                             .on_hover_text("Low shelf gain");
                                     });
                                     ui.label(RichText::new("Mid").small().weak())
                                         .on_hover_text("Boosts or cuts a band centered on this frequency");
                                     ui.horizontal(|ui| {
                                         ui.label("Freq");
-                                        ui.add(egui::DragValue::new(&mut mid_freq_hz).range(50.0..=12_000.0).speed(5.0).suffix(" Hz"))
+                                        ui.add(egui::DragValue::new(&mut mid_freq_hz).range(crate::wave::ThreeBandEqParams::MID_HZ).speed(5.0).suffix(" Hz"))
                                             .on_hover_text("Mid band center frequency");
                                         ui.label("Gain");
-                                        ui.add(egui::DragValue::new(&mut mid_gain_db).range(-24.0..=24.0).speed(0.1).suffix(" dB"))
+                                        ui.add(egui::DragValue::new(&mut mid_gain_db).range(crate::wave::ThreeBandEqParams::GAIN_DB).speed(0.1).suffix(" dB"))
                                             .on_hover_text("Mid band gain");
                                     });
                                     ui.horizontal(|ui| {
                                         ui.label("Q");
-                                        ui.add(egui::DragValue::new(&mut mid_q).range(0.1..=10.0).speed(0.05))
+                                        ui.add(egui::DragValue::new(&mut mid_q).range(crate::wave::ThreeBandEqParams::MID_Q).speed(0.05))
                                             .on_hover_text("Mid band width: higher Q = narrower band");
                                     });
                                     ui.label(RichText::new("High shelf").small().weak())
                                         .on_hover_text("Boosts or cuts everything above this frequency");
                                     ui.horizontal(|ui| {
                                         ui.label("Freq");
-                                        ui.add(egui::DragValue::new(&mut high_shelf_freq_hz).range(500.0..=20_000.0).speed(10.0).suffix(" Hz"))
+                                        ui.add(egui::DragValue::new(&mut high_shelf_freq_hz).range(crate::wave::ThreeBandEqParams::HIGH_SHELF_HZ).speed(10.0).suffix(" Hz"))
                                             .on_hover_text("High shelf corner frequency");
                                         ui.label("Gain");
-                                        ui.add(egui::DragValue::new(&mut high_shelf_gain_db).range(-24.0..=24.0).speed(0.1).suffix(" dB"))
+                                        ui.add(egui::DragValue::new(&mut high_shelf_gain_db).range(crate::wave::ThreeBandEqParams::GAIN_DB).speed(0.1).suffix(" dB"))
                                             .on_hover_text("High shelf gain");
                                     });
                                     tab.tool_state = ToolState {
@@ -11837,23 +11911,23 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                                     }
                                     ui.label("Threshold (dB)")
                                         .on_hover_text("Signal above this level gets compressed");
-                                    ui.add(egui::DragValue::new(&mut threshold_db).range(-60.0..=0.0).speed(0.5))
+                                    ui.add(egui::DragValue::new(&mut threshold_db).range(crate::wave::CompressorParams::THRESHOLD_DB).speed(0.5))
                                         .on_hover_text("Signal above this level gets compressed");
                                     ui.label("Ratio")
                                         .on_hover_text("How strongly signal above the threshold is reduced (4:1 = 4 dB in becomes 1 dB out)");
-                                    ui.add(egui::DragValue::new(&mut ratio).range(1.0..=20.0).speed(0.1))
+                                    ui.add(egui::DragValue::new(&mut ratio).range(crate::wave::CompressorParams::RATIO).speed(0.1))
                                         .on_hover_text("How strongly signal above the threshold is reduced (4:1 = 4 dB in becomes 1 dB out)");
                                     ui.label("Attack (ms)")
                                         .on_hover_text("How fast the compressor reacts once the signal crosses the threshold");
-                                    ui.add(egui::DragValue::new(&mut attack_ms).range(0.1..=500.0).speed(0.1))
+                                    ui.add(egui::DragValue::new(&mut attack_ms).range(crate::wave::NoiseGateParams::ATTACK_MS).speed(0.1))
                                         .on_hover_text("How fast the compressor reacts once the signal crosses the threshold");
                                     ui.label("Release (ms)")
                                         .on_hover_text("How fast the compressor lets go once the signal drops below the threshold");
-                                    ui.add(egui::DragValue::new(&mut release_ms).range(1.0..=2000.0).speed(1.0))
+                                    ui.add(egui::DragValue::new(&mut release_ms).range(crate::wave::NoiseGateParams::RELEASE_MS).speed(1.0))
                                         .on_hover_text("How fast the compressor lets go once the signal drops below the threshold");
                                     ui.label("Makeup (dB)")
                                         .on_hover_text("Gain applied after compression to restore overall level");
-                                    ui.add(egui::DragValue::new(&mut makeup_db).range(0.0..=24.0).speed(0.1))
+                                    ui.add(egui::DragValue::new(&mut makeup_db).range(crate::wave::CompressorParams::MAKEUP_DB).speed(0.1))
                                         .on_hover_text("Gain applied after compression to restore overall level");
                                     tab.tool_state = ToolState {
                                         compressor_threshold_db: threshold_db,
@@ -13855,12 +13929,13 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                                         ui.label("Radius");
                                         let mut t_ms = tab.tool_state.warp_time_radius_ms;
                                         let mut f_hz = tab.tool_state.warp_freq_radius_hz;
-                                        if !t_ms.is_finite() || t_ms <= 0.0 { t_ms = 150.0; }
-                                        if !f_hz.is_finite() || f_hz <= 0.0 { f_hz = 300.0; }
+                                        let defaults = ToolState::default_values();
+                                        if !t_ms.is_finite() || t_ms <= 0.0 { t_ms = defaults.warp_time_radius_ms; }
+                                        if !f_hz.is_finite() || f_hz <= 0.0 { f_hz = defaults.warp_freq_radius_hz; }
                                         let rt = ui
                                             .add(
                                                 egui::DragValue::new(&mut t_ms)
-                                                    .range(10.0..=2000.0)
+                                                    .range(WARP_TIME_RADIUS_MS)
                                                     .speed(5.0)
                                                     .suffix(" ms"),
                                             )
@@ -13868,7 +13943,7 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                                         let rf = ui
                                             .add(
                                                 egui::DragValue::new(&mut f_hz)
-                                                    .range(20.0..=8000.0)
+                                                    .range(WARP_FREQ_RADIUS_HZ)
                                                     .speed(10.0)
                                                     .suffix(" Hz"),
                                             )
@@ -15157,6 +15232,25 @@ mod tests {
         SELECTION_STRETCH_HANDLE_W,
     };
     use crate::app::types::{EditorHorizontalScrollSpeed, SelectionStretchEdge};
+
+    /// DC at +0.5 with a single sign change `offset` frames after `cur`.
+    fn dc_with_crossing_after(cur: usize, offset: usize) -> Vec<Vec<f32>> {
+        let len = cur + offset + 16;
+        vec![(0..len)
+            .map(|i| if i < cur + offset { 0.5 } else { -0.5 })
+            .collect()]
+    }
+
+    #[test]
+    fn zero_cross_snap_reaches_one_second_at_any_rate() {
+        // 1.5x the 48 kHz window: out of reach at 48 kHz, inside one
+        // second at 96 kHz. A window counted in frames would miss it.
+        let cur = 1_000;
+        let offset = 72_000;
+        let ch = dc_with_crossing_after(cur, offset);
+        assert_eq!(super::zc_snap_nearest(&ch, 48_000, 0.0, cur), cur);
+        assert_eq!(super::zc_snap_nearest(&ch, 96_000, 0.0, cur), cur + offset);
+    }
 
     fn geom(view_offset: usize, spp: f32) -> EditorDisplayGeometry {
         EditorDisplayGeometry {

@@ -165,7 +165,7 @@ impl WavesPreviewer {
             if state.done >= state.total {
                 finished = true;
             }
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(crate::app::ui_timing::PROGRESS_REFRESH);
         }
         if finished {
             self.finish_duplicate_scan(false);

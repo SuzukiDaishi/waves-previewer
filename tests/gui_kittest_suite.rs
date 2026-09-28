@@ -12566,7 +12566,23 @@ mod kittest_suite {
         harness.state_mut().test_list_select_all();
         harness.run_steps(2);
         harness.event(egui::Event::Paste(lines.join("\n")));
-        harness.run_steps(6);
+        // The paths load on the background scanner, which reports when it is
+        // done; a fixed frame count is not enough under a loaded test run.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !harness
+            .state()
+            .test_toast_messages()
+            .iter()
+            .any(|t| t.contains("Added") || t.contains("Nothing to add"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the paste never reported"
+            );
+            harness.run_steps(1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        harness.run_steps(2);
 
         assert_eq!(
             harness.state().test_visible_list_paths().len(),

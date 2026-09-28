@@ -35,6 +35,20 @@ const EFFECT_GRAPH_EMBEDDED_SAMPLE_WORKER_PATH: &str = "[embedded effect graph s
 const EFFECT_GRAPH_EMBEDDED_SAMPLE_WAV: &[u8] =
     include_bytes!("assets/effect_graph_test_sample.wav");
 const EFFECT_GRAPH_ROUGH_WAVEFORM_BINS: usize = 256;
+
+use crate::wave::{CompressorParams, NoiseGateParams, ThreeBandEqParams};
+
+fn clamp_to(value: f32, range: std::ops::RangeInclusive<f32>) -> f32 {
+    value.clamp(*range.start(), *range.end())
+}
+/// Band Split: the low/high crossover cannot rise above 8 kHz, so the
+/// high band always keeps the presence/air range to itself.
+pub(crate) const BAND_SPLIT_LOW_MAX_HZ: f32 = 8_000.0;
+/// Band Split: the lowest the high crossover may go (one octave above the
+/// audible floor), and how far above the low crossover it must sit so the
+/// middle band is never empty.
+pub(crate) const BAND_SPLIT_HIGH_MIN_HZ: f32 = 40.0;
+pub(crate) const BAND_SPLIT_MIN_RATIO: f32 = 1.01;
 const EFFECT_GRAPH_RUNNER_EVENT_BUDGET: usize = 32;
 const EFFECT_GRAPH_RUNNER_DRAIN_BUDGET_MS: u128 = 4;
 
@@ -688,7 +702,7 @@ where
         input_audio_path: input_path.to_string_lossy().to_string(),
         output_audio_path: output_path.to_string_lossy().to_string(),
         sample_rate: input_bus.sample_rate.max(1),
-        max_block_size: 1024,
+        max_block_size: crate::plugin::OFFLINE_MAX_BLOCK_SIZE,
         enabled: config.enabled,
         bypass: config.bypass,
         state_blob_b64: config.state_blob_b64.clone(),
@@ -789,9 +803,9 @@ fn clamp_node_data(data: &mut EffectGraphNodeData) {
             attack_ms,
             release_ms,
         } => {
-            *threshold_db = threshold_db.clamp(-80.0, 0.0);
-            *attack_ms = attack_ms.clamp(0.1, 500.0);
-            *release_ms = release_ms.clamp(1.0, 2000.0);
+            *threshold_db = clamp_to(*threshold_db, NoiseGateParams::THRESHOLD_DB);
+            *attack_ms = clamp_to(*attack_ms, NoiseGateParams::ATTACK_MS);
+            *release_ms = clamp_to(*release_ms, NoiseGateParams::RELEASE_MS);
         }
         EffectGraphNodeData::Eq {
             low_shelf_freq_hz,
@@ -802,13 +816,13 @@ fn clamp_node_data(data: &mut EffectGraphNodeData) {
             high_shelf_freq_hz,
             high_shelf_gain_db,
         } => {
-            *low_shelf_freq_hz = low_shelf_freq_hz.clamp(20.0, 2000.0);
-            *low_shelf_gain_db = low_shelf_gain_db.clamp(-24.0, 24.0);
-            *mid_freq_hz = mid_freq_hz.clamp(50.0, 12_000.0);
-            *mid_gain_db = mid_gain_db.clamp(-24.0, 24.0);
-            *mid_q = mid_q.clamp(0.1, 10.0);
-            *high_shelf_freq_hz = high_shelf_freq_hz.clamp(500.0, 20_000.0);
-            *high_shelf_gain_db = high_shelf_gain_db.clamp(-24.0, 24.0);
+            *low_shelf_freq_hz = clamp_to(*low_shelf_freq_hz, ThreeBandEqParams::LOW_SHELF_HZ);
+            *low_shelf_gain_db = clamp_to(*low_shelf_gain_db, ThreeBandEqParams::GAIN_DB);
+            *mid_freq_hz = clamp_to(*mid_freq_hz, ThreeBandEqParams::MID_HZ);
+            *mid_gain_db = clamp_to(*mid_gain_db, ThreeBandEqParams::GAIN_DB);
+            *mid_q = clamp_to(*mid_q, ThreeBandEqParams::MID_Q);
+            *high_shelf_freq_hz = clamp_to(*high_shelf_freq_hz, ThreeBandEqParams::HIGH_SHELF_HZ);
+            *high_shelf_gain_db = clamp_to(*high_shelf_gain_db, ThreeBandEqParams::GAIN_DB);
         }
         EffectGraphNodeData::Compressor {
             threshold_db,
@@ -817,11 +831,11 @@ fn clamp_node_data(data: &mut EffectGraphNodeData) {
             release_ms,
             makeup_db,
         } => {
-            *threshold_db = threshold_db.clamp(-60.0, 0.0);
-            *ratio = ratio.clamp(1.0, 20.0);
-            *attack_ms = attack_ms.clamp(0.1, 500.0);
-            *release_ms = release_ms.clamp(1.0, 2000.0);
-            *makeup_db = makeup_db.clamp(0.0, 24.0);
+            *threshold_db = clamp_to(*threshold_db, CompressorParams::THRESHOLD_DB);
+            *ratio = clamp_to(*ratio, CompressorParams::RATIO);
+            *attack_ms = clamp_to(*attack_ms, CompressorParams::ATTACK_MS);
+            *release_ms = clamp_to(*release_ms, CompressorParams::RELEASE_MS);
+            *makeup_db = clamp_to(*makeup_db, CompressorParams::MAKEUP_DB);
         }
         EffectGraphNodeData::Trim {
             threshold_below_peak_db,
@@ -836,7 +850,10 @@ fn clamp_node_data(data: &mut EffectGraphNodeData) {
         EffectGraphNodeData::Resampler {
             target_sample_rate, ..
         } => {
-            *target_sample_rate = (*target_sample_rate).clamp(8_000, 192_000);
+            *target_sample_rate = (*target_sample_rate).clamp(
+                crate::sample_rate::MIN_SAMPLE_RATE,
+                crate::sample_rate::MAX_SAMPLE_RATE,
+            );
         }
         EffectGraphNodeData::DebugWaveform { zoom } => {
             *zoom = zoom.clamp(1.0, 32.0);
@@ -845,8 +862,11 @@ fn clamp_node_data(data: &mut EffectGraphNodeData) {
             *zoom = zoom.clamp(1.0, 16.0);
         }
         EffectGraphNodeData::BandSplit { low_hz, high_hz } => {
-            *low_hz = low_hz.clamp(20.0, 8_000.0);
-            *high_hz = high_hz.clamp((*low_hz * 1.01).max(40.0), 20_000.0);
+            *low_hz = low_hz.clamp(crate::sample_rate::AUDIBLE_LOW_HZ, BAND_SPLIT_LOW_MAX_HZ);
+            *high_hz = high_hz.clamp(
+                (*low_hz * BAND_SPLIT_MIN_RATIO).max(BAND_SPLIT_HIGH_MIN_HZ),
+                crate::sample_rate::AUDIBLE_HIGH_HZ,
+            );
         }
         EffectGraphNodeData::Input
         | EffectGraphNodeData::Output
@@ -1978,7 +1998,7 @@ fn validate_effect_graph_document(
                 });
             }
             EffectGraphNodeData::NoiseGate { threshold_db, .. }
-                if *threshold_db < -80.0 || *threshold_db > 0.0 =>
+                if !NoiseGateParams::THRESHOLD_DB.contains(threshold_db) =>
             {
                 issues.push(EffectGraphValidationIssue {
                     severity: EffectGraphSeverity::Warning,
@@ -2017,12 +2037,15 @@ fn validate_effect_graph_document(
             }
             EffectGraphNodeData::Resampler {
                 target_sample_rate, ..
-            } if *target_sample_rate < 8_000 || *target_sample_rate > 192_000 => {
+            } if !crate::sample_rate::is_supported_target(*target_sample_rate) => {
                 issues.push(EffectGraphValidationIssue {
                     severity: EffectGraphSeverity::Warning,
                     code: "resampler_rate_out_of_range".to_string(),
-                    message: "Resampler target rate is outside 8000..192000 Hz and will be clamped on save"
-                        .to_string(),
+                    message: format!(
+                        "Resampler target rate is outside {}..{} Hz and will be clamped on save",
+                        crate::sample_rate::MIN_SAMPLE_RATE,
+                        crate::sample_rate::MAX_SAMPLE_RATE
+                    ),
                     node_id: Some(node.id.clone()),
                 });
             }
@@ -3026,7 +3049,8 @@ where
                     .as_ref()
                     .or(side_bus.as_ref())
                     .map(|bus| bus.sample_rate)
-                    .unwrap_or(48_000);
+                    // Unreachable: a node with neither input returned above.
+                    .unwrap_or(crate::sample_rate::FALLBACK_SAMPLE_RATE);
                 for (label, bus) in [("mid", &mid_bus), ("side", &side_bus)] {
                     if let Some(bus) = bus {
                         if bus.channels.len() > 1 {
@@ -4343,6 +4367,16 @@ impl WavesPreviewer {
         Ok(())
     }
 
+    /// The rate of an editor buffer, or -- for a buffer that never recorded
+    /// one -- the rate of the file it was decoded from.
+    fn buffer_sr_or_file_sr(&self, buffer_sr: u32, path: &Path) -> u32 {
+        if buffer_sr > 0 {
+            buffer_sr
+        } else {
+            self.resolve_file_sample_rate(path).hz
+        }
+    }
+
     fn resident_effect_graph_audio_bus_for_path(&self, path: &Path) -> Option<EffectGraphAudioBus> {
         if let Some(tab) = self
             .tabs
@@ -4351,25 +4385,21 @@ impl WavesPreviewer {
         {
             return Some(dense_audio_bus(
                 tab.ch_samples.clone(),
-                self.effective_sample_rate_for_path(path).unwrap_or(48_000),
+                // The samples the tab holds are at its buffer rate.
+                self.buffer_sr_or_file_sr(tab.buffer_sample_rate, path),
             ));
         }
         if let Some(cached) = self.edited_cache.get(path) {
             return Some(dense_audio_bus(
                 cached.ch_samples.clone(),
-                self.effective_sample_rate_for_path(path).unwrap_or(48_000),
+                self.buffer_sr_or_file_sr(cached.buffer_sample_rate, path),
             ));
         }
         if let Some(item) = self.item_for_path(path) {
             if let Some(audio) = item.virtual_audio.as_ref() {
                 return Some(dense_audio_bus(
                     (*audio.channels).clone(),
-                    item.virtual_state
-                        .as_ref()
-                        .map(|state| state.sample_rate)
-                        .or_else(|| item.meta.as_ref().map(|meta| meta.sample_rate))
-                        .filter(|sample_rate| *sample_rate > 0)
-                        .unwrap_or(48_000),
+                    self.resolve_file_sample_rate(path).hz,
                 ));
             }
             if matches!(item.source, MediaSource::External) {
@@ -4761,25 +4791,21 @@ impl WavesPreviewer {
         {
             return Some(format_only_audio_bus(
                 tab.ch_samples.len(),
-                self.effective_sample_rate_for_path(path).unwrap_or(48_000),
+                // The samples the tab holds are at its buffer rate.
+                self.buffer_sr_or_file_sr(tab.buffer_sample_rate, path),
             ));
         }
         if let Some(cached) = self.edited_cache.get(path) {
             return Some(format_only_audio_bus(
                 cached.ch_samples.len(),
-                self.effective_sample_rate_for_path(path).unwrap_or(48_000),
+                self.buffer_sr_or_file_sr(cached.buffer_sample_rate, path),
             ));
         }
         if let Some(item) = self.item_for_path(path) {
             if let Some(audio) = item.virtual_audio.as_ref() {
                 return Some(format_only_audio_bus(
                     audio.channels.len(),
-                    item.virtual_state
-                        .as_ref()
-                        .map(|state| state.sample_rate)
-                        .or_else(|| item.meta.as_ref().map(|meta| meta.sample_rate))
-                        .filter(|sample_rate| *sample_rate > 0)
-                        .unwrap_or(48_000),
+                    self.resolve_file_sample_rate(path).hz,
                 ));
             }
             if let Some(meta) = item.meta.as_ref() {

@@ -305,7 +305,7 @@ impl WavesPreviewer {
         let target_secs = pending.target_secs;
         self.pending_video_play_start = Some(pending);
         self.request_video_frame_for_tab(tab_idx, target_secs, true);
-        ctx.request_repaint_after(Duration::from_millis(16));
+        ctx.request_repaint_after(crate::app::ui_timing::ANIMATION_FRAME);
     }
 
     /// Ask this tab's worker for the picture at `target_secs`.

@@ -120,7 +120,8 @@ impl WavesPreviewer {
                     ui.add_enabled(
                         cfg.check_silence,
                         egui::DragValue::new(&mut cfg.silence_threshold_dbfs)
-                            .range(-120.0..=-20.0)
+                            // Anything above -20 dBFS is programme, not silence.
+                            .range(crate::levels::BLANK_THRESHOLD_MIN_DBFS..=-20.0)
                             .speed(1.0)
                             .prefix("floor ")
                             .suffix(" dBFS"),

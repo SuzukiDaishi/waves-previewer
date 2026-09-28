@@ -19,6 +19,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rustc_hash::{FxHashMap, FxHashSet};
+/// An idle existence-check worker wakes this often to notice shutdown.
+const IDLE_WAKE: Duration = Duration::from_millis(500);
+
 
 /// What we currently know about a path.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -114,7 +117,8 @@ impl PathStatusService {
                             }
                             let (guard, _) = worker_queue
                                 .ready
-                                .wait_timeout(inner, Duration::from_millis(500))
+                                // Idle: nothing queued. Wake occasionally to notice shutdown.
+                                .wait_timeout(inner, IDLE_WAKE)
                                 .unwrap_or_else(|e| e.into_inner());
                             inner = guard;
                         }

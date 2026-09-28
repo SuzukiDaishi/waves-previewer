@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::*;
 
@@ -41,14 +41,15 @@ impl super::WavesPreviewer {
             crate::app::threading::lower_current_thread_priority();
             let progress_tx = tx.clone();
             let mut last_progress = 0.0f32;
-            let mut last_emit = Instant::now() - Duration::from_millis(250);
+            // Backdated so the first progress report goes out at once.
+            let mut last_emit = Instant::now() - crate::app::ui_timing::PROGRESS_EMIT_INTERVAL * 2;
             let mut progress_cb = move |p: f32| {
                 let progress = p.clamp(0.0, 1.0);
                 let now = Instant::now();
                 let should_emit = progress >= 1.0
                     || progress <= 0.0
                     || progress - last_progress >= 0.01
-                    || now.duration_since(last_emit) >= Duration::from_millis(120);
+                    || now.duration_since(last_emit) >= crate::app::ui_timing::PROGRESS_EMIT_INTERVAL;
                 if !should_emit {
                     return;
                 }

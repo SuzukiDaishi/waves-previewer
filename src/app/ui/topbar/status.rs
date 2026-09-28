@@ -380,7 +380,7 @@ impl WavesPreviewer {
         if let Some(status) = self
             .editor_decode_state
             .as_ref()
-            .filter(|state| state.started_at.elapsed() >= Duration::from_millis(120))
+            .filter(|state| state.started_at.elapsed() >= crate::app::ui_timing::BUSY_INDICATOR_DELAY)
             .and_then(|_| self.editor_decode_ui_status(None))
         {
             items.push(TopbarActivityItem {
@@ -430,7 +430,7 @@ impl WavesPreviewer {
             });
         }
         if let Some(proc) = &self.processing {
-            if proc.started_at.elapsed() >= Duration::from_millis(120) {
+            if proc.started_at.elapsed() >= crate::app::ui_timing::BUSY_INDICATOR_DELAY {
                 items.push(TopbarActivityItem {
                     label: proc.msg.clone(),
                     progress: None,
@@ -745,7 +745,7 @@ impl WavesPreviewer {
             .unwrap_or_default();
         ListLoadingStatus {
             elapsed,
-            visible: loading && elapsed >= Duration::from_millis(120),
+            visible: loading && elapsed >= crate::app::ui_timing::BUSY_INDICATOR_DELAY,
         }
     }
 
@@ -760,7 +760,7 @@ impl WavesPreviewer {
             elapsed,
             visible: self.effect_graph.runner.mode
                 == Some(EffectGraphRunMode::ApplyToListSelection)
-                && elapsed >= Duration::from_millis(120),
+                && elapsed >= crate::app::ui_timing::BUSY_INDICATOR_DELAY,
         }
     }
 
@@ -846,7 +846,8 @@ impl WavesPreviewer {
         );
         if m.is_some() || s.is_some() || tp.is_some() {
             ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(120));
+                // Recheck once the busy delay has passed.
+                .request_repaint_after(crate::app::ui_timing::BUSY_INDICATOR_DELAY);
         }
     }
 
@@ -1028,7 +1029,7 @@ impl WavesPreviewer {
         painter.rect_stroke(
             track_rect,
             3.0,
-            egui::Stroke::new(1.0, stroke_col),
+            egui::Stroke::new(1.0_f32, stroke_col),
             egui::StrokeKind::Inside,
         );
         // Unity is no longer where a linear fader would put it, so it is
@@ -1040,7 +1041,7 @@ impl WavesPreviewer {
                 egui::pos2(unity_x, track_rect.top() - 2.0),
                 egui::pos2(unity_x, track_rect.bottom() + 2.0),
             ],
-            egui::Stroke::new(1.0, palette.slider_knob_stroke),
+            egui::Stroke::new(1.0_f32, palette.slider_knob_stroke),
         );
         let knob_x = track_rect.left() + track_rect.width() * t;
         painter.circle_filled(
@@ -1051,7 +1052,7 @@ impl WavesPreviewer {
         painter.circle_stroke(
             egui::pos2(knob_x, track_rect.center().y),
             5.0,
-            egui::Stroke::new(1.0, palette.meter_text_outline),
+            egui::Stroke::new(1.0_f32, palette.meter_text_outline),
         );
         painter.text(
             egui::pos2(rect.right(), rect.center().y),
@@ -1122,7 +1123,7 @@ impl WavesPreviewer {
                         let x = sub.left() + sub.width() * hn;
                         painter.line_segment(
                             [egui::pos2(x, sub.top()), egui::pos2(x, sub.bottom())],
-                            egui::Stroke::new(1.0, palette.meter_peak_tick),
+                            egui::Stroke::new(1.0_f32, palette.meter_peak_tick),
                         );
                     }
                 }
@@ -1140,7 +1141,7 @@ impl WavesPreviewer {
         painter.rect_stroke(
             track_rect,
             2.0,
-            egui::Stroke::new(1.0, Color32::GRAY),
+            egui::Stroke::new(1.0_f32, Color32::GRAY),
             egui::StrokeKind::Inside,
         );
         let db_label = if db <= -79.9 {

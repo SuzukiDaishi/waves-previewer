@@ -1529,7 +1529,7 @@ impl crate::app::WavesPreviewer {
         // Keep polling while the one-shot is in flight, even when nothing
         // else animates, so the buffer restore is not delayed until the
         // next input event.
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        ctx.request_repaint_after(crate::app::ui_timing::SMOOTH_REFRESH);
         if !matches!(
             self.playback_session.source,
             crate::app::PlaybackSourceKind::ToolPreview

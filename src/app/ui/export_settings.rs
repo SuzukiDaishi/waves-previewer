@@ -401,7 +401,7 @@ impl crate::app::WavesPreviewer {
                                 let mut th = self.blank_threshold_dbfs;
                                 let resp = ui.add(
                                     egui::DragValue::new(&mut th)
-                                        .range(-120.0..=0.0)
+                                        .range(crate::levels::BLANK_THRESHOLD_MIN_DBFS..=crate::levels::BLANK_THRESHOLD_MAX_DBFS)
                                         .speed(0.5)
                                         .fixed_decimals(1)
                                         .suffix(" dBFS"),
@@ -413,7 +413,7 @@ impl crate::app::WavesPreviewer {
                                     || resp.lost_focus()
                                     || (resp.changed() && !resp.dragged());
                                 if resp.changed() {
-                                    self.blank_threshold_dbfs = th.clamp(-120.0, 0.0);
+                                    self.blank_threshold_dbfs = th.clamp(crate::levels::BLANK_THRESHOLD_MIN_DBFS, crate::levels::BLANK_THRESHOLD_MAX_DBFS);
                                 }
                                 if committed {
                                     self.push_blank_threshold_to_meta_pool();
@@ -590,13 +590,14 @@ impl crate::app::WavesPreviewer {
                                         window: WindowFunction::BlackmanHarris,
                                         hop_size: 410,
                                         overlap: 0.9,
-                                        max_frames: 8192,
+                                        max_frames: crate::app::types::SpectrogramConfig::MAX_FRAMES_MAX,
                                         scale: SpectrogramScale::Log,
                                         mel_scale: SpectrogramScale::Linear,
                                         db_floor: -120.0,
                                         db_ceiling: 0.0,
                                         db_ref: crate::app::types::SpectrogramDbRef::Absolute,
-                                        max_freq_hz: 8000.0,
+                                        // Low-frequency detail: show only up to 8 kHz.
+                                        max_freq_hz: 8_000.0,
                                         show_note_labels: false,
                                     };
                                 }
@@ -606,10 +607,7 @@ impl crate::app::WavesPreviewer {
                                 egui::ComboBox::from_id_salt("spectro_fft")
                                     .selected_text(format!("{}", next_cfg.fft_size))
                                     .show_ui(ui, |ui| {
-                                        for size in [
-                                            256usize, 512, 1024, 2048, 4096, 8192, 16384, 32768,
-                                            65536,
-                                        ] {
+                                        for size in crate::app::types::SpectrogramConfig::FFT_SIZES {
                                             ui.selectable_value(
                                                 &mut next_cfg.fft_size,
                                                 size,
@@ -662,7 +660,10 @@ impl crate::app::WavesPreviewer {
                                 ui.label("Max Frames:");
                                 let mut frames = next_cfg.max_frames as i64;
                                 if ui
-                                    .add(egui::DragValue::new(&mut frames).range(256..=8192))
+                                    .add(egui::DragValue::new(&mut frames).range(
+                                        crate::app::types::SpectrogramConfig::MAX_FRAMES_MIN as i64
+                                            ..=crate::app::types::SpectrogramConfig::MAX_FRAMES_MAX as i64,
+                                    ))
                                     .changed()
                                 {
                                     next_cfg.max_frames = frames as usize;
@@ -734,7 +735,7 @@ impl crate::app::WavesPreviewer {
                                 if ui
                                     .add(egui::Slider::new(
                                         &mut floor,
-                                        -160.0..=(next_cfg.db_ceiling - 10.0).min(-20.0),
+                                        crate::levels::SPECTRO_DB_FLOOR_MIN..=(next_cfg.db_ceiling - crate::levels::SPECTRO_MIN_SPAN_DB).min(crate::levels::SPECTRO_DB_FLOOR_MAX),
                                     ))
                                     .changed()
                                 {
@@ -747,7 +748,7 @@ impl crate::app::WavesPreviewer {
                                 if ui
                                     .add(egui::Slider::new(
                                         &mut ceiling,
-                                        (next_cfg.db_floor + 10.0).max(-80.0)..=0.0,
+                                        (next_cfg.db_floor + crate::levels::SPECTRO_MIN_SPAN_DB).max(crate::levels::SPECTRO_DB_CEILING_MIN)..=crate::levels::SPECTRO_DB_CEILING_MAX,
                                     ))
                                     .changed()
                                 {
@@ -760,7 +761,8 @@ impl crate::app::WavesPreviewer {
                                 if ui
                                     .add(
                                         egui::DragValue::new(&mut max_hz)
-                                            .range(0.0..=192000.0)
+                                            // Up to Nyquist of the highest rate the app handles.
+                                            .range(0.0..=(crate::sample_rate::MAX_SAMPLE_RATE / 2) as f32)
                                             .speed(100.0),
                                     )
                                     .changed()
