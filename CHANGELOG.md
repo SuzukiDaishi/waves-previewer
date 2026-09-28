@@ -4,6 +4,8 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+## 0.20260928.0 - 2026-09-28
+
 ### Explorer でコピーしたファイル・フォルダを、リストで Ctrl+V して開けるようにした
 
 - **Explorer で Ctrl+C → リスト上で Ctrl+V** で、ファイルとフォルダが今のリストに追加される

@@ -3905,7 +3905,7 @@ dependencies = [
 
 [[package]]
 name = "neowaves"
-version = "0.20260926.0"
+version = "0.20260928.0"
 dependencies = [
  "anyhow",
  "arc-swap",
