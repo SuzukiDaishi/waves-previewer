@@ -59,6 +59,10 @@ pub struct ProjectFile {
     /// two people appending to a flat list of uniquely-named entries do not.
     #[serde(default)]
     pub comments: Vec<ProjectComment>,
+    /// Multi Edits timelines. No merge rule: two people editing timelines at
+    /// once get the whole-document conflict choice (AGENTS.md).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub multi_edits: Vec<crate::app::multi_edit::MultiEditDoc>,
 }
 
 /// One message in a session's comment thread.
@@ -2283,6 +2287,7 @@ impl super::WavesPreviewer {
         self.session_file_changes = None;
         self.comments.clear();
         self.mark_comment_index_dirty();
+        self.multi_edit_reset();
         self.session_comment_free_fingerprint = None;
         self.comment_outbox.clear();
         self.comment_write = None;

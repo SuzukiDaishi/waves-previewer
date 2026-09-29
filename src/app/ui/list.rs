@@ -106,7 +106,7 @@ impl crate::app::WavesPreviewer {
         if self.ui_list_empty_state(ui) {
             return;
         }
-        let cols = self.list_columns;
+        let cols = self.active_list_columns();
         // Hoisted out of the row loop: read once per frame, and needed inside
         // the closure that borrows self mutably.
         let uses_hours = self.list_length_uses_hours();
@@ -1461,7 +1461,22 @@ impl crate::app::WavesPreviewer {
                         // -- it drops the file into Explorer or a DAW -- and
                         // taking that away to gain a comment reference would
                         // be a bad trade. Alt is bound to nothing else here.
-                        if drag_started && !interacted_with_control && ctx.input(|i| i.modifiers.alt)
+                        if drag_started
+                            && !interacted_with_control
+                            && self.list_view_profile
+                                == crate::app::types::ListViewProfile::MultiEditPane
+                        {
+                            // In the Multi Edits pane a row goes onto the
+                            // timeline, not out to the shell -- the drag out
+                            // is still there in the List workspace.
+                            let paths = self.multi_edit_drag_paths_for_row(row_idx);
+                            egui::DragAndDrop::set_payload(
+                                ctx,
+                                crate::app::ui::multi_edit::MultiEditRowDrag(paths),
+                            );
+                        } else if drag_started
+                            && !interacted_with_control
+                            && ctx.input(|i| i.modifiers.alt)
                         {
                             if let Some(path) = self.path_for_row(row_idx).cloned() {
                                 egui::DragAndDrop::set_payload(

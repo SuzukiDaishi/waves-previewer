@@ -31,3 +31,8 @@ pub const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
 /// How long typing must pause before a text filter is re-applied.
 pub const TYPING_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// How long Multi Edits waits after the last edit before mixing the timeline
+/// again: long enough that a drag re-mixes once when it stops rather than on
+/// every frame, short enough that the change is heard at once.
+pub const MULTI_EDIT_RENDER_DEBOUNCE: Duration = Duration::from_millis(100);

@@ -3,7 +3,7 @@ use egui::Color32;
 use crate::app::WavesPreviewer;
 
 impl WavesPreviewer {
-    pub(super) fn list_art_texture_for_path(
+    pub(in crate::app) fn list_art_texture_for_path(
         &mut self,
         ctx: &egui::Context,
         path: &std::path::Path,

@@ -1021,6 +1021,7 @@ pub enum UndoScope {
     Editor,
     List,
     EffectGraph,
+    MultiEdit,
 }
 
 /// The list selection held by `MediaId` rather than by row, taken before the
@@ -1457,6 +1458,32 @@ impl Default for ListColumnConfig {
     }
 }
 
+impl ListColumnConfig {
+    /// The Multi Edits list pane: enough to pick a row -- its name, length
+    /// and channel count -- in a pane a third of the window wide.
+    pub fn multi_edit_pane_default() -> Self {
+        let mut cols = Self::default();
+        for column in ColumnId::ALL {
+            column.set_enabled(&mut cols, false);
+        }
+        cols.file = true;
+        cols.length = true;
+        cols.channels = true;
+        cols
+    }
+}
+
+/// Which view of the one list is being drawn. There is one list -- its rows,
+/// order, filters and selection are shared -- and two places draw it: the
+/// List workspace and the Multi Edits pane. Only the columns (and their
+/// widths) differ between them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ListViewProfile {
+    #[default]
+    Main,
+    MultiEditPane,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ExternalKeyRule {
     FileName,
@@ -1486,6 +1513,8 @@ pub enum WorkspaceView {
     Editor,
     EffectGraph,
     Recording,
+    /// A Multi Edits timeline; which one is `MultiEditRuntime::active`.
+    MultiEdit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

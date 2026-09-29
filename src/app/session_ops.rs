@@ -2725,6 +2725,7 @@ impl super::WavesPreviewer {
             // on disk before it writes, so a colleague's comment posted since
             // we loaded is not dropped by our save.
             comments: self.comments.clone(),
+            multi_edits: self.multi_edit_docs_for_session(base_dir, path_mode),
         };
         Ok((path, project, sidecar_jobs))
     }
@@ -5480,6 +5481,7 @@ impl super::WavesPreviewer {
         self.comments = project.comments.clone();
         super::comments::sort_for_storage(&mut self.comments);
         self.mark_comment_index_dirty();
+        self.multi_edit_load_from_session(project.multi_edits.clone(), &base_dir);
         self.add_recent_session_path(&project_path);
         self.restart_session_watch();
         // What changed in the *referenced files* since this user last opened

@@ -138,29 +138,33 @@ impl WavesPreviewer {
             return;
         }
 
-        let out_tx = self.ensure_video_channel();
-        let (tx, rx) = std::sync::mpsc::sync_channel::<VideoFrameRequest>(1);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let worker_shutdown = shutdown.clone();
-        let worker_path = path.clone();
-        std::thread::Builder::new()
-            .name("neowaves-video".to_string())
-            .spawn(move || {
-                crate::app::threading::lower_current_thread_priority();
-                video_worker_main(tab_id, worker_path, rx, out_tx, worker_shutdown);
-            })
-            .ok();
-
-        self.video_workers.push(VideoWorkerHandle {
-            tab_id,
-            tx,
-            shutdown,
-        });
+        self.spawn_video_worker(tab_id, path);
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             if tab.video_panel.is_none() {
                 tab.video_panel = Some(VideoPanelState::new(placeholder_stream_info()));
             }
         }
+    }
+
+    /// Start a decode worker for the panel `panel_id` (an editor tab's id, or
+    /// a Multi Edits video panel's) reading `path`.
+    fn spawn_video_worker(&mut self, panel_id: u64, path: PathBuf) {
+        let out_tx = self.ensure_video_channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<VideoFrameRequest>(1);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = shutdown.clone();
+        std::thread::Builder::new()
+            .name("neowaves-video".to_string())
+            .spawn(move || {
+                crate::app::threading::lower_current_thread_priority();
+                video_worker_main(panel_id, path, rx, out_tx, worker_shutdown);
+            })
+            .ok();
+        self.video_workers.push(VideoWorkerHandle {
+            tab_id: panel_id,
+            tx,
+            shutdown,
+        });
     }
 
     /// Give every open video tab a worker, and drop workers whose tab is gone.
@@ -192,6 +196,17 @@ impl WavesPreviewer {
         for idx in wanted {
             self.spawn_video_worker_for_tab(idx);
         }
+        // The same rule for the Multi Edits preview's panels.
+        let multi_edit_wanted: Vec<(u64, PathBuf)> = self
+            .multi_edit
+            .video_panels
+            .iter()
+            .filter(|(_, video)| !self.video_workers.iter().any(|w| w.tab_id == video.id))
+            .map(|(path, video)| (video.id, path.clone()))
+            .collect();
+        for (id, path) in multi_edit_wanted {
+            self.spawn_video_worker(id, path);
+        }
     }
 
     /// Stop the worker for a tab that is closing or changing path.
@@ -204,7 +219,12 @@ impl WavesPreviewer {
         if self.video_workers.is_empty() {
             return;
         }
-        let live: Vec<u64> = self.tabs.iter().map(|tab| tab.tab_id).collect();
+        let live: Vec<u64> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.tab_id)
+            .chain(self.multi_edit.video_panels.values().map(|video| video.id))
+            .collect();
         self.video_workers
             .retain(|worker| live.contains(&worker.tab_id));
     }
@@ -215,6 +235,11 @@ impl WavesPreviewer {
         self.tabs
             .iter()
             .any(|tab| tab.video_panel.as_ref().is_some_and(|panel| panel.inflight))
+            || self
+                .multi_edit
+                .video_panels
+                .values()
+                .any(|video| video.panel.inflight)
     }
 
     /// While the audio clock is advancing, completed video chunks are not
@@ -319,18 +344,6 @@ impl WavesPreviewer {
         playing: bool,
     ) {
         let perf = self.perf;
-        let fps = self
-            .tabs
-            .get(tab_idx)
-            .and_then(|tab| tab.video_panel.as_ref())
-            .map(|panel| panel.info.nominal_fps)
-            .unwrap_or(30.0);
-        let decode_ahead = if playing {
-            perf.video_decode_ahead_frames_for_fps(fps)
-        } else {
-            1
-        };
-        let max_forward_walk = self.perf.video_forward_walk_frames();
         let Some(tab) = self.tabs.get_mut(tab_idx) else {
             return;
         };
@@ -338,144 +351,22 @@ impl WavesPreviewer {
         let Some(panel) = tab.video_panel.as_mut() else {
             return;
         };
-        if matches!(
-            panel.status,
-            VideoPanelStatus::Failed(_) | VideoPanelStatus::Unsupported(_)
-        ) {
-            return;
+        if let Some(request) = prepare_video_request(panel, perf, target_secs, playing) {
+            self.send_video_request(tab_id, request);
         }
-        // The size the panel asked for on its last draw. Zero means the strip
-        // is too narrow to show a picture, so nothing needs decoding.
-        let wanted_box_px = panel.effective_wanted_box_px();
-        if wanted_box_px.0 == 0 || wanted_box_px.1 == 0 {
-            return;
-        }
+    }
 
-        // Half a frame of slack: below that the picture on screen is already
-        // the right one and a request would only add work.
-        let frame_secs = if panel.info.nominal_fps > 1.0 {
-            1.0 / panel.info.nominal_fps as f64
-        } else {
-            1.0 / 30.0
-        };
-        // AAC priming/padding can make the audio transport a few samples (or
-        // one AAC packet) longer than the video track. Media Foundation rejects
-        // a seek beyond the video duration with MF_E_INVALIDREQUEST, so keep
-        // decoder requests just inside the last frame while the painter still
-        // uses the unmodified audio clock.
-        let target_secs = video_decode_target_secs(panel, target_secs);
-        let previous_target = if panel.last_target_secs.is_finite() {
-            video_decode_target_secs(panel, panel.last_target_secs)
-        } else {
-            panel.last_target_secs
-        };
-        let backward_clock_jump =
-            previous_target.is_finite() && target_secs + frame_secs < previous_target;
-        panel.last_target_secs = target_secs;
-        let newest_decoded = panel.ring.back().map(|(pts, _)| *pts).or(panel.shown_pts);
-        let forward_underrun =
-            playing && newest_decoded.is_some_and(|pts| target_secs > pts + frame_secs);
-        let box_px = adaptive_video_box(
-            panel,
-            wanted_box_px,
-            Instant::now(),
-            decode_ahead,
-            perf.video_ring_memory_bytes(),
-            forward_underrun,
-        );
-        let have_frame_for_target = panel
-            .frame_at(target_secs)
-            .map(|(pts, _)| target_secs >= pts && target_secs - pts < frame_secs)
-            .unwrap_or(false);
-        let box_changed = panel.box_px != box_px;
-        // Count only pictures still ahead of the playhead. Old frames remain
-        // in the ring briefly for cheap backward nudges, so the total ring
-        // length never represented how much read-ahead was left.
-        let frames_ahead = panel
-            .ring
-            .iter()
-            .filter(|(pts, _)| *pts > target_secs)
-            .count();
-        let ring_running_low = playing && frames_ahead <= decode_ahead / 2;
-        if !box_changed && have_frame_for_target && !ring_running_low {
-            return;
-        }
-        let newest_coverage = panel
-            .ring
-            .back()
-            .map(|(pts, _)| *pts)
-            .or(panel.shown_pts)
-            .unwrap_or(panel.requested_secs);
-        let discontinuous_forward = target_secs > newest_coverage + frame_secs * 2.0
-            && target_secs > panel.requested_secs + frame_secs * 2.0;
-        let discontinuous_backward = backward_clock_jump;
-        // Sequential read-ahead is left alone, but a seek, stable resize or a
-        // decoder that has fallen behind may supersede an active generation.
-        // The worker checks its channel between native frames and switches to
-        // this newest request without finishing the stale batch.
-        if panel.inflight && !box_changed && !discontinuous_forward && !discontinuous_backward {
-            return;
-        }
-
-        if box_changed {
-            // Frames were scaled into the old box on the way in; they cannot
-            // be grown back. Keep the current texture and its synchronized
-            // PTS on screen until the replacement arrives, though: opening or
-            // resizing the detached window must not blank a valid picture.
-            panel.ring.clear();
-            panel.box_px = box_px;
-        }
-        let outside_ring =
-            panel
-                .ring
-                .front()
-                .zip(panel.ring.back())
-                .is_some_and(|((front, _), (back, _))| {
-                    target_secs + frame_secs < *front || target_secs > *back + frame_secs
-                });
-        if outside_ring {
-            // A discontinuous seek must be allowed to append older frames.
-            // Keep the currently uploaded texture and PTS: during a forward
-            // underrun it remains a safe (non-future) frame to display while
-            // the worker catches up. A backward seek is hidden by the paint
-            // rule until its replacement arrives.
-            panel.ring.clear();
-        }
-        if discontinuous_backward {
-            panel.seeking = true;
-        }
-        let request_secs = if playing && have_frame_for_target {
-            panel
-                .ring
-                .back()
-                .map(|(pts, _)| pts + frame_secs)
-                .unwrap_or(target_secs)
-        } else {
-            target_secs
-        };
-        panel.generation = panel.generation.wrapping_add(1).max(1);
-        panel.requested_secs = request_secs;
-        panel.inflight = true;
-        let request = VideoFrameRequest {
-            generation: panel.generation,
-            target_secs: request_secs,
-            decode_ahead,
-            box_px,
-            max_forward_walk,
-        };
-
+    /// Hand a request to the worker for `panel_id`. A worker that cannot take
+    /// it leaves the panel free to ask again next frame.
+    pub(super) fn send_video_request(&mut self, panel_id: u64, request: VideoFrameRequest) {
         let sent = self
             .video_workers
             .iter()
-            .find(|worker| worker.tab_id == tab_id)
+            .find(|worker| worker.tab_id == panel_id)
             .map(|worker| worker.send(request))
             .unwrap_or(false);
         if !sent {
-            if let Some(panel) = self
-                .tabs
-                .get_mut(tab_idx)
-                .and_then(|tab| tab.video_panel.as_mut())
-            {
+            if let Some(panel) = self.video_panel_for_tab_id(panel_id) {
                 panel.inflight = false;
             }
         }
@@ -599,11 +490,157 @@ impl WavesPreviewer {
     }
 
     fn video_panel_for_tab_id(&mut self, tab_id: u64) -> Option<&mut VideoPanelState> {
-        self.tabs
-            .iter_mut()
-            .find(|tab| tab.tab_id == tab_id)
-            .and_then(|tab| tab.video_panel.as_mut())
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.tab_id == tab_id) {
+            return tab.video_panel.as_mut();
+        }
+        self.multi_edit
+            .video_panels
+            .values_mut()
+            .find(|video| video.id == tab_id)
+            .map(|video| &mut video.panel)
     }
+}
+
+/// Decide what, if anything, a panel should ask its worker for so that the
+/// picture at `target_secs` is on hand -- a seek, a resize, or more
+/// read-ahead while playing. Marks the panel in flight when it asks.
+pub(super) fn prepare_video_request(
+    panel: &mut VideoPanelState,
+    perf: crate::app::perf_profile::PerfProfile,
+    target_secs: f64,
+    playing: bool,
+) -> Option<VideoFrameRequest> {
+    let decode_ahead = if playing {
+        perf.video_decode_ahead_frames_for_fps(panel.info.nominal_fps)
+    } else {
+        1
+    };
+    let max_forward_walk = perf.video_forward_walk_frames();
+    if matches!(
+        panel.status,
+        VideoPanelStatus::Failed(_) | VideoPanelStatus::Unsupported(_)
+    ) {
+        return None;
+    }
+    // The size the panel asked for on its last draw. Zero means the strip
+    // is too narrow to show a picture, so nothing needs decoding.
+    let wanted_box_px = panel.effective_wanted_box_px();
+    if wanted_box_px.0 == 0 || wanted_box_px.1 == 0 {
+        return None;
+    }
+
+    // Half a frame of slack: below that the picture on screen is already
+    // the right one and a request would only add work.
+    let frame_secs = if panel.info.nominal_fps > 1.0 {
+        1.0 / panel.info.nominal_fps as f64
+    } else {
+        1.0 / 30.0
+    };
+    // AAC priming/padding can make the audio transport a few samples (or
+    // one AAC packet) longer than the video track. Media Foundation rejects
+    // a seek beyond the video duration with MF_E_INVALIDREQUEST, so keep
+    // decoder requests just inside the last frame while the painter still
+    // uses the unmodified audio clock.
+    let target_secs = video_decode_target_secs(panel, target_secs);
+    let previous_target = if panel.last_target_secs.is_finite() {
+        video_decode_target_secs(panel, panel.last_target_secs)
+    } else {
+        panel.last_target_secs
+    };
+    let backward_clock_jump =
+        previous_target.is_finite() && target_secs + frame_secs < previous_target;
+    panel.last_target_secs = target_secs;
+    let newest_decoded = panel.ring.back().map(|(pts, _)| *pts).or(panel.shown_pts);
+    let forward_underrun =
+        playing && newest_decoded.is_some_and(|pts| target_secs > pts + frame_secs);
+    let box_px = adaptive_video_box(
+        panel,
+        wanted_box_px,
+        Instant::now(),
+        decode_ahead,
+        perf.video_ring_memory_bytes(),
+        forward_underrun,
+    );
+    let have_frame_for_target = panel
+        .frame_at(target_secs)
+        .map(|(pts, _)| target_secs >= pts && target_secs - pts < frame_secs)
+        .unwrap_or(false);
+    let box_changed = panel.box_px != box_px;
+    // Count only pictures still ahead of the playhead. Old frames remain
+    // in the ring briefly for cheap backward nudges, so the total ring
+    // length never represented how much read-ahead was left.
+    let frames_ahead = panel
+        .ring
+        .iter()
+        .filter(|(pts, _)| *pts > target_secs)
+        .count();
+    let ring_running_low = playing && frames_ahead <= decode_ahead / 2;
+    if !box_changed && have_frame_for_target && !ring_running_low {
+        return None;
+    }
+    let newest_coverage = panel
+        .ring
+        .back()
+        .map(|(pts, _)| *pts)
+        .or(panel.shown_pts)
+        .unwrap_or(panel.requested_secs);
+    let discontinuous_forward = target_secs > newest_coverage + frame_secs * 2.0
+        && target_secs > panel.requested_secs + frame_secs * 2.0;
+    let discontinuous_backward = backward_clock_jump;
+    // Sequential read-ahead is left alone, but a seek, stable resize or a
+    // decoder that has fallen behind may supersede an active generation.
+    // The worker checks its channel between native frames and switches to
+    // this newest request without finishing the stale batch.
+    if panel.inflight && !box_changed && !discontinuous_forward && !discontinuous_backward {
+        return None;
+    }
+
+    if box_changed {
+        // Frames were scaled into the old box on the way in; they cannot
+        // be grown back. Keep the current texture and its synchronized
+        // PTS on screen until the replacement arrives, though: opening or
+        // resizing the detached window must not blank a valid picture.
+        panel.ring.clear();
+        panel.box_px = box_px;
+    }
+    let outside_ring =
+        panel
+            .ring
+            .front()
+            .zip(panel.ring.back())
+            .is_some_and(|((front, _), (back, _))| {
+                target_secs + frame_secs < *front || target_secs > *back + frame_secs
+            });
+    if outside_ring {
+        // A discontinuous seek must be allowed to append older frames.
+        // Keep the currently uploaded texture and PTS: during a forward
+        // underrun it remains a safe (non-future) frame to display while
+        // the worker catches up. A backward seek is hidden by the paint
+        // rule until its replacement arrives.
+        panel.ring.clear();
+    }
+    if discontinuous_backward {
+        panel.seeking = true;
+    }
+    let request_secs = if playing && have_frame_for_target {
+        panel
+            .ring
+            .back()
+            .map(|(pts, _)| pts + frame_secs)
+            .unwrap_or(target_secs)
+    } else {
+        target_secs
+    };
+    panel.generation = panel.generation.wrapping_add(1).max(1);
+    panel.requested_secs = request_secs;
+    panel.inflight = true;
+    Some(VideoFrameRequest {
+        generation: panel.generation,
+        target_secs: request_secs,
+        decode_ahead,
+        box_px,
+        max_forward_walk,
+    })
 }
 
 fn capped_video_box(wanted: (u32, u32), source: (u32, u32), long_edge_cap: u32) -> (u32, u32) {
@@ -780,7 +817,7 @@ fn adaptive_video_box(
 /// Stand-in description used between "we know this is a video" and the
 /// worker's first word about it, so the panel can reserve a 16:9 slot rather
 /// than pop into existence a moment later.
-fn placeholder_stream_info() -> crate::video::VideoStreamInfo {
+pub(super) fn placeholder_stream_info() -> crate::video::VideoStreamInfo {
     crate::video::VideoStreamInfo {
         coded_width: 16,
         coded_height: 9,

@@ -66,6 +66,7 @@ impl WavesPreviewer {
         self.item_bg_mode = ItemBgMode::Standard;
         self.src_quality = SrcQuality::Good;
         self.list_columns = ListColumnConfig::default();
+        self.multi_edit_list_columns = ListColumnConfig::multi_edit_pane_default();
         self.zero_cross_epsilon = 1.0e-4;
         self.blank_threshold_dbfs = super::inspection::DEFAULT_BLANK_THRESHOLD_DBFS;
         self.blank_min_ms = super::inspection::DEFAULT_BLANK_MIN_MS;
@@ -582,6 +583,33 @@ impl WavesPreviewer {
                 }
             } else if let Some(rest) = line.strip_prefix("list_click_audition=") {
                 self.list_click_audition = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("multi_edit_list_columns=") {
+                let mut cols = ListColumnConfig::multi_edit_pane_default();
+                for column in super::types::ColumnId::ALL {
+                    column.set_enabled(&mut cols, false);
+                }
+                for name in rest.split(',') {
+                    if let Some(column) = super::types::ColumnId::from_name(name.trim()) {
+                        column.set_enabled(&mut cols, true);
+                    }
+                }
+                // A pane with no columns cannot be clicked back to life.
+                if !cols.file {
+                    cols.file = true;
+                }
+                self.multi_edit_list_columns = cols;
+            } else if let Some(rest) = line.strip_prefix("multi_edit_list_col_widths=") {
+                self.multi_edit_list_col_widths.clear();
+                for part in rest.split(',') {
+                    let Some((key, w)) = part.split_once(':') else {
+                        continue;
+                    };
+                    if let Ok(w) = w.trim().parse::<f32>() {
+                        if w.is_finite() && w >= 10.0 && !key.trim().is_empty() {
+                            self.multi_edit_list_col_widths.insert(key.trim().to_string(), w);
+                        }
+                    }
+                }
             } else if let Some(rest) = line.strip_prefix("list_col_widths=") {
                 self.list_col_widths.clear();
                 for part in rest.split(',') {
@@ -977,6 +1005,18 @@ impl WavesPreviewer {
             .map(|(k, w)| format!("{k}:{w:.1}"))
             .collect::<Vec<_>>()
             .join(",");
+        let multi_edit_list_columns = super::types::ColumnId::ALL
+            .iter()
+            .filter(|column| column.enabled(&self.multi_edit_list_columns))
+            .map(|column| column.name())
+            .collect::<Vec<_>>()
+            .join(",");
+        let multi_edit_list_col_widths = self
+            .multi_edit_list_col_widths
+            .iter()
+            .map(|(k, w)| format!("{k}:{w:.1}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let transcript_ai_opt_in = if self.transcript_ai_opt_in { "1" } else { "0" };
         let transcript_overwrite_existing_srt = if self.transcript_ai_cfg.overwrite_existing_srt {
             "1"
@@ -1077,6 +1117,8 @@ list_stop_returns_to_start={}\n\
 list_click_audition={}\n\
 list_columns_window_pos={}\n\
 list_col_widths={}\n\
+multi_edit_list_columns={}\n\
+multi_edit_list_col_widths={}\n\
 inspect_cfg={}\n\
 inspect_naming={}\n\
 loudnorm_target={:.2}\n\
@@ -1155,6 +1197,8 @@ zoo_flip_manual={}\n",
             list_click_audition,
             list_columns_window_pos,
             list_col_widths,
+            multi_edit_list_columns,
+            multi_edit_list_col_widths,
             inspect_cfg,
             inspect_naming,
             self.loudnorm_dialog_target,

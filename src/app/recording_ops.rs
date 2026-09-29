@@ -817,7 +817,7 @@ impl super::WavesPreviewer {
         &mut self,
         tmp_path: &std::path::Path,
     ) -> Option<PathBuf> {
-        use crate::app::types::{VirtualSourceRef, VirtualState};
+        use crate::app::types::VirtualSourceRef;
 
         if let Some(item) = self.items.iter().find(|item| {
             item.source == MediaSource::Virtual
@@ -830,17 +830,33 @@ impl super::WavesPreviewer {
             return Some(item.path.clone());
         }
 
-        let asset = crate::audio_asset::AudioAssetDescriptor::managed(tmp_path.to_path_buf());
+        let logical_name = if self.recording_tab.recording_display_name.is_empty() {
+            "Recording.wav".to_string()
+        } else {
+            self.recording_tab.recording_display_name.clone()
+        };
+        Some(self.add_file_backed_virtual_row(tmp_path, &logical_name))
+    }
+
+    /// Adds a `(virtual)` row whose audio is `file`, a WAV the app wrote and
+    /// owns (a recording take, a Multi Edits mixdown). The row is one undo
+    /// step and its metadata is read by the metadata worker from `file`.
+    /// Returns the row's path.
+    pub(super) fn add_file_backed_virtual_row(
+        &mut self,
+        file: &std::path::Path,
+        logical_name: &str,
+    ) -> PathBuf {
+        use crate::app::types::{VirtualSourceRef, VirtualState};
+
+        // Reads the WAV header of a file the app just wrote itself -- the
+        // one kind of path the UI thread may touch.
+        let asset = crate::audio_asset::AudioAssetDescriptor::managed(file.to_path_buf());
         let sample_rate = asset.sample_rate.max(1);
         let bits_per_sample = asset.bits_per_sample.max(1);
-        let logical_name = if self.recording_tab.recording_display_name.is_empty() {
-            "Recording.wav"
-        } else {
-            self.recording_tab.recording_display_name.as_str()
-        };
         let name = self.unique_virtual_display_name(logical_name);
         let virtual_state = Some(VirtualState {
-            source: VirtualSourceRef::FilePath(tmp_path.to_path_buf()),
+            source: VirtualSourceRef::FilePath(file.to_path_buf()),
             op_chain: Vec::new(),
             sample_rate,
             channels: asset.channels.max(1),
@@ -852,8 +868,8 @@ impl super::WavesPreviewer {
         self.add_virtual_item(item, None);
         self.after_add_refresh();
         self.record_list_insert_from_paths(&[item_path.clone()], before);
-        self.recording_temp_files.push(tmp_path.to_path_buf());
-        Some(item_path)
+        self.recording_temp_files.push(file.to_path_buf());
+        item_path
     }
 }
 

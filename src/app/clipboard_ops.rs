@@ -933,7 +933,9 @@ impl super::WavesPreviewer {
             self.handle_editor_audio_clipboard_hotkeys(ctx);
             return;
         }
-        if !self.is_list_workspace_active() {
+        // The Multi Edits pane is the list too; `allow_paste` below still
+        // requires the list to own the keys, so the timeline keeps its own.
+        if !self.is_list_workspace_active() && !self.is_multi_edit_workspace_active() {
             return;
         }
         let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));

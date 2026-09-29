@@ -698,6 +698,7 @@ impl super::WavesPreviewer {
             Some(super::input_focus::UiSurface::Editor) => "editor",
             Some(super::input_focus::UiSurface::EffectGraph) => "effect_graph",
             Some(super::input_focus::UiSurface::Recording) => "recording",
+            Some(super::input_focus::UiSurface::MultiEdit) => "multi_edit",
             Some(super::input_focus::UiSurface::Floating(_)) => "floating",
             None => "none",
         }
@@ -5190,5 +5191,230 @@ impl super::WavesPreviewer {
             self.playback_session.source,
             self.playback_current_source_time_sec(),
         )
+    }
+
+    // ---- Multi Edits ---------------------------------------------------
+
+    /// Test-only: Tools > Multi Edits > New Timeline. Returns its id.
+    pub fn test_multi_edit_new(&mut self) -> String {
+        self.multi_edit_new()
+    }
+
+    pub fn test_multi_edit_open(&mut self, id: &str) {
+        self.multi_edit_open(id);
+    }
+
+    pub fn test_multi_edit_close(&mut self, id: &str) {
+        self.multi_edit_close(id);
+    }
+
+    pub fn test_multi_edit_workspace_active(&self) -> bool {
+        self.is_multi_edit_workspace_active()
+    }
+
+    pub fn test_multi_edit_active_id(&self) -> Option<String> {
+        self.multi_edit.active.clone()
+    }
+
+    /// Test-only: rows dropped from the list pane at `at_secs` on track
+    /// `track` (`None`: below the tracks). Returns how many clips landed.
+    pub fn test_multi_edit_drop(&mut self, track: Option<usize>, at_secs: f64, paths: &[PathBuf]) -> usize {
+        self.multi_edit_drop_paths(track, at_secs, paths)
+    }
+
+    /// Test-only: every clip of the active timeline as
+    /// (track, source path, start, length), track by track.
+    pub fn test_multi_edit_clips(&self) -> Vec<(usize, PathBuf, f64, f64)> {
+        let Some(doc) = self.multi_edit_active_doc() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (ti, track) in doc.tracks.iter().enumerate() {
+            let mut clips: Vec<_> = track.clips.iter().collect();
+            clips.sort_by(|a, b| a.start_secs.total_cmp(&b.start_secs));
+            for clip in clips {
+                out.push((ti, clip.source.path.clone(), clip.start_secs, clip.len_secs));
+            }
+        }
+        out
+    }
+
+    /// Test-only: the active timeline's tracks as (name, is video).
+    pub fn test_multi_edit_tracks(&self) -> Vec<(String, bool)> {
+        self.multi_edit_active_doc()
+            .map(|doc| {
+                doc.tracks
+                    .iter()
+                    .map(|t| (t.name.clone(), t.kind == super::multi_edit::TrackKind::Video))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Test-only: every timeline as (name, open, tracks, clips, lane points).
+    pub fn test_multi_edit_docs(&self) -> Vec<(String, bool, usize, usize, usize)> {
+        self.multi_edit
+            .docs
+            .iter()
+            .map(|doc| {
+                (
+                    doc.name.clone(),
+                    doc.open,
+                    doc.tracks.len(),
+                    doc.tracks.iter().map(|t| t.clips.len()).sum(),
+                    doc.tracks
+                        .iter()
+                        .flat_map(|t| t.lanes.iter())
+                        .map(|l| l.points.len())
+                        .sum(),
+                )
+            })
+            .collect()
+    }
+
+    /// Test-only: add a Gain point on a track of the active timeline.
+    pub fn test_multi_edit_add_gain_point(&mut self, track: usize, secs: f64, db: f32) {
+        self.multi_edit_checkpoint();
+        if let Some(doc) = self.multi_edit_active_doc_mut() {
+            if let Some(idx) = doc.ensure_lane(track, super::multi_edit::LaneParam::Gain) {
+                doc.tracks[track].lanes[idx].insert_point(secs, db);
+            }
+        }
+        self.multi_edit_touched();
+    }
+
+    /// Test-only: select the n-th clip (in `test_multi_edit_clips` order),
+    /// as a click on it does.
+    pub fn test_multi_edit_select_clip(&mut self, n: usize) -> bool {
+        let Some(doc) = self.multi_edit_active_doc() else {
+            return false;
+        };
+        let mut ids = Vec::new();
+        for track in &doc.tracks {
+            let mut clips: Vec<_> = track.clips.iter().collect();
+            clips.sort_by(|a, b| a.start_secs.total_cmp(&b.start_secs));
+            ids.extend(clips.into_iter().map(|c| c.id.clone()));
+        }
+        let Some(id) = ids.get(n).cloned() else {
+            return false;
+        };
+        self.multi_edit_select_clip(Some(id));
+        true
+    }
+
+    /// Test-only: frames in the current playback mix of the active timeline,
+    /// once one exists and reflects the latest edit.
+    pub fn test_multi_edit_mix_frames(&self) -> Option<usize> {
+        let id = self.multi_edit.active.as_deref()?;
+        let rev = self.multi_edit.rev(id);
+        self.multi_edit
+            .mix
+            .as_ref()
+            .filter(|mix| mix.doc_id == id && mix.rev == rev)
+            .map(|mix| mix.audio.len())
+    }
+
+    /// Test-only: peak of the current mix between two times, both channels.
+    pub fn test_multi_edit_mix_peak(&self, from_secs: f64, to_secs: f64) -> Option<f32> {
+        let id = self.multi_edit.active.as_deref()?;
+        let mix = self.multi_edit.mix.as_ref().filter(|mix| mix.doc_id == id)?;
+        let sr = self.audio.shared.out_sample_rate.max(1) as f64;
+        let (a, b) = ((from_secs * sr) as usize, (to_secs * sr) as usize);
+        let mut peak = 0.0f32;
+        for channel in mix.audio.channels.iter() {
+            for v in channel.get(a.min(channel.len())..b.min(channel.len())).unwrap_or(&[]) {
+                peak = peak.max(v.abs());
+            }
+        }
+        Some(peak)
+    }
+
+    pub fn test_multi_edit_is_playing(&self) -> bool {
+        self.multi_edit
+            .active
+            .as_deref()
+            .is_some_and(|id| self.multi_edit_is_playing(id))
+    }
+
+    pub fn test_multi_edit_export(&mut self) {
+        self.multi_edit_start_export();
+    }
+
+    pub fn test_multi_edit_export_in_flight(&self) -> bool {
+        self.multi_edit.export.is_some()
+    }
+
+    pub fn test_multi_edit_undo(&mut self) -> bool {
+        self.trigger_undo_redo(false)
+    }
+
+    pub fn test_multi_edit_redo(&mut self) -> bool {
+        self.trigger_undo_redo(true)
+    }
+
+    /// Test-only: draw the next frames with the list pane's columns set to
+    /// exactly these (by column name).
+    pub fn test_multi_edit_set_pane_columns(&mut self, names: &[&str]) {
+        let mut cols = self.multi_edit_list_columns;
+        for column in super::types::ColumnId::ALL {
+            column.set_enabled(&mut cols, names.contains(&column.name()));
+        }
+        self.multi_edit_list_columns = cols;
+    }
+
+    pub fn test_multi_edit_seek(&mut self, secs: f64) {
+        self.multi_edit_seek(secs);
+    }
+
+    /// Test-only: the picture the preview shows, as (file, seconds into it).
+    pub fn test_multi_edit_video_target(&self) -> Option<(PathBuf, f64)> {
+        self.multi_edit_video_at_playhead()
+    }
+
+    /// Test-only: the frame time the preview has on screen, once decoded.
+    pub fn test_multi_edit_video_shown_pts(&self) -> Option<f64> {
+        self.multi_edit
+            .video_panels
+            .values()
+            .find_map(|video| video.panel.shown_pts)
+    }
+
+    /// Test-only: fades on the n-th clip (in `test_multi_edit_clips` order).
+    pub fn test_multi_edit_set_fades(&mut self, n: usize, fade_in: f64, fade_out: f64) -> bool {
+        let Some(doc) = self.multi_edit_active_doc() else {
+            return false;
+        };
+        let mut ids = Vec::new();
+        for track in &doc.tracks {
+            let mut clips: Vec<_> = track.clips.iter().collect();
+            clips.sort_by(|a, b| a.start_secs.total_cmp(&b.start_secs));
+            ids.extend(clips.into_iter().map(|c| c.id.clone()));
+        }
+        let Some(id) = ids.get(n).cloned() else {
+            return false;
+        };
+        if let Some(doc) = self.multi_edit_active_doc_mut() {
+            doc.set_fade_in(&id, fade_in);
+            doc.set_fade_out(&id, fade_out);
+        }
+        self.multi_edit_touched();
+        true
+    }
+
+    /// Test-only: a point on a track's lane, the lane named as its menu item
+    /// ("Gain", "Pitch", "Pan", "Mute") and added when missing.
+    pub fn test_multi_edit_add_lane_point(&mut self, track: usize, lane: &str, secs: f64, value: f32) {
+        let Some(param) = super::multi_edit::LaneParam::ALL
+            .into_iter()
+            .find(|p| p.label() == lane)
+        else {
+            return;
+        };
+        if let Some(doc) = self.multi_edit_active_doc_mut() {
+            if let Some(idx) = doc.ensure_lane(track, param) {
+                doc.tracks[track].lanes[idx].insert_point(secs, value);
+            }
+        }
+        self.multi_edit_touched();
     }
 }

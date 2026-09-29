@@ -59,7 +59,8 @@ impl WavesPreviewer {
             }
             PlaybackSourceKind::None
             | PlaybackSourceKind::EffectGraph
-            | PlaybackSourceKind::ToolPreview => false,
+            | PlaybackSourceKind::ToolPreview
+            | PlaybackSourceKind::MultiEdit(_) => false,
         } && source_secs.is_some();
         let video_secs = if source_matches {
             source_secs.unwrap_or(frozen_secs)

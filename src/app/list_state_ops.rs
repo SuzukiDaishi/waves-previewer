@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use super::types::{
-    ColumnId, FileMeta, MediaId, MediaItem, MediaSource, SampleValueKind, SelectionIds, SortDir,
-    SortKey, Transcript, TranscriptDocument,
+    ColumnId, FileMeta, ListColumnConfig, ListViewProfile, MediaId, MediaItem, MediaSource,
+    SampleValueKind, SelectionIds, SortDir, SortKey, Transcript, TranscriptDocument,
 };
 use super::WavesPreviewer;
 
@@ -121,6 +121,37 @@ impl WavesPreviewer {
     pub(super) fn item_for_path_mut(&mut self, path: &Path) -> Option<&mut MediaItem> {
         let id = self.path_index.get(path)?;
         self.item_for_id_mut(id)
+    }
+
+    /// The columns of the list view being drawn: the List workspace's, or
+    /// the Multi Edits pane's while that pane draws.
+    pub(super) fn active_list_columns(&self) -> ListColumnConfig {
+        match self.list_view_profile {
+            ListViewProfile::Main => self.list_columns,
+            ListViewProfile::MultiEditPane => self.multi_edit_list_columns,
+        }
+    }
+
+    pub(super) fn active_list_col_widths(&self) -> &std::collections::BTreeMap<String, f32> {
+        match self.list_view_profile {
+            ListViewProfile::Main => &self.list_col_widths,
+            ListViewProfile::MultiEditPane => &self.multi_edit_list_col_widths,
+        }
+    }
+
+    pub(super) fn active_list_col_widths_mut(
+        &mut self,
+    ) -> &mut std::collections::BTreeMap<String, f32> {
+        match self.list_view_profile {
+            ListViewProfile::Main => &mut self.list_col_widths,
+            ListViewProfile::MultiEditPane => &mut self.multi_edit_list_col_widths,
+        }
+    }
+
+    /// Whether a list view is on screen and may take the list's keys: the
+    /// List workspace, or the Multi Edits pane while it draws.
+    pub(super) fn list_surface_live(&self) -> bool {
+        self.is_list_workspace_active() || self.list_view_profile == ListViewProfile::MultiEditPane
     }
 
     pub(super) fn is_virtual_path(&self, path: &Path) -> bool {

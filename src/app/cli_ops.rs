@@ -3328,6 +3328,7 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
         // A synthetic document built for a render or a query, never written
         // back over a real session -- so it carries no conversation.
         comments: Vec::new(),
+        multi_edits: Vec::new(),
     })
 }
 

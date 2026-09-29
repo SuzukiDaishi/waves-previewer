@@ -90,7 +90,7 @@ impl WavesPreviewer {
         // is lost, where the alternative is a list that stops answering until
         // it is clicked.
         if std::mem::take(&mut self.list_arrow_focus_guard)
-            && self.is_list_workspace_active()
+            && self.list_surface_live()
             && !ctx.input(|i| i.pointer.any_pressed())
             && !modified_key_pressed(ctx)
             && ctx.memory(|m| m.focused().is_some_and(|id| id != list_focus_id))
@@ -119,7 +119,7 @@ impl WavesPreviewer {
 
         let mut list_has_focus = list_focus_now || self.list_has_focus;
         if !list_has_focus
-            && self.is_list_workspace_active()
+            && self.list_surface_live()
             && self.selected.is_some()
             && !self.search_has_focus
             && allow_focus_reclaim
@@ -149,7 +149,7 @@ impl WavesPreviewer {
         // thing that keeps the two apart, and it does not depend on the topbar
         // drawing before the list.
         let allow_list_gain_keys = allow_list_keys && !self.topbar_volume_owns_arrows(ctx);
-        if self.debug.cfg.enabled && self.is_list_workspace_active() && !self.files.is_empty() {
+        if self.debug.cfg.enabled && self.list_surface_live() && !self.files.is_empty() {
             let nav_key_pressed = ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowDown)
                     || i.key_pressed(egui::Key::ArrowUp)
@@ -265,7 +265,7 @@ impl WavesPreviewer {
             false
         };
 
-        if self.is_list_workspace_active() && !self.files.is_empty() && allow_list_keys {
+        if self.list_surface_live() && !self.files.is_empty() && allow_list_keys {
             if pressed_ctrl_a
                 || pressed_home
                 || pressed_end

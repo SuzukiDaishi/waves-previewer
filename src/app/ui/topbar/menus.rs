@@ -419,6 +419,29 @@ impl WavesPreviewer {
                 }
                 ui.close();
             }
+            ui.menu_button("Multi Edits", |ui| {
+                if ui.button("New Timeline").clicked() {
+                    self.multi_edit_new();
+                    ui.close();
+                }
+                // Closing a tab keeps the timeline; this is how it comes back.
+                let docs: Vec<(String, String, bool)> = self
+                    .multi_edit
+                    .docs
+                    .iter()
+                    .map(|doc| (doc.id.clone(), doc.name.clone(), doc.open))
+                    .collect();
+                if !docs.is_empty() {
+                    ui.separator();
+                }
+                for (id, name, open) in docs {
+                    let label = if open { format!("{name}  (open)") } else { name };
+                    if ui.button(label).clicked() {
+                        self.multi_edit_open(&id);
+                        ui.close();
+                    }
+                }
+            });
             if ui.button("Plugin Manager...").clicked() {
                 self.show_plugin_manager = true;
                 ui.close();

@@ -51,7 +51,7 @@ impl WavesPreviewer {
     pub(super) fn list_view_metrics(&mut self, ui: &mut egui::Ui) -> ListViewMetrics {
         let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
         let header_h = text_height * 1.6;
-        let cols = self.list_columns;
+        let cols = self.active_list_columns();
         let row_h = if cols.cover_art {
             self.wave_row_h.max(text_height * 2.8).max(48.0)
         } else {
@@ -218,14 +218,19 @@ impl WavesPreviewer {
         ui: &'a mut egui::Ui,
         metrics: &ListViewMetrics,
     ) -> (TableBuilder<'a>, usize, bool) {
-        let cols = self.list_columns;
+        let cols = self.active_list_columns();
         let header_dirty = self.list_header_dirty();
         let mut filler_cols = 0usize;
         // Remember where the table lives so commit_list_col_widths can probe
         // the egui_extras resize-handle responses (ids derive from this ui).
         self.list_table_ui_id = Some(ui.id());
         let mut table = TableBuilder::new(ui)
-            .id_salt(("list_table", self.list_table_layout_revision))
+            // Each view of the list keeps its own column widths.
+            .id_salt((
+                "list_table",
+                self.list_view_profile,
+                self.list_table_layout_revision,
+            ))
             .striped(true)
             .resizable(true)
             .auto_shrink([false, true])
@@ -307,7 +312,7 @@ impl WavesPreviewer {
     }
 
     fn list_col_w(&self, key: &str, default: f32) -> f32 {
-        self.list_col_widths
+        self.active_list_col_widths()
             .get(key)
             .copied()
             .filter(|w| w.is_finite() && *w >= 10.0)
@@ -329,7 +334,11 @@ impl WavesPreviewer {
         if seen_empty {
             return;
         }
-        let state_id = ui_id.with(("list_table", self.list_table_layout_revision));
+        let state_id = ui_id.with((
+            "list_table",
+            self.list_view_profile,
+            self.list_table_layout_revision,
+        ));
         let mut drag_stopped = false;
         let mut dragging = false;
         for i in 0..self.list_table_col_count {
@@ -359,7 +368,8 @@ impl WavesPreviewer {
             }
             let effective = self.list_col_w(&key, Self::list_col_default(&key));
             if (effective - width).abs() > 0.5 {
-                self.list_col_widths.insert(key.to_string(), width);
+                self.active_list_col_widths_mut()
+                    .insert(key.to_string(), width);
                 changed = true;
             }
         }
@@ -402,7 +412,7 @@ impl WavesPreviewer {
         header_dirty: bool,
         sort_changed: &mut bool,
     ) {
-        let cols = self.list_columns;
+        let cols = self.active_list_columns();
         self.list_col_widths_seen.clear();
         // Read once: the header closures below borrow the sort fields
         // mutably, and a menu must not ask the list anything per frame.

@@ -14,6 +14,9 @@ pub(super) enum UiSurface {
     Editor,
     EffectGraph,
     Recording,
+    /// The Multi Edits timeline. Its list pane is `List`: the same list,
+    /// with the same keys.
+    MultiEdit,
     Floating(Id),
 }
 
@@ -254,6 +257,7 @@ impl WavesPreviewer {
         match self.workspace_view {
             WorkspaceView::EffectGraph => UiSurface::EffectGraph,
             WorkspaceView::Recording => UiSurface::Recording,
+            WorkspaceView::MultiEdit => UiSurface::MultiEdit,
             WorkspaceView::Editor if self.active_tab.is_some() => UiSurface::Editor,
             WorkspaceView::Editor | WorkspaceView::List => UiSurface::List,
         }

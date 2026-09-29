@@ -72,6 +72,10 @@ impl WavesPreviewer {
         &self,
         key: &ColumnKey,
     ) -> Option<(usize, &MetadataListColumn)> {
+        // The Multi Edits pane shows built-in columns only.
+        if self.list_view_profile == crate::app::types::ListViewProfile::MultiEditPane {
+            return None;
+        }
         self.metadata_list_columns
             .iter()
             .enumerate()
@@ -190,10 +194,11 @@ impl WavesPreviewer {
     pub(super) fn visible_metadata_columns(
         &self,
     ) -> impl Iterator<Item = (usize, &MetadataListColumn)> {
+        let pane = self.list_view_profile == crate::app::types::ListViewProfile::MultiEditPane;
         self.metadata_list_columns
             .iter()
             .enumerate()
-            .filter(|(_, column)| column.visible)
+            .filter(move |(_, column)| column.visible && !pane)
     }
 
     fn metadata_summary_request(&self) -> Option<SummaryRequest> {

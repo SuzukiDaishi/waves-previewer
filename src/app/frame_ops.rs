@@ -347,6 +347,8 @@ impl WavesPreviewer {
         trace_stage!("plugin jobs", self.drain_plugin_jobs(ctx));
         trace_stage!("plugin preview", self.poll_plugin_auto_preview(ctx));
         trace_stage!("variation audition", self.poll_variation_audition(ctx));
+        // Not deferrable: the user is waiting on a mix to hear an edit.
+        trace_stage!("multi edit", self.tick_multi_edit(ctx));
         deferrable!(trace_stage!(
             "duplicate scan",
             self.drain_duplicate_scan(ctx)
@@ -540,6 +542,7 @@ impl WavesPreviewer {
                         }
                     });
                 }
+                self.ui_multi_edit_tab_labels(ui);
                 let mut to_close: Option<usize> = None;
                 let tabs_len = self.tabs.len();
                 for i in 0..tabs_len {
@@ -584,13 +587,21 @@ impl WavesPreviewer {
             let scroll_target = self.current_ui_surface();
             self.ui_input_focus.begin_surface(scroll_target);
             let workspace_rect = ui.available_rect_before_wrap();
+            // The Multi Edits workspace is two surfaces side by side -- the
+            // list pane (List) and the timeline (MultiEdit) -- and registers
+            // and guards each itself, so neither may be claimed whole here.
+            let split_workspace = self.is_multi_edit_workspace_active();
             {
-                let _scroll_guard = self.pointer_scroll_input_guard(scroll_target, &ctx);
+                let _scroll_guard = (!split_workspace)
+                    .then(|| self.pointer_scroll_input_guard(scroll_target, &ctx));
                 let view_started = profile_frame_stages.then(Instant::now);
                 let view_stage;
                 if self.is_effect_graph_workspace_active() {
                     view_stage = "Effect graph UI";
                     self.ui_effect_graph_view(ui, &ctx);
+                } else if self.is_multi_edit_workspace_active() {
+                    view_stage = "Multi Edit UI";
+                    self.ui_multi_edit_view(ui, &ctx);
                 } else if self.workspace_view == WorkspaceView::Recording {
                     view_stage = "Recording UI";
                     self.ui_recording_view(ui, &ctx);
@@ -610,8 +621,10 @@ impl WavesPreviewer {
                         .note_stage(view_stage, started.elapsed().as_secs_f32() * 1_000.0);
                 }
             }
-            self.ui_input_focus
-                .register_region(scroll_target, ui.layer_id(), workspace_rect);
+            if !split_workspace {
+                self.ui_input_focus
+                    .register_region(scroll_target, ui.layer_id(), workspace_rect);
+            }
         });
         activate_path
     }

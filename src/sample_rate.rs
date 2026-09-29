@@ -10,6 +10,7 @@
 //! | `buffer_sr`  | the rate of the samples an editor tab is working on   | `EditorTab::buffer_sample_rate`           |
 //! | `out_sr`     | the output device's rate, what playback runs at       | `AudioShared::out_sample_rate`            |
 //! | `capture_sr` | the input device's rate while recording               | the capture stream, once opened           |
+//! | `timeline_sr`| a Multi Edits timeline's mixdown rate                 | `MultiEditDoc::timeline_sr`: its first clip's `file_sr` |
 //! | fixed        | a rate a standard or model requires                   | a named `const` beside the code using it  |
 //!
 //! Nothing here holds a device or a file; this module is only the vocabulary

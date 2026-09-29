@@ -84,6 +84,9 @@ mod loudnorm_ops;
 mod meta;
 mod meta_ops;
 mod metadata_list_ops;
+pub(crate) mod multi_edit;
+mod multi_edit_ops;
+pub(crate) mod multi_edit_render;
 mod music_ai_ops;
 mod music_onnx;
 mod native_drag;
@@ -366,6 +369,8 @@ pub(super) enum PlaybackSourceKind {
     EditorTab(PathBuf),
     EffectGraph,
     ToolPreview,
+    /// A Multi Edits timeline's mix, by timeline id.
+    MultiEdit(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -758,6 +763,14 @@ pub struct WavesPreviewer {
     metadata_cache_hits: u64,
     // persisted per-column widths (prefs.txt); key = column id in table.rs
     list_col_widths: std::collections::BTreeMap<String, f32>,
+    /// The view of the list being drawn right now; `Main` outside the
+    /// Multi Edits pane's draw. Read through `active_list_columns`.
+    list_view_profile: types::ListViewProfile,
+    /// The Multi Edits pane's columns and their widths (prefs).
+    multi_edit_list_columns: ListColumnConfig,
+    multi_edit_list_col_widths: std::collections::BTreeMap<String, f32>,
+    /// Multi Edits timelines and everything they run on.
+    multi_edit: multi_edit_ops::MultiEditRuntime,
     // widths observed while rendering the current frame's header
     list_col_widths_seen: Vec<(String, f32)>,
     list_table_ui_id: Option<egui::Id>,

@@ -853,6 +853,17 @@ impl super::WavesPreviewer {
     /// then the active editor tab, then the list, then overwrite-export.
     pub(super) fn trigger_undo_redo(&mut self, redo: bool) -> bool {
         let mut handled = false;
+        // A timeline in front owns Ctrl+Z, as the effect graph does.
+        if self.is_multi_edit_workspace_active() {
+            let handled = if redo {
+                self.multi_edit_redo()
+            } else {
+                self.multi_edit_undo()
+            };
+            if handled || self.last_undo_scope == UndoScope::MultiEdit {
+                return handled;
+            }
+        }
         let prefer_graph = self.is_effect_graph_workspace_active()
             || self.last_undo_scope == UndoScope::EffectGraph;
         if prefer_graph {

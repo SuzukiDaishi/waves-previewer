@@ -742,7 +742,9 @@ impl super::WavesPreviewer {
                     self.select_and_load(row_idx, false);
                 }
             }
-            super::PlaybackSourceKind::EffectGraph | super::PlaybackSourceKind::ToolPreview => {
+            super::PlaybackSourceKind::EffectGraph
+            | super::PlaybackSourceKind::ToolPreview
+            | super::PlaybackSourceKind::MultiEdit(_) => {
                 if let Some(base) = self.playback_base_audio.clone() {
                     self.audio.stop();
                     self.audio.set_samples_buffer(base);
@@ -820,6 +822,10 @@ impl super::WavesPreviewer {
         if self.cancel_pending_video_play_start() {
             self.audio.stop();
             self.playback_sync_state_snapshot();
+            return;
+        }
+        if self.is_multi_edit_workspace_active() {
+            self.multi_edit_toggle_play();
             return;
         }
         if self.is_list_workspace_active() {
