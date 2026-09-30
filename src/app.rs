@@ -85,7 +85,9 @@ mod meta;
 mod meta_ops;
 mod metadata_list_ops;
 pub(crate) mod multi_edit;
+mod multi_edit_clipboard;
 mod multi_edit_ops;
+mod window_owner;
 pub(crate) mod multi_edit_render;
 mod music_ai_ops;
 mod music_onnx;
@@ -771,6 +773,8 @@ pub struct WavesPreviewer {
     multi_edit_list_col_widths: std::collections::BTreeMap<String, f32>,
     /// Multi Edits timelines and everything they run on.
     multi_edit: multi_edit_ops::MultiEditRuntime,
+    /// Keeps the video windows just in front of the main window.
+    window_owner: window_owner::WindowOwner,
     // widths observed while rendering the current frame's header
     list_col_widths_seen: Vec<(String, f32)>,
     list_table_ui_id: Option<egui::Id>,
@@ -3500,8 +3504,9 @@ impl WavesPreviewer {
 }
 
 impl eframe::App for WavesPreviewer {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let frame_started = std::time::Instant::now();
+        self.window_owner.note_main(frame);
         let had_ui_input = ctx.input(|i| {
             !i.events.is_empty()
                 || i.pointer.any_pressed()

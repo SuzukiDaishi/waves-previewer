@@ -255,6 +255,7 @@ impl WavesPreviewer {
             multi_edit_list_columns: ListColumnConfig::multi_edit_pane_default(),
             multi_edit_list_col_widths: Default::default(),
             multi_edit: Default::default(),
+            window_owner: Default::default(),
             list_col_widths_seen: Vec::new(),
             list_table_ui_id: None,
             list_table_col_count: 0,

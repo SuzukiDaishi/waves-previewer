@@ -76,7 +76,7 @@ impl WavesPreviewer {
         );
         let viewport_id = Self::detached_video_viewport_id(tab_id);
         let builder = egui::ViewportBuilder::default()
-            .with_title(title)
+            .with_title(title.clone())
             .with_inner_size([960.0, 540.0])
             .with_min_inner_size([320.0, 180.0])
             .with_resizable(true);
@@ -110,6 +110,7 @@ impl WavesPreviewer {
                 );
             });
         }
+        self.window_owner.keep_in_front(viewport_id, &title);
 
         if close_requested {
             if let Some(panel) = self.tabs[tab_idx].video_panel.as_mut() {

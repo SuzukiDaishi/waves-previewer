@@ -16,7 +16,7 @@ use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 use super::loading_ops::{poll_job, JobPoll};
-use super::multi_edit::{ClipSource, MultiEditDoc, NewClip, TrackKind};
+use super::multi_edit::{ClipSource, MultiEditDoc, NewClip, TrackKind, MIN_CLIP_SECS};
 use super::multi_edit_render::{SourceAudio, SourceMap};
 use super::render::waveform_pyramid::{PeakPyramid, DEFAULT_BASE_BIN_SAMPLES};
 use super::types::{MediaSource, ToastSeverity, UndoScope, WorkspaceView};
@@ -26,16 +26,92 @@ use crate::audio::AudioBuffer;
 /// Snapshots kept per timeline for Ctrl+Z.
 const MULTI_EDIT_UNDO_LIMIT: usize = 100;
 
+/// Ruler ticks, grid lines and arrow-key steps never come closer than this
+/// on screen.
+pub(crate) const MULTI_EDIT_GRID_MIN_PX: f32 = 70.0;
+
 /// Where the preview's video panel ids start. They share the decode workers'
 /// id space with editor tabs, whose ids count up from 1, so these start far
 /// above anything a session could open.
 const MULTI_EDIT_VIDEO_ID_BASE: u64 = 1 << 48;
 
-/// The preview's picture for one video file: the same panel an editor tab
-/// uses, with its own decode worker.
+/// One video track's picture window: the same panel an editor tab uses,
+/// with its own decode worker, reading the file under the playhead.
 pub(crate) struct MultiEditVideo {
     pub id: u64,
+    pub path: PathBuf,
     pub panel: super::types::VideoPanelState,
+}
+
+/// The value popup of an automation point.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PointEditor {
+    pub track_id: String,
+    pub lane_id: String,
+    pub point: usize,
+    pub secs: f64,
+    pub value: f32,
+    /// Where on screen the popup opens.
+    pub at: egui::Pos2,
+}
+
+/// The rows a drag from the list would place, measured once when the drag
+/// reaches the timeline -- the selection can be the whole list, so no frame
+/// looks the rows up again.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DropPreview {
+    /// Which drag this is (the payload's address).
+    pub key: usize,
+    /// (name, length) of the audio rows, in list order. They land back to
+    /// back on an audio track from the drop point.
+    pub audio: Vec<(String, f64)>,
+    /// The same for the video rows, which land on a video track.
+    pub video: Vec<(String, f64)>,
+    pub audio_secs: f64,
+    pub video_secs: f64,
+}
+
+impl DropPreview {
+    /// Only the clips `insert_clips` would place, so the preview and the
+    /// drop agree.
+    pub fn new(key: usize, clips: Vec<NewClip>) -> Self {
+        let mut preview = Self {
+            key,
+            ..Self::default()
+        };
+        for clip in clips {
+            if !(clip.len_secs.is_finite() && clip.len_secs >= MIN_CLIP_SECS) {
+                continue;
+            }
+            if clip.is_video {
+                preview.video_secs += clip.len_secs;
+                preview.video.push((clip.name, clip.len_secs));
+            } else {
+                preview.audio_secs += clip.len_secs;
+                preview.audio.push((clip.name, clip.len_secs));
+            }
+        }
+        preview
+    }
+
+    pub fn count(&self) -> usize {
+        self.audio.len() + self.video.len()
+    }
+
+    /// One group: the clips and their length together.
+    pub fn group(&self, kind: TrackKind) -> (&[(String, f64)], f64) {
+        match kind {
+            TrackKind::Audio => (&self.audio, self.audio_secs),
+            TrackKind::Video => (&self.video, self.video_secs),
+        }
+    }
+}
+
+/// A row being resized by its bottom edge.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum RowResize {
+    Track { track_id: String, start_height: f32, start_y: f32 },
+    Lane { track_id: String, lane_id: String, start_height: f32, start_y: f32 },
 }
 
 /// A timeline's audio, as the cache holds it.
@@ -149,13 +225,52 @@ pub(crate) struct LaneDrag {
 #[derive(Default)]
 pub(crate) struct MultiEditUi {
     pub selected_clip: Option<String>,
+    /// A selected track; exclusive with `selected_clip`.
+    pub selected_track: Option<String>,
     pub clip_drag: Option<ClipDrag>,
     pub lane_drag: Option<LaneDrag>,
+    /// A marker being dragged along the ruler, by id.
+    pub marker_drag: Option<String>,
+    /// (marker id, label being typed).
+    pub renaming_marker: Option<(String, String)>,
+    pub point_editor: Option<PointEditor>,
+    pub row_resize: Option<RowResize>,
+    /// Held arrow keys: the playhead's repeat, and the selected clip's.
+    pub seek_hold: Option<super::types::SeekHoldState>,
+    pub nudge_hold: Option<super::types::SeekHoldState>,
+    /// Set on the frame the point popup opens, so the click that opened it
+    /// does not count as a click outside it.
+    pub point_editor_just_opened: bool,
+    /// Measured each frame: how far the rows can scroll, how wide the lanes
+    /// are. The wheel and the zoom limits read them.
+    pub max_scroll_y: f32,
+    pub lane_width: f32,
+    /// Where the lanes start on screen (time zero before scrolling).
+    pub lane_left: f32,
+    /// Whether the last wheel event came with Shift held. A notch is spread
+    /// over several frames, and only its event says what was held.
+    pub wheel_shift: bool,
+    /// A name field just opened and should take the keyboard, once. Asking
+    /// every frame is what used to keep the caret there after a click
+    /// elsewhere.
+    pub rename_focus_pending: bool,
+    /// An input method is composing (a Japanese conversion, say): its Enter
+    /// confirms the conversion and must not also confirm the name.
+    pub ime_composing: bool,
+    /// This frame saw input-method events, or one was composing before it.
+    pub ime_busy: bool,
+    /// The rows being dragged from the list, measured once per drag.
+    pub drop_preview: Option<DropPreview>,
+    /// Where the drag would place them right now, as (start, total length,
+    /// clip count), while the pointer is over a track.
+    pub drop_preview_shown: Option<(f64, f64, usize)>,
     /// (track id, name being typed).
     pub renaming_track: Option<(String, String)>,
     /// (timeline id, name being typed).
     pub renaming_doc: Option<(String, String)>,
     pub confirm_delete_doc: Option<String>,
+    /// The clip Ctrl+C took, for Ctrl+V (`multi_edit_clipboard.rs`).
+    pub clip_clipboard: Option<super::multi_edit_clipboard::CopiedClip>,
 }
 
 #[derive(Default)]
@@ -176,9 +291,20 @@ pub(crate) struct MultiEditRuntime {
     pub playhead_secs: HashMap<String, f64>,
     /// A timeline whose Play was pressed before its mix existed.
     play_when_ready: Option<String>,
-    /// Video preview panels, by source file. Only the one on screen is kept.
-    pub video_panels: HashMap<PathBuf, MultiEditVideo>,
+    /// Picture windows, by video track id.
+    pub video_panels: HashMap<String, MultiEditVideo>,
     next_video_id: u64,
+    /// Bumped on every change a session stores, unlike `revs`, which also
+    /// moves when a source finishes loading. Compared with `saved_edit_revs`
+    /// for the tab's unsaved mark.
+    edit_revs: HashMap<String, u64>,
+    saved_edit_revs: HashMap<String, u64>,
+    /// `edit_revs` as they were when the running save was planned.
+    pending_saved_revs: Option<HashMap<String, u64>>,
+    /// Where each timeline's playback last started, for "Return to last start".
+    play_start: HashMap<String, f64>,
+    /// Whether the active timeline was playing last frame.
+    was_playing: bool,
     pub ui: MultiEditUi,
 }
 
@@ -400,8 +526,51 @@ impl WavesPreviewer {
         let Some(id) = self.multi_edit.active.clone() else {
             return;
         };
-        *self.multi_edit.revs.entry(id).or_default() += 1;
+        *self.multi_edit.revs.entry(id.clone()).or_default() += 1;
+        *self.multi_edit.edit_revs.entry(id).or_default() += 1;
         self.multi_edit.edited_at = Some(Instant::now());
+    }
+
+    /// Note a change the session stores that does not change the sound: a
+    /// name, a row height, folded lanes, a video window shown or hidden.
+    pub(super) fn multi_edit_mark_changed(&mut self, id: &str) {
+        *self.multi_edit.edit_revs.entry(id.to_string()).or_default() += 1;
+    }
+
+    /// Whether a timeline differs from what the session last saved or
+    /// opened. A timeline never saved into a session always does.
+    pub(super) fn multi_edit_is_dirty(&self, id: &str) -> bool {
+        let current = self.multi_edit.edit_revs.get(id).copied().unwrap_or(0);
+        self.multi_edit.saved_edit_revs.get(id) != Some(&current)
+    }
+
+    pub(super) fn multi_edit_any_dirty(&self) -> bool {
+        self.multi_edit
+            .docs
+            .iter()
+            .any(|doc| self.multi_edit_is_dirty(&doc.id))
+    }
+
+    /// A session save is being planned: what it will write is the timelines
+    /// as they are now.
+    pub(super) fn multi_edit_note_save_planned(&mut self) {
+        let revs = self
+            .multi_edit
+            .docs
+            .iter()
+            .map(|doc| {
+                let rev = self.multi_edit.edit_revs.get(&doc.id).copied().unwrap_or(0);
+                (doc.id.clone(), rev)
+            })
+            .collect();
+        self.multi_edit.pending_saved_revs = Some(revs);
+    }
+
+    /// The planned save landed: those versions are the session's now.
+    pub(super) fn multi_edit_note_saved(&mut self) {
+        if let Some(revs) = self.multi_edit.pending_saved_revs.take() {
+            self.multi_edit.saved_edit_revs = revs;
+        }
     }
 
     fn multi_edit_restore(&mut self, redo: bool) -> bool {
@@ -554,8 +723,127 @@ impl WavesPreviewer {
         self.path_for_row(row).cloned().into_iter().collect()
     }
 
+    /// Select a track (and no clip).
+    pub(super) fn multi_edit_select_track(&mut self, track_id: Option<String>) {
+        self.multi_edit.ui.selected_track = track_id;
+        if self.multi_edit.ui.selected_track.is_some() {
+            self.multi_edit.ui.selected_clip = None;
+        }
+    }
+
+    /// Delete what is selected: a clip, or else a track. Returns whether
+    /// anything went.
+    pub(super) fn multi_edit_delete_selected(&mut self) -> bool {
+        let clip = self.multi_edit.ui.selected_clip.clone();
+        let track = self.multi_edit.ui.selected_track.clone();
+        if clip.is_none() && track.is_none() {
+            return false;
+        }
+        self.multi_edit_checkpoint();
+        let Some(doc) = self.multi_edit_active_doc_mut() else {
+            return false;
+        };
+        let removed = match (clip, track) {
+            (Some(clip), _) => doc.remove_clip(&clip),
+            (None, Some(track)) => doc.remove_track(&track),
+            (None, None) => false,
+        };
+        self.multi_edit.ui.selected_clip = None;
+        self.multi_edit.ui.selected_track = None;
+        if removed {
+            self.multi_edit_touched();
+        }
+        removed
+    }
+
+    /// A marker at the playhead (the M key). Returns its id.
+    pub(super) fn multi_edit_add_marker_at_playhead(&mut self) -> Option<String> {
+        let doc_id = self.multi_edit.active.clone()?;
+        let playhead = self.multi_edit_playhead(&doc_id);
+        self.multi_edit_checkpoint();
+        let id = self.multi_edit_active_doc_mut()?.add_marker(playhead);
+        self.multi_edit_mark_changed(&doc_id);
+        Some(id)
+    }
+
+    /// Set an automation point's time and value, as its value popup does.
+    pub(super) fn multi_edit_set_point(
+        &mut self,
+        track_id: &str,
+        lane_id: &str,
+        point: usize,
+        secs: f64,
+        value: f32,
+    ) {
+        if let Some(lane) = self
+            .multi_edit_active_doc_mut()
+            .and_then(|doc| doc.tracks.iter_mut().find(|t| t.id == track_id))
+            .and_then(|track| track.lanes.iter_mut().find(|l| l.id == lane_id))
+        {
+            lane.move_point(point, secs, value);
+        }
+        self.multi_edit_touched();
+    }
+
+    /// The step an arrow key moves by at the current zoom: one grid line, or
+    /// one pixel's worth of time with Ctrl.
+    fn multi_edit_arrow_target(&self, t: f64, dir: i32, fine: bool) -> f64 {
+        let pps = self
+            .multi_edit_active_doc()
+            .map(|doc| doc.view.px_per_sec)
+            .unwrap_or(super::multi_edit::DEFAULT_PX_PER_SEC)
+            .max(super::multi_edit::MIN_PX_PER_SEC);
+        if fine {
+            (t + dir as f64 / pps as f64).max(0.0)
+        } else {
+            let step = super::multi_edit::grid_step_secs(pps, MULTI_EDIT_GRID_MIN_PX);
+            super::multi_edit::step_to_grid(t, dir, step)
+        }
+    }
+
+    /// Move the playhead one arrow step, stopping at a marker on the way.
+    pub(super) fn multi_edit_step_playhead(&mut self, dir: i32, fine: bool) {
+        let Some(id) = self.multi_edit.active.clone() else {
+            return;
+        };
+        let from = self.multi_edit_playhead(&id);
+        let target = self.multi_edit_arrow_target(from, dir, fine);
+        let target = self
+            .multi_edit_active_doc()
+            .map(|doc| super::multi_edit::stop_before(from, target, doc.markers.iter().map(|m| m.secs)))
+            .unwrap_or(target);
+        self.multi_edit_seek(target);
+    }
+
+    /// Move the selected clip one arrow step. `checkpoint` is true for the
+    /// first step of a held key, so one hold is one undo.
+    pub(super) fn multi_edit_nudge_selected_clip(&mut self, dir: i32, fine: bool, checkpoint: bool) -> bool {
+        let Some(clip_id) = self.multi_edit.ui.selected_clip.clone() else {
+            return false;
+        };
+        let Some(start) = self
+            .multi_edit_active_doc()
+            .and_then(|doc| doc.clip(&clip_id))
+            .map(|clip| clip.start_secs)
+        else {
+            return false;
+        };
+        let target = self.multi_edit_arrow_target(start, dir, fine);
+        if checkpoint {
+            self.multi_edit_checkpoint();
+        }
+        if let Some(doc) = self.multi_edit_active_doc_mut() {
+            doc.move_clip(&clip_id, target, None);
+        }
+        self.multi_edit_touched();
+        true
+    }
+
     /// Select a clip, and its row in the list with it.
     pub(super) fn multi_edit_select_clip(&mut self, clip_id: Option<String>) {
+        if clip_id.is_some() {
+            self.multi_edit.ui.selected_track = None;
+        }
         let source = clip_id.as_deref().and_then(|id| {
             self.multi_edit_active_doc()
                 .and_then(|doc| doc.clip(id))
@@ -840,8 +1128,12 @@ impl WavesPreviewer {
         if frame + 1 >= len {
             frame = 0;
         }
+        self.multi_edit
+            .play_start
+            .insert(doc_id.to_string(), frame as f64 / out_sr as f64);
         self.audio.seek_to_sample(frame);
         self.audio.play();
+        self.multi_edit.was_playing = true;
     }
 
     /// Play or stop the active timeline.
@@ -851,7 +1143,7 @@ impl WavesPreviewer {
         };
         if self.multi_edit_is_playing(&id) {
             self.audio.stop();
-            self.multi_edit_sync_playhead();
+            self.multi_edit_after_stop(&id);
             return;
         }
         if self.multi_edit.play_when_ready.take().is_some() {
@@ -874,19 +1166,48 @@ impl WavesPreviewer {
         self.multi_edit.playhead_secs.get(doc_id).copied().unwrap_or(0.0)
     }
 
-    /// Follow the transport while it plays the active timeline.
-    fn multi_edit_sync_playhead(&mut self) {
+    /// Follow the transport while it plays the active timeline, and settle
+    /// the playhead once it stops -- by the user or at the end.
+    fn multi_edit_follow_transport(&mut self) {
         let Some(id) = self.multi_edit.active.clone() else {
             return;
         };
         if !self.multi_edit_playback_is(&id) {
+            self.multi_edit.was_playing = false;
             return;
         }
+        if self.multi_edit_is_playing(&id) {
+            let out_sr = self.audio.shared.out_sample_rate.max(1);
+            let pos = self.audio.shared.play_pos.load(Ordering::Relaxed);
+            self.multi_edit
+                .playhead_secs
+                .insert(id, pos as f64 / out_sr as f64);
+            self.multi_edit.was_playing = true;
+        } else if self.multi_edit.was_playing {
+            self.multi_edit_after_stop(&id);
+        }
+    }
+
+    /// Where the playhead goes when playback stops: back to where it started,
+    /// or where it stopped -- the editor's "Pause Resume" setting decides, so
+    /// the two behave alike.
+    fn multi_edit_after_stop(&mut self, id: &str) {
+        self.multi_edit.was_playing = false;
         let out_sr = self.audio.shared.out_sample_rate.max(1);
-        let pos = self.audio.shared.play_pos.load(Ordering::Relaxed);
-        self.multi_edit
-            .playhead_secs
-            .insert(id, pos as f64 / out_sr as f64);
+        let stopped_at = self.audio.shared.play_pos.load(Ordering::Relaxed) as f64 / out_sr as f64;
+        let target = match self.editor_pause_resume_mode {
+            super::types::EditorPauseResumeMode::ReturnToLastStart => self
+                .multi_edit
+                .play_start
+                .get(id)
+                .copied()
+                .unwrap_or(stopped_at),
+            super::types::EditorPauseResumeMode::ContinueFromPause => stopped_at,
+        };
+        self.multi_edit.playhead_secs.insert(id.to_string(), target);
+        if self.multi_edit_playback_is(id) {
+            self.audio.seek_to_sample((target * out_sr as f64) as usize);
+        }
     }
 
     pub(super) fn multi_edit_seek(&mut self, secs: f64) {
@@ -1055,16 +1376,18 @@ impl WavesPreviewer {
         }
     }
 
-    /// The video under the playhead: the topmost video track's clip there,
-    /// as (source file, seconds into it).
-    pub(super) fn multi_edit_video_at_playhead(&self) -> Option<(PathBuf, f64)> {
-        let doc = self.multi_edit_active_doc()?;
+    /// Every video track whose picture window is open, top to bottom, as
+    /// (track id, window title, the file and time under the playhead).
+    pub(super) fn multi_edit_video_windows(&self) -> Vec<(String, String, Option<(PathBuf, f64)>)> {
+        let Some(doc) = self.multi_edit_active_doc() else {
+            return Vec::new();
+        };
         let playhead = self.multi_edit_playhead(&doc.id);
         doc.tracks
             .iter()
-            .filter(|track| track.kind == TrackKind::Video && doc.track_audible(track))
-            .find_map(|track| {
-                track
+            .filter(|track| track.kind == TrackKind::Video && track.show_video)
+            .map(|track| {
+                let target = track
                     .clips
                     .iter()
                     .find(|clip| clip.start_secs <= playhead && playhead < clip.end_secs())
@@ -1073,21 +1396,32 @@ impl WavesPreviewer {
                             clip.source.path.clone(),
                             clip.in_secs + (playhead - clip.start_secs),
                         )
-                    })
+                    });
+                (
+                    track.id.clone(),
+                    format!("NeoWaves Video \u{2014} {} / {}", doc.name, track.name),
+                    target,
+                )
             })
+            .collect()
     }
 
-    /// The preview panel for a video file, made on first use. Every other
-    /// panel is dropped: one picture is shown, so one file is kept open.
-    pub(super) fn multi_edit_video_panel(&mut self, path: &Path) -> &mut MultiEditVideo {
-        self.multi_edit.video_panels.retain(|p, _| p == path);
-        if !self.multi_edit.video_panels.contains_key(path) {
+    /// A video track's picture panel, reading `path`: made on first use, and
+    /// made again when the clip under the playhead comes from another file.
+    pub(super) fn multi_edit_video_panel(&mut self, track_id: &str, path: &Path) -> &mut MultiEditVideo {
+        let stale = self
+            .multi_edit
+            .video_panels
+            .get(track_id)
+            .is_some_and(|video| video.path != path);
+        if stale || !self.multi_edit.video_panels.contains_key(track_id) {
             let id = MULTI_EDIT_VIDEO_ID_BASE + self.multi_edit.next_video_id;
             self.multi_edit.next_video_id += 1;
             self.multi_edit.video_panels.insert(
-                path.to_path_buf(),
+                track_id.to_string(),
                 MultiEditVideo {
                     id,
+                    path: path.to_path_buf(),
                     panel: super::types::VideoPanelState::new(
                         super::video_ops::placeholder_stream_info(),
                     ),
@@ -1096,14 +1430,14 @@ impl WavesPreviewer {
         }
         self.multi_edit
             .video_panels
-            .get_mut(path)
+            .get_mut(track_id)
             .expect("inserted above")
     }
 
-    /// Ask the preview panel's worker for the picture at `secs` of `path`.
-    pub(super) fn multi_edit_request_video(&mut self, path: &Path, secs: f64, playing: bool) {
+    /// Ask a video track's panel worker for the picture at `secs`.
+    pub(super) fn multi_edit_request_video(&mut self, track_id: &str, secs: f64, playing: bool) {
         let perf = self.perf;
-        let Some(video) = self.multi_edit.video_panels.get_mut(path) else {
+        let Some(video) = self.multi_edit.video_panels.get_mut(track_id) else {
             return;
         };
         let id = video.id;
@@ -1111,6 +1445,24 @@ impl WavesPreviewer {
             super::video_ops::prepare_video_request(&mut video.panel, perf, secs, playing)
         {
             self.send_video_request(id, request);
+        }
+    }
+
+    /// Show or hide a video track's picture window.
+    pub(super) fn multi_edit_set_show_video(&mut self, track_id: &str, show: bool) {
+        let Some(doc_id) = self.multi_edit.active.clone() else {
+            return;
+        };
+        let changed = self
+            .multi_edit_active_doc_mut()
+            .and_then(|doc| doc.tracks.iter_mut().find(|t| t.id == track_id))
+            .map(|track| std::mem::replace(&mut track.show_video, show) != show)
+            .unwrap_or(false);
+        if changed {
+            if !show {
+                self.multi_edit.video_panels.remove(track_id);
+            }
+            self.multi_edit_mark_changed(&doc_id);
         }
     }
 
@@ -1130,7 +1482,7 @@ impl WavesPreviewer {
         }
         self.multi_edit_drain_render();
         self.multi_edit_drain_export();
-        self.multi_edit_sync_playhead();
+        self.multi_edit_follow_transport();
         let busy = !self.multi_edit.source_jobs.is_empty()
             || self.multi_edit.render.is_some()
             || self.multi_edit.export.is_some()
@@ -1196,6 +1548,8 @@ impl WavesPreviewer {
             }
         }
         self.multi_edit.active = docs.iter().find(|doc| doc.open).map(|doc| doc.id.clone());
+        // What was just read is what the session holds: nothing unsaved.
+        self.multi_edit.saved_edit_revs = docs.iter().map(|doc| (doc.id.clone(), 0)).collect();
         self.multi_edit.docs = docs;
     }
 }

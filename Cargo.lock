@@ -3946,6 +3946,7 @@ dependencies = [
  "oxideav-prores",
  "quick-xml 0.39.4",
  "rand 0.9.5",
+ "raw-window-handle",
  "realfft",
  "regex",
  "rfd",

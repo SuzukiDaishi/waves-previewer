@@ -5366,9 +5366,203 @@ impl super::WavesPreviewer {
         self.multi_edit_seek(secs);
     }
 
-    /// Test-only: the picture the preview shows, as (file, seconds into it).
+    /// Test-only: the picture the topmost shown video track has at the
+    /// playhead, as (file, seconds into it).
     pub fn test_multi_edit_video_target(&self) -> Option<(PathBuf, f64)> {
-        self.multi_edit_video_at_playhead()
+        self.multi_edit_video_windows()
+            .into_iter()
+            .find_map(|(_, _, target)| target)
+    }
+
+    /// Test-only: how many video tracks have a picture panel running.
+    pub fn test_multi_edit_video_panel_count(&self) -> usize {
+        self.multi_edit.video_panels.len()
+    }
+
+    /// Test-only: show or hide a track's picture window, as its toggle does.
+    pub fn test_multi_edit_set_show_video(&mut self, track: usize, show: bool) {
+        let id = self
+            .multi_edit_active_doc()
+            .and_then(|doc| doc.tracks.get(track))
+            .map(|t| t.id.clone());
+        if let Some(id) = id {
+            self.multi_edit_set_show_video(&id, show);
+        }
+    }
+
+    pub fn test_multi_edit_select_track(&mut self, track: usize) -> bool {
+        let id = self
+            .multi_edit_active_doc()
+            .and_then(|doc| doc.tracks.get(track))
+            .map(|t| t.id.clone());
+        let found = id.is_some();
+        self.multi_edit_select_track(id);
+        found
+    }
+
+    pub fn test_multi_edit_selected_track(&self) -> Option<usize> {
+        let id = self.multi_edit.ui.selected_track.as_deref()?;
+        self.multi_edit_active_doc()?
+            .tracks
+            .iter()
+            .position(|t| t.id == id)
+    }
+
+    /// Test-only: the markers as (time, label).
+    pub fn test_multi_edit_markers(&self) -> Vec<(f64, String)> {
+        self.multi_edit_active_doc()
+            .map(|doc| doc.markers.iter().map(|m| (m.secs, m.label.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn test_multi_edit_dirty(&self) -> bool {
+        self.multi_edit
+            .active
+            .as_deref()
+            .is_some_and(|id| self.multi_edit_is_dirty(id))
+    }
+
+    /// Test-only: (px per second, scroll secs, scroll y, row zoom).
+    pub fn test_multi_edit_view(&self) -> (f32, f64, f32, f32) {
+        self.multi_edit_active_doc()
+            .map(|doc| {
+                (
+                    doc.view.px_per_sec,
+                    doc.view.scroll_secs,
+                    doc.view.scroll_y,
+                    doc.view.track_zoom,
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn test_multi_edit_set_zoom(&mut self, px_per_sec: f32) {
+        if let Some(doc) = self.multi_edit_active_doc_mut() {
+            doc.view.px_per_sec = px_per_sec;
+            doc.view.scroll_secs = 0.0;
+        }
+    }
+
+    /// Test-only: the screen x of timeline second `secs`, as last drawn.
+    pub fn test_multi_edit_x_for(&self, secs: f64) -> f32 {
+        let (pps, scroll) = self
+            .multi_edit_active_doc()
+            .map(|doc| (doc.view.px_per_sec, doc.view.scroll_secs))
+            .unwrap_or((1.0, 0.0));
+        self.multi_edit.ui.lane_left + ((secs - scroll) * pps as f64) as f32
+    }
+
+    /// Test-only: how far the rows can scroll down, as last measured.
+    pub fn test_multi_edit_max_scroll_y(&self) -> f32 {
+        self.multi_edit.ui.max_scroll_y
+    }
+
+    /// Test-only: open a track's name field, as a double-click on the name
+    /// does.
+    pub fn test_multi_edit_begin_rename_track(&mut self, track: usize) {
+        let named = self
+            .multi_edit_active_doc()
+            .and_then(|doc| doc.tracks.get(track))
+            .map(|t| (t.id.clone(), t.name.clone()));
+        if let Some(named) = named {
+            self.multi_edit.ui.renaming_track = Some(named);
+            self.multi_edit.ui.rename_focus_pending = true;
+        }
+    }
+
+    /// Test-only: whether a name field (timeline, track or marker) is open.
+    pub fn test_multi_edit_renaming(&self) -> bool {
+        let ui = &self.multi_edit.ui;
+        ui.renaming_track.is_some() || ui.renaming_doc.is_some() || ui.renaming_marker.is_some()
+    }
+
+    /// Test-only: what a drag from the list shows over the timeline this
+    /// frame, as (start, span, clips); `None` when it shows nothing.
+    pub fn test_multi_edit_drop_preview(&self) -> Option<(f64, f64, usize)> {
+        self.multi_edit.ui.drop_preview_shown
+    }
+
+    pub fn test_multi_edit_rename_track(&mut self, track: usize, name: &str) {
+        if let Some(t) = self
+            .multi_edit_active_doc_mut()
+            .and_then(|doc| doc.tracks.get_mut(track))
+        {
+            t.name = name.to_string();
+        }
+    }
+
+    pub fn test_multi_edit_set_lanes_collapsed(&mut self, track: usize, collapsed: bool) {
+        if let Some(t) = self
+            .multi_edit_active_doc_mut()
+            .and_then(|doc| doc.tracks.get_mut(track))
+        {
+            t.lanes_collapsed = collapsed;
+        }
+    }
+
+    pub fn test_multi_edit_add_marker_at(&mut self, secs: f64) {
+        self.multi_edit_seek(secs);
+        self.multi_edit_add_marker_at_playhead();
+    }
+
+    pub fn test_multi_edit_set_row_zoom(&mut self, zoom: f32) {
+        if let Some(doc) = self.multi_edit_active_doc_mut() {
+            doc.view.track_zoom = zoom;
+        }
+    }
+
+    pub fn test_multi_edit_playhead(&self) -> f64 {
+        self.multi_edit
+            .active
+            .as_deref()
+            .map(|id| self.multi_edit_playhead(id))
+            .unwrap_or(0.0)
+    }
+
+    /// Test-only: the editor's "Pause Resume" setting, which the timeline
+    /// follows on stop.
+    pub fn test_set_return_to_last_start(&mut self, on: bool) {
+        self.editor_pause_resume_mode = if on {
+            crate::app::types::EditorPauseResumeMode::ReturnToLastStart
+        } else {
+            crate::app::types::EditorPauseResumeMode::ContinueFromPause
+        };
+    }
+
+    /// Test-only: move the transport as if it had played to `secs`. The test
+    /// engine has no device, so nothing advances it on its own.
+    pub fn test_set_transport_secs(&mut self, secs: f64) {
+        let sr = self.audio.shared.out_sample_rate.max(1) as f64;
+        let frame = (secs * sr) as usize;
+        self.audio
+            .shared
+            .play_pos
+            .store(frame, std::sync::atomic::Ordering::Relaxed);
+        self.audio
+            .shared
+            .play_pos_f
+            .store(frame as f64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Test-only: set a point by typed values, as its popup does.
+    pub fn test_multi_edit_set_point(&mut self, track: usize, lane: &str, point: usize, secs: f64, value: f32) {
+        let ids = self.multi_edit_active_doc().and_then(|doc| {
+            let t = doc.tracks.get(track)?;
+            let l = t.lanes.iter().find(|l| l.param.label() == lane)?;
+            Some((t.id.clone(), l.id.clone()))
+        });
+        if let Some((track_id, lane_id)) = ids {
+            self.multi_edit_set_point(&track_id, &lane_id, point, secs, value);
+        }
+    }
+
+    /// Test-only: a lane's points as (time, value).
+    pub fn test_multi_edit_lane_points(&self, track: usize, lane: &str) -> Vec<(f64, f32)> {
+        self.multi_edit_active_doc()
+            .and_then(|doc| doc.tracks.get(track))
+            .and_then(|t| t.lanes.iter().find(|l| l.param.label() == lane))
+            .map(|l| l.points.iter().map(|p| (p.secs, p.value)).collect())
+            .unwrap_or_default()
     }
 
     /// Test-only: the frame time the preview has on screen, once decoded.

@@ -36,3 +36,13 @@ pub const TYPING_DEBOUNCE: Duration = Duration::from_millis(300);
 /// again: long enough that a drag re-mixes once when it stops rather than on
 /// every frame, short enough that the change is heard at once.
 pub const MULTI_EDIT_RENDER_DEBOUNCE: Duration = Duration::from_millis(100);
+
+/// Held arrow-key seeking, in the editor and on the Multi Edits timeline:
+/// the first step is immediate, the next waits `SEEK_REPEAT_DELAY` (so a tap
+/// moves one step), then steps come every `SEEK_REPEAT_SLOW`, and every
+/// `SEEK_REPEAT_FAST` once the key has been held for
+/// `SEEK_REPEAT_ACCELERATE_AFTER`.
+pub const SEEK_REPEAT_DELAY: Duration = Duration::from_millis(220);
+pub const SEEK_REPEAT_SLOW: Duration = Duration::from_millis(70);
+pub const SEEK_REPEAT_FAST: Duration = Duration::from_millis(35);
+pub const SEEK_REPEAT_ACCELERATE_AFTER: Duration = Duration::from_millis(650);

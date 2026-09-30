@@ -17,6 +17,7 @@ pub(super) mod list_columns;
 pub(super) mod list_filter_dialog;
 pub(super) mod metadata_inspector;
 pub(super) mod multi_edit;
+pub(super) mod multi_edit_video;
 pub(super) mod plugin_manager;
 pub(super) mod recording;
 pub(super) mod regions;

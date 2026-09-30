@@ -24,6 +24,90 @@ pub const MIX_CHANNELS: usize = 2;
 /// click: short enough to read as a cut.
 const MUTE_RAMP_SECS: f64 = 0.005;
 
+/// A clip dropped wholly inside another on the same track fades in and out
+/// over this at each of its ends while the outer clip dips out under it.
+pub const CONTAINED_XFADE_SECS: f64 = 0.01;
+
+/// One stretch of a clip's crossfade with its neighbours on the track.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum XfadeShape {
+    /// Rising along a quarter sine: 0 to 1.
+    In,
+    /// Falling along a quarter cosine: 1 to 0.
+    Out,
+    /// Silent: under a clip laid wholly over it.
+    Zero,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct XfadeSeg {
+    pub start: f64,
+    pub end: f64,
+    pub shape: XfadeShape,
+}
+
+/// Where clips on one track overlap, each fades against the other at equal
+/// power (sin / cos), so the sum keeps its loudness through the join.
+/// Returned per clip, in the order given.
+///
+/// A clip overlapping the end of an earlier one crossfades over the overlap.
+/// A clip lying wholly inside another fades in and out over
+/// `CONTAINED_XFADE_SECS` at its ends, and the outer clip is silent between.
+pub fn crossfade_segments(clips: &[Clip]) -> Vec<Vec<XfadeSeg>> {
+    let mut out = vec![Vec::new(); clips.len()];
+    let mut order: Vec<usize> = (0..clips.len()).collect();
+    order.sort_by(|&a, &b| {
+        clips[a]
+            .start_secs
+            .total_cmp(&clips[b].start_secs)
+            .then(clips[a].end_secs().total_cmp(&clips[b].end_secs()))
+    });
+    for (pos, &ai) in order.iter().enumerate() {
+        for &bi in &order[pos + 1..] {
+            let (a, b) = (&clips[ai], &clips[bi]);
+            if b.start_secs >= a.end_secs() {
+                continue;
+            }
+            let seg = |start: f64, end: f64, shape| XfadeSeg { start, end, shape };
+            if b.end_secs() >= a.end_secs() {
+                let (s, e) = (b.start_secs, a.end_secs());
+                out[ai].push(seg(s, e, XfadeShape::Out));
+                out[bi].push(seg(s, e, XfadeShape::In));
+            } else {
+                let x = CONTAINED_XFADE_SECS.min(b.len_secs * 0.5);
+                let (s, e) = (b.start_secs, b.end_secs());
+                out[ai].push(seg(s, s + x, XfadeShape::Out));
+                out[ai].push(seg(s + x, e - x, XfadeShape::Zero));
+                out[ai].push(seg(e - x, e, XfadeShape::In));
+                out[bi].push(seg(s, s + x, XfadeShape::In));
+                out[bi].push(seg(e - x, e, XfadeShape::Out));
+            }
+        }
+    }
+    out
+}
+
+/// A clip's crossfade gain at timeline second `t`: 1 outside every segment.
+pub fn xfade_gain(segs: &[XfadeSeg], t: f64) -> f32 {
+    let mut gain = 1.0f64;
+    for seg in segs {
+        if t < seg.start || t >= seg.end {
+            continue;
+        }
+        let x = if seg.end > seg.start {
+            ((t - seg.start) / (seg.end - seg.start)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        gain *= match seg.shape {
+            XfadeShape::In => (x * std::f64::consts::FRAC_PI_2).sin(),
+            XfadeShape::Out => (x * std::f64::consts::FRAC_PI_2).cos(),
+            XfadeShape::Zero => 0.0,
+        };
+    }
+    gain as f32
+}
+
 /// A clip's source, decoded, at the rate the render runs at.
 #[derive(Debug)]
 pub struct SourceAudio {
@@ -79,8 +163,14 @@ fn stereo_frame(channels: &[Vec<f32>], frame: usize) -> (f32, f32) {
     }
 }
 
-/// Add one clip, trimmed and faded, into a stereo track buffer.
-fn place_clip(out: &mut [Vec<f32>], clip: &Clip, source: &SourceAudio, sr: u32) {
+/// Add one clip, trimmed, faded and crossfaded, into a stereo track buffer.
+fn place_clip(
+    out: &mut [Vec<f32>],
+    clip: &Clip,
+    xfades: &[XfadeSeg],
+    source: &SourceAudio,
+    sr: u32,
+) {
     let start = secs_to_frames(clip.start_secs, sr);
     let src_in = secs_to_frames(clip.in_secs, sr);
     let src_frames = source.frames();
@@ -103,6 +193,9 @@ fn place_clip(out: &mut [Vec<f32>], clip: &Clip, source: &SourceAudio, sr: u32) 
         let from_end = len - i;
         if from_end <= fade_out {
             gain *= (from_end - 1) as f32 / fade_out as f32;
+        }
+        if !xfades.is_empty() {
+            gain *= xfade_gain(xfades, (start + i) as f64 / sr as f64);
         }
         let (l, r) = stereo_frame(channels, src_in + i);
         left[start + i] += l * gain;
@@ -237,12 +330,13 @@ pub fn render_track(
     if !doc.track_audible(track) {
         return Some(buf);
     }
-    for clip in &track.clips {
+    let xfades = crossfade_segments(&track.clips);
+    for (clip, segs) in track.clips.iter().zip(xfades.iter()) {
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return None;
         }
         if let Some(source) = sources.get(&clip.source.path) {
-            place_clip(&mut buf, clip, source, sr);
+            place_clip(&mut buf, clip, segs, source, sr);
         }
     }
     if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
@@ -458,6 +552,74 @@ mod tests {
         let mix = render(&doc, &sources);
         assert!((mix[0][10] - 0.4).abs() < 1e-6, "(0.2 + 0.6) / 2");
         assert!((mix[1][10] - 0.2).abs() < 1e-6, "(0.4 + 0.0) / 2");
+    }
+
+    /// Two clips on one track, overlapping.
+    fn overlapping(a: (f64, f64), b: (f64, f64)) -> MultiEditDoc {
+        let mut doc = MultiEditDoc::new("t");
+        let track = doc.add_track(TrackKind::Audio);
+        for (name, (start, len)) in [("a", a), ("b", b)] {
+            doc.insert_clips(
+                track,
+                start,
+                vec![NewClip {
+                    source: ClipSource {
+                        path: PathBuf::from(name),
+                        asset_id: None,
+                    },
+                    name: name.to_string(),
+                    len_secs: len,
+                    is_video: false,
+                }],
+            );
+        }
+        doc
+    }
+
+    #[test]
+    fn an_overlap_crossfades_at_equal_power() {
+        let doc = overlapping((0.0, 2.0), (1.0, 2.0));
+        let segs = crossfade_segments(&doc.tracks[0].clips);
+        let (a, b) = (xfade_gain(&segs[0], 1.5), xfade_gain(&segs[1], 1.5));
+        assert!((a - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4, "{a}");
+        assert!((b - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4, "{b}");
+        assert!((a * a + b * b - 1.0).abs() < 1e-4, "power is kept");
+        assert_eq!(xfade_gain(&segs[0], 0.5), 1.0, "untouched before the overlap");
+        assert_eq!(xfade_gain(&segs[1], 2.5), 1.0, "and after it");
+
+        // Two unrelated noises: the level through the join matches either side.
+        let noise = |seed: u32| -> Vec<f32> {
+            let mut x = seed;
+            (0..2 * SR as usize)
+                .map(|_| {
+                    x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (x >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+                })
+                .collect()
+        };
+        let mut sources = SourceMap::new();
+        sources.insert("a".into(), source(vec![noise(1)]));
+        sources.insert("b".into(), source(vec![noise(7)]));
+        let mix = render(&doc, &sources);
+        let rms = |from: f64, to: f64| {
+            let s = &mix[0][(from * SR as f64) as usize..(to * SR as f64) as usize];
+            (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt()
+        };
+        let (before, join) = (rms(0.1, 0.9), rms(1.35, 1.65));
+        assert!((join / before - 1.0).abs() < 0.1, "{before} vs {join}");
+    }
+
+    #[test]
+    fn a_clip_inside_another_replaces_it_there() {
+        let doc = overlapping((0.0, 4.0), (1.0, 1.0));
+        let mut sources = SourceMap::new();
+        sources.insert("a".into(), source(vec![vec![1.0; 4 * SR as usize]]));
+        sources.insert("b".into(), source(vec![vec![0.5; SR as usize]]));
+        let mix = render(&doc, &sources);
+        let at = |t: f64| mix[0][(t * SR as f64) as usize];
+        assert!((at(0.5) - 1.0).abs() < 1e-6);
+        assert!((at(1.5) - 0.5).abs() < 1e-6, "only the inner clip: {}", at(1.5));
+        assert!((at(3.0) - 1.0).abs() < 1e-6, "the outer clip comes back");
     }
 
     #[test]

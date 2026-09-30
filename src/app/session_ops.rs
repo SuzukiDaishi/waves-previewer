@@ -2692,6 +2692,7 @@ impl super::WavesPreviewer {
             });
         }
 
+        self.multi_edit_note_save_planned();
         let project = ProjectFile {
             version: 2,
             // Carried across saves of the same document; `save_project_as`
@@ -3338,6 +3339,7 @@ impl super::WavesPreviewer {
         comments: Vec<super::project::ProjectComment>,
         comment_free_fingerprint: session_sync::SessionFingerprint,
     ) {
+        self.multi_edit_note_saved();
         self.session_disk_fingerprint = Some(fingerprint);
         self.session_comment_free_fingerprint = Some(comment_free_fingerprint);
         // What was committed, not what we set out to commit: the worker

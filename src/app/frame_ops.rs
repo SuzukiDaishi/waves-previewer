@@ -51,6 +51,9 @@ impl WavesPreviewer {
             // is one the document never received -- quitting on it would drop
             // something the author has every reason to think they sent.
             || self.comments_pending() > 0
+            // A timeline lives only in the session; one never saved into it
+            // is lost on quit.
+            || self.multi_edit_any_dirty()
     }
 
     fn run_frame_quit_prompt(&mut self, ctx: &egui::Context) {
@@ -67,7 +70,8 @@ impl WavesPreviewer {
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.label(
-                    "There are unsaved in-memory edits (modified tabs or pending gains).\n\
+                    "There are unsaved in-memory edits (modified tabs, pending gains or \
+                     Multi Edits timelines not saved into a session).\n\
                      They will be lost if you quit now.",
                 );
                 ui.horizontal(|ui| {
@@ -888,6 +892,8 @@ impl WavesPreviewer {
         }
         let detached_video_started = profile_frame_stages.then(Instant::now);
         self.ui_detached_video_viewport(ctx);
+        self.ui_multi_edit_video_windows(ctx);
+        self.window_owner.end_frame();
         if let Some(started) = detached_video_started {
             self.debug.frame_profiler.note_stage(
                 "Detached video UI",

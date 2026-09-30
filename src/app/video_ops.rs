@@ -202,7 +202,7 @@ impl WavesPreviewer {
             .video_panels
             .iter()
             .filter(|(_, video)| !self.video_workers.iter().any(|w| w.tab_id == video.id))
-            .map(|(path, video)| (video.id, path.clone()))
+            .map(|(_, video)| (video.id, video.path.clone()))
             .collect();
         for (id, path) in multi_edit_wanted {
             self.spawn_video_worker(id, path);

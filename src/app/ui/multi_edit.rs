@@ -1,5 +1,6 @@
 //! The Multi Edits workspace: the list pane on the left, the timeline on the
-//! right. What each part does is in `docs/MULTI_EDITS_SPEC.md`.
+//! right. What each part does is in `docs/MULTI_EDITS_SPEC.md`; the picture
+//! windows of video tracks are `multi_edit_video.rs`.
 //!
 //! The timeline is drawn from a copy of the document taken at the top of the
 //! frame; everything the user does while it is drawn is collected as an
@@ -13,10 +14,17 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeK
 
 use crate::app::input_focus::UiSurface;
 use crate::app::multi_edit::{
-    Clip, LaneParam, MultiEditDoc, TrackKind, MAX_PX_PER_SEC, MIN_PX_PER_SEC, TRACK_GAIN_MAX_DB,
-    TRACK_GAIN_MIN_DB,
+    clamp_scroll_secs, grid_points, grid_step_secs, snap_secs, snap_span, zoom_out_limit,
+    AutomationLane,
+    Clip, LaneParam, MultiEditDoc, Track, TrackKind, MAX_LANE_HEIGHT, MAX_PX_PER_SEC,
+    MAX_TRACK_HEIGHT, MAX_TRACK_ZOOM, MIN_LANE_HEIGHT, MIN_TRACK_HEIGHT, MIN_TRACK_ZOOM,
+    TRACK_GAIN_MAX_DB, TRACK_GAIN_MIN_DB,
 };
-use crate::app::multi_edit_ops::{ClipDrag, ClipDragKind, LaneDrag, SourceSlot};
+use crate::app::multi_edit_ops::{
+    ClipDrag, ClipDragKind, DropPreview, LaneDrag, PointEditor, RowResize, SourceSlot,
+    MULTI_EDIT_GRID_MIN_PX,
+};
+use crate::app::multi_edit_render::{crossfade_segments, xfade_gain, XfadeSeg, XfadeShape};
 use crate::app::types::{ColumnId, ListViewProfile};
 use crate::app::WavesPreviewer;
 
@@ -24,10 +32,17 @@ use crate::app::WavesPreviewer;
 pub(crate) struct MultiEditRowDrag(pub Vec<PathBuf>);
 
 /// Width of the track header column (name, fader, M/S).
-const HEADER_W: f32 = 150.0;
-const TRACK_H: f32 = 72.0;
-const LANE_H: f32 = 56.0;
-const RULER_H: f32 = 22.0;
+const HEADER_W: f32 = 176.0;
+/// Inner padding of a track or lane header.
+const HEADER_PAD: f32 = 6.0;
+/// One line of header controls.
+const HEADER_LINE_H: f32 = 20.0;
+/// Side of a square header button (M, S, the lane fold arrow).
+const HEADER_BUTTON: f32 = 22.0;
+/// Width of a video track's picture-window toggle.
+const VIDEO_BUTTON_W: f32 = 46.0;
+/// Ruler height: tick labels below, marker flags above.
+const RULER_H: f32 = 30.0;
 /// The row under the tracks that holds the add button and takes drops that
 /// should make a new track.
 const ADD_ROW_H: f32 = 64.0;
@@ -35,32 +50,60 @@ const ADD_ROW_H: f32 = 64.0;
 const EDGE_GRAB_PX: f32 = 6.0;
 /// Side of the square handle at a clip's top corner that sets its fade.
 const FADE_HANDLE_PX: f32 = 9.0;
-/// How close, on screen, a dragged edge must come to another to snap to it.
+/// How close, on screen, a dragged thing must come to a snap target.
 const SNAP_PX: f32 = 8.0;
 /// How far an automation lane is indented under its track, as in the design.
 const LANE_INDENT: f32 = 14.0;
-const POINT_RADIUS: f32 = 4.0;
+const POINT_RADIUS: f32 = 5.0;
+/// A lane's value label is this tall; labels closer than this are dropped.
+const LANE_LABEL_H: f32 = 11.0;
+const POINT_RADIUS_HOT: f32 = 7.0;
 /// How close a press must land to a point to grab it rather than add one.
-const POINT_GRAB_PX: f32 = 7.0;
+const POINT_GRAB_PX: f32 = 9.0;
+const LANE_STROKE: f32 = 2.0;
 const CLIP_CORNER: f32 = 6.0;
-/// Ruler ticks never crowd closer than this.
-const RULER_MIN_TICK_PX: f32 = 70.0;
-/// Zoom per notch of Ctrl+wheel is what egui reports; this is the button step.
+/// Height of the strip at a header's bottom edge that resizes its row.
+const RESIZE_GRAB_PX: f32 = 5.0;
+/// Horizontal zoom per button press.
 const ZOOM_BUTTON_STEP: f32 = 1.5;
+/// Vertical zoom per button press.
+const VERTICAL_ZOOM_STEP: f32 = 1.25;
+/// Marker flags: the triangle's size, and the band of the ruler they use.
+const MARKER_FLAG: f32 = 7.0;
 
 const AUDIO_CLIP_FILL: Color32 = Color32::from_rgb(46, 92, 140);
 const VIDEO_CLIP_FILL: Color32 = Color32::from_rgb(104, 70, 150);
 const MISSING_CLIP_FILL: Color32 = Color32::from_rgb(110, 50, 50);
 const WAVE_COLOR: Color32 = Color32::from_rgb(190, 215, 240);
 const PLAYHEAD_COLOR: Color32 = Color32::from_rgb(235, 80, 60);
-/// The video preview's opening size (16:9) and the least it shrinks to.
-const VIDEO_WINDOW_W: f32 = 360.0;
-const VIDEO_WINDOW_H: f32 = 203.0;
-const VIDEO_WINDOW_MIN_W: f32 = 160.0;
-/// Gap between the preview's first position and the timeline's corner,
-/// with room for the window's title bar.
-const VIDEO_WINDOW_MARGIN: f32 = 40.0;
-const LANE_LINE_COLOR: Color32 = Color32::from_rgb(240, 190, 90);
+const MARKER_COLOR: Color32 = Color32::from_rgb(120, 200, 255);
+
+/// Each parameter's colour, in its lane and over folded clips.
+fn param_color(param: LaneParam) -> Color32 {
+    match param {
+        LaneParam::Gain => Color32::from_rgb(240, 190, 90),
+        LaneParam::Pitch => Color32::from_rgb(120, 220, 210),
+        LaneParam::Pan => Color32::from_rgb(150, 220, 120),
+        LaneParam::Mute => Color32::from_rgb(235, 120, 120),
+    }
+}
+
+/// The value lines a lane draws, with their labels.
+fn lane_ticks(param: LaneParam) -> Vec<(f32, String)> {
+    let label = |v: f32| param.format_value(v);
+    match param {
+        LaneParam::Gain => [12.0, 0.0, -12.0, -24.0, -36.0, -48.0]
+            .into_iter()
+            .map(|v| (v, format!("{v:+.0}")))
+            .collect(),
+        LaneParam::Pitch => [24.0, 12.0, 0.0, -12.0, -24.0]
+            .into_iter()
+            .map(|v| (v, format!("{v:+.0}")))
+            .collect(),
+        LaneParam::Pan => vec![(1.0, label(1.0)), (0.0, label(0.0)), (-1.0, label(-1.0))],
+        LaneParam::Mute => vec![(1.0, label(1.0)), (0.0, label(0.0))],
+    }
+}
 
 /// Seconds <-> screen x for the visible part of the timeline.
 #[derive(Clone, Copy)]
@@ -83,13 +126,64 @@ impl TimeMap {
     fn visible_secs(&self) -> (f64, f64) {
         (self.secs(self.left), self.secs(self.right))
     }
+
+    fn width(&self) -> f32 {
+        (self.right - self.left).max(1.0)
+    }
+}
+
+/// What snapping may catch this frame.
+struct Snap {
+    candidates: Vec<f64>,
+    step: f64,
+    threshold: f64,
+    off: bool,
+}
+
+impl Snap {
+    /// The candidates near `times`: every edge, marker and the playhead
+    /// but those in `except`, and the grid lines either side of each time.
+    fn candidates_near(&self, times: &[f64], except: &[f64]) -> Vec<f64> {
+        let mut candidates: Vec<f64> = self
+            .candidates
+            .iter()
+            .copied()
+            .filter(|c| !except.iter().any(|e| (e - c).abs() < 1e-9))
+            .collect();
+        if self.step > 0.0 {
+            for t in times {
+                candidates.push((t / self.step).floor() * self.step);
+                candidates.push((t / self.step).ceil() * self.step);
+            }
+        }
+        candidates
+    }
+
+    /// `t` caught by the nearest clip edge, marker, the playhead or grid line.
+    fn apply(&self, t: f64, except: &[f64]) -> f64 {
+        if self.off {
+            return t;
+        }
+        snap_secs(t, &self.candidates_near(&[t], except), self.threshold)
+    }
+
+    /// The start of a span `len` long, caught by whichever end is nearer.
+    fn apply_span(&self, start: f64, len: f64, except: &[f64]) -> f64 {
+        if self.off {
+            return start;
+        }
+        let candidates = self.candidates_near(&[start, start + len], except);
+        snap_span(start, len, &candidates, self.threshold)
+    }
 }
 
 /// Everything a frame of the timeline asked for, applied after drawing.
 enum Action {
     SelectClip(Option<String>),
+    SelectTrack(Option<String>),
     BeginClipDrag(ClipDrag),
     ClipCommand(String, ClipCommand),
+    DeleteSelected,
     Seek(f64),
     DropRows {
         track: Option<usize>,
@@ -100,8 +194,11 @@ enum Action {
     SetVolume(usize, f32),
     ToggleMute(usize),
     ToggleSolo(usize),
+    ToggleLanes(usize),
+    ToggleVideo(String, bool),
     BeginRenameTrack(usize),
     CommitRenameTrack(usize, String),
+    CancelRenameTrack,
     AddLane(usize, LaneParam),
     RemoveLane(usize, String),
     AddTrack(TrackKind),
@@ -113,17 +210,95 @@ enum Action {
         value: f32,
     },
     BeginPointDrag(LaneDrag),
-    RemovePoint {
-        track: usize,
-        lane: String,
-        point: usize,
-    },
+    OpenPointEditor(PointEditor),
+    BeginResize(RowResize),
+    AddMarker,
+    CopyClip(String),
+    CutClip(String),
+    /// Paste at the playhead, on this track when it takes the clip.
+    Paste(Option<String>),
+    BeginMarkerDrag(String),
+    BeginRenameMarker(String),
+    RemoveMarker(String),
     Zoom {
         factor: f32,
         anchor_secs: f64,
         anchor_x: f32,
     },
+    ZoomVertical(f32),
     Scroll(f64),
+    /// The wheel: move the rows by this much.
+    ScrollYBy(f32),
+    /// The scroll bar: the rows are now here.
+    ScrollYTo(f32),
+}
+
+/// What an inline name field did this frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NameEdit {
+    Editing,
+    Commit,
+    Cancel,
+}
+
+/// An inline name field (a timeline's, a track's, a marker's).
+///
+/// It takes the keyboard once, when it opens, and never again: asked every
+/// frame, it pulled the caret back after every click elsewhere and could not
+/// be left. It ends on Enter, on a click anywhere outside it, or when the
+/// keyboard goes elsewhere; Escape cancels.
+///
+/// While an input method is converting, Enter and Escape belong to the
+/// conversion. Windows' egui-winit does not deliver them at all; another
+/// integration might, so the field takes Enter itself (`return_key(None)`
+/// -- egui's own handling would drop the focus mid-conversion) and ignores
+/// both keys until the conversion is over. A click elsewhere still leaves.
+fn inline_name_field(
+    ui: &mut egui::Ui,
+    rect: Option<Rect>,
+    text: &mut String,
+    width: f32,
+    focus_now: bool,
+    ime_busy: bool,
+) -> NameEdit {
+    let edit = egui::TextEdit::singleline(text)
+        .desired_width(width)
+        .return_key(None);
+    let resp = match rect {
+        Some(rect) => ui.put(rect, edit),
+        None => ui.add(edit),
+    };
+    if focus_now {
+        resp.request_focus();
+        return NameEdit::Editing;
+    }
+    let (enter, escape, pressed) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::Enter),
+            i.key_pressed(egui::Key::Escape),
+            i.pointer.any_pressed(),
+        )
+    });
+    let pointer_away = resp.clicked_elsewhere() || (resp.lost_focus() && pressed);
+    let outcome = if pointer_away {
+        NameEdit::Commit
+    } else if ime_busy {
+        if resp.lost_focus() && (enter || escape) {
+            // egui let go for a key the conversion owns: take it back.
+            resp.request_focus();
+        }
+        NameEdit::Editing
+    } else if escape {
+        NameEdit::Cancel
+    } else if enter || resp.lost_focus() {
+        NameEdit::Commit
+    } else {
+        NameEdit::Editing
+    };
+    if outcome != NameEdit::Editing {
+        ui.memory_mut(|m| m.surrender_focus(resp.id));
+    }
+    outcome
 }
 
 #[derive(Clone, Copy)]
@@ -131,6 +306,17 @@ enum ClipCommand {
     SplitAtPlayhead,
     Duplicate,
     Delete,
+}
+
+/// A length, short: "3.25 s", or "1:05.3" from a minute up.
+fn format_len(secs: f64) -> String {
+    let secs = secs.max(0.0);
+    if secs < 60.0 {
+        format!("{secs:.2} s")
+    } else {
+        let minutes = (secs / 60.0).floor() as u64;
+        format!("{minutes}:{:04.1}", secs - minutes as f64 * 60.0)
+    }
 }
 
 /// "m:ss.mmm", the way the ruler and the readout show time.
@@ -141,20 +327,9 @@ fn format_secs(secs: f64) -> String {
     format!("{minutes}:{rest:06.3}")
 }
 
-/// The ruler's step: the smallest of these that keeps labels apart.
-fn ruler_step(px_per_sec: f32) -> f64 {
-    const STEPS: [f64; 14] = [
-        0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0,
-    ];
-    STEPS
-        .iter()
-        .copied()
-        .find(|step| (*step as f32) * px_per_sec >= RULER_MIN_TICK_PX)
-        .unwrap_or(3600.0)
-}
-
 impl WavesPreviewer {
-    /// One tab label per open timeline, in the workspace tab bar.
+    /// One tab label per open timeline, in the workspace tab bar. A timeline
+    /// the session does not hold as it is carries the editor's unsaved dot.
     pub(in crate::app) fn ui_multi_edit_tab_labels(&mut self, ui: &mut egui::Ui) {
         let open: Vec<(String, String)> = self
             .multi_edit
@@ -167,10 +342,15 @@ impl WavesPreviewer {
             ui.horizontal(|ui| {
                 let active = self.is_multi_edit_workspace_active()
                     && self.multi_edit.active.as_deref() == Some(id.as_str());
-                let text = if active {
-                    RichText::new(format!("[{name}]")).strong()
+                let shown = if self.multi_edit_is_dirty(&id) {
+                    format!("\u{25CF} {name}")
                 } else {
-                    RichText::new(name.clone())
+                    name.clone()
+                };
+                let text = if active {
+                    RichText::new(format!("[{shown}]")).strong()
+                } else {
+                    RichText::new(shown)
                 };
                 let resp = ui.selectable_label(active, text);
                 if resp.clicked() && !active {
@@ -179,6 +359,7 @@ impl WavesPreviewer {
                 resp.context_menu(|ui| {
                     if ui.button("Rename...").clicked() {
                         self.multi_edit.ui.renaming_doc = Some((id.clone(), name.clone()));
+                        self.multi_edit.ui.rename_focus_pending = true;
                         ui.close();
                     }
                     if ui.button("Delete timeline...").clicked() {
@@ -198,6 +379,7 @@ impl WavesPreviewer {
     }
 
     pub(in crate::app) fn ui_multi_edit_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.multi_edit_track_ime(ctx);
         egui::Panel::left("multi_edit_list_pane")
             .resizable(true)
             .default_size(320.0)
@@ -205,89 +387,34 @@ impl WavesPreviewer {
             .show_inside(ui, |ui| {
                 self.ui_multi_edit_list_pane(ui, ctx);
             });
-        let timeline = egui::CentralPanel::default()
-            .show_inside(ui, |ui| {
-                self.ui_multi_edit_timeline(ui, ctx);
-            })
-            .response
-            .rect;
-        self.ui_multi_edit_video_window(ctx, timeline);
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            self.ui_multi_edit_timeline(ui, ctx);
+        });
+        self.ui_multi_edit_point_editor(ctx);
         self.ui_multi_edit_dialogs(ctx);
     }
 
-    /// The video preview: a small window showing the picture of the topmost
-    /// video track at the playhead. Shown while the timeline has video.
-    fn ui_multi_edit_video_window(&mut self, ctx: &egui::Context, timeline: Rect) {
-        let Some(doc) = self.multi_edit_active_doc() else {
-            return;
-        };
-        let has_video = doc
-            .tracks
-            .iter()
-            .any(|track| track.kind == TrackKind::Video && !track.clips.is_empty());
-        if !has_video {
-            self.multi_edit.video_panels.clear();
-            return;
-        }
-        let doc_id = doc.id.clone();
-        let target = self.multi_edit_video_at_playhead();
-        let playing = self.multi_edit_is_playing(&doc_id);
-        if target.is_none() {
-            self.multi_edit.video_panels.clear();
-        }
-        egui::Window::new("Video")
-            .id(egui::Id::new(("multi_edit_video", doc_id.as_str())))
-            .default_size([VIDEO_WINDOW_W, VIDEO_WINDOW_H])
-            // First shown in the timeline's bottom-right corner, clear of the
-            // list pane and the tab bar; after that, wherever it was left.
-            .default_pos(
-                timeline.right_bottom()
-                    - Vec2::new(VIDEO_WINDOW_W, VIDEO_WINDOW_H)
-                    - Vec2::splat(VIDEO_WINDOW_MARGIN),
-            )
-            .resizable(true)
-            .collapsible(true)
-            .show(ctx, |ui| {
-                let size = ui
-                    .available_size()
-                    .max(Vec2::new(VIDEO_WINDOW_MIN_W, VIDEO_WINDOW_MIN_W * 9.0 / 16.0));
-                let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-                match target.as_ref() {
-                    Some((path, secs)) => {
-                        let ppp = ctx.pixels_per_point();
-                        let video = self.multi_edit_video_panel(path);
-                        let id = video.id;
-                        let aspect = video.panel.info.aspect();
-                        video.panel.wanted_box_px = crate::app::render::video_panel::frame_box_px(
-                            rect.shrink(2.0),
-                            aspect,
-                            ppp,
-                        );
-                        Self::paint_video_surface(
-                            ui,
-                            id,
-                            &mut video.panel,
-                            rect,
-                            *secs,
-                            true,
-                            "multi_edit_video",
-                        );
-                    }
-                    None => {
-                        ui.painter().rect_filled(rect, 4.0, Color32::from_gray(16));
-                        ui.painter().text(
-                            rect.center(),
-                            Align2::CENTER_CENTER,
-                            "No video at the playhead",
-                            FontId::proportional(12.0),
-                            ui.visuals().weak_text_color(),
-                        );
-                    }
+    /// Follow the input method: whether it is composing, and whether its
+    /// events touch this frame. A name field reads the result to tell the
+    /// Enter that confirms a conversion from the one that confirms the name.
+    fn multi_edit_track_ime(&mut self, ctx: &egui::Context) {
+        let was_composing = self.multi_edit.ui.ime_composing;
+        let mut composing = was_composing;
+        let mut touched = false;
+        ctx.input(|i| {
+            for event in &i.events {
+                if let egui::Event::Ime(ime) = event {
+                    touched = true;
+                    composing = match ime {
+                        egui::ImeEvent::Preedit(text) => !text.is_empty(),
+                        egui::ImeEvent::Commit(_) | egui::ImeEvent::Disabled => false,
+                        egui::ImeEvent::Enabled => composing,
+                    };
                 }
-            });
-        if let Some((path, secs)) = target {
-            self.multi_edit_request_video(&path, secs, playing);
-        }
+            }
+        });
+        self.multi_edit.ui.ime_composing = composing;
+        self.multi_edit.ui.ime_busy = was_composing || touched;
     }
 
     /// The list, drawn with the pane's columns. It is the List workspace's
@@ -324,78 +451,110 @@ impl WavesPreviewer {
             .register_region(UiSurface::List, ui.layer_id(), rect);
     }
 
+    /// Measure the rows a drag from the list carries, once per drag, and
+    /// forget them when it ends.
+    fn multi_edit_refresh_drop_preview(&mut self, ctx: &egui::Context) {
+        self.multi_edit.ui.drop_preview_shown = None;
+        let Some(payload) = egui::DragAndDrop::payload::<MultiEditRowDrag>(ctx) else {
+            self.multi_edit.ui.drop_preview = None;
+            return;
+        };
+        let key = std::sync::Arc::as_ptr(&payload) as usize;
+        if self
+            .multi_edit
+            .ui
+            .drop_preview
+            .as_ref()
+            .is_some_and(|preview| preview.key == key)
+        {
+            return;
+        }
+        let clips = self.multi_edit_new_clips(&payload.0);
+        self.multi_edit.ui.drop_preview = Some(DropPreview::new(key, clips));
+    }
+
     fn ui_multi_edit_timeline(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if self.multi_edit_active_doc().is_none() {
+            return;
+        }
+        self.ui_multi_edit_header(ui);
+        ui.separator();
+        let area = ui.available_rect_before_wrap();
+        self.multi_edit_clamp_view(area.width() - HEADER_W);
         let Some(doc) = self.multi_edit_active_doc().cloned() else {
             return;
         };
         let mut actions: Vec<Action> = Vec::new();
-        self.ui_multi_edit_header(ui, &doc);
-        ui.separator();
-
-        let area = ui.available_rect_before_wrap();
+        self.multi_edit_refresh_drop_preview(ctx);
         self.ui_input_focus
             .register_region(UiSurface::MultiEdit, ui.layer_id(), area);
         let _scroll = self.pointer_scroll_input_guard(UiSurface::MultiEdit, ctx);
         let map = TimeMap {
             left: area.left() + HEADER_W,
             right: area.right(),
-            px_per_sec: doc.view.px_per_sec.clamp(MIN_PX_PER_SEC, MAX_PX_PER_SEC),
+            px_per_sec: doc.view.px_per_sec.clamp(
+                zoom_out_limit(doc.end_secs(), area.width() - HEADER_W),
+                MAX_PX_PER_SEC,
+            ),
             scroll_secs: doc.view.scroll_secs.max(0.0),
         };
+        self.multi_edit.ui.lane_left = map.left;
         let playhead = self.multi_edit_playhead(&doc.id);
+        let alt = ctx.input(|i| i.modifiers.alt);
+        let snap = self.multi_edit_snap_set(&doc, map, playhead, alt);
 
-        // Ruler.
-        let (ruler_row, _) = ui.allocate_exact_size(Vec2::new(area.width(), RULER_H), Sense::hover());
+        // Ruler, with the markers on it.
+        let (ruler_row, _) =
+            ui.allocate_exact_size(Vec2::new(area.width(), RULER_H), Sense::hover());
         let ruler = Rect::from_min_max(Pos2::new(map.left, ruler_row.top()), ruler_row.max);
-        self.paint_ruler(ui, ruler, map);
-        let ruler_resp = ui.interact(ruler, ui.id().with("multi_edit_ruler"), Sense::click_and_drag());
-        if ruler_resp.clicked() || ruler_resp.dragged() {
-            if let Some(pos) = ruler_resp.interact_pointer_pos() {
-                actions.push(Action::Seek(map.secs(pos.x)));
-            }
-        }
+        self.ui_multi_edit_ruler(ui, &doc, ruler, map, &snap, &mut actions);
 
-        // Wheel over the lanes: Ctrl zooms about the pointer, Shift (or a
-        // sideways swipe) scrolls time. The vertical wheel scrolls tracks.
         let body = Rect::from_min_max(Pos2::new(area.left(), ruler_row.bottom()), area.max);
-        let hover = ctx.input(|i| i.pointer.hover_pos());
-        if hover.is_some_and(|pos| pos.x >= map.left && body.contains(pos)) {
-            let (zoom, dx) = ctx.input(|i| (i.zoom_delta(), i.smooth_scroll_delta.x));
-            if (zoom - 1.0).abs() > f32::EPSILON {
-                let x = hover.map(|p| p.x).unwrap_or(map.left);
-                actions.push(Action::Zoom {
-                    factor: zoom,
-                    anchor_secs: map.secs(x),
-                    anchor_x: x - map.left,
-                });
-            }
-            if dx.abs() > 0.0 {
-                actions.push(Action::Scroll(-(dx / map.px_per_sec) as f64));
-                ctx.input_mut(|i| i.smooth_scroll_delta.x = 0.0);
-            }
-        }
+        self.multi_edit_wheel(ctx, ui, body, map, &mut actions);
 
         let mut track_rows: Vec<(usize, Rect)> = Vec::new();
         let mut lane_rects: HashMap<(String, String), Rect> = HashMap::new();
-        let scroll_source = self.scroll_source_for(UiSurface::MultiEdit);
-        egui::ScrollArea::vertical()
+        let output = egui::ScrollArea::vertical()
             .id_salt(("multi_edit_tracks", doc.id.as_str()))
             .auto_shrink([false, false])
-            .scroll_source(scroll_source)
+            // The wheel is the timeline's own (see `multi_edit_wheel`); only
+            // the bar scrolls here, and dragging on the rows edits them.
+            .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR)
+            .vertical_scroll_offset(doc.view.scroll_y)
             .show(ui, |ui| {
                 for (ti, track) in doc.tracks.iter().enumerate() {
-                    let row = self.ui_multi_edit_track_row(ui, &doc, ti, map, &mut actions);
+                    let row =
+                        self.ui_multi_edit_track_row(ui, &doc, ti, map, playhead, &snap, &mut actions);
                     track_rows.push((ti, row));
-                    for lane in &track.lanes {
-                        let rect =
-                            self.ui_multi_edit_lane_row(ui, &doc, ti, lane, map, &mut actions);
-                        lane_rects.insert((track.id.clone(), lane.id.clone()), rect);
+                    if !track.lanes_collapsed {
+                        for lane in &track.lanes {
+                            let rect = self.ui_multi_edit_lane_row(
+                                ui, &doc, ti, lane, map, playhead, &snap, &mut actions,
+                            );
+                            lane_rects.insert((track.id.clone(), lane.id.clone()), rect);
+                        }
                     }
                 }
-                self.ui_multi_edit_add_row(ui, map, &mut actions);
+                self.ui_multi_edit_add_row(ui, map, &snap, &mut actions);
             });
+        let max_scroll_y = (output.content_size.y - output.inner_rect.height()).max(0.0);
+        self.multi_edit.ui.max_scroll_y = max_scroll_y;
+        let offset = output.state.offset.y.clamp(0.0, max_scroll_y);
+        if (offset - doc.view.scroll_y).abs() > 0.5 {
+            actions.push(Action::ScrollYTo(offset));
+        }
 
-        // Playhead over everything below the header.
+        // Markers and the playhead over every row.
+        let painter = ui.painter_at(Rect::from_min_max(Pos2::new(map.left, body.top()), body.max));
+        for marker in &doc.markers {
+            let x = map.x(marker.secs);
+            painter.add(egui::Shape::dashed_line(
+                &[Pos2::new(x, body.top()), Pos2::new(x, body.bottom())],
+                Stroke::new(1.0, MARKER_COLOR.gamma_multiply(0.7)),
+                4.0,
+                4.0,
+            ));
+        }
         let px = map.x(playhead);
         if px >= map.left && px <= map.right {
             ui.painter_at(area).line_segment(
@@ -404,12 +563,101 @@ impl WavesPreviewer {
             );
         }
 
-        self.multi_edit_timeline_keys(ctx, &doc, playhead, &mut actions);
-        self.apply_multi_edit_actions(actions);
-        self.multi_edit_continue_drags(ctx, map, &track_rows, &lane_rects);
+        self.multi_edit_timeline_keys(ctx, &doc, &mut actions);
+        self.apply_multi_edit_actions(actions, map);
+        self.multi_edit_continue_drags(ctx, &doc, map, &snap, &track_rows, &lane_rects);
     }
 
-    fn ui_multi_edit_header(&mut self, ui: &mut egui::Ui, doc: &MultiEditDoc) {
+    /// Keep the view inside the timeline: zoomed out no further than the
+    /// whole of it with a margin, scrolled no further than its end mid-view.
+    fn multi_edit_clamp_view(&mut self, lane_width: f32) {
+        self.multi_edit.ui.lane_width = lane_width.max(1.0);
+        let max_y = self.multi_edit.ui.max_scroll_y;
+        if let Some(doc) = self.multi_edit_active_doc_mut() {
+            let end = doc.end_secs();
+            let min_pps = zoom_out_limit(end, lane_width);
+            doc.view.px_per_sec = doc.view.px_per_sec.clamp(min_pps, MAX_PX_PER_SEC);
+            let visible = (lane_width / doc.view.px_per_sec) as f64;
+            doc.view.scroll_secs = clamp_scroll_secs(doc.view.scroll_secs, end, visible);
+            doc.view.scroll_y = doc.view.scroll_y.clamp(0.0, max_y);
+            doc.view.track_zoom = doc.view.track_zoom.clamp(MIN_TRACK_ZOOM, MAX_TRACK_ZOOM);
+        }
+    }
+
+    /// Everything a dragged or dropped time may snap to this frame.
+    fn multi_edit_snap_set(&self, doc: &MultiEditDoc, map: TimeMap, playhead: f64, off: bool) -> Snap {
+        let mut candidates = doc.snap_points(None);
+        candidates.push(playhead);
+        candidates.extend(doc.markers.iter().map(|m| m.secs));
+        Snap {
+            candidates,
+            step: grid_step_secs(map.px_per_sec, MULTI_EDIT_GRID_MIN_PX),
+            threshold: (SNAP_PX / map.px_per_sec) as f64,
+            off,
+        }
+    }
+
+    /// The timeline's wheel: plain scrolls time, Shift scrolls the tracks,
+    /// Ctrl zooms time about the pointer, Ctrl+Shift zooms the rows.
+    fn multi_edit_wheel(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &egui::Ui,
+        body: Rect,
+        map: TimeMap,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
+            return;
+        };
+        if !body.contains(pos) || ctx.layer_id_at(pos) != Some(ui.layer_id()) {
+            return;
+        }
+        let (dx, dy, zoom, held_shift, event_shift) = ctx.input(|i| {
+            let event_shift = i.raw.events.iter().rev().find_map(|event| match event {
+                egui::Event::MouseWheel { modifiers, .. } => Some(modifiers.shift),
+                _ => None,
+            });
+            (
+                i.smooth_scroll_delta.x,
+                i.smooth_scroll_delta.y,
+                i.zoom_delta(),
+                i.modifiers.shift,
+                event_shift,
+            )
+        });
+        if let Some(shift) = event_shift {
+            self.multi_edit.ui.wheel_shift = shift;
+        }
+        let shift = held_shift || self.multi_edit.ui.wheel_shift;
+        if (zoom - 1.0).abs() > f32::EPSILON {
+            if shift {
+                actions.push(Action::ZoomVertical(zoom));
+            } else {
+                let x = pos.x.max(map.left);
+                actions.push(Action::Zoom {
+                    factor: zoom,
+                    anchor_secs: map.secs(x),
+                    anchor_x: x - map.left,
+                });
+            }
+        }
+        // egui already turned a Shift+wheel into a sideways delta.
+        let delta = dx + dy;
+        if delta.abs() > 0.0 {
+            if shift {
+                actions.push(Action::ScrollYBy(-delta));
+            } else {
+                actions.push(Action::Scroll(-(delta / map.px_per_sec) as f64));
+            }
+            ctx.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+        }
+    }
+
+    fn ui_multi_edit_header(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = self.multi_edit_active_doc().cloned() else {
+            return;
+        };
         ui.horizontal(|ui| {
             let renaming = self
                 .multi_edit
@@ -418,19 +666,20 @@ impl WavesPreviewer {
                 .as_ref()
                 .is_some_and(|(id, _)| id == &doc.id);
             if renaming {
-                let mut done = false;
+                let focus_now = std::mem::take(&mut self.multi_edit.ui.rename_focus_pending);
+                let ime_busy = self.multi_edit.ui.ime_busy;
+                let mut outcome = NameEdit::Editing;
                 if let Some((_, text)) = self.multi_edit.ui.renaming_doc.as_mut() {
-                    let resp = ui.add(egui::TextEdit::singleline(text).desired_width(200.0));
-                    resp.request_focus();
-                    done = resp.lost_focus();
+                    outcome = inline_name_field(ui, None, text, 200.0, focus_now, ime_busy);
                 }
-                if done {
+                if outcome != NameEdit::Editing {
                     if let Some((id, text)) = self.multi_edit.ui.renaming_doc.take() {
                         let name = text.trim().to_string();
-                        if !name.is_empty() {
+                        if outcome == NameEdit::Commit && !name.is_empty() {
                             if let Some(doc) = self.multi_edit.doc_mut(&id) {
                                 doc.name = name;
                             }
+                            self.multi_edit_mark_changed(&id);
                         }
                     }
                 }
@@ -440,6 +689,7 @@ impl WavesPreviewer {
                     .on_hover_text("Double-click to rename");
                 if resp.double_clicked() {
                     self.multi_edit.ui.renaming_doc = Some((doc.id.clone(), doc.name.clone()));
+                    self.multi_edit.ui.rename_focus_pending = true;
                 }
             }
             ui.separator();
@@ -468,11 +718,26 @@ impl WavesPreviewer {
                 ui.spinner();
                 ui.label(RichText::new(format!("reading {loading} source(s)")).weak());
             }
-            if ui.small_button("\u{2212}").on_hover_text("Zoom out").clicked() {
+            ui.separator();
+            if ui.small_button("\u{2212}").on_hover_text("Zoom out (Ctrl+wheel)").clicked() {
                 self.multi_edit_zoom_by(1.0 / ZOOM_BUTTON_STEP);
             }
             if ui.small_button("+").on_hover_text("Zoom in (Ctrl+wheel)").clicked() {
                 self.multi_edit_zoom_by(ZOOM_BUTTON_STEP);
+            }
+            if ui
+                .small_button("\u{2195}\u{2212}")
+                .on_hover_text("Lower rows (Ctrl+Shift+wheel)")
+                .clicked()
+            {
+                self.multi_edit_zoom_rows(1.0 / VERTICAL_ZOOM_STEP);
+            }
+            if ui
+                .small_button("\u{2195}+")
+                .on_hover_text("Taller rows (Ctrl+Shift+wheel)")
+                .clicked()
+            {
+                self.multi_edit_zoom_rows(VERTICAL_ZOOM_STEP);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let exporting = self
@@ -517,9 +782,10 @@ impl WavesPreviewer {
             .as_deref()
             .map(|id| self.multi_edit_playhead(id))
             .unwrap_or(0.0);
+        let width = self.multi_edit.ui.lane_width;
         if let Some(doc) = self.multi_edit_active_doc_mut() {
             let before = doc.view.px_per_sec;
-            let after = (before * factor).clamp(MIN_PX_PER_SEC, MAX_PX_PER_SEC);
+            let after = (before * factor).clamp(zoom_out_limit(doc.end_secs(), width), MAX_PX_PER_SEC);
             // Keep the playhead where it is on screen.
             let offset = (playhead - doc.view.scroll_secs) * before as f64;
             doc.view.px_per_sec = after;
@@ -527,58 +793,188 @@ impl WavesPreviewer {
         }
     }
 
-    fn paint_ruler(&self, ui: &egui::Ui, ruler: Rect, map: TimeMap) {
+    fn multi_edit_zoom_rows(&mut self, factor: f32) {
+        let Some(id) = self.multi_edit.active.clone() else {
+            return;
+        };
+        if let Some(doc) = self.multi_edit_active_doc_mut() {
+            doc.view.track_zoom = (doc.view.track_zoom * factor).clamp(MIN_TRACK_ZOOM, MAX_TRACK_ZOOM);
+        }
+        self.multi_edit_mark_changed(&id);
+    }
+
+    fn ui_multi_edit_ruler(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &MultiEditDoc,
+        ruler: Rect,
+        map: TimeMap,
+        snap: &Snap,
+        actions: &mut Vec<Action>,
+    ) {
         let painter = ui.painter_at(ruler);
-        let visuals = ui.visuals();
+        let visuals = ui.visuals().clone();
         painter.rect_filled(ruler, 0.0, visuals.extreme_bg_color);
-        let step = ruler_step(map.px_per_sec);
+        let step = grid_step_secs(map.px_per_sec, MULTI_EDIT_GRID_MIN_PX);
         let (start, end) = map.visible_secs();
-        let mut t = (start / step).floor() * step;
-        while t <= end {
+        for t in grid_points(start - step, end, step) {
             let x = map.x(t);
             painter.line_segment(
                 [Pos2::new(x, ruler.bottom() - 6.0), Pos2::new(x, ruler.bottom())],
                 Stroke::new(1.0, visuals.weak_text_color()),
             );
             painter.text(
-                Pos2::new(x + 3.0, ruler.center().y - 2.0),
+                Pos2::new(x + 3.0, ruler.bottom() - 9.0),
                 Align2::LEFT_CENTER,
                 format_secs(t),
                 FontId::monospace(10.0),
                 visuals.weak_text_color(),
             );
-            t += step;
+        }
+        // The ruler seeks; clicks near a marker's flag belong to the marker.
+        let ruler_resp = ui.interact(ruler, ui.id().with("multi_edit_ruler"), Sense::click_and_drag());
+        let marker_busy = self.multi_edit.ui.marker_drag.is_some();
+        if !marker_busy && (ruler_resp.clicked() || ruler_resp.dragged()) {
+            if let Some(pos) = ruler_resp.interact_pointer_pos() {
+                actions.push(Action::Seek(snap.apply(map.secs(pos.x), &[])));
+            }
+        }
+        for marker in &doc.markers {
+            let x = map.x(marker.secs);
+            if x < ruler.left() - 40.0 || x > ruler.right() {
+                continue;
+            }
+            let flag = [
+                Pos2::new(x, ruler.top() + 2.0 + MARKER_FLAG),
+                Pos2::new(x - MARKER_FLAG * 0.6, ruler.top() + 2.0),
+                Pos2::new(x + MARKER_FLAG * 0.6, ruler.top() + 2.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(flag.to_vec(), MARKER_COLOR, Stroke::NONE));
+            let galley = painter.layout_no_wrap(
+                marker.label.clone(),
+                FontId::proportional(10.0),
+                MARKER_COLOR,
+            );
+            let text_pos = Pos2::new(x + MARKER_FLAG * 0.6 + 2.0, ruler.top() + 1.0);
+            let hit = Rect::from_min_max(
+                Pos2::new(x - MARKER_FLAG, ruler.top()),
+                Pos2::new(text_pos.x + galley.size().x + 2.0, ruler.top() + MARKER_FLAG + 6.0),
+            );
+            painter.galley(text_pos, galley, MARKER_COLOR);
+            let resp = ui
+                .interact(hit, ui.id().with(("me_marker", &marker.id)), Sense::click_and_drag())
+                .on_hover_text(format!(
+                    "{} at {} -- drag to move, double-click to rename, right-click for more",
+                    marker.label,
+                    format_secs(marker.secs)
+                ));
+            if resp.drag_started() {
+                actions.push(Action::BeginMarkerDrag(marker.id.clone()));
+            } else if resp.double_clicked() {
+                actions.push(Action::BeginRenameMarker(marker.id.clone()));
+            } else if resp.clicked() {
+                actions.push(Action::Seek(marker.secs));
+            }
+            resp.context_menu(|ui| {
+                if ui.button("Rename...").clicked() {
+                    actions.push(Action::BeginRenameMarker(marker.id.clone()));
+                    ui.close();
+                }
+                if ui.button("Delete marker").clicked() {
+                    actions.push(Action::RemoveMarker(marker.id.clone()));
+                    ui.close();
+                }
+            });
+        }
+        // Renaming a marker: a field on the ruler, where the flag is.
+        let renaming = self.multi_edit.ui.renaming_marker.clone();
+        if let Some((id, _)) = renaming {
+            if let Some(marker) = doc.markers.iter().find(|m| m.id == id) {
+                let x = map.x(marker.secs).clamp(ruler.left(), ruler.right() - 140.0);
+                let field = Rect::from_min_size(Pos2::new(x, ruler.top()), Vec2::new(140.0, RULER_H - 4.0));
+                let focus_now = std::mem::take(&mut self.multi_edit.ui.rename_focus_pending);
+                let ime_busy = self.multi_edit.ui.ime_busy;
+                let mut commit = None;
+                let mut cancel = false;
+                if let Some((_, text)) = self.multi_edit.ui.renaming_marker.as_mut() {
+                    // In a child, so the ruler row's layout is not moved.
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(field));
+                    match inline_name_field(&mut child, Some(field), text, 136.0, focus_now, ime_busy) {
+                        NameEdit::Commit => commit = Some(text.clone()),
+                        NameEdit::Cancel => cancel = true,
+                        NameEdit::Editing => {}
+                    }
+                }
+                if cancel {
+                    self.multi_edit.ui.renaming_marker = None;
+                }
+                if let Some(label) = commit {
+                    self.multi_edit.ui.renaming_marker = None;
+                    self.multi_edit_checkpoint();
+                    if let Some(doc) = self.multi_edit_active_doc_mut() {
+                        doc.rename_marker(&id, &label);
+                    }
+                    let doc_id = doc.id.clone();
+                    self.multi_edit_mark_changed(&doc_id);
+                }
+            } else {
+                self.multi_edit.ui.renaming_marker = None;
+            }
         }
     }
 
-    /// One track: its header and its clip lane. Returns the row's rect.
+    /// Faint vertical lines at the ruler's ticks, the grid things snap to.
+    fn paint_grid(painter: &egui::Painter, rect: Rect, map: TimeMap, color: Color32) {
+        let step = grid_step_secs(map.px_per_sec, MULTI_EDIT_GRID_MIN_PX);
+        let (start, end) = map.visible_secs();
+        for t in grid_points(start, end, step) {
+            let x = map.x(t);
+            painter.line_segment(
+                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                Stroke::new(1.0, color),
+            );
+        }
+    }
+
+    /// One track: its header and its clip row. Returns the row's rect.
+    #[allow(clippy::too_many_arguments)]
     fn ui_multi_edit_track_row(
         &mut self,
         ui: &mut egui::Ui,
         doc: &MultiEditDoc,
         ti: usize,
         map: TimeMap,
+        playhead: f64,
+        snap: &Snap,
         actions: &mut Vec<Action>,
     ) -> Rect {
         let track = &doc.tracks[ti];
-        let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), TRACK_H), Sense::hover());
+        let height = track.height * doc.view.track_zoom;
+        let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
         let header = Rect::from_min_max(row.min, Pos2::new(row.left() + HEADER_W, row.bottom()));
         let lane = Rect::from_min_max(Pos2::new(map.left, row.top()), row.max);
         let visuals = ui.visuals().clone();
-        ui.painter().rect_filled(header, 0.0, visuals.faint_bg_color);
+        let line = visuals.widgets.noninteractive.bg_stroke.color;
+        let selected = self.multi_edit.ui.selected_track.as_deref() == Some(track.id.as_str());
+        let header_fill = if selected {
+            visuals.selection.bg_fill.gamma_multiply(0.45)
+        } else {
+            visuals.faint_bg_color
+        };
+        ui.painter().rect_filled(header, 0.0, header_fill);
         ui.painter()
             .rect_filled(lane, 0.0, visuals.extreme_bg_color.gamma_multiply(0.6));
-        ui.painter().line_segment(
-            [row.left_bottom(), row.right_bottom()],
-            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
-        );
-        ui.painter().line_segment(
-            [header.right_top(), header.right_bottom()],
-            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
-        );
+        Self::paint_grid(&ui.painter_at(lane), lane, map, line.gamma_multiply(0.35));
+        ui.painter()
+            .line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0, line));
+        ui.painter()
+            .line_segment([header.right_top(), header.right_bottom()], Stroke::new(1.0, line));
 
-        // Header: name, fader, M / S, and the track menu.
+        // Header background: a click selects the track; the menu adds lanes.
         let header_resp = ui.interact(header, ui.id().with(("me_track_hdr", &track.id)), Sense::click());
+        if header_resp.clicked() {
+            actions.push(Action::SelectTrack(Some(track.id.clone())));
+        }
         header_resp.context_menu(|ui| {
             ui.menu_button("Add lane", |ui| {
                 for param in LaneParam::ALL {
@@ -598,103 +994,317 @@ impl WavesPreviewer {
                 ui.close();
             }
         });
-        ui.scope_builder(egui::UiBuilder::new().max_rect(header.shrink(6.0)), |ui| {
-            let renaming = self
-                .multi_edit
-                .ui
-                .renaming_track
-                .as_ref()
-                .is_some_and(|(id, _)| id == &track.id);
-            if renaming {
-                let mut commit = None;
-                if let Some((_, text)) = self.multi_edit.ui.renaming_track.as_mut() {
-                    let resp = ui.add(egui::TextEdit::singleline(text).desired_width(HEADER_W - 16.0));
-                    resp.request_focus();
-                    if resp.lost_focus() {
-                        commit = Some(text.clone());
-                    }
-                }
-                if let Some(name) = commit {
-                    actions.push(Action::CommitRenameTrack(ti, name));
-                }
-            } else {
-                let name = ui
-                    .add(egui::Label::new(RichText::new(&track.name).strong()).sense(Sense::click()))
-                    .on_hover_text("Double-click to rename; right-click for lanes");
-                if name.double_clicked() {
-                    actions.push(Action::BeginRenameTrack(ti));
-                }
-            }
-            ui.horizontal(|ui| {
-                ui.spacing_mut().slider_width = HEADER_W - 70.0;
-                let mut volume = track.volume_db;
-                let slider = ui
-                    .add(
-                        egui::Slider::new(&mut volume, TRACK_GAIN_MIN_DB..=TRACK_GAIN_MAX_DB)
-                            .show_value(false)
-                            .trailing_fill(true),
-                    )
-                    .on_hover_text(format!("{volume:+.1} dB (double-click: 0 dB)"));
-                if slider.drag_started() || (slider.clicked() && !slider.dragged()) {
-                    actions.push(Action::Checkpoint);
-                }
-                if slider.double_clicked() {
-                    actions.push(Action::Checkpoint);
-                    actions.push(Action::SetVolume(ti, 0.0));
-                } else if slider.changed() {
-                    actions.push(Action::SetVolume(ti, volume));
-                }
-                if ui
-                    .selectable_label(track.mute, "M")
-                    .on_hover_text("Mute")
-                    .clicked()
-                {
-                    actions.push(Action::ToggleMute(ti));
-                }
-                if ui
-                    .selectable_label(track.solo, "S")
-                    .on_hover_text("Solo")
-                    .clicked()
-                {
-                    actions.push(Action::ToggleSolo(ti));
-                }
-            });
-        });
+        self.ui_multi_edit_track_header(ui, track, ti, header, actions);
+        Self::resize_grip(
+            ui,
+            header,
+            ("me_track_grip", &track.id),
+            RowResize::Track {
+                track_id: track.id.clone(),
+                start_height: track.height,
+                start_y: 0.0,
+            },
+            actions,
+        );
 
-        // The lane: a click on empty space seeks and deselects; rows dropped
-        // here join this track.
+        // The clip row: a click on empty space seeks and clears the
+        // selection; rows dropped here join this track.
         let lane_resp = ui.interact(lane, ui.id().with(("me_lane", &track.id)), Sense::click());
         if lane_resp.clicked() {
             if let Some(pos) = lane_resp.interact_pointer_pos() {
                 actions.push(Action::SelectClip(None));
-                actions.push(Action::Seek(map.secs(pos.x)));
+                actions.push(Action::SelectTrack(None));
+                actions.push(Action::Seek(snap.apply(map.secs(pos.x), &[])));
             }
         }
-        self.multi_edit_drop_target(ui, lane, Some(ti), map, actions);
-
+        let can_paste = self.multi_edit.ui.clip_clipboard.is_some();
+        lane_resp.context_menu(|ui| {
+            if ui
+                .add_enabled(can_paste, egui::Button::new("Paste at playhead (Ctrl+V)"))
+                .clicked()
+            {
+                actions.push(Action::Paste(Some(track.id.clone())));
+                ui.close();
+            }
+        });
         let painter = ui.painter_at(lane);
-        for clip in &track.clips {
-            self.ui_multi_edit_clip(ui, &painter, track.kind, clip, lane, map, actions);
+        let xfades = crossfade_segments(&track.clips);
+        for (clip, segs) in track.clips.iter().zip(xfades.iter()) {
+            self.ui_multi_edit_clip(ui, &painter, track.kind, clip, segs, lane, map, actions);
         }
+        if track.lanes_collapsed && !track.lanes.is_empty() {
+            Self::paint_folded_lanes(&painter, track, lane, map);
+        }
+        // Last, so the clips about to land are drawn over the ones here.
+        self.multi_edit_drop_target(ui, lane, Some((ti, track.kind)), map, snap, actions);
+        let _ = playhead;
         row
     }
 
-    /// Accept rows dragged from the list pane over `rect`, showing where they
-    /// would land.
+    /// Name, fold arrow and video toggle on the first line; fader and M / S
+    /// on the second, when the row is tall enough for it. Every control has
+    /// a rect of its own inside the header, so nothing spills into the clips.
+    fn ui_multi_edit_track_header(
+        &mut self,
+        ui: &mut egui::Ui,
+        track: &Track,
+        ti: usize,
+        header: Rect,
+        actions: &mut Vec<Action>,
+    ) {
+        // A child of the row that the row's layout never sees: placing a
+        // widget in the parent would move its cursor back up to that widget,
+        // and the next row would be laid over this one.
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(header));
+        let ui = &mut child;
+        let inner = header.shrink(HEADER_PAD);
+        let line1 = Rect::from_min_size(inner.min, Vec2::new(inner.width(), HEADER_LINE_H));
+        let mut left = line1.left();
+        let mut right = line1.right();
+        if !track.lanes.is_empty() {
+            let rect = Rect::from_min_size(Pos2::new(left, line1.top()), Vec2::new(HEADER_BUTTON - 4.0, HEADER_LINE_H));
+            let arrow = if track.lanes_collapsed { "\u{25B8}" } else { "\u{25BE}" };
+            if ui
+                .put(rect, egui::Button::new(arrow).small().frame(false))
+                .on_hover_text(if track.lanes_collapsed {
+                    "Show the lanes"
+                } else {
+                    "Fold the lanes (their curves are drawn over the clips)"
+                })
+                .clicked()
+            {
+                actions.push(Action::ToggleLanes(ti));
+            }
+            left = rect.right() + 2.0;
+        }
+        if track.kind == TrackKind::Video {
+            let rect = Rect::from_min_max(Pos2::new(right - VIDEO_BUTTON_W, line1.top()), line1.right_bottom());
+            if ui
+                .put(
+                    rect,
+                    egui::Button::selectable(track.show_video, RichText::new("Video").small())
+                        .truncate(),
+                )
+                .on_hover_text("Show or hide this track's picture window")
+                .clicked()
+            {
+                actions.push(Action::ToggleVideo(track.id.clone(), !track.show_video));
+            }
+            right = rect.left() - 4.0;
+        }
+        let name_rect = Rect::from_min_max(Pos2::new(left, line1.top()), Pos2::new(right.max(left + 10.0), line1.bottom()));
+        let renaming = self
+            .multi_edit
+            .ui
+            .renaming_track
+            .as_ref()
+            .is_some_and(|(id, _)| id == &track.id);
+        if renaming {
+            let focus_now = std::mem::take(&mut self.multi_edit.ui.rename_focus_pending);
+            let ime_busy = self.multi_edit.ui.ime_busy;
+            if let Some((_, text)) = self.multi_edit.ui.renaming_track.as_mut() {
+                match inline_name_field(ui, Some(name_rect), text, name_rect.width(), focus_now, ime_busy) {
+                    NameEdit::Commit => actions.push(Action::CommitRenameTrack(ti, text.clone())),
+                    NameEdit::Cancel => actions.push(Action::CancelRenameTrack),
+                    NameEdit::Editing => {}
+                }
+            }
+        } else {
+            // Left-aligned, as in the design (`put` would centre it).
+            let name = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(name_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(&track.name).strong())
+                                .truncate()
+                                .sense(Sense::click()),
+                        )
+                    },
+                )
+                .inner
+                .on_hover_text(format!(
+                    "{} -- double-click to rename; right-click for lanes",
+                    track.name
+                ));
+            if name.double_clicked() {
+                actions.push(Action::BeginRenameTrack(ti));
+            } else if name.clicked() {
+                actions.push(Action::SelectTrack(Some(track.id.clone())));
+            }
+        }
+
+        // The second line only when there is room for it.
+        if inner.height() < HEADER_LINE_H * 2.0 + 4.0 {
+            return;
+        }
+        let line2 = Rect::from_min_size(
+            Pos2::new(inner.left(), line1.bottom() + 4.0),
+            Vec2::new(inner.width(), HEADER_LINE_H),
+        );
+        let solo = Rect::from_min_max(Pos2::new(line2.right() - HEADER_BUTTON, line2.top()), line2.right_bottom());
+        let mute = solo.translate(Vec2::new(-(HEADER_BUTTON + 2.0), 0.0));
+        let fader = Rect::from_min_max(line2.min, Pos2::new(mute.left() - 6.0, line2.bottom()));
+        if ui
+            .put(mute, egui::Button::selectable(track.mute, "M").small())
+            .on_hover_text("Mute")
+            .clicked()
+        {
+            actions.push(Action::ToggleMute(ti));
+        }
+        if ui
+            .put(solo, egui::Button::selectable(track.solo, "S").small())
+            .on_hover_text("Solo")
+            .clicked()
+        {
+            actions.push(Action::ToggleSolo(ti));
+        }
+        ui.scope_builder(egui::UiBuilder::new().max_rect(fader), |ui| {
+            ui.spacing_mut().slider_width = fader.width().max(10.0);
+            let mut volume = track.volume_db;
+            let slider = ui
+                .add(
+                    egui::Slider::new(&mut volume, TRACK_GAIN_MIN_DB..=TRACK_GAIN_MAX_DB)
+                        .show_value(false)
+                        .trailing_fill(true),
+                )
+                .on_hover_text(format!("{volume:+.1} dB (double-click: 0 dB)"));
+            if slider.drag_started() || (slider.clicked() && !slider.dragged()) {
+                actions.push(Action::Checkpoint);
+            }
+            if slider.double_clicked() {
+                actions.push(Action::Checkpoint);
+                actions.push(Action::SetVolume(ti, 0.0));
+            } else if slider.changed() {
+                actions.push(Action::SetVolume(ti, volume));
+            }
+        });
+    }
+
+    /// The strip at the bottom of a header that resizes its row.
+    fn resize_grip(
+        ui: &egui::Ui,
+        header: Rect,
+        id: impl std::hash::Hash,
+        resize: RowResize,
+        actions: &mut Vec<Action>,
+    ) {
+        let grip = Rect::from_min_max(
+            Pos2::new(header.left(), header.bottom() - RESIZE_GRAB_PX),
+            header.right_bottom(),
+        );
+        let resp = ui.interact(grip, ui.id().with(id), Sense::drag());
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            ui.painter().line_segment(
+                [Pos2::new(grip.left(), grip.center().y), Pos2::new(grip.right(), grip.center().y)],
+                Stroke::new(2.0, ui.visuals().selection.bg_fill),
+            );
+        }
+        if resp.drag_started() {
+            let y = resp.interact_pointer_pos().map(|p| p.y).unwrap_or(grip.center().y);
+            let resize = match resize {
+                RowResize::Track { track_id, start_height, .. } => RowResize::Track {
+                    track_id,
+                    start_height,
+                    start_y: y,
+                },
+                RowResize::Lane { track_id, lane_id, start_height, .. } => RowResize::Lane {
+                    track_id,
+                    lane_id,
+                    start_height,
+                    start_y: y,
+                },
+            };
+            actions.push(Action::BeginResize(resize));
+        }
+    }
+
+    /// Folded lanes: each parameter's curve over the clips, in its colour,
+    /// with a small legend.
+    fn paint_folded_lanes(painter: &egui::Painter, track: &Track, lane: Rect, map: TimeMap) {
+        let inner = lane.shrink2(Vec2::new(0.0, 6.0));
+        let mut legend_x = lane.right() - 6.0;
+        for automation in track.lanes.iter().rev() {
+            let color = param_color(automation.param);
+            Self::paint_curve(painter, automation, inner, map, color.gamma_multiply(0.85), 1.5, 2.5);
+            let galley = painter.layout_no_wrap(
+                automation.param.label().to_string(),
+                FontId::proportional(10.0),
+                color,
+            );
+            legend_x -= galley.size().x;
+            painter.galley(Pos2::new(legend_x, lane.top() + 2.0), galley, color);
+            legend_x -= 6.0;
+        }
+    }
+
+    /// A lane's curve in `rect`: flat before its first point and after its
+    /// last, stepped for Mute, with its points.
+    fn paint_curve(
+        painter: &egui::Painter,
+        lane: &AutomationLane,
+        rect: Rect,
+        map: TimeMap,
+        color: Color32,
+        width: f32,
+        point_radius: f32,
+    ) {
+        let (lo, hi) = lane.param.range();
+        let y_of = |v: f32| rect.bottom() - (v - lo) / (hi - lo) * rect.height();
+        let (vis0, vis1) = map.visible_secs();
+        if lane.points.is_empty() {
+            let y = y_of(lane.param.neutral());
+            painter.line_segment(
+                [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+                Stroke::new(width, color.gamma_multiply(0.5)),
+            );
+            return;
+        }
+        let mut pts: Vec<Pos2> = Vec::new();
+        pts.push(Pos2::new(map.x(vis0.min(lane.points[0].secs)), y_of(lane.points[0].value)));
+        for (i, point) in lane.points.iter().enumerate() {
+            let x = map.x(point.secs);
+            if lane.param.is_stepped() && i > 0 {
+                pts.push(Pos2::new(x, y_of(lane.points[i - 1].value)));
+            }
+            pts.push(Pos2::new(x, y_of(point.value)));
+        }
+        let last = lane.points[lane.points.len() - 1];
+        pts.push(Pos2::new(map.x(vis1.max(last.secs)), y_of(last.value)));
+        painter.add(egui::Shape::line(pts, Stroke::new(width, color)));
+        if point_radius > 0.0 {
+            for point in &lane.points {
+                let c = Pos2::new(map.x(point.secs), y_of(point.value));
+                painter.circle_filled(c, point_radius, color);
+            }
+        }
+    }
+
+    /// Accept rows dragged from the list pane over `rect` (a track's clip
+    /// row, or the row under the tracks when `track` is `None`), drawing the
+    /// clips they would become where they would land: each one's name and
+    /// length, and the span they cover from start to end.
+    ///
+    /// The span snaps by whichever end is nearer a snap point, the way a
+    /// dragged clip does, and the drop lands exactly where it is drawn.
     ///
     /// Tested against the rect itself rather than a response: a drop onto a
     /// clip is a drop onto its track, and a response is "covered" wherever a
     /// clip sits on it.
     fn multi_edit_drop_target(
-        &self,
+        &mut self,
         ui: &egui::Ui,
         rect: Rect,
-        track: Option<usize>,
+        track: Option<(usize, TrackKind)>,
         map: TimeMap,
+        snap: &Snap,
         actions: &mut Vec<Action>,
     ) {
-        let ctx = ui.ctx();
-        if !egui::DragAndDrop::has_payload_of_type::<MultiEditRowDrag>(ctx) {
+        let ctx = ui.ctx().clone();
+        if !egui::DragAndDrop::has_payload_of_type::<MultiEditRowDrag>(&ctx) {
             return;
         }
         let Some(pos) = ctx.pointer_hover_pos().or_else(|| ctx.pointer_interact_pos()) else {
@@ -703,21 +1313,176 @@ impl WavesPreviewer {
         if !rect.contains(pos) || ctx.layer_id_at(pos) != Some(ui.layer_id()) {
             return;
         }
-        let x = pos.x.max(map.left);
-        let accent = ui.visuals().selection.bg_fill;
-        ui.painter()
-            .rect_stroke(rect, 0.0, Stroke::new(1.5, accent), StrokeKind::Inside);
-        ui.painter().line_segment(
-            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            Stroke::new(2.0, accent),
+        let Some(preview) = self.multi_edit.ui.drop_preview.as_ref() else {
+            return;
+        };
+        // The group that lands here: the track's own kind when there is any
+        // of it, otherwise whatever there is (which goes to its own track).
+        let own_kind = track.map(|(_, kind)| kind).unwrap_or(TrackKind::Audio);
+        let other_kind = match own_kind {
+            TrackKind::Audio => TrackKind::Video,
+            TrackKind::Video => TrackKind::Audio,
+        };
+        let (main_kind, rest_kind) = if preview.group(own_kind).0.is_empty() {
+            (other_kind, own_kind)
+        } else {
+            (own_kind, other_kind)
+        };
+        let (_, main_secs) = preview.group(main_kind);
+        let (_, rest_secs) = preview.group(rest_kind);
+        let start = snap
+            .apply_span(map.secs(pos.x.max(map.left)), main_secs, &[])
+            .max(0.0);
+        let span = main_secs.max(rest_secs);
+        let count = preview.count();
+
+        let visuals = ui.visuals();
+        let accent = visuals.selection.bg_fill;
+        let text = visuals.strong_text_color();
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, accent.gamma_multiply(0.08));
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.5, accent), StrokeKind::Inside);
+        let inner = rect.shrink2(Vec2::new(0.0, 3.0));
+        let split = !preview.group(rest_kind).0.is_empty();
+        let main_band = if split {
+            Rect::from_min_max(inner.min, Pos2::new(inner.right(), inner.top() + inner.height() * 0.62))
+        } else {
+            inner
+        };
+        let destination = |kind: TrackKind| {
+            let name = match kind {
+                TrackKind::Audio => "Audio track",
+                TrackKind::Video => "Video track",
+            };
+            if track.is_none() {
+                format!("new {name}")
+            } else {
+                name.to_string()
+            }
+        };
+        let main_note = (track.is_none() || main_kind != own_kind).then(|| destination(main_kind));
+        Self::paint_drop_group(&painter, main_band, map, start, preview.group(main_kind).0, main_kind, 1.0, main_note, text);
+        if split {
+            let rest_band = Rect::from_min_max(Pos2::new(inner.left(), main_band.bottom() + 2.0), inner.max);
+            Self::paint_drop_group(
+                &painter,
+                rest_band,
+                map,
+                start,
+                preview.group(rest_kind).0,
+                rest_kind,
+                0.45,
+                Some(destination(rest_kind)),
+                text,
+            );
+        }
+        // Where the span starts and ends, through the whole row.
+        let (x0, x1) = (map.x(start), map.x(start + span));
+        for x in [x0, x1] {
+            painter.line_segment(
+                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                Stroke::new(2.0, accent),
+            );
+        }
+        // The summary sits above the row, on a layer of its own, so a short
+        // row or the edge of the scroll area never cuts it.
+        let summary = format!(
+            "{} \u{2013} {}   {}   {} clip{}",
+            format_secs(start),
+            format_secs(start + span),
+            format_len(span),
+            count,
+            if count == 1 { "" } else { "s" },
         );
+        let label_painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::new("multi_edit_drop_summary"),
+        ));
+        let galley = label_painter.layout_no_wrap(summary, FontId::proportional(12.0), text);
+        let size = galley.size() + Vec2::new(12.0, 6.0);
+        let left = x0.clamp(map.left, (map.right - size.x).max(map.left));
+        let pill = Rect::from_min_size(Pos2::new(left, rect.top() - size.y - 2.0), size);
+        label_painter.rect_filled(pill, 4.0, visuals.extreme_bg_color);
+        label_painter.rect_stroke(pill, 4.0, Stroke::new(1.0, accent), StrokeKind::Inside);
+        label_painter.galley(pill.min + Vec2::new(6.0, 3.0), galley, text);
+        self.multi_edit.ui.drop_preview_shown = Some((start, span, count));
+
         if ctx.input(|i| i.pointer.any_released()) {
-            if let Some(payload) = egui::DragAndDrop::take_payload::<MultiEditRowDrag>(ctx) {
+            if let Some(payload) = egui::DragAndDrop::take_payload::<MultiEditRowDrag>(&ctx) {
                 actions.push(Action::DropRows {
-                    track,
-                    at_secs: map.secs(x),
+                    track: track.map(|(ti, _)| ti),
+                    at_secs: start,
                     paths: payload.0.clone(),
                 });
+            }
+        }
+    }
+
+    /// One group of clips about to be dropped, back to back from `start`,
+    /// translucent, each with its name and length. `note` says where the
+    /// group goes when that is not the row it is drawn on.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_drop_group(
+        painter: &egui::Painter,
+        band: Rect,
+        map: TimeMap,
+        start: f64,
+        clips: &[(String, f64)],
+        kind: TrackKind,
+        opacity: f32,
+        note: Option<String>,
+        text: Color32,
+    ) {
+        let fill = match kind {
+            TrackKind::Audio => AUDIO_CLIP_FILL,
+            TrackKind::Video => VIDEO_CLIP_FILL,
+        };
+        let text = text.gamma_multiply(opacity.max(0.6));
+        let clip_rect = painter.clip_rect();
+        let mut cursor = start;
+        for (i, (name, len)) in clips.iter().enumerate() {
+            let (x0, x1) = (map.x(cursor), map.x(cursor + len));
+            cursor += len;
+            if x1 < clip_rect.left() {
+                continue;
+            }
+            if x0 > clip_rect.right() {
+                // Everything after this is further right still.
+                break;
+            }
+            let ghost = Rect::from_min_max(Pos2::new(x0, band.top()), Pos2::new(x1.max(x0 + 2.0), band.bottom()));
+            painter.rect_filled(ghost, CLIP_CORNER, fill.gamma_multiply(0.55 * opacity));
+            painter.rect_stroke(
+                ghost,
+                CLIP_CORNER,
+                Stroke::new(1.5, Color32::WHITE.gamma_multiply(0.7 * opacity)),
+                StrokeKind::Inside,
+            );
+            let room = ghost.shrink2(Vec2::new(5.0, 2.0)).intersect(clip_rect);
+            if room.width() < 24.0 {
+                continue;
+            }
+            let inside = painter.with_clip_rect(room);
+            let title = match (&note, i) {
+                (Some(note), 0) => format!("\u{2192} {note}   {name}"),
+                _ => name.clone(),
+            };
+            // On a backing, as a placed clip's name is: the clips already
+            // on the track show through the ghost.
+            let backed = |pos: Pos2, line: String, size: f32| {
+                let galley = inside.layout_no_wrap(line, FontId::proportional(size), text);
+                let backing = Rect::from_min_size(pos - Vec2::new(3.0, 1.0), galley.size() + Vec2::new(6.0, 2.0));
+                inside.rect_filled(backing, 3.0, Color32::from_black_alpha((150.0 * opacity) as u8));
+                let height = galley.size().y;
+                inside.galley(pos, galley, text);
+                height
+            };
+            let top = room.left_top() + Vec2::new(3.0, 1.0);
+            if room.height() >= 30.0 {
+                let height = backed(top, title, 12.0);
+                backed(top + Vec2::new(0.0, height + 2.0), format_len(*len), 11.0);
+            } else {
+                backed(top, format!("{title}  {}", format_len(*len)), 11.0);
             }
         }
     }
@@ -729,6 +1494,7 @@ impl WavesPreviewer {
         painter: &egui::Painter,
         kind: TrackKind,
         clip: &Clip,
+        xfades: &[XfadeSeg],
         lane: Rect,
         map: TimeMap,
         actions: &mut Vec<Action>,
@@ -738,7 +1504,10 @@ impl WavesPreviewer {
         if x1 < lane.left() || x0 > lane.right() {
             return;
         }
-        let rect = Rect::from_min_max(Pos2::new(x0, lane.top() + 4.0), Pos2::new(x1.max(x0 + 2.0), lane.bottom() - 4.0));
+        let rect = Rect::from_min_max(
+            Pos2::new(x0, lane.top() + 4.0),
+            Pos2::new(x1.max(x0 + 2.0), lane.bottom() - 4.0),
+        );
         let selected = self.multi_edit.ui.selected_clip.as_deref() == Some(clip.id.as_str());
         let poster = (kind == TrackKind::Video)
             .then(|| {
@@ -749,44 +1518,34 @@ impl WavesPreviewer {
             .flatten()
             .map(|art| self.list_art_texture_for_path(ui.ctx(), &clip.source.path, art));
         let slot = self.multi_edit.sources.get(&clip.source.path);
+        let base = match kind {
+            TrackKind::Audio => AUDIO_CLIP_FILL,
+            TrackKind::Video => VIDEO_CLIP_FILL,
+        };
         let (fill, status) = match slot {
             Some(SourceSlot::Failed(err)) => (MISSING_CLIP_FILL, Some(format!("missing: {err}"))),
             Some(SourceSlot::NotInList) => (MISSING_CLIP_FILL, Some("not in the list".to_string())),
-            Some(SourceSlot::Loading) | None => (
-                match kind {
-                    TrackKind::Audio => AUDIO_CLIP_FILL,
-                    TrackKind::Video => VIDEO_CLIP_FILL,
-                },
-                Some("reading...".to_string()),
-            ),
-            Some(SourceSlot::Ready(_)) => (
-                match kind {
-                    TrackKind::Audio => AUDIO_CLIP_FILL,
-                    TrackKind::Video => VIDEO_CLIP_FILL,
-                },
-                None,
-            ),
+            Some(SourceSlot::Loading) | None => (base, Some("reading...".to_string())),
+            Some(SourceSlot::Ready(_)) => (base, None),
         };
         painter.rect_filled(rect, CLIP_CORNER, fill.gamma_multiply(0.85));
         // A video clip opens with its poster frame, when the list has one.
         let mut wave_left = rect.left();
-        if kind == TrackKind::Video {
-            if let Some(texture) = poster {
-                let tex = texture.size_vec2().max(Vec2::splat(1.0));
-                let h = rect.height() - 4.0;
-                let w = (h * tex.x / tex.y).min(rect.width() * 0.5);
-                let thumb = Rect::from_min_size(rect.min + Vec2::new(2.0, 2.0), Vec2::new(w, h));
-                painter.image(
-                    texture.id(),
-                    thumb,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-                wave_left = thumb.right() + 2.0;
-            }
+        if let Some(texture) = poster {
+            let tex = texture.size_vec2().max(Vec2::splat(1.0));
+            let h = rect.height() - 4.0;
+            let w = (h * tex.x / tex.y).min(rect.width() * 0.5);
+            let thumb = Rect::from_min_size(rect.min + Vec2::new(2.0, 2.0), Vec2::new(w, h));
+            painter.image(
+                texture.id(),
+                thumb,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            wave_left = thumb.right() + 2.0;
         }
 
-        // Waveform of the part of the clip on screen.
+        // Waveform of the part of the clip on screen, shaped by its fades.
         if let Some(SourceSlot::Ready(source)) = slot {
             let vis_x0 = wave_left.max(lane.left());
             let vis_x1 = rect.right().min(lane.right());
@@ -804,7 +1563,8 @@ impl WavesPreviewer {
                 let half = rect.height() * 0.45;
                 for (i, peak) in peaks.iter().enumerate() {
                     let x = vis_x0 + i as f32 + 0.5;
-                    let gain = fade_gain_at(clip, map.secs(x));
+                    let t = map.secs(x);
+                    let gain = fade_gain_at(clip, t) * xfade_gain(xfades, t);
                     let top = mid - peak.max.clamp(-1.0, 1.0) * half * gain;
                     let bottom = mid - peak.min.clamp(-1.0, 1.0) * half * gain;
                     painter.line_segment(
@@ -815,8 +1575,8 @@ impl WavesPreviewer {
             }
         }
 
-        // Fades, drawn as the design has them: a line from the bottom corner
-        // up to where the fade ends.
+        // Fades as the design has them: a line from the bottom corner up to
+        // where the fade ends. Crossfades with a neighbour draw an X.
         let fade_stroke = Stroke::new(1.2, Color32::WHITE.gamma_multiply(0.8));
         if clip.fade_in_secs > 0.0 {
             let fx = map.x(clip.start_secs + clip.fade_in_secs);
@@ -826,23 +1586,45 @@ impl WavesPreviewer {
             let fx = map.x(clip.end_secs() - clip.fade_out_secs);
             painter.line_segment([Pos2::new(fx, rect.top()), rect.right_bottom()], fade_stroke);
         }
+        let xfade_stroke = Stroke::new(1.2, Color32::from_rgb(255, 230, 150).gamma_multiply(0.9));
+        for seg in xfades {
+            let (a, b) = (map.x(seg.start), map.x(seg.end));
+            match seg.shape {
+                XfadeShape::In => {
+                    painter.line_segment([Pos2::new(a, rect.bottom()), Pos2::new(b, rect.top())], xfade_stroke)
+                }
+                XfadeShape::Out => {
+                    painter.line_segment([Pos2::new(a, rect.top()), Pos2::new(b, rect.bottom())], xfade_stroke)
+                }
+                XfadeShape::Zero => painter.rect_filled(
+                    Rect::from_min_max(Pos2::new(a, rect.top()), Pos2::new(b, rect.bottom())),
+                    0.0,
+                    Color32::from_black_alpha(90),
+                ),
+            };
+        }
         let outline = if selected {
             Stroke::new(2.0, ui.visuals().selection.stroke.color)
         } else {
             Stroke::new(1.0, Color32::from_gray(200).gamma_multiply(0.6))
         };
         painter.rect_stroke(rect, CLIP_CORNER, outline, StrokeKind::Inside);
+
+        // The name, on a backing so the fade lines never run through it, cut
+        // to the clip.
         let label = match &status {
             Some(status) => format!("{}  ({status})", clip.name),
             None => clip.name.clone(),
         };
-        painter.text(
-            Pos2::new(rect.left().max(lane.left()) + 6.0, rect.top() + 3.0),
-            Align2::LEFT_TOP,
-            label,
-            FontId::proportional(11.0),
-            Color32::WHITE,
-        );
+        let visible = rect.intersect(lane);
+        let text_pos = Pos2::new(visible.left() + FADE_HANDLE_PX + 4.0, rect.top() + 3.0);
+        if visible.width() > FADE_HANDLE_PX * 2.0 + 12.0 {
+            let clipped = painter.with_clip_rect(visible.shrink(1.0));
+            let galley = clipped.layout_no_wrap(label, FontId::proportional(11.0), Color32::WHITE);
+            let backing = Rect::from_min_size(text_pos - Vec2::new(3.0, 1.0), galley.size() + Vec2::new(6.0, 2.0));
+            clipped.rect_filled(backing, 3.0, Color32::from_black_alpha(140));
+            clipped.galley(text_pos, galley, Color32::WHITE);
+        }
 
         // Interaction: body moves, edges trim, the top corners set fades.
         // Later rects win where they overlap, so the smallest go last.
@@ -889,8 +1671,12 @@ impl WavesPreviewer {
         } else if right.drag_started() {
             actions.push(begin(ClipDragKind::TrimEnd));
         } else if body.drag_started() {
-            let grab = body
-                .interact_pointer_pos()
+            // Where on the clip it was pressed, not where the pointer is once
+            // the drag threshold is passed: the clip must not jump.
+            let press = ui
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| body.interact_pointer_pos());
+            let grab = press
                 .map(|pos| map.secs(pos.x) - clip.start_secs)
                 .unwrap_or(0.0);
             actions.push(begin(ClipDragKind::Move { grab_secs: grab }));
@@ -900,7 +1686,24 @@ impl WavesPreviewer {
         if body.hovered() && self.multi_edit.ui.clip_drag.is_none() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
+        let can_paste = self.multi_edit.ui.clip_clipboard.is_some();
         body.context_menu(|ui| {
+            if ui.button("Copy (Ctrl+C)").clicked() {
+                actions.push(Action::CopyClip(clip.id.clone()));
+                ui.close();
+            }
+            if ui.button("Cut (Ctrl+X)").clicked() {
+                actions.push(Action::CutClip(clip.id.clone()));
+                ui.close();
+            }
+            if ui
+                .add_enabled(can_paste, egui::Button::new("Paste at playhead (Ctrl+V)"))
+                .clicked()
+            {
+                actions.push(Action::Paste(None));
+                ui.close();
+            }
+            ui.separator();
             if ui.button("Split at playhead (S)").clicked() {
                 actions.push(Action::ClipCommand(clip.id.clone(), ClipCommand::SplitAtPlayhead));
                 ui.close();
@@ -917,50 +1720,63 @@ impl WavesPreviewer {
     }
 
     /// An automation lane under its track. Returns the lane's value rect.
+    #[allow(clippy::too_many_arguments)]
     fn ui_multi_edit_lane_row(
         &mut self,
         ui: &mut egui::Ui,
         doc: &MultiEditDoc,
         ti: usize,
-        lane: &crate::app::multi_edit::AutomationLane,
+        lane: &AutomationLane,
         map: TimeMap,
+        playhead: f64,
+        snap: &Snap,
         actions: &mut Vec<Action>,
     ) -> Rect {
         let track = &doc.tracks[ti];
-        let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), LANE_H), Sense::hover());
+        let height = lane.height * doc.view.track_zoom;
+        let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
         let header = Rect::from_min_max(row.min, Pos2::new(row.left() + HEADER_W, row.bottom()));
         let area = Rect::from_min_max(Pos2::new(map.left, row.top()), row.max);
         let visuals = ui.visuals().clone();
         let line = visuals.widgets.noninteractive.bg_stroke.color;
+        let color = param_color(lane.param);
         ui.painter().rect_filled(header, 0.0, visuals.faint_bg_color);
         ui.painter().rect_filled(area, 0.0, visuals.extreme_bg_color.gamma_multiply(0.35));
-        // The bracket that ties the lane to its track, as in the design.
+        ui.painter()
+            .line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0, line));
+        ui.painter()
+            .line_segment([header.right_top(), header.right_bottom()], Stroke::new(1.0, line));
+
+        // Header: the bracket tying the lane to its track, the name, the value
+        // at the playhead and the remove button, each in its own place.
+        let hp = ui.painter_at(header);
         let bracket_x = header.left() + LANE_INDENT * 0.5;
-        ui.painter().line_segment(
+        hp.line_segment(
             [Pos2::new(bracket_x, row.top()), Pos2::new(bracket_x, row.bottom())],
             Stroke::new(1.0, line),
         );
-        ui.painter()
-            .line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0, line));
-        ui.painter().line_segment(
-            [header.right_top(), header.right_bottom()],
-            Stroke::new(1.0, line),
+        let remove = Rect::from_center_size(
+            Pos2::new(header.right() - HEADER_PAD - 8.0, header.center().y),
+            Vec2::splat(16.0),
         );
-        ui.painter().text(
+        hp.text(
             Pos2::new(header.left() + LANE_INDENT + 4.0, header.center().y),
             Align2::LEFT_CENTER,
             lane.param.label(),
             FontId::proportional(13.0),
-            visuals.text_color(),
+            color,
         );
-        let remove = Rect::from_center_size(
-            Pos2::new(header.right() - 14.0, header.center().y),
-            Vec2::splat(16.0),
+        hp.text(
+            Pos2::new(remove.left() - 6.0, header.center().y),
+            Align2::RIGHT_CENTER,
+            lane.param.format_value(lane.value_at(playhead)),
+            FontId::monospace(10.0),
+            visuals.weak_text_color(),
         );
         let remove_resp = ui
             .interact(remove, ui.id().with(("me_lane_rm", &lane.id)), Sense::click())
             .on_hover_text("Remove this lane");
-        ui.painter().text(
+        hp.text(
             remove.center(),
             Align2::CENTER_CENTER,
             "\u{00D7}",
@@ -974,42 +1790,55 @@ impl WavesPreviewer {
         if remove_resp.clicked() {
             actions.push(Action::RemoveLane(ti, lane.id.clone()));
         }
+        Self::resize_grip(
+            ui,
+            header,
+            ("me_lane_grip", &lane.id),
+            RowResize::Lane {
+                track_id: track.id.clone(),
+                lane_id: lane.id.clone(),
+                start_height: lane.height,
+                start_y: 0.0,
+            },
+            actions,
+        );
 
-        let inner = area.shrink2(Vec2::new(0.0, 5.0));
+        // The value scale, the grid, the curve, the points.
+        let inner = area.shrink2(Vec2::new(0.0, 6.0));
         let (lo, hi) = lane.param.range();
         let y_of = |v: f32| inner.bottom() - (v - lo) / (hi - lo) * inner.height();
         let value_of = |y: f32| lane.param.clamp(lo + (inner.bottom() - y) / inner.height() * (hi - lo));
         let painter = ui.painter_at(area);
-        // The neutral value, for reference.
-        let neutral_y = y_of(lane.param.neutral());
-        painter.line_segment(
-            [Pos2::new(area.left(), neutral_y), Pos2::new(area.right(), neutral_y)],
-            Stroke::new(1.0, line.gamma_multiply(0.6)),
-        );
-        let stroke = Stroke::new(1.5, LANE_LINE_COLOR);
-        let (vis0, vis1) = map.visible_secs();
-        if lane.points.is_empty() {
+        Self::paint_grid(&painter, area, map, line.gamma_multiply(0.3));
+        // Every line is drawn; a label only where it has room, the neutral
+        // value's first, so a short lane shows fewer labels, never a pile.
+        let mut ticks = lane_ticks(lane.param);
+        ticks.sort_by(|a, b| {
+            (a.0 - lane.param.neutral())
+                .abs()
+                .total_cmp(&(b.0 - lane.param.neutral()).abs())
+        });
+        let mut labelled: Vec<f32> = Vec::new();
+        for (value, label) in ticks {
+            let y = y_of(value);
+            let strong = (value - lane.param.neutral()).abs() < f32::EPSILON;
             painter.line_segment(
-                [Pos2::new(area.left(), neutral_y), Pos2::new(area.right(), neutral_y)],
-                Stroke::new(1.0, LANE_LINE_COLOR.gamma_multiply(0.5)),
+                [Pos2::new(area.left(), y), Pos2::new(area.right(), y)],
+                Stroke::new(1.0, line.gamma_multiply(if strong { 0.9 } else { 0.4 })),
             );
-        } else {
-            let mut pts: Vec<Pos2> = Vec::new();
-            pts.push(Pos2::new(map.x(vis0.min(lane.points[0].secs)), y_of(lane.points[0].value)));
-            for (i, point) in lane.points.iter().enumerate() {
-                let x = map.x(point.secs);
-                if lane.param.is_stepped() && i > 0 {
-                    pts.push(Pos2::new(x, y_of(lane.points[i - 1].value)));
-                }
-                pts.push(Pos2::new(x, y_of(point.value)));
-            }
-            let last = lane.points[lane.points.len() - 1];
-            pts.push(Pos2::new(map.x(vis1.max(last.secs)), y_of(last.value)));
-            painter.add(egui::Shape::line(pts, stroke));
-            for point in &lane.points {
-                painter.circle_filled(Pos2::new(map.x(point.secs), y_of(point.value)), POINT_RADIUS, LANE_LINE_COLOR);
+            let fits = y - LANE_LABEL_H >= area.top() && labelled.iter().all(|other| (other - y).abs() >= LANE_LABEL_H);
+            if fits {
+                labelled.push(y);
+                painter.text(
+                    Pos2::new(area.left() + 3.0, y - 1.0),
+                    Align2::LEFT_BOTTOM,
+                    label,
+                    FontId::monospace(9.0),
+                    visuals.weak_text_color().gamma_multiply(0.8),
+                );
             }
         }
+        Self::paint_curve(&painter, lane, inner, map, color, LANE_STROKE, 0.0);
 
         let resp = ui.interact(area, ui.id().with(("me_lane_area", &lane.id)), Sense::click_and_drag());
         let pointer = resp.interact_pointer_pos().or_else(|| resp.hover_pos());
@@ -1022,14 +1851,35 @@ impl WavesPreviewer {
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| i)
         });
+        let dragging_here = self
+            .multi_edit
+            .ui
+            .lane_drag
+            .as_ref()
+            .filter(|drag| drag.lane_id == lane.id)
+            .map(|drag| drag.point);
+        for (i, point) in lane.points.iter().enumerate() {
+            let hot = nearest == Some(i) || dragging_here == Some(i);
+            let c = Pos2::new(map.x(point.secs), y_of(point.value));
+            let r = if hot { POINT_RADIUS_HOT } else { POINT_RADIUS };
+            painter.circle_filled(c, r, color);
+            painter.circle_stroke(c, r, Stroke::new(1.0, Color32::from_black_alpha(200)));
+        }
         if let (Some(pos), true) = (resp.hover_pos(), resp.hovered()) {
             let text = match nearest {
-                Some(i) => lane.param.format_value(lane.points[i].value),
-                None => lane.param.format_value(value_of(pos.y)),
+                Some(i) => format!(
+                    "{} at {} -- drag to move, double- or right-click to type a value",
+                    lane.param.format_value(lane.points[i].value),
+                    format_secs(lane.points[i].secs)
+                ),
+                None => format!("click to add {}", lane.param.format_value(value_of(pos.y))),
             };
             resp.clone().on_hover_text_at_pointer(text);
         }
-        if resp.drag_started() {
+        // A point is taken the moment it is pressed, so it moves with the
+        // pointer from the first pixel instead of after the drag threshold.
+        let pressed_now = ui.input(|i| i.pointer.primary_pressed());
+        if pressed_now && resp.is_pointer_button_down_on() && dragging_here.is_none() {
             if let Some(point) = nearest {
                 actions.push(Action::BeginPointDrag(LaneDrag {
                     track_id: track.id.clone(),
@@ -1037,20 +1887,24 @@ impl WavesPreviewer {
                     point,
                 }));
             }
-        } else if resp.double_clicked() || resp.secondary_clicked() {
-            if let Some(point) = nearest {
-                actions.push(Action::RemovePoint {
-                    track: ti,
-                    lane: lane.id.clone(),
+        }
+        if resp.double_clicked() || resp.secondary_clicked() {
+            if let (Some(point), Some(pos)) = (nearest, pointer) {
+                actions.push(Action::OpenPointEditor(PointEditor {
+                    track_id: track.id.clone(),
+                    lane_id: lane.id.clone(),
                     point,
-                });
+                    secs: lane.points[point].secs,
+                    value: lane.points[point].value,
+                    at: pos + Vec2::new(12.0, 12.0),
+                }));
             }
         } else if resp.clicked() {
             if let (Some(pos), None) = (pointer, nearest) {
                 actions.push(Action::InsertPoint {
                     track: ti,
                     lane: lane.id.clone(),
-                    secs: map.secs(pos.x),
+                    secs: snap.apply(map.secs(pos.x), &[]),
                     value: value_of(pos.y),
                 });
             }
@@ -1060,10 +1914,9 @@ impl WavesPreviewer {
 
     /// The row under the tracks: the (+) button, and a drop zone that makes
     /// a new track.
-    fn ui_multi_edit_add_row(&mut self, ui: &mut egui::Ui, map: TimeMap, actions: &mut Vec<Action>) {
+    fn ui_multi_edit_add_row(&mut self, ui: &mut egui::Ui, map: TimeMap, snap: &Snap, actions: &mut Vec<Action>) {
         let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ADD_ROW_H), Sense::hover());
         let area = Rect::from_min_max(Pos2::new(map.left, row.top()), row.max);
-        self.multi_edit_drop_target(ui, area, None, map, actions);
         let center = area.center();
         let button_rect = Rect::from_center_size(center, Vec2::splat(30.0));
         let button = ui.interact(button_rect, ui.id().with("me_add_track"), Sense::click());
@@ -1086,62 +1939,279 @@ impl WavesPreviewer {
                 ui.close();
             }
         });
+        // After the (+), so a drag over the row shows the clips over it.
+        self.multi_edit_drop_target(ui, area, None, map, snap, actions);
     }
 
-    /// Delete / S / Ctrl+D on the selected clip, while the timeline owns
-    /// the keys.
-    fn multi_edit_timeline_keys(
-        &mut self,
-        ctx: &egui::Context,
-        doc: &MultiEditDoc,
-        _playhead: f64,
-        actions: &mut Vec<Action>,
-    ) {
-        if !self.surface_keys_allowed(UiSurface::MultiEdit) {
+    /// The value popup of an automation point: its time and value typed in,
+    /// or the point deleted.
+    fn ui_multi_edit_point_editor(&mut self, ctx: &egui::Context) {
+        let Some(editor) = self.multi_edit.ui.point_editor.clone() else {
+            return;
+        };
+        let Some(param) = self
+            .multi_edit_active_doc()
+            .and_then(|doc| doc.tracks.iter().find(|t| t.id == editor.track_id))
+            .and_then(|track| track.lanes.iter().find(|l| l.id == editor.lane_id))
+            .filter(|lane| editor.point < lane.points.len())
+            .map(|lane| lane.param)
+        else {
+            self.multi_edit.ui.point_editor = None;
+            return;
+        };
+        let (lo, hi) = param.range();
+        let mut edited = editor.clone();
+        let mut close = false;
+        let mut delete = false;
+        let area = egui::Area::new(egui::Id::new("multi_edit_point_editor"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(editor.at)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(RichText::new(format!("{} point", param.label())).strong());
+                    egui::Grid::new("multi_edit_point_grid").num_columns(2).show(ui, |ui| {
+                        ui.label("Time");
+                        ui.add(
+                            egui::DragValue::new(&mut edited.secs)
+                                .speed(0.01)
+                                .range(0.0..=f64::MAX)
+                                .custom_formatter(|v, _| format_secs(v))
+                                .custom_parser(parse_secs),
+                        );
+                        ui.end_row();
+                        ui.label("Value");
+                        if param.is_stepped() {
+                            let mut muted = edited.value >= 0.5;
+                            if ui.checkbox(&mut muted, "Muted").changed() {
+                                edited.value = if muted { 1.0 } else { 0.0 };
+                            }
+                        } else {
+                            let (speed, suffix) = match param {
+                                LaneParam::Gain => (0.1, " dB"),
+                                LaneParam::Pitch => (0.05, " st"),
+                                _ => (0.01, ""),
+                            };
+                            ui.add(
+                                egui::DragValue::new(&mut edited.value)
+                                    .speed(speed)
+                                    .range(lo..=hi)
+                                    .suffix(suffix),
+                            );
+                        }
+                        ui.end_row();
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete point").clicked() {
+                            delete = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        let clicked_outside = ctx.input(|i| i.pointer.any_pressed())
+            && ctx
+                .input(|i| i.pointer.interact_pos())
+                .is_some_and(|pos| !area.response.rect.contains(pos))
+            && !self.multi_edit.ui.point_editor_just_opened;
+        self.multi_edit.ui.point_editor_just_opened = false;
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            close = true;
+        }
+        if delete {
+            if let Some(lane) = self
+                .multi_edit_active_doc_mut()
+                .and_then(|doc| doc.tracks.iter_mut().find(|t| t.id == editor.track_id))
+                .and_then(|track| track.lanes.iter_mut().find(|l| l.id == editor.lane_id))
+            {
+                lane.remove_point(editor.point);
+            }
+            self.multi_edit_touched();
+            self.multi_edit.ui.point_editor = None;
             return;
         }
-        let Some(clip) = self
+        if edited.secs != editor.secs || edited.value != editor.value {
+            self.multi_edit_set_point(
+                &editor.track_id,
+                &editor.lane_id,
+                editor.point,
+                edited.secs,
+                edited.value,
+            );
+            // Read back what the lane kept: neighbours clamp the time.
+            let kept = self
+                .multi_edit_active_doc()
+                .and_then(|doc| doc.tracks.iter().find(|t| t.id == editor.track_id))
+                .and_then(|track| track.lanes.iter().find(|l| l.id == editor.lane_id))
+                .and_then(|lane| lane.points.get(editor.point).copied());
+            if let Some(point) = kept {
+                edited.secs = point.secs;
+                edited.value = point.value;
+            }
+        }
+        self.multi_edit.ui.point_editor = if close || clicked_outside {
+            None
+        } else {
+            Some(edited)
+        };
+    }
+
+    /// The timeline's keys, while it owns them: Delete, S, Ctrl+D, the marker
+    /// key, and the arrows (the playhead; with Alt the selected clip).
+    fn multi_edit_timeline_keys(&mut self, ctx: &egui::Context, doc: &MultiEditDoc, actions: &mut Vec<Action>) {
+        if !self.surface_keys_allowed(UiSurface::MultiEdit) {
+            self.multi_edit.ui.seek_hold = None;
+            self.multi_edit.ui.nudge_hold = None;
+            return;
+        }
+        if self.keymap_consume(ctx, crate::app::keymap::Action::EditorAddMarker) {
+            actions.push(Action::AddMarker);
+        }
+        let delete = ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                | i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+        });
+        if delete {
+            actions.push(Action::DeleteSelected);
+        }
+        if let Some(clip) = self
             .multi_edit
             .ui
             .selected_clip
             .clone()
             .filter(|id| doc.clip(id).is_some())
-        else {
+        {
+            let (split, duplicate) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::S),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::D),
+                )
+            });
+            if split {
+                actions.push(Action::ClipCommand(clip, ClipCommand::SplitAtPlayhead));
+            } else if duplicate {
+                actions.push(Action::ClipCommand(clip, ClipCommand::Duplicate));
+            }
+        }
+        if self.topbar_volume_owns_arrows(ctx) {
             return;
+        }
+        self.multi_edit_arrow_keys(ctx);
+    }
+
+    /// Held arrows repeat the way the editor's do (`SEEK_REPEAT_*`): one
+    /// step on the press, then after a pause, then faster.
+    fn multi_edit_arrow_keys(&mut self, ctx: &egui::Context) {
+        use crate::app::types::SeekHoldState;
+        use crate::app::ui_timing::{
+            SEEK_REPEAT_ACCELERATE_AFTER, SEEK_REPEAT_DELAY, SEEK_REPEAT_FAST, SEEK_REPEAT_SLOW,
         };
-        let (delete, split, duplicate) = ctx.input_mut(|i| {
+        let (left_down, right_down, pressed_left, pressed_right, mods) = ctx.input(|i| {
+            // The modifiers the arrow press itself carried, when there is one:
+            // they are what was held at that press, however the frame's
+            // modifier state reads by the time it is drawn.
+            let pressed_with = i.events.iter().rev().find_map(|event| match event {
+                egui::Event::Key {
+                    key: egui::Key::ArrowLeft | egui::Key::ArrowRight,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some(*modifiers),
+                _ => None,
+            });
             (
-                i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
-                    | i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace),
-                i.consume_key(egui::Modifiers::NONE, egui::Key::S),
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::D),
+                i.key_down(egui::Key::ArrowLeft),
+                i.key_down(egui::Key::ArrowRight),
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+                pressed_with.unwrap_or(i.modifiers),
             )
         });
-        if delete {
-            actions.push(Action::ClipCommand(clip, ClipCommand::Delete));
-        } else if split {
-            actions.push(Action::ClipCommand(clip, ClipCommand::SplitAtPlayhead));
-        } else if duplicate {
-            actions.push(Action::ClipCommand(clip, ClipCommand::Duplicate));
+        // Taken so egui's focus navigation does not also act on them.
+        ctx.input_mut(|i| {
+            for key in [egui::Key::ArrowLeft, egui::Key::ArrowRight] {
+                for m in [
+                    egui::Modifiers::NONE,
+                    egui::Modifiers::ALT,
+                    egui::Modifiers::COMMAND,
+                    egui::Modifiers::ALT | egui::Modifiers::COMMAND,
+                ] {
+                    i.consume_key(m, key);
+                }
+            }
+        });
+        // A tap can press and release within one frame: count the press too.
+        let dir = match (left_down || pressed_left, right_down || pressed_right) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        };
+        let nudge = mods.alt;
+        let fine = mods.ctrl || mods.command;
+        let slot = if nudge {
+            self.multi_edit.ui.seek_hold = None;
+            &mut self.multi_edit.ui.nudge_hold
+        } else {
+            self.multi_edit.ui.nudge_hold = None;
+            &mut self.multi_edit.ui.seek_hold
+        };
+        if dir == 0 {
+            *slot = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        let pressed = if dir > 0 { pressed_right } else { pressed_left };
+        let (step, first) = match slot.take() {
+            Some(state) if state.dir == dir => {
+                let elapsed = now.saturating_duration_since(state.started_at);
+                let since = now.saturating_duration_since(state.last_step_at);
+                let interval = if elapsed >= SEEK_REPEAT_ACCELERATE_AFTER {
+                    SEEK_REPEAT_FAST
+                } else {
+                    SEEK_REPEAT_SLOW
+                };
+                let step = pressed || (elapsed >= SEEK_REPEAT_DELAY && since >= interval);
+                *slot = Some(SeekHoldState {
+                    last_step_at: if step { now } else { state.last_step_at },
+                    ..state
+                });
+                (step, false)
+            }
+            _ => {
+                *slot = Some(SeekHoldState {
+                    dir,
+                    started_at: now,
+                    last_step_at: now,
+                });
+                (true, true)
+            }
+        };
+        if step {
+            if nudge {
+                self.multi_edit_nudge_selected_clip(dir, fine, first);
+            } else {
+                self.multi_edit_step_playhead(dir, fine);
+            }
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(SEEK_REPEAT_FAST);
         }
     }
 
-    fn apply_multi_edit_actions(&mut self, actions: Vec<Action>) {
+    fn apply_multi_edit_actions(&mut self, actions: Vec<Action>, map: TimeMap) {
+        let doc_id = self.multi_edit.active.clone().unwrap_or_default();
         for action in actions {
             match action {
                 Action::SelectClip(id) => self.multi_edit_select_clip(id),
+                Action::SelectTrack(id) => self.multi_edit_select_track(id),
                 Action::BeginClipDrag(drag) => {
                     self.multi_edit_checkpoint();
                     self.multi_edit_select_clip(Some(drag.clip_id.clone()));
                     self.multi_edit.ui.clip_drag = Some(drag);
                 }
                 Action::ClipCommand(id, command) => {
-                    let playhead = self
-                        .multi_edit
-                        .active
-                        .as_deref()
-                        .map(|doc| self.multi_edit_playhead(doc))
-                        .unwrap_or(0.0);
+                    let playhead = self.multi_edit_playhead(&doc_id);
                     self.multi_edit_checkpoint();
                     let Some(doc) = self.multi_edit_active_doc_mut() else {
                         continue;
@@ -1156,6 +2226,23 @@ impl WavesPreviewer {
                     };
                     self.multi_edit.ui.selected_clip = selected;
                     self.multi_edit_touched();
+                }
+                Action::DeleteSelected => {
+                    self.multi_edit_delete_selected();
+                }
+                Action::CopyClip(id) => {
+                    self.multi_edit_select_clip(Some(id));
+                    self.multi_edit_copy_selected();
+                }
+                Action::CutClip(id) => {
+                    self.multi_edit_select_clip(Some(id));
+                    self.multi_edit_cut_selected();
+                }
+                Action::Paste(track) => {
+                    if track.is_some() {
+                        self.multi_edit_select_track(track);
+                    }
+                    self.multi_edit_paste();
                 }
                 Action::Seek(secs) => self.multi_edit_seek(secs),
                 Action::DropRows {
@@ -1177,11 +2264,23 @@ impl WavesPreviewer {
                 }
                 Action::ToggleMute(ti) => self.multi_edit_toggle_track_flag(ti, true),
                 Action::ToggleSolo(ti) => self.multi_edit_toggle_track_flag(ti, false),
+                Action::ToggleLanes(ti) => {
+                    if let Some(track) = self
+                        .multi_edit_active_doc_mut()
+                        .and_then(|doc| doc.tracks.get_mut(ti))
+                    {
+                        track.lanes_collapsed = !track.lanes_collapsed;
+                    }
+                    self.multi_edit_mark_changed(&doc_id);
+                }
+                Action::ToggleVideo(track_id, show) => self.multi_edit_set_show_video(&track_id, show),
                 Action::BeginRenameTrack(ti) => {
                     if let Some(track) = self.multi_edit_active_doc().and_then(|doc| doc.tracks.get(ti)) {
                         self.multi_edit.ui.renaming_track = Some((track.id.clone(), track.name.clone()));
+                        self.multi_edit.ui.rename_focus_pending = true;
                     }
                 }
+                Action::CancelRenameTrack => self.multi_edit.ui.renaming_track = None,
                 Action::CommitRenameTrack(ti, name) => {
                     self.multi_edit.ui.renaming_track = None;
                     let name = name.trim().to_string();
@@ -1195,11 +2294,15 @@ impl WavesPreviewer {
                     {
                         track.name = name;
                     }
+                    self.multi_edit_mark_changed(&doc_id);
                 }
                 Action::AddLane(ti, param) => {
                     self.multi_edit_checkpoint();
                     if let Some(doc) = self.multi_edit_active_doc_mut() {
                         doc.ensure_lane(ti, param);
+                        if let Some(track) = doc.tracks.get_mut(ti) {
+                            track.lanes_collapsed = false;
+                        }
                     }
                     self.multi_edit_touched();
                 }
@@ -1224,6 +2327,7 @@ impl WavesPreviewer {
                             doc.remove_track(&id);
                         }
                     }
+                    self.multi_edit.ui.selected_track = None;
                     self.multi_edit_touched();
                 }
                 Action::InsertPoint {
@@ -1246,31 +2350,75 @@ impl WavesPreviewer {
                     self.multi_edit_checkpoint();
                     self.multi_edit.ui.lane_drag = Some(drag);
                 }
-                Action::RemovePoint { track, lane, point } => {
+                Action::OpenPointEditor(editor) => {
                     self.multi_edit_checkpoint();
-                    if let Some(lane) = self
-                        .multi_edit_active_doc_mut()
-                        .and_then(|doc| doc.tracks.get_mut(track))
-                        .and_then(|track| track.lanes.iter_mut().find(|l| l.id == lane))
-                    {
-                        lane.remove_point(point);
+                    self.multi_edit.ui.lane_drag = None;
+                    self.multi_edit.ui.point_editor = Some(editor);
+                    self.multi_edit.ui.point_editor_just_opened = true;
+                }
+                Action::BeginResize(resize) => {
+                    self.multi_edit.ui.row_resize = Some(resize);
+                }
+                Action::AddMarker => {
+                    self.multi_edit_add_marker_at_playhead();
+                }
+                Action::BeginMarkerDrag(id) => {
+                    self.multi_edit_checkpoint();
+                    self.multi_edit.ui.marker_drag = Some(id);
+                }
+                Action::BeginRenameMarker(id) => {
+                    let label = self
+                        .multi_edit_active_doc()
+                        .and_then(|doc| doc.markers.iter().find(|m| m.id == id))
+                        .map(|m| m.label.clone())
+                        .unwrap_or_default();
+                    self.multi_edit.ui.renaming_marker = Some((id, label));
+                    self.multi_edit.ui.rename_focus_pending = true;
+                }
+                Action::RemoveMarker(id) => {
+                    self.multi_edit_checkpoint();
+                    if let Some(doc) = self.multi_edit_active_doc_mut() {
+                        doc.remove_marker(&id);
                     }
-                    self.multi_edit_touched();
+                    self.multi_edit_mark_changed(&doc_id);
                 }
                 Action::Zoom {
                     factor,
                     anchor_secs,
                     anchor_x,
                 } => {
+                    let width = map.width();
                     if let Some(doc) = self.multi_edit_active_doc_mut() {
-                        let pps = (doc.view.px_per_sec * factor).clamp(MIN_PX_PER_SEC, MAX_PX_PER_SEC);
+                        let pps = (doc.view.px_per_sec * factor)
+                            .clamp(zoom_out_limit(doc.end_secs(), width), MAX_PX_PER_SEC);
                         doc.view.px_per_sec = pps;
-                        doc.view.scroll_secs = (anchor_secs - (anchor_x / pps) as f64).max(0.0);
+                        let visible = (width / pps) as f64;
+                        doc.view.scroll_secs = clamp_scroll_secs(
+                            anchor_secs - (anchor_x / pps) as f64,
+                            doc.end_secs(),
+                            visible,
+                        );
                     }
                 }
+                Action::ZoomVertical(factor) => self.multi_edit_zoom_rows(factor),
                 Action::Scroll(delta) => {
+                    let width = map.width();
                     if let Some(doc) = self.multi_edit_active_doc_mut() {
-                        doc.view.scroll_secs = (doc.view.scroll_secs + delta).max(0.0);
+                        let visible = (width / doc.view.px_per_sec) as f64;
+                        doc.view.scroll_secs =
+                            clamp_scroll_secs(doc.view.scroll_secs + delta, doc.end_secs(), visible);
+                    }
+                }
+                Action::ScrollYBy(delta) => {
+                    let max_y = self.multi_edit.ui.max_scroll_y;
+                    if let Some(doc) = self.multi_edit_active_doc_mut() {
+                        doc.view.scroll_y = (doc.view.scroll_y + delta).clamp(0.0, max_y);
+                    }
+                }
+                Action::ScrollYTo(offset) => {
+                    let max_y = self.multi_edit.ui.max_scroll_y;
+                    if let Some(doc) = self.multi_edit_active_doc_mut() {
+                        doc.view.scroll_y = offset.clamp(0.0, max_y);
                     }
                 }
             }
@@ -1292,25 +2440,26 @@ impl WavesPreviewer {
         self.multi_edit_touched();
     }
 
-    /// Carry a clip or point drag with the pointer; end it on release.
+    /// Carry a clip, point, marker or row-height drag with the pointer; end
+    /// it on release. Every time one sets is snapped (Alt: not).
     fn multi_edit_continue_drags(
         &mut self,
         ctx: &egui::Context,
+        doc: &MultiEditDoc,
         map: TimeMap,
+        snap: &Snap,
         track_rows: &[(usize, Rect)],
         lane_rects: &HashMap<(String, String), Rect>,
     ) {
-        let (down, pos, alt) = ctx.input(|i| {
-            (
-                i.pointer.primary_down(),
-                i.pointer.interact_pos(),
-                i.modifiers.alt,
-            )
-        });
+        let (down, pos) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
         if !down {
-            if self.multi_edit.ui.clip_drag.take().is_some()
+            let ended = self.multi_edit.ui.clip_drag.take().is_some()
                 | self.multi_edit.ui.lane_drag.take().is_some()
-            {
+                | self.multi_edit.ui.marker_drag.take().is_some();
+            if self.multi_edit.ui.row_resize.take().is_some() {
+                self.multi_edit_mark_changed(&doc.id);
+            }
+            if ended {
                 self.multi_edit_touched();
             }
             return;
@@ -1324,57 +2473,38 @@ impl WavesPreviewer {
                 ClipDragKind::Move { .. } => egui::CursorIcon::Grabbing,
                 _ => egui::CursorIcon::ResizeHorizontal,
             });
-            let playhead = self.multi_edit_playhead(self.multi_edit.active.as_deref().unwrap_or(""));
-            let Some(doc) = self.multi_edit_active_doc_mut() else {
-                return;
-            };
-            let snap_secs = (SNAP_PX / map.px_per_sec) as f64;
-            let mut candidates = doc.snap_points(Some(&drag.clip_id));
-            candidates.push(playhead);
-            let snap = |t: f64| -> f64 {
-                if alt {
-                    return t;
-                }
-                candidates
-                    .iter()
-                    .copied()
-                    .filter(|c| (c - t).abs() <= snap_secs)
-                    .min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs()))
-                    .unwrap_or(t)
-            };
             let Some(clip) = doc.clip(&drag.clip_id).cloned() else {
                 self.multi_edit.ui.clip_drag = None;
+                return;
+            };
+            // The clip's own edges are no target for itself.
+            let own = [clip.start_secs, clip.end_secs()];
+            let target = track_rows
+                .iter()
+                .find(|(_, rect)| pos.y >= rect.top() && pos.y < rect.bottom())
+                .map(|(ti, _)| *ti);
+            let Some(live) = self.multi_edit_active_doc_mut() else {
                 return;
             };
             match drag.kind {
                 ClipDragKind::Move { grab_secs } => {
                     let raw_start = (pointer_secs - grab_secs).max(0.0);
-                    let snapped_start = snap(raw_start);
-                    let snapped_end = snap(raw_start + clip.len_secs) - clip.len_secs;
-                    let start = if (snapped_start - raw_start).abs() <= (snapped_end - raw_start).abs() {
-                        snapped_start
-                    } else {
-                        snapped_end
-                    };
-                    let target = track_rows
-                        .iter()
-                        .find(|(_, rect)| pos.y >= rect.top() && pos.y < rect.bottom())
-                        .map(|(ti, _)| *ti);
-                    if !doc.move_clip(&drag.clip_id, start.max(0.0), target) {
-                        doc.move_clip(&drag.clip_id, start.max(0.0), None);
+                    let start = snap.apply_span(raw_start, clip.len_secs, &own);
+                    if !live.move_clip(&drag.clip_id, start.max(0.0), target) {
+                        live.move_clip(&drag.clip_id, start.max(0.0), None);
                     }
                 }
                 ClipDragKind::TrimStart => {
-                    doc.trim_clip_start(&drag.clip_id, snap(pointer_secs));
+                    live.trim_clip_start(&drag.clip_id, snap.apply(pointer_secs, &own));
                 }
                 ClipDragKind::TrimEnd => {
-                    doc.trim_clip_end(&drag.clip_id, snap(pointer_secs));
+                    live.trim_clip_end(&drag.clip_id, snap.apply(pointer_secs, &own));
                 }
                 ClipDragKind::FadeIn => {
-                    doc.set_fade_in(&drag.clip_id, pointer_secs - clip.start_secs);
+                    live.set_fade_in(&drag.clip_id, snap.apply(pointer_secs, &own) - clip.start_secs);
                 }
                 ClipDragKind::FadeOut => {
-                    doc.set_fade_out(&drag.clip_id, clip.end_secs() - pointer_secs);
+                    live.set_fade_out(&drag.clip_id, clip.end_secs() - snap.apply(pointer_secs, &own));
                 }
             }
             self.multi_edit_touched();
@@ -1382,21 +2512,57 @@ impl WavesPreviewer {
             let Some(rect) = lane_rects.get(&(drag.track_id.clone(), drag.lane_id.clone())).copied() else {
                 return;
             };
-            let Some(doc) = self.multi_edit_active_doc_mut() else {
-                return;
-            };
-            let Some(lane) = doc
+            let own = doc
                 .tracks
-                .iter_mut()
+                .iter()
                 .find(|t| t.id == drag.track_id)
+                .and_then(|t| t.lanes.iter().find(|l| l.id == drag.lane_id))
+                .and_then(|l| l.points.get(drag.point))
+                .map(|p| vec![p.secs])
+                .unwrap_or_default();
+            let secs = snap.apply(pointer_secs, &own);
+            let Some(lane) = self
+                .multi_edit_active_doc_mut()
+                .and_then(|d| d.tracks.iter_mut().find(|t| t.id == drag.track_id))
                 .and_then(|t| t.lanes.iter_mut().find(|l| l.id == drag.lane_id))
             else {
                 return;
             };
             let (lo, hi) = lane.param.range();
             let value = lo + (rect.bottom() - pos.y) / rect.height().max(1.0) * (hi - lo);
-            lane.move_point(drag.point, pointer_secs, value);
+            lane.move_point(drag.point, secs, value);
             self.multi_edit_touched();
+        } else if let Some(id) = self.multi_edit.ui.marker_drag.clone() {
+            let own: Vec<f64> = doc.markers.iter().filter(|m| m.id == id).map(|m| m.secs).collect();
+            let secs = snap.apply(pointer_secs, &own);
+            if let Some(live) = self.multi_edit_active_doc_mut() {
+                live.move_marker(&id, secs);
+            }
+            self.multi_edit_mark_changed(&doc.id);
+        } else if let Some(resize) = self.multi_edit.ui.row_resize.clone() {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            let zoom = doc.view.track_zoom.max(MIN_TRACK_ZOOM);
+            if let Some(live) = self.multi_edit_active_doc_mut() {
+                match resize {
+                    RowResize::Track { track_id, start_height, start_y } => {
+                        if let Some(track) = live.tracks.iter_mut().find(|t| t.id == track_id) {
+                            track.height = (start_height + (pos.y - start_y) / zoom)
+                                .clamp(MIN_TRACK_HEIGHT, MAX_TRACK_HEIGHT);
+                        }
+                    }
+                    RowResize::Lane { track_id, lane_id, start_height, start_y } => {
+                        if let Some(lane) = live
+                            .tracks
+                            .iter_mut()
+                            .find(|t| t.id == track_id)
+                            .and_then(|t| t.lanes.iter_mut().find(|l| l.id == lane_id))
+                        {
+                            lane.height = (start_height + (pos.y - start_y) / zoom)
+                                .clamp(MIN_LANE_HEIGHT, MAX_LANE_HEIGHT);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1431,6 +2597,15 @@ impl WavesPreviewer {
     }
 }
 
+/// "m:ss.mmm" or plain seconds back into seconds, for the point popup.
+fn parse_secs(text: &str) -> Option<f64> {
+    let text = text.trim();
+    match text.split_once(':') {
+        Some((m, s)) => Some(m.trim().parse::<f64>().ok()? * 60.0 + s.trim().parse::<f64>().ok()?),
+        None => text.parse::<f64>().ok(),
+    }
+}
+
 /// How loud a clip is at timeline second `secs` from its fades alone, for
 /// drawing the waveform the way it will sound.
 fn fade_gain_at(clip: &Clip, secs: f64) -> f32 {
@@ -1444,4 +2619,16 @@ fn fade_gain_at(clip: &Clip, secs: f64) -> f32 {
         gain *= (to_end / clip.fade_out_secs).clamp(0.0, 1.0);
     }
     gain as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_secs;
+
+    #[test]
+    fn typed_times_read_both_ways() {
+        assert_eq!(parse_secs("1:02.500"), Some(62.5));
+        assert_eq!(parse_secs(" 3.25 "), Some(3.25));
+        assert_eq!(parse_secs("x"), None);
+    }
 }

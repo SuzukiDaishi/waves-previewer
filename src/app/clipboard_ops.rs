@@ -933,6 +933,14 @@ impl super::WavesPreviewer {
             self.handle_editor_audio_clipboard_hotkeys(ctx);
             return;
         }
+        // The timeline's own clipboard, when it owns the keys; otherwise
+        // the Multi Edits pane is the list, below.
+        if self.is_multi_edit_workspace_active()
+            && self.surface_keys_allowed(super::input_focus::UiSurface::MultiEdit)
+        {
+            self.handle_multi_edit_clipboard_hotkeys(ctx, os_paste);
+            return;
+        }
         // The Multi Edits pane is the list too; `allow_paste` below still
         // requires the list to own the keys, so the timeline keeps its own.
         if !self.is_list_workspace_active() && !self.is_multi_edit_workspace_active() {

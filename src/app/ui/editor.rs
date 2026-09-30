@@ -308,14 +308,10 @@ const WARP_TIME_RADIUS_MS: std::ops::RangeInclusive<f32> = 10.0..=2_000.0;
 const WARP_FREQ_RADIUS_HZ: std::ops::RangeInclusive<f32> =
     crate::sample_rate::AUDIBLE_LOW_HZ..=8_000.0;
 
-/// Held arrow-key seeking in the editor: the first step is immediate, the
-/// next waits `SEEK_REPEAT_DELAY` (so a tap moves one step), then steps come
-/// every `SEEK_REPEAT_SLOW`, and every `SEEK_REPEAT_FAST` once the key has
-/// been held for `SEEK_REPEAT_ACCELERATE_AFTER`.
-const SEEK_REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(220);
-const SEEK_REPEAT_SLOW: std::time::Duration = std::time::Duration::from_millis(70);
-const SEEK_REPEAT_FAST: std::time::Duration = std::time::Duration::from_millis(35);
-const SEEK_REPEAT_ACCELERATE_AFTER: std::time::Duration = std::time::Duration::from_millis(650);
+// Held arrow-key seeking: shared with the Multi Edits timeline.
+use crate::app::ui_timing::{
+    SEEK_REPEAT_ACCELERATE_AFTER, SEEK_REPEAT_DELAY, SEEK_REPEAT_FAST, SEEK_REPEAT_SLOW,
+};
 
 /// Mini meter analysis windows, in time so they read the same at any rate:
 /// the oscilloscope shows 40 ms (a couple of cycles of a low voice), the
