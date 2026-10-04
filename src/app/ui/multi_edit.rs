@@ -7,7 +7,7 @@
 //! [`Action`] and applied afterwards. Drawing never holds the document while
 //! editing it, and one frame's edits land together.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
@@ -16,17 +16,21 @@ use crate::app::input_focus::UiSurface;
 use crate::app::multi_edit::{
     clamp_scroll_secs, grid_points, grid_step_secs, snap_secs, snap_span, zoom_out_limit,
     AutomationLane,
-    Clip, LaneParam, MultiEditDoc, Track, TrackKind, MAX_LANE_HEIGHT, MAX_PX_PER_SEC,
+    Clip, LaneParam, MultiEditDoc, Track, TrackKind, TrackOutput, MAX_LANE_HEIGHT, MAX_PX_PER_SEC,
     MAX_TRACK_HEIGHT, MAX_TRACK_ZOOM, MIN_LANE_HEIGHT, MIN_TRACK_HEIGHT, MIN_TRACK_ZOOM,
     TRACK_GAIN_MAX_DB, TRACK_GAIN_MIN_DB,
 };
 use crate::app::multi_edit_ops::{
-    ClipDrag, ClipDragKind, DropPreview, LaneDrag, PointEditor, RowResize, SourceSlot,
+    ClipDrag, ClipDragKind, DropPreview, LaneDrag, Marquee, PointEditor, RowResize, SourceSlot,
     MULTI_EDIT_GRID_MIN_PX,
 };
-use crate::app::multi_edit_render::{crossfade_segments, xfade_gain, XfadeSeg, XfadeShape};
+use crate::app::multi_edit_render::{
+    covered_spans, crossfade_segments, draw_order, xfade_gain, XfadeSeg, XfadeShape,
+};
+use crate::app::channel_layout_ops::layout_name;
 use crate::app::types::{ColumnId, ListViewProfile};
 use crate::app::WavesPreviewer;
+use crate::audio_channels::{Layout, SpeakerPos, PRESETS};
 
 /// Rows dragged from the list pane onto the timeline.
 pub(crate) struct MultiEditRowDrag(pub Vec<PathBuf>);
@@ -41,6 +45,8 @@ const HEADER_LINE_H: f32 = 20.0;
 const HEADER_BUTTON: f32 = 22.0;
 /// Width of a video track's picture-window toggle.
 const VIDEO_BUTTON_W: f32 = 46.0;
+/// Width of a track's output chip ("St", "L", "LFE", "Ch 13").
+const OUTPUT_CHIP_W: f32 = 34.0;
 /// Ruler height: tick labels below, marker flags above.
 const RULER_H: f32 = 30.0;
 /// The row under the tracks that holds the add button and takes drops that
@@ -75,6 +81,16 @@ const AUDIO_CLIP_FILL: Color32 = Color32::from_rgb(46, 92, 140);
 const VIDEO_CLIP_FILL: Color32 = Color32::from_rgb(104, 70, 150);
 const MISSING_CLIP_FILL: Color32 = Color32::from_rgb(110, 50, 50);
 const WAVE_COLOR: Color32 = Color32::from_rgb(190, 215, 240);
+/// The waveform of a clip where it lies over another: warm, so the two
+/// waveforms in a crossfade are told apart.
+const COVER_WAVE_COLOR: Color32 = Color32::from_rgb(250, 205, 150);
+/// How much of a clip's fill is left where it lies over another clip, so
+/// the one under it shows through.
+const COVER_FILL_ALPHA: f32 = 0.3;
+/// A crossfade's curves.
+const XFADE_COLOR: Color32 = Color32::from_rgb(255, 196, 110);
+/// The cut tool's line.
+const CUT_LINE_COLOR: Color32 = Color32::from_rgb(255, 120, 90);
 const PLAYHEAD_COLOR: Color32 = Color32::from_rgb(235, 80, 60);
 const MARKER_COLOR: Color32 = Color32::from_rgb(120, 200, 255);
 
@@ -215,6 +231,24 @@ enum Action {
     AddMarker,
     CopyClip(String),
     CutClip(String),
+    /// Split a clip at a time (the cut tool, or Alt+click).
+    SplitAt(String, f64),
+    /// Split a clip into one track per channel of its source.
+    SplitChannels(String),
+    /// Send a track (by id) to the front pair, or to one channel in mono.
+    SetTrackOutput(String, TrackOutput),
+    SetCutTool(bool),
+    /// Select the track this many rows down (up when negative).
+    StepTrack(i32),
+    /// Ctrl+click: in or out of the selection.
+    ToggleClip(String),
+    /// Shift+click: into the selection.
+    AddClip(String),
+    SelectAllClips,
+    BeginMarquee {
+        origin: Pos2,
+        additive: bool,
+    },
     /// Paste at the playhead, on this track when it takes the clip.
     Paste(Option<String>),
     BeginMarkerDrag(String),
@@ -308,7 +342,160 @@ enum ClipCommand {
     Delete,
 }
 
+/// What a click on a clip does to the selection: Ctrl toggles it, Shift adds
+/// it, a plain click selects it alone.
+fn clip_click_action(ui: &egui::Ui, id: &str) -> Action {
+    let mods = click_mods(ui);
+    if mods.ctrl || mods.command {
+        Action::ToggleClip(id.to_string())
+    } else if mods.shift {
+        Action::AddClip(id.to_string())
+    } else {
+        Action::SelectClip(Some(id.to_string()))
+    }
+}
+
+/// Both sets of modifiers held: either one says a key was down.
+fn merge_mods(a: egui::Modifiers, b: egui::Modifiers) -> egui::Modifiers {
+    egui::Modifiers {
+        alt: a.alt || b.alt,
+        ctrl: a.ctrl || b.ctrl,
+        shift: a.shift || b.shift,
+        mac_cmd: a.mac_cmd || b.mac_cmd,
+        command: a.command || b.command,
+    }
+}
+
+/// The modifiers held at a click: the frame's, and the release event's --
+/// a test harness, and a fast click, carry them on the event alone.
+fn click_mods(ui: &egui::Ui) -> egui::Modifiers {
+    ui.input(|i| {
+        i.events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::PointerButton {
+                    pressed: false,
+                    modifiers,
+                    ..
+                } => Some(*modifiers),
+                _ => None,
+            })
+            .fold(i.modifiers, merge_mods)
+    })
+}
+
+/// The corners of the part of clip `rect` from `xa` to `xb`: rounded only
+/// where the part reaches the clip's own ends.
+fn clip_corners(rect: Rect, xa: f32, xb: f32) -> egui::CornerRadius {
+    let r = CLIP_CORNER as u8;
+    let left = if xa <= rect.left() + 0.5 { r } else { 0 };
+    let right = if xb >= rect.right() - 0.5 { r } else { 0 };
+    egui::CornerRadius {
+        nw: left,
+        sw: left,
+        ne: right,
+        se: right,
+    }
+}
+
+/// A crossfade between two clips over `seg`, drawn on the clip on top: its
+/// own gain (rising for a fade-in) in the crossfade colour, the clip under
+/// it in the waveform colour, as the equal-power curves both follow; and the
+/// crossfade's length when there is room.
+fn paint_crossfade(painter: &egui::Painter, rect: Rect, map: TimeMap, seg: &XfadeSeg) {
+    let (a, b) = (map.x(seg.start), map.x(seg.end));
+    if b - a < 1.0 {
+        return;
+    }
+    let steps = ((b - a) / 3.0).ceil().clamp(4.0, 64.0) as usize;
+    let curve = |rising: bool| -> Vec<Pos2> {
+        (0..=steps)
+            .map(|k| {
+                let u = k as f32 / steps as f32;
+                let phase = u * std::f32::consts::FRAC_PI_2;
+                let gain = if rising { phase.sin() } else { phase.cos() };
+                Pos2::new(a + (b - a) * u, rect.bottom() - gain * rect.height())
+            })
+            .collect()
+    };
+    let own_rising = seg.shape == XfadeShape::In;
+    // The span itself, tinted, and where the clip underneath ends (its edge
+    // is under this clip's see-through fill).
+    painter.rect_filled(
+        Rect::from_min_max(Pos2::new(a, rect.top()), Pos2::new(b, rect.bottom())),
+        0.0,
+        XFADE_COLOR.gamma_multiply(0.12),
+    );
+    if own_rising {
+        painter.add(egui::Shape::dashed_line(
+            &[Pos2::new(b, rect.top()), Pos2::new(b, rect.bottom())],
+            Stroke::new(1.2, Color32::WHITE.gamma_multiply(0.8)),
+            4.0,
+            3.0,
+        ));
+    }
+    painter.add(egui::Shape::line(curve(!own_rising), Stroke::new(2.0, WAVE_COLOR)));
+    painter.add(egui::Shape::line(curve(own_rising), Stroke::new(2.0, XFADE_COLOR)));
+    if b - a >= 56.0 {
+        let label = format!("X {}", format_len(seg.end - seg.start));
+        let galley = painter.layout_no_wrap(label, FontId::proportional(11.0), Color32::WHITE);
+        let pos = Pos2::new((a + b) * 0.5 - galley.size().x * 0.5, rect.bottom() - galley.size().y - 3.0);
+        let backing = Rect::from_min_size(pos - Vec2::new(3.0, 1.0), galley.size() + Vec2::new(6.0, 2.0));
+        painter.rect_filled(backing, 3.0, Color32::from_black_alpha(150));
+        painter.galley(pos, galley, Color32::WHITE);
+    }
+}
+
+/// Widest a waiting clip's chip grows (its name is cut to fit).
+const PENDING_CHIP_MAX_W: f32 = 180.0;
+/// Height of a waiting clip's chip, and the step between stacked ones.
+const PENDING_CHIP_H: f32 = 17.0;
+
+/// A clip whose length is not known yet, as its start alone: a line down
+/// `band` at `x` and a chip with its name and an ellipsis. Several waiting
+/// at one spot stack their chips (`stack`), wrapping to the top when the
+/// band is full. Returns the chip.
+fn paint_pending_clip(
+    painter: &egui::Painter,
+    x: f32,
+    band: Rect,
+    stack: usize,
+    name: &str,
+    fill: Color32,
+    text: Color32,
+) -> Rect {
+    painter.line_segment(
+        [Pos2::new(x, band.top()), Pos2::new(x, band.bottom())],
+        Stroke::new(2.0, fill),
+    );
+    let rows = ((band.height() - 4.0) / PENDING_CHIP_H).floor().max(1.0) as usize;
+    let top = band.top() + 2.0 + (stack % rows) as f32 * PENDING_CHIP_H;
+    let galley = painter.layout_no_wrap(format!("{name} \u{2026}"), FontId::proportional(11.0), text);
+    let width = (galley.size().x + 10.0).min(PENDING_CHIP_MAX_W);
+    let chip = Rect::from_min_size(Pos2::new(x, top), Vec2::new(width, PENDING_CHIP_H - 2.0));
+    painter.rect_filled(chip, 3.0, fill);
+    painter.add(egui::Shape::dashed_line(
+        &[chip.left_top(), chip.right_top(), chip.right_bottom(), chip.left_bottom(), chip.left_top()],
+        Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.7)),
+        3.0,
+        2.0,
+    ));
+    painter
+        .with_clip_rect(chip.shrink(1.0).intersect(painter.clip_rect()))
+        .galley(Pos2::new(chip.left() + 5.0, chip.center().y - galley.size().y * 0.5), galley, text);
+    chip
+}
+
 /// A length, short: "3.25 s", or "1:05.3" from a minute up.
+/// What the output chip and its menu call output channel `index` of
+/// `layout`: its speaker, else its number.
+fn output_channel_name(layout: &[Option<SpeakerPos>], index: usize) -> String {
+    match layout.get(index).copied().flatten() {
+        Some(pos) => pos.label(layout).to_string(),
+        None => format!("Ch {}", index + 1),
+    }
+}
+
 fn format_len(secs: f64) -> String {
     let secs = secs.max(0.0);
     if secs < 60.0 {
@@ -486,6 +673,18 @@ impl WavesPreviewer {
         };
         let mut actions: Vec<Action> = Vec::new();
         self.multi_edit_refresh_drop_preview(ctx);
+        if let Some(mods) = ctx.input(|i| {
+            i.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerButton {
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some(merge_mods(*modifiers, i.modifiers)),
+                _ => None,
+            })
+        }) {
+            self.multi_edit.ui.press_mods = mods;
+        }
         self.ui_input_focus
             .register_region(UiSurface::MultiEdit, ui.layer_id(), area);
         let _scroll = self.pointer_scroll_input_guard(UiSurface::MultiEdit, ctx);
@@ -543,6 +742,29 @@ impl WavesPreviewer {
         if (offset - doc.view.scroll_y).abs() > 0.5 {
             actions.push(Action::ScrollYTo(offset));
         }
+        // A track picked with the keys last frame, brought into view.
+        if let Some(id) = self.multi_edit.ui.reveal_track.take() {
+            let view = output.inner_rect;
+            let row = doc
+                .tracks
+                .iter()
+                .position(|t| t.id == id)
+                .and_then(|ti| track_rows.iter().find(|(i, _)| *i == ti))
+                .map(|(_, rect)| *rect);
+            if let Some(row) = row {
+                let target = if row.top() < view.top() {
+                    offset - (view.top() - row.top())
+                } else if row.bottom() > view.bottom() {
+                    // Its bottom into view, but never its top out of it.
+                    offset + (row.bottom() - view.bottom()).min(row.top() - view.top())
+                } else {
+                    offset
+                };
+                if (target - offset).abs() > 0.5 {
+                    actions.push(Action::ScrollYTo(target.clamp(0.0, max_scroll_y)));
+                }
+            }
+        }
 
         // Markers and the playhead over every row.
         let painter = ui.painter_at(Rect::from_min_max(Pos2::new(map.left, body.top()), body.max));
@@ -566,6 +788,21 @@ impl WavesPreviewer {
         self.multi_edit_timeline_keys(ctx, &doc, &mut actions);
         self.apply_multi_edit_actions(actions, map);
         self.multi_edit_continue_drags(ctx, &doc, map, &snap, &track_rows, &lane_rects);
+        // The selection rectangle, over the rows.
+        if let (Some(marquee), Some(pos)) = (
+            self.multi_edit.ui.marquee.as_ref(),
+            ctx.input(|i| i.pointer.interact_pos()),
+        ) {
+            let rect = Rect::from_two_pos(marquee.origin, pos).intersect(body);
+            let selection = ui.visuals().selection;
+            ui.painter_at(body).rect(
+                rect,
+                2.0,
+                selection.bg_fill.gamma_multiply(0.18),
+                Stroke::new(1.0, selection.stroke.color),
+                StrokeKind::Inside,
+            );
+        }
     }
 
     /// Keep the view inside the timeline: zoomed out no further than the
@@ -739,6 +976,23 @@ impl WavesPreviewer {
             {
                 self.multi_edit_zoom_rows(VERTICAL_ZOOM_STEP);
             }
+            ui.separator();
+            let cut = self.multi_edit.ui.cut_tool;
+            if ui
+                .selectable_label(cut, "\u{2702} Cut")
+                .on_hover_text(
+                    "Cut tool (C): click a clip to split it there. \
+                     Alt+click splits a clip without the tool, and without snapping.",
+                )
+                .clicked()
+            {
+                self.multi_edit.ui.cut_tool = !cut;
+            }
+            let selected = self.multi_edit.ui.selected_clips.len();
+            if selected > 1 {
+                ui.label(RichText::new(format!("{selected} clips")).strong())
+                    .on_hover_text("Delete, drag, Alt+arrows, Ctrl+C / X / D and S act on all of them. Esc clears.");
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let exporting = self
                     .multi_edit
@@ -758,18 +1012,55 @@ impl WavesPreviewer {
                         );
                     }
                     None => {
-                        let can = self.multi_edit.export.is_none() && doc.end_secs() > 0.0;
+                        let pending = doc.has_pending();
+                        let can = self.multi_edit.export.is_none() && doc.end_secs() > 0.0 && !pending;
                         if ui
                             .add_enabled(can, egui::Button::new("Export"))
                             .on_hover_text(
-                                "Mix the timeline down into a new (virtual) row in the list. \
-                                 Save it from there. Video tracks contribute their sound only.",
+                                "Mix the timeline down, in its output format, into a new \
+                                 (virtual) row in the list. Save it from there. Video tracks \
+                                 contribute their sound only.",
                             )
+                            .on_disabled_hover_text(if pending {
+                                "Some clips are still waiting for their length to be read."
+                            } else {
+                                "Nothing to mix down yet."
+                            })
                             .clicked()
                         {
                             self.multi_edit_start_export();
                         }
                     }
+                }
+                ui.separator();
+                let current = doc.output_layout();
+                let current_name = layout_name(&current);
+                let mut chosen: Option<Layout> = None;
+                egui::ComboBox::from_id_salt(("me_output", &doc.id))
+                    .selected_text(&current_name)
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for preset in PRESETS {
+                            let layout: Layout = preset.speakers.iter().copied().map(Some).collect();
+                            if ui.selectable_label(layout == current, preset.name).clicked() {
+                                chosen = Some(layout);
+                            }
+                        }
+                        // A format no preset has (a split of an unusual
+                        // source) stays in the list while it is the one.
+                        if !PRESETS.iter().any(|preset| preset.name == current_name) {
+                            let _ = ui.selectable_label(true, &current_name);
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "The mix's channels. A stereo track plays on the front pair; \
+                         a mono track on the one channel its chip names. Export writes \
+                         this many channels.",
+                    );
+                ui.label("Output");
+                if let Some(layout) = chosen {
+                    self.multi_edit_set_output_layout(layout);
                 }
             });
         });
@@ -979,7 +1270,12 @@ impl WavesPreviewer {
             ui.menu_button("Add lane", |ui| {
                 for param in LaneParam::ALL {
                     let exists = track.lane(param).is_some();
-                    if ui.add_enabled(!exists, egui::Button::new(param.label())).clicked() {
+                    let mono_pan = param == LaneParam::Pan && track.output.is_mono();
+                    let mut resp = ui.add_enabled(!exists && !mono_pan, egui::Button::new(param.label()));
+                    if mono_pan {
+                        resp = resp.on_disabled_hover_text("A mono track has nothing to pan");
+                    }
+                    if resp.clicked() {
                         actions.push(Action::AddLane(ti, param));
                         ui.close();
                     }
@@ -994,7 +1290,7 @@ impl WavesPreviewer {
                 ui.close();
             }
         });
-        self.ui_multi_edit_track_header(ui, track, ti, header, actions);
+        self.ui_multi_edit_track_header(ui, track, ti, header, &doc.output_layout(), actions);
         Self::resize_grip(
             ui,
             header,
@@ -1009,7 +1305,21 @@ impl WavesPreviewer {
 
         // The clip row: a click on empty space seeks and clears the
         // selection; rows dropped here join this track.
-        let lane_resp = ui.interact(lane, ui.id().with(("me_lane", &track.id)), Sense::click());
+        // A click on empty space seeks; a drag from it selects the clips its
+        // rectangle meets.
+        let lane_resp = ui.interact(lane, ui.id().with(("me_lane", &track.id)), Sense::click_and_drag());
+        if lane_resp.drag_started() {
+            let origin = ui
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| lane_resp.interact_pointer_pos());
+            if let Some(origin) = origin {
+                let mods = self.multi_edit.ui.press_mods;
+                actions.push(Action::BeginMarquee {
+                    origin,
+                    additive: mods.shift || mods.ctrl || mods.command,
+                });
+            }
+        }
         if lane_resp.clicked() {
             if let Some(pos) = lane_resp.interact_pointer_pos() {
                 actions.push(Action::SelectClip(None));
@@ -1028,9 +1338,39 @@ impl WavesPreviewer {
             }
         });
         let painter = ui.painter_at(lane);
+        // Back to front by start: a clip that starts later lies over the one
+        // it overlaps, see-through there (`covered_spans`).
         let xfades = crossfade_segments(&track.clips);
-        for (clip, segs) in track.clips.iter().zip(xfades.iter()) {
-            self.ui_multi_edit_clip(ui, &painter, track.kind, clip, segs, lane, map, actions);
+        let covered = covered_spans(&track.clips);
+        for ci in draw_order(&track.clips) {
+            self.ui_multi_edit_clip(
+                ui,
+                &painter,
+                track.kind,
+                &track.clips[ci],
+                &xfades[ci],
+                &covered[ci],
+                lane,
+                map,
+                snap,
+                actions,
+            );
+        }
+        // Clips still waiting for a length, as their starts; several at one
+        // spot stack.
+        let mut stacks: Vec<(f64, usize)> = Vec::new();
+        for clip in track.clips.iter().filter(|clip| clip.len_pending) {
+            let stack = match stacks.iter_mut().find(|(t, _)| (t - clip.start_secs).abs() < 1e-6) {
+                Some((_, n)) => {
+                    *n += 1;
+                    *n
+                }
+                None => {
+                    stacks.push((clip.start_secs, 0));
+                    0
+                }
+            };
+            self.ui_multi_edit_pending_clip(ui, &painter, track.kind, clip, stack, lane, map, actions);
         }
         if track.lanes_collapsed && !track.lanes.is_empty() {
             Self::paint_folded_lanes(&painter, track, lane, map);
@@ -1041,15 +1381,17 @@ impl WavesPreviewer {
         row
     }
 
-    /// Name, fold arrow and video toggle on the first line; fader and M / S
-    /// on the second, when the row is tall enough for it. Every control has
-    /// a rect of its own inside the header, so nothing spills into the clips.
+    /// Name, fold arrow, output chip and video toggle on the first line;
+    /// fader and M / S on the second, when the row is tall enough for it.
+    /// Every control has a rect of its own inside the header, so nothing
+    /// spills into the clips. `out` is the timeline's output format.
     fn ui_multi_edit_track_header(
         &mut self,
         ui: &mut egui::Ui,
         track: &Track,
         ti: usize,
         header: Rect,
+        out: &[Option<SpeakerPos>],
         actions: &mut Vec<Action>,
     ) {
         // A child of the row that the row's layout never sees: placing a
@@ -1090,6 +1432,50 @@ impl WavesPreviewer {
             {
                 actions.push(Action::ToggleVideo(track.id.clone(), !track.show_video));
             }
+            right = rect.left() - 4.0;
+        }
+        // Where the track plays: the front pair, or one channel in mono.
+        {
+            let rect = Rect::from_min_max(Pos2::new(right - OUTPUT_CHIP_W, line1.top()), Pos2::new(right, line1.bottom()));
+            let (text, hover) = match track.output {
+                TrackOutput::Stereo => (
+                    "St".to_string(),
+                    "Stereo: plays on the output's front pair, and pans. Click to choose.".to_string(),
+                ),
+                TrackOutput::Channel { index } if index < out.len() => {
+                    let name = output_channel_name(out, index);
+                    let hover = format!("Mono: plays on {name} (channel {}) alone. Click to choose.", index + 1);
+                    (name, hover)
+                }
+                TrackOutput::Channel { index } => (
+                    format!("Ch {}", index + 1),
+                    format!("Silent: the output has no channel {}. Click to choose.", index + 1),
+                ),
+            };
+            let chip = ui
+                .put(
+                    rect,
+                    egui::Button::selectable(track.output.is_mono(), RichText::new(text).small()).truncate(),
+                )
+                .on_hover_text(hover);
+            egui::Popup::menu(&chip).show(|ui| {
+                if ui
+                    .selectable_label(track.output == TrackOutput::Stereo, "Stereo (front pair)")
+                    .clicked()
+                {
+                    actions.push(Action::SetTrackOutput(track.id.clone(), TrackOutput::Stereo));
+                    ui.close();
+                }
+                ui.separator();
+                for index in 0..out.len() {
+                    let output = TrackOutput::Channel { index };
+                    let label = format!("Mono \u{2192} {}", output_channel_name(out, index));
+                    if ui.selectable_label(track.output == output, label).clicked() {
+                        actions.push(Action::SetTrackOutput(track.id.clone(), output));
+                        ui.close();
+                    }
+                }
+            });
             right = rect.left() - 4.0;
         }
         let name_rect = Rect::from_min_max(Pos2::new(left, line1.top()), Pos2::new(right.max(left + 10.0), line1.bottom()));
@@ -1386,7 +1772,7 @@ impl WavesPreviewer {
         }
         // The summary sits above the row, on a layer of its own, so a short
         // row or the edge of the scroll area never cuts it.
-        let summary = format!(
+        let mut summary = format!(
             "{} \u{2013} {}   {}   {} clip{}",
             format_secs(start),
             format_secs(start + span),
@@ -1394,6 +1780,9 @@ impl WavesPreviewer {
             count,
             if count == 1 { "" } else { "s" },
         );
+        if preview.pending > 0 {
+            summary.push_str(&format!(" ({} not read yet)", preview.pending));
+        }
         let label_painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Tooltip,
             egui::Id::new("multi_edit_drop_summary"),
@@ -1427,7 +1816,7 @@ impl WavesPreviewer {
         band: Rect,
         map: TimeMap,
         start: f64,
-        clips: &[(String, f64)],
+        clips: &[(String, Option<f64>)],
         kind: TrackKind,
         opacity: f32,
         note: Option<String>,
@@ -1440,7 +1829,22 @@ impl WavesPreviewer {
         let text = text.gamma_multiply(opacity.max(0.6));
         let clip_rect = painter.clip_rect();
         let mut cursor = start;
+        // Rows without a length land on one spot; their chips stack.
+        let mut stacked = 0usize;
         for (i, (name, len)) in clips.iter().enumerate() {
+            let Some(len) = len else {
+                let x = map.x(cursor);
+                if x >= clip_rect.left() - PENDING_CHIP_MAX_W && x <= clip_rect.right() {
+                    let title = match (&note, i) {
+                        (Some(note), 0) => format!("\u{2192} {note}   {name}"),
+                        _ => name.clone(),
+                    };
+                    paint_pending_clip(painter, x, band, stacked, &title, fill.gamma_multiply(opacity), text);
+                }
+                stacked += 1;
+                continue;
+            };
+            stacked = 0;
             let (x0, x1) = (map.x(cursor), map.x(cursor + len));
             cursor += len;
             if x1 < clip_rect.left() {
@@ -1495,8 +1899,10 @@ impl WavesPreviewer {
         kind: TrackKind,
         clip: &Clip,
         xfades: &[XfadeSeg],
+        covered: &[(f64, f64)],
         lane: Rect,
         map: TimeMap,
+        snap: &Snap,
         actions: &mut Vec<Action>,
     ) {
         let x0 = map.x(clip.start_secs);
@@ -1508,7 +1914,8 @@ impl WavesPreviewer {
             Pos2::new(x0, lane.top() + 4.0),
             Pos2::new(x1.max(x0 + 2.0), lane.bottom() - 4.0),
         );
-        let selected = self.multi_edit.ui.selected_clip.as_deref() == Some(clip.id.as_str());
+        let selected = self.multi_edit.ui.selected_clips.contains(&clip.id);
+        let primary = selected && self.multi_edit.ui.selected_clip.as_deref() == Some(clip.id.as_str());
         let poster = (kind == TrackKind::Video)
             .then(|| {
                 self.item_for_path(&clip.source.path)
@@ -1528,7 +1935,24 @@ impl WavesPreviewer {
             Some(SourceSlot::Loading) | None => (base, Some("reading...".to_string())),
             Some(SourceSlot::Ready(_)) => (base, None),
         };
-        painter.rect_filled(rect, CLIP_CORNER, fill.gamma_multiply(0.85));
+        // Where the clip lies over one drawn before it, it is see-through, so
+        // the clip under it -- waveform, name, edge -- stays in sight.
+        let over = |t: f64| covered.iter().any(|&(s, e)| t >= s && t < e);
+        let mut parts: Vec<(f32, f32, f32)> = Vec::with_capacity(covered.len() * 2 + 1);
+        let mut x = rect.left();
+        for &(s, e) in covered {
+            let (cs, ce) = (map.x(s).max(rect.left()), map.x(e).min(rect.right()));
+            parts.push((x, cs, 0.85));
+            parts.push((cs, ce, COVER_FILL_ALPHA));
+            x = x.max(ce);
+        }
+        parts.push((x, rect.right(), 0.85));
+        for (xa, xb, alpha) in parts {
+            if xb > xa {
+                let part = Rect::from_min_max(Pos2::new(xa, rect.top()), Pos2::new(xb, rect.bottom()));
+                painter.rect_filled(part, clip_corners(rect, xa, xb), fill.gamma_multiply(alpha));
+            }
+        }
         // A video clip opens with its poster frame, when the list has one.
         let mut wave_left = rect.left();
         if let Some(texture) = poster {
@@ -1536,11 +1960,16 @@ impl WavesPreviewer {
             let h = rect.height() - 4.0;
             let w = (h * tex.x / tex.y).min(rect.width() * 0.5);
             let thumb = Rect::from_min_size(rect.min + Vec2::new(2.0, 2.0), Vec2::new(w, h));
+            let tint = if over(clip.start_secs) {
+                Color32::WHITE.gamma_multiply(0.5)
+            } else {
+                Color32::WHITE
+            };
             painter.image(
                 texture.id(),
                 thumb,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
+                tint,
             );
             wave_left = thumb.right() + 2.0;
         }
@@ -1557,7 +1986,7 @@ impl WavesPreviewer {
                 let s1 = (secs_at(vis_x1) * sr).max(0.0) as usize;
                 let mut peaks = Vec::new();
                 source
-                    .peaks
+                    .peaks_for(clip.channel)
                     .query_columns(s0, s1.max(s0 + 1), width, 0.0, &mut peaks);
                 let mid = rect.center().y;
                 let half = rect.height() * 0.45;
@@ -1567,9 +1996,14 @@ impl WavesPreviewer {
                     let gain = fade_gain_at(clip, t) * xfade_gain(xfades, t);
                     let top = mid - peak.max.clamp(-1.0, 1.0) * half * gain;
                     let bottom = mid - peak.min.clamp(-1.0, 1.0) * half * gain;
+                    let color = if over(t) {
+                        COVER_WAVE_COLOR.gamma_multiply(0.85)
+                    } else {
+                        WAVE_COLOR.gamma_multiply(0.8)
+                    };
                     painter.line_segment(
                         [Pos2::new(x, top), Pos2::new(x, bottom.max(top + 1.0))],
-                        Stroke::new(1.0, WAVE_COLOR.gamma_multiply(0.8)),
+                        Stroke::new(1.0, color),
                     );
                 }
             }
@@ -1586,25 +2020,27 @@ impl WavesPreviewer {
             let fx = map.x(clip.end_secs() - clip.fade_out_secs);
             painter.line_segment([Pos2::new(fx, rect.top()), rect.right_bottom()], fade_stroke);
         }
-        let xfade_stroke = Stroke::new(1.2, Color32::from_rgb(255, 230, 150).gamma_multiply(0.9));
         for seg in xfades {
-            let (a, b) = (map.x(seg.start), map.x(seg.end));
             match seg.shape {
-                XfadeShape::In => {
-                    painter.line_segment([Pos2::new(a, rect.bottom()), Pos2::new(b, rect.top())], xfade_stroke)
+                // Under a clip laid wholly over it: silent there.
+                XfadeShape::Zero => {
+                    let (a, b) = (map.x(seg.start), map.x(seg.end));
+                    painter.rect_filled(
+                        Rect::from_min_max(Pos2::new(a, rect.top()), Pos2::new(b, rect.bottom())),
+                        0.0,
+                        Color32::from_black_alpha(90),
+                    );
                 }
-                XfadeShape::Out => {
-                    painter.line_segment([Pos2::new(a, rect.top()), Pos2::new(b, rect.bottom())], xfade_stroke)
+                // A crossfade is drawn once, by the clip on top, over both.
+                XfadeShape::In | XfadeShape::Out => {
+                    if over((seg.start + seg.end) * 0.5) {
+                        paint_crossfade(painter, rect, map, seg);
+                    }
                 }
-                XfadeShape::Zero => painter.rect_filled(
-                    Rect::from_min_max(Pos2::new(a, rect.top()), Pos2::new(b, rect.bottom())),
-                    0.0,
-                    Color32::from_black_alpha(90),
-                ),
-            };
+            }
         }
         let outline = if selected {
-            Stroke::new(2.0, ui.visuals().selection.stroke.color)
+            Stroke::new(if primary { 2.5 } else { 2.0 }, ui.visuals().selection.stroke.color)
         } else {
             Stroke::new(1.0, Color32::from_gray(200).gamma_multiply(0.6))
         };
@@ -1612,9 +2048,13 @@ impl WavesPreviewer {
 
         // The name, on a backing so the fade lines never run through it, cut
         // to the clip.
-        let label = match &status {
-            Some(status) => format!("{}  ({status})", clip.name),
+        let name = match clip.channel {
+            Some(ch) => format!("{} ({})", clip.name, self.multi_edit_source_channel_name(&clip.source.path, ch)),
             None => clip.name.clone(),
+        };
+        let label = match &status {
+            Some(status) => format!("{name}  ({status})"),
+            None => name,
         };
         let visible = rect.intersect(lane);
         let text_pos = Pos2::new(visible.left() + FADE_HANDLE_PX + 4.0, rect.top() + 3.0);
@@ -1629,7 +2069,43 @@ impl WavesPreviewer {
         // Interaction: body moves, edges trim, the top corners set fades.
         // Later rects win where they overlap, so the smallest go last.
         let id = ui.id().with(("me_clip", &clip.id));
-        let body = ui.interact(rect, id, Sense::click_and_drag());
+        let cutting = self.multi_edit.ui.cut_tool;
+        let sense = if cutting {
+            Sense::click()
+        } else {
+            Sense::click_and_drag()
+        };
+        let body = ui.interact(rect, id, sense);
+        // A click with Alt held splits the clip where it lands, unsnapped.
+        // The release event carries the modifiers held at the click.
+        let alt_click = body.clicked() && click_mods(ui).alt;
+        if cutting || alt_click {
+            if cutting {
+                if let Some(pos) = body.hover_pos() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                    let raw = map.secs(pos.x);
+                    let at = if ui.input(|i| i.modifiers.alt) {
+                        raw
+                    } else {
+                        snap.apply(raw, &[])
+                    };
+                    let x = map.x(at);
+                    painter.line_segment(
+                        [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                        Stroke::new(2.0, CUT_LINE_COLOR),
+                    );
+                }
+            }
+            if body.clicked() {
+                if let Some(pos) = body.interact_pointer_pos() {
+                    let raw = map.secs(pos.x);
+                    let at = if alt_click { raw } else { snap.apply(raw, &[]) };
+                    actions.push(Action::SplitAt(clip.id.clone(), at));
+                }
+            }
+            self.ui_multi_edit_clip_menu(&body, clip, actions);
+            return;
+        }
         let left_edge = Rect::from_min_max(rect.min, Pos2::new(rect.left() + EDGE_GRAB_PX, rect.bottom()));
         let right_edge = Rect::from_min_max(Pos2::new(rect.right() - EDGE_GRAB_PX, rect.top()), rect.max);
         let left = ui.interact(left_edge, id.with("l"), Sense::drag());
@@ -1660,6 +2136,7 @@ impl WavesPreviewer {
             Action::BeginClipDrag(ClipDrag {
                 clip_id: clip.id.clone(),
                 kind,
+                group: Vec::new(),
             })
         };
         if fade_in.drag_started() {
@@ -1681,13 +2158,28 @@ impl WavesPreviewer {
                 .unwrap_or(0.0);
             actions.push(begin(ClipDragKind::Move { grab_secs: grab }));
         } else if body.clicked() {
-            actions.push(Action::SelectClip(Some(clip.id.clone())));
+            actions.push(clip_click_action(ui, &clip.id));
         }
         if body.hovered() && self.multi_edit.ui.clip_drag.is_none() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
+        self.ui_multi_edit_clip_menu(&body, clip, actions);
+    }
+
+    /// A clip's right-click menu.
+    fn ui_multi_edit_clip_menu(&self, body: &egui::Response, clip: &Clip, actions: &mut Vec<Action>) {
         let can_paste = self.multi_edit.ui.clip_clipboard.is_some();
+        // On a selected clip the menu acts on the whole selection.
+        let count = if self.multi_edit.ui.selected_clips.contains(&clip.id) {
+            self.multi_edit.ui.selected_clips.len()
+        } else {
+            1
+        };
         body.context_menu(|ui| {
+            if count > 1 {
+                ui.label(RichText::new(format!("{count} clips selected")).weak());
+                ui.separator();
+            }
             if ui.button("Copy (Ctrl+C)").clicked() {
                 actions.push(Action::CopyClip(clip.id.clone()));
                 ui.close();
@@ -1716,7 +2208,83 @@ impl WavesPreviewer {
                 actions.push(Action::ClipCommand(clip.id.clone(), ClipCommand::Delete));
                 ui.close();
             }
+            ui.separator();
+            // This clip alone, whatever else is selected.
+            let refusal = self.multi_edit_split_by_channel_refusal(&clip.id);
+            let label = match self.multi_edit_clip_source_channels(&clip.id) {
+                Some(channels) if channels > 1 => format!("Split into channels ({channels})"),
+                _ => "Split into channels".to_string(),
+            };
+            if ui
+                .add_enabled(refusal.is_none(), egui::Button::new(label))
+                .on_hover_text(
+                    "One track per channel of this clip's source, right below this \
+                     track, each playing its channel in mono to the same speaker of \
+                     the output",
+                )
+                .on_disabled_hover_text(format!("Not split: {}", refusal.unwrap_or("")))
+                .clicked()
+            {
+                actions.push(Action::SplitChannels(clip.id.clone()));
+                ui.close();
+            }
         });
+    }
+
+    /// A clip whose row's length is not known yet: its start and a chip,
+    /// which selects, moves and deletes it like a clip's body.
+    #[allow(clippy::too_many_arguments)]
+    fn ui_multi_edit_pending_clip(
+        &mut self,
+        ui: &egui::Ui,
+        painter: &egui::Painter,
+        kind: TrackKind,
+        clip: &Clip,
+        stack: usize,
+        lane: Rect,
+        map: TimeMap,
+        actions: &mut Vec<Action>,
+    ) {
+        let x = map.x(clip.start_secs);
+        if x < lane.left() - PENDING_CHIP_MAX_W || x > lane.right() {
+            return;
+        }
+        let fill = match kind {
+            TrackKind::Audio => AUDIO_CLIP_FILL,
+            TrackKind::Video => VIDEO_CLIP_FILL,
+        };
+        let band = lane.shrink2(Vec2::new(0.0, 4.0));
+        let chip = paint_pending_clip(painter, x, band, stack, &clip.name, fill.gamma_multiply(0.9), Color32::WHITE);
+        if self.multi_edit.ui.selected_clips.contains(&clip.id) {
+            painter.rect_stroke(
+                chip.expand(1.0),
+                3.0,
+                Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                StrokeKind::Outside,
+            );
+        }
+        let body = ui
+            .interact(chip, ui.id().with(("me_clip", &clip.id)), Sense::click_and_drag())
+            .on_hover_text("Reading this row's length; the clip takes its full length once it is known.");
+        if body.drag_started() {
+            let press = ui
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| body.interact_pointer_pos());
+            let grab = press
+                .map(|pos| map.secs(pos.x) - clip.start_secs)
+                .unwrap_or(0.0);
+            actions.push(Action::BeginClipDrag(ClipDrag {
+                clip_id: clip.id.clone(),
+                kind: ClipDragKind::Move { grab_secs: grab },
+                group: Vec::new(),
+            }));
+        } else if body.clicked() {
+            actions.push(clip_click_action(ui, &clip.id));
+        }
+        if body.hovered() && self.multi_edit.ui.clip_drag.is_none() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        self.ui_multi_edit_clip_menu(&body, clip, actions);
     }
 
     /// An automation lane under its track. Returns the lane's value rect.
@@ -1766,10 +2334,15 @@ impl WavesPreviewer {
             FontId::proportional(13.0),
             color,
         );
+        let unheard = lane.param == LaneParam::Pan && track.output.is_mono();
         hp.text(
             Pos2::new(remove.left() - 6.0, header.center().y),
             Align2::RIGHT_CENTER,
-            lane.param.format_value(lane.value_at(playhead)),
+            if unheard {
+                "mono: no pan".to_string()
+            } else {
+                lane.param.format_value(lane.value_at(playhead))
+            },
             FontId::monospace(10.0),
             visuals.weak_text_color(),
         );
@@ -2075,6 +2648,31 @@ impl WavesPreviewer {
         if delete {
             actions.push(Action::DeleteSelected);
         }
+        // Up and down pick a track; taken so egui's focus navigation does not
+        // walk the keyboard off the timeline with them.
+        let (up, down) = ctx.input_mut(|i| {
+            (
+                i.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                i.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+            )
+        });
+        let steps = down as i32 - up as i32;
+        if steps != 0 {
+            actions.push(Action::StepTrack(steps));
+        }
+        let cut = self.multi_edit.ui.cut_tool;
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::C)) {
+            actions.push(Action::SetCutTool(!cut));
+        } else if cut && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            actions.push(Action::SetCutTool(false));
+        } else if !self.multi_edit.ui.selected_clips.is_empty()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            actions.push(Action::SelectClip(None));
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
+            actions.push(Action::SelectAllClips);
+        }
         if let Some(clip) = self
             .multi_edit
             .ui
@@ -2205,37 +2803,114 @@ impl WavesPreviewer {
             match action {
                 Action::SelectClip(id) => self.multi_edit_select_clip(id),
                 Action::SelectTrack(id) => self.multi_edit_select_track(id),
-                Action::BeginClipDrag(drag) => {
+                Action::BeginClipDrag(mut drag) => {
                     self.multi_edit_checkpoint();
-                    self.multi_edit_select_clip(Some(drag.clip_id.clone()));
+                    // A selected clip carries the selection with it; any
+                    // other clip is selected alone first.
+                    if self.multi_edit.ui.selected_clips.contains(&drag.clip_id) {
+                        self.multi_edit.ui.selected_clip = Some(drag.clip_id.clone());
+                    } else {
+                        self.multi_edit_select_clip(Some(drag.clip_id.clone()));
+                    }
+                    if matches!(drag.kind, ClipDragKind::Move { .. }) {
+                        drag.group = self.multi_edit_selection_origins();
+                    }
                     self.multi_edit.ui.clip_drag = Some(drag);
                 }
                 Action::ClipCommand(id, command) => {
+                    // On a clip outside the selection, the command takes that
+                    // clip alone; on a selected one, every selected clip.
+                    if !self.multi_edit.ui.selected_clips.contains(&id) {
+                        self.multi_edit_select_clip(Some(id.clone()));
+                    }
+                    let ids = self.multi_edit_selected_ids();
                     let playhead = self.multi_edit_playhead(&doc_id);
-                    self.multi_edit_checkpoint();
-                    let Some(doc) = self.multi_edit_active_doc_mut() else {
-                        continue;
-                    };
-                    let selected = match command {
-                        ClipCommand::SplitAtPlayhead => doc.split_clip(&id, playhead).map(|_| id.clone()),
-                        ClipCommand::Duplicate => doc.duplicate_clip(&id),
+                    match command {
                         ClipCommand::Delete => {
-                            doc.remove_clip(&id);
-                            None
+                            self.multi_edit_delete_selected();
                         }
+                        ClipCommand::SplitAtPlayhead => {
+                            let can = self
+                                .multi_edit_active_doc()
+                                .is_some_and(|doc| ids.iter().any(|id| doc.can_split(id, playhead)));
+                            if can {
+                                self.multi_edit_checkpoint();
+                                if let Some(doc) = self.multi_edit_active_doc_mut() {
+                                    doc.split_clips_at(&ids, playhead);
+                                }
+                                self.multi_edit_touched();
+                            }
+                        }
+                        ClipCommand::Duplicate => {
+                            self.multi_edit_checkpoint();
+                            let copies = self
+                                .multi_edit_active_doc_mut()
+                                .map(|doc| doc.duplicate_clips(&ids))
+                                .unwrap_or_default();
+                            let first = copies.first().cloned();
+                            self.multi_edit_select_clips(copies, first);
+                            self.multi_edit_touched();
+                        }
+                    }
+                }
+                Action::ToggleClip(id) => self.multi_edit_toggle_clip(id),
+                Action::AddClip(id) => {
+                    let ids: Vec<String> = self.multi_edit.ui.selected_clips.iter().cloned().collect();
+                    self.multi_edit_select_clips(ids, Some(id));
+                }
+                Action::SelectAllClips => {
+                    let ids: Vec<String> = self
+                        .multi_edit_active_doc()
+                        .map(|doc| {
+                            doc.tracks
+                                .iter()
+                                .flat_map(|t| t.clips.iter().map(|c| c.id.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    self.multi_edit_select_clips(ids, None);
+                }
+                Action::BeginMarquee { origin, additive } => {
+                    let base = if additive {
+                        self.multi_edit.ui.selected_clips.clone()
+                    } else {
+                        self.multi_edit_select_clip(None);
+                        HashSet::new()
                     };
-                    self.multi_edit.ui.selected_clip = selected;
-                    self.multi_edit_touched();
+                    self.multi_edit.ui.marquee = Some(Marquee {
+                        origin,
+                        additive,
+                        base,
+                    });
                 }
                 Action::DeleteSelected => {
                     self.multi_edit_delete_selected();
                 }
+                Action::SplitAt(id, at) => {
+                    let can = self
+                        .multi_edit_active_doc()
+                        .is_some_and(|doc| doc.can_split(&id, at));
+                    if can {
+                        self.multi_edit_checkpoint();
+                        if let Some(doc) = self.multi_edit_active_doc_mut() {
+                            doc.split_clip(&id, at);
+                        }
+                        self.multi_edit_select_clip(Some(id));
+                        self.multi_edit_touched();
+                    }
+                }
+                Action::SetCutTool(on) => self.multi_edit.ui.cut_tool = on,
+                Action::StepTrack(steps) => self.multi_edit_step_track(steps),
                 Action::CopyClip(id) => {
-                    self.multi_edit_select_clip(Some(id));
+                    if !self.multi_edit.ui.selected_clips.contains(&id) {
+                        self.multi_edit_select_clip(Some(id));
+                    }
                     self.multi_edit_copy_selected();
                 }
                 Action::CutClip(id) => {
-                    self.multi_edit_select_clip(Some(id));
+                    if !self.multi_edit.ui.selected_clips.contains(&id) {
+                        self.multi_edit_select_clip(Some(id));
+                    }
                     self.multi_edit_cut_selected();
                 }
                 Action::Paste(track) => {
@@ -2295,6 +2970,12 @@ impl WavesPreviewer {
                         track.name = name;
                     }
                     self.multi_edit_mark_changed(&doc_id);
+                }
+                Action::SplitChannels(id) => {
+                    self.multi_edit_split_clip_by_channel(&id);
+                }
+                Action::SetTrackOutput(track_id, output) => {
+                    self.multi_edit_set_track_output(&track_id, output);
                 }
                 Action::AddLane(ti, param) => {
                     self.multi_edit_checkpoint();
@@ -2453,6 +3134,8 @@ impl WavesPreviewer {
     ) {
         let (down, pos) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
         if !down {
+            // A selection is no edit: the rectangle just goes.
+            self.multi_edit.ui.marquee = None;
             let ended = self.multi_edit.ui.clip_drag.take().is_some()
                 | self.multi_edit.ui.lane_drag.take().is_some()
                 | self.multi_edit.ui.marker_drag.take().is_some();
@@ -2468,6 +3151,26 @@ impl WavesPreviewer {
             return;
         };
         let pointer_secs = map.secs(pos.x);
+        if let Some((origin, additive)) = self.multi_edit.ui.marquee.as_ref().map(|m| (m.origin, m.additive)) {
+            // Every clip the rectangle meets, on every track row it spans.
+            let rect = Rect::from_two_pos(origin, pos);
+            let (t0, t1) = (map.secs(rect.left().max(map.left)), map.secs(rect.right().max(map.left)));
+            let tracks: Vec<usize> = track_rows
+                .iter()
+                .filter(|(_, row)| row.top() < rect.bottom() && row.bottom() > rect.top())
+                .map(|(ti, _)| *ti)
+                .collect();
+            let mut ids: HashSet<String> = doc.clips_in_range(&tracks, t0, t1).into_iter().collect();
+            if additive {
+                if let Some(marquee) = self.multi_edit.ui.marquee.as_ref() {
+                    ids.extend(marquee.base.iter().cloned());
+                }
+            }
+            if ids != self.multi_edit.ui.selected_clips {
+                self.multi_edit_select_clips(ids, None);
+            }
+            return;
+        }
         if let Some(drag) = self.multi_edit.ui.clip_drag.clone() {
             ctx.set_cursor_icon(match drag.kind {
                 ClipDragKind::Move { .. } => egui::CursorIcon::Grabbing,
@@ -2488,10 +3191,33 @@ impl WavesPreviewer {
             };
             match drag.kind {
                 ClipDragKind::Move { grab_secs } => {
+                    // The grabbed clip goes where the pointer (and snapping)
+                    // says; the rest of the group by as much. No clip of the
+                    // group is a snap target for it.
+                    let group_edges: Vec<f64> = drag
+                        .group
+                        .iter()
+                        .filter_map(|(id, _, _)| doc.clip(id))
+                        .flat_map(|c| [c.start_secs, c.end_secs()])
+                        .chain(own)
+                        .collect();
                     let raw_start = (pointer_secs - grab_secs).max(0.0);
-                    let start = snap.apply_span(raw_start, clip.len_secs, &own);
-                    if !live.move_clip(&drag.clip_id, start.max(0.0), target) {
-                        live.move_clip(&drag.clip_id, start.max(0.0), None);
+                    let start = snap.apply_span(raw_start, clip.len_secs, &group_edges);
+                    let origin = drag
+                        .group
+                        .iter()
+                        .find(|(id, _, _)| *id == drag.clip_id)
+                        .map(|(_, start, ti)| (*start, *ti));
+                    match origin {
+                        Some((origin_secs, origin_track)) => {
+                            let rows = target.map_or(0, |ti| ti as i32 - origin_track as i32);
+                            live.move_group(&drag.group, start - origin_secs, rows);
+                        }
+                        None => {
+                            if !live.move_clip(&drag.clip_id, start.max(0.0), target) {
+                                live.move_clip(&drag.clip_id, start.max(0.0), None);
+                            }
+                        }
                     }
                 }
                 ClipDragKind::TrimStart => {

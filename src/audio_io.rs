@@ -21,14 +21,17 @@ use symphonia::default::{get_codecs, get_probe};
 pub const SUPPORTED_AUDIO_EXTS: &[&str] = &["wav", "aiff", "aif", "flac", "mp3", "m4a", "ogg"];
 /// Video containers the app will open for the sake of their audio track.
 ///
-/// All ISO base media file format, so they demux through the same `mp4` crate
-/// reader the `.m4a` path already uses. Only the audio track is ever played;
-/// the picture is decoded separately, for preview only. See
-/// [`crate::media_kind`] for what the app is and is not allowed to do with one.
-pub const SUPPORTED_VIDEO_EXTS: &[&str] = &["mp4", "mov", "m4v", "3gp", "3g2"];
+/// The ISO base media file format ones demux through the same `mp4` crate
+/// reader the `.m4a` path already uses; `.mts` / `.m2ts` (AVCHD, Blu-ray) are
+/// MPEG-2 transport streams and go through [`crate::mpegts`] and
+/// [`crate::audio_mpegts`]. Only the audio track is ever played; the picture
+/// is decoded separately, for preview only. See [`crate::media_kind`] for what
+/// the app is and is not allowed to do with one.
+pub const SUPPORTED_VIDEO_EXTS: &[&str] = &["mp4", "mov", "m4v", "3gp", "3g2", "mts", "m2ts"];
 /// Every extension the app will list, scan, open and decode.
 pub const SUPPORTED_EXTS: &[&str] = &[
-    "wav", "aiff", "aif", "flac", "mp3", "m4a", "ogg", "mp4", "mov", "m4v", "3gp", "3g2",
+    "wav", "aiff", "aif", "flac", "mp3", "m4a", "ogg", "mp4", "mov", "m4v", "3gp", "3g2", "mts",
+    "m2ts",
 ];
 pub const EDITOR_PROXY_OVERVIEW_MAX_TOTAL_SAMPLES: usize = 16_384;
 const REMOTE_WAV_PROXY_MAX_WINDOWS: usize = 256;
@@ -123,6 +126,9 @@ pub struct AudioInfo {
     pub total_frames: Option<u64>,
     pub created_at: Option<SystemTime>,
     pub modified_at: Option<SystemTime>,
+    /// Which speaker each channel feeds, as a WAVE channel mask, when the
+    /// file says (see `audio_channels::layout_from_mask`).
+    pub channel_mask: Option<u32>,
 }
 
 pub fn is_supported_extension(ext: &str) -> bool {
@@ -146,6 +152,20 @@ pub fn is_supported_audio_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// What a list row needs beyond a supported extension. Every extension but
+/// two answers by name; `.mts` / `.m2ts` must hold a transport stream,
+/// because TypeScript's ES modules are `.mts` too and a `node_modules` is
+/// full of `index.d.mts`. Reads the head of those two only -- call it where
+/// a read is allowed (the scan and watch workers, the CLI).
+pub fn content_is_listable(path: &Path) -> bool {
+    !is_mpegts_path(path) || crate::mpegts::file_looks_like_transport_stream(path)
+}
+
+/// A supported extension and, where the name is not enough, the contents.
+pub fn is_listable_media_file(path: &Path) -> bool {
+    is_supported_audio_path(path) && content_is_listable(path)
+}
+
 /// Extensions that are ISO base media file format (ISO/IEC 14496-12) containers:
 /// `m4a` audio and the video containers that share the same box layout. They all
 /// demux through the same `mp4` crate reader, so every ISO-BMFF-specific path in
@@ -159,6 +179,40 @@ pub(crate) fn is_isobmff_path(path: &Path) -> bool {
                 .any(|known| ext.eq_ignore_ascii_case(known))
         })
         .unwrap_or(false)
+}
+
+/// `.mts` / `.m2ts`: MPEG-2 transport streams. symphonia has no demuxer for
+/// them, so their audio always goes through [`crate::audio_mpegts`].
+pub(crate) fn is_mpegts_path(path: &Path) -> bool {
+    crate::mpegts::is_mpegts_path(path)
+}
+
+/// The whole-buffer decoders that are not symphonia -- the OS AAC decoder
+/// and the transport stream reader -- behind one call, so the progressive
+/// path can drive either.
+fn decode_routed(path: &Path, max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, u32, bool)> {
+    if is_mpegts_path(path) {
+        crate::audio_mpegts::decode(path, max_secs)
+    } else {
+        decode_isobmff_aac(path, max_secs)
+    }
+}
+
+fn decode_routed_progressive_chunks<C, F>(
+    path: &Path,
+    emit_every_secs: f32,
+    should_cancel: C,
+    on_chunk: F,
+) -> Result<()>
+where
+    C: FnMut() -> bool,
+    F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
+{
+    if is_mpegts_path(path) {
+        crate::audio_mpegts::decode_progressive_chunks(path, emit_every_secs, should_cancel, on_chunk)
+    } else {
+        decode_isobmff_aac_progressive_chunks(path, emit_every_secs, should_cancel, on_chunk)
+    }
 }
 
 /// Whether the first audio track of an ISO-BMFF file is AAC in an `mp4a` sample
@@ -340,6 +394,7 @@ fn read_audio_info_isobmff(
         total_frames,
         created_at,
         modified_at,
+        channel_mask: None,
     })
 }
 
@@ -390,6 +445,7 @@ fn read_audio_info_wav(
             total_frames: Some(info.frame_count),
             created_at,
             modified_at,
+            channel_mask: info.channel_mask,
         });
     }
     let reader =
@@ -429,6 +485,7 @@ fn read_audio_info_wav(
         total_frames: Some(frames as u64),
         created_at,
         modified_at,
+        channel_mask: None,
     })
 }
 
@@ -1227,7 +1284,9 @@ where
     C: FnMut() -> bool,
     F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
 {
-    if is_isobmff_path(path) && isobmff_audio_is_aac(path) {
+    if is_mpegts_path(path) {
+        crate::audio_mpegts::decode_progressive_chunks(path, emit_every_secs, should_cancel, on_chunk)
+    } else if is_isobmff_path(path) && isobmff_audio_is_aac(path) {
         decode_isobmff_aac_progressive_chunks(path, emit_every_secs, should_cancel, on_chunk)
     } else {
         decode_audio_multi_symphonia_chunks(path, emit_every_secs, should_cancel, on_chunk)
@@ -1260,6 +1319,9 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
     let modified_at = metadata.as_ref().and_then(|m| m.modified().ok());
     let file_size = metadata.as_ref().map(|m| m.len());
     let ext_hint = path.extension().and_then(|s| s.to_str());
+    if is_mpegts_path(path) {
+        return crate::audio_mpegts::read_info(path, created_at, modified_at);
+    }
     if ext_hint
         .map(|ext| ext.eq_ignore_ascii_case("wav"))
         .unwrap_or(false)
@@ -1397,6 +1459,11 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
         total_frames: cp.n_frames,
         created_at,
         modified_at,
+        // Symphonia's channel bits are the WAVE mask's.
+        channel_mask: cp
+            .channels
+            .map(|c| c.bits())
+            .filter(|mask| *mask != 0 && mask.count_ones() == u32::from(channels)),
     })
 }
 
@@ -1639,8 +1706,15 @@ fn open_decoder(
 }
 
 /// Symphonia has no AAC decoder in this build, so an AAC track must never
-/// reach it: the OS decoder took it already, or nothing can decode it.
+/// reach it: the OS decoder took it already, or nothing can decode it. Nor
+/// does it read transport streams, which `audio_mpegts` has already had.
 fn reject_aac_decode(path: &Path) -> Result<()> {
+    if is_mpegts_path(path) {
+        anyhow::bail!(
+            "MPEG-TS audio is decoded by audio_mpegts, not symphonia: {}",
+            path.display()
+        );
+    }
     if is_isobmff_path(path) && probe_isobmff_aac_audio_track(path).unwrap_or(false) {
         if aac_decode_available() {
             anyhow::bail!(
@@ -1657,7 +1731,7 @@ fn reject_aac_decode(path: &Path) -> Result<()> {
 }
 
 pub fn decode_audio_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
-    if is_isobmff_path(path) {
+    if is_isobmff_path(path) || is_mpegts_path(path) {
         let (chans, sr) = decode_audio_multi(path)?;
         let mono = mixdown_to_mono(&chans);
         io_trace(
@@ -1739,6 +1813,11 @@ pub fn decode_audio_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
 }
 
 pub fn decode_audio_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>, u32, bool)> {
+    if is_mpegts_path(path) {
+        let max = (max_secs > 0.0).then_some(max_secs);
+        let (chans, sr, reached_eof) = crate::audio_mpegts::decode(path, max)?;
+        return Ok((mixdown_to_mono(&chans), sr, !reached_eof));
+    }
     if is_isobmff_path(path) {
         let max = if max_secs <= 0.0 {
             None
@@ -1866,6 +1945,10 @@ pub fn decode_audio_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>,
 }
 
 pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
+    if is_mpegts_path(path) {
+        let (chans, sr, _) = crate::audio_mpegts::decode(path, None)?;
+        return Ok((chans, sr));
+    }
     if is_isobmff_path(path) {
         // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
         if let Ok((chans, sr, _)) = decode_isobmff_aac(path, None) {
@@ -1976,6 +2059,11 @@ pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
 }
 
 pub fn decode_audio_multi_prefix(path: &Path, max_secs: f32) -> Result<(Vec<Vec<f32>>, u32, bool)> {
+    if is_mpegts_path(path) {
+        let max = (max_secs > 0.0).then_some(max_secs);
+        let (chans, sr, reached_eof) = crate::audio_mpegts::decode(path, max)?;
+        return Ok((chans, sr, !reached_eof));
+    }
     if is_isobmff_path(path) {
         let max = if max_secs <= 0.0 {
             None
@@ -2106,11 +2194,12 @@ where
     C: FnMut() -> bool,
     F: FnMut(Vec<Vec<f32>>, u32, bool) -> bool,
 {
-    if is_isobmff_path(path) && isobmff_audio_is_aac(path) {
+    // Not symphonia: the OS AAC decoder, or the transport stream reader.
+    if is_mpegts_path(path) || (is_isobmff_path(path) && isobmff_audio_is_aac(path)) {
         let wants_prefix = prefix_secs > 0.0;
         let wants_emit = emit_every_secs > 0.0;
         if !wants_prefix && !wants_emit {
-            let (chans, sr, _) = decode_isobmff_aac(path, None)?;
+            let (chans, sr, _) = decode_routed(path, None)?;
             let _ = on_chunk(chans, sr, true);
             return Ok(());
         }
@@ -2133,7 +2222,7 @@ where
 
         let should_cancel = std::cell::RefCell::new(should_cancel);
 
-        decode_isobmff_aac_progressive_chunks(
+        decode_routed_progressive_chunks(
             path,
             chunk_secs,
             || (should_cancel.borrow_mut())(),
@@ -2398,6 +2487,11 @@ pub fn decode_audio_mono_prefix_with_errors(
     path: &Path,
     max_secs: f32,
 ) -> Result<(Vec<f32>, u32, bool, u32)> {
+    if is_mpegts_path(path) {
+        let max = (max_secs > 0.0).then_some(max_secs);
+        let (chans, sr, reached_eof, errors) = crate::audio_mpegts::decode_with_errors(path, max)?;
+        return Ok((mixdown_to_mono(&chans), sr, !reached_eof, errors));
+    }
     if is_isobmff_path(path) {
         let max = if max_secs <= 0.0 {
             None
@@ -2407,7 +2501,7 @@ pub fn decode_audio_mono_prefix_with_errors(
         // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
         if let Ok((chans, sr, reached_eof)) = decode_isobmff_aac(path, max) {
             let mono = mixdown_to_mono(&chans);
-            return Ok((mono, sr, reached_eof, 0));
+            return Ok((mono, sr, !reached_eof, 0));
         }
     }
     if max_secs <= 0.0 {
@@ -2491,6 +2585,10 @@ pub fn decode_audio_mono_prefix_with_errors(
 }
 
 pub fn decode_audio_mono_with_errors(path: &Path) -> Result<(Vec<f32>, u32, u32)> {
+    if is_mpegts_path(path) {
+        let (chans, sr, _, errors) = crate::audio_mpegts::decode_with_errors(path, None)?;
+        return Ok((mixdown_to_mono(&chans), sr, errors));
+    }
     let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
     let mut mono: Vec<f32> = Vec::new();
     let mut decode_errors = 0u32;
@@ -2546,6 +2644,10 @@ pub fn decode_audio_mono_with_errors(path: &Path) -> Result<(Vec<f32>, u32, u32)
 }
 
 pub fn decode_audio_multi_with_errors(path: &Path) -> Result<(Vec<Vec<f32>>, u32, u32)> {
+    if is_mpegts_path(path) {
+        let (chans, sr, _, errors) = crate::audio_mpegts::decode_with_errors(path, None)?;
+        return Ok((chans, sr, errors));
+    }
     if is_isobmff_path(path) {
         // Not AAC (ALAC, or PCM in a .mov) falls through to symphonia below.
         if let Ok((chans, sr, _)) = decode_isobmff_aac(path, None) {
@@ -2636,6 +2738,13 @@ mod tests {
         joined.sort_unstable();
         all.sort_unstable();
         assert_eq!(joined, all);
+    }
+
+    #[test]
+    fn transport_streams_are_video_extensions() {
+        for ext in crate::mpegts::MPEGTS_EXTS {
+            assert!(super::SUPPORTED_VIDEO_EXTS.contains(ext), "{ext}");
+        }
     }
 
     #[test]

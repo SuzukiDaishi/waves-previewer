@@ -62,7 +62,7 @@ pub fn write_loop_markers(path: &Path, loop_opt: Option<(u64, u64)>) -> Result<(
         // A video container has the same freeform atom an .m4a does, but the
         // app never rewrites a video file — see `crate::media_kind`. The loop
         // region goes to the sidecar instead, so the picture is untouched.
-        Some("mp4") | Some("mov") | Some("m4v") | Some("3gp") | Some("3g2") => {
+        Some(ext) if crate::media_kind::is_video_extension(ext) => {
             write_sidecar_loop_markers(path, loop_opt)
         }
         // Formats without in-file loop support (ogg): JSON sidecar so a save

@@ -288,10 +288,17 @@ impl crate::app::WavesPreviewer {
                                             b.threshold_dbfs != blank_threshold_dbfs
                                         })
                                     })));
+                            // A video with no audio track, or with audio
+                            // nothing here decodes, is answered for good: a
+                            // full decode finds no waveform or level to add,
+                            // so asking again would ask every frame.
+                            let audio_answered = item.meta.as_ref().is_some_and(|m| {
+                                m.audio_track_absent || m.audio_track_unsupported
+                            });
                             (
-                                needs_bg_full,
-                                needs_wave_meta,
-                                needs_lufs_meta || needs_loudness_extra,
+                                needs_bg_full && !audio_answered,
+                                needs_wave_meta && !audio_answered,
+                                (needs_lufs_meta || needs_loudness_extra) && !audio_answered,
                                 item.meta.as_ref().and_then(|m| m.cover_art.clone()),
                                 Self::list_type_badge_for_item(item),
                                 item.transcript.clone(),

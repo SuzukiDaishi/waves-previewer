@@ -11,6 +11,7 @@ pub struct TestDialogQueue {
     folder: VecDeque<Option<PathBuf>>,
     files: VecDeque<Option<Vec<PathBuf>>>,
     csv_save: VecDeque<Option<PathBuf>>,
+    sofa: VecDeque<Option<PathBuf>>,
 }
 
 #[cfg(feature = "kittest")]
@@ -37,6 +38,14 @@ impl TestDialogQueue {
 
     fn push_csv_save(&mut self, path: Option<PathBuf>) {
         self.csv_save.push_back(path);
+    }
+
+    fn next_sofa(&mut self) -> Option<PathBuf> {
+        self.sofa.pop_front().unwrap_or(None)
+    }
+
+    fn push_sofa(&mut self, path: Option<PathBuf>) {
+        self.sofa.push_back(path);
     }
 }
 
@@ -158,6 +167,25 @@ impl WavesPreviewer {
     #[cfg(feature = "kittest")]
     pub fn test_queue_csv_save_dialog(&mut self, path: Option<PathBuf>) {
         self.test_dialogs.push_csv_save(path);
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_queue_sofa_dialog(&mut self, path: Option<PathBuf>) {
+        self.test_dialogs.push_sofa(path);
+    }
+
+    /// Ask for an HRTF in SOFA format.
+    pub(super) fn pick_sofa_dialog(&mut self) -> Option<PathBuf> {
+        #[cfg(feature = "kittest")]
+        {
+            return self.test_dialogs.next_sofa();
+        }
+        #[cfg(not(feature = "kittest"))]
+        {
+            rfd::FileDialog::new()
+                .add_filter("SOFA (HRTF)", &["sofa"])
+                .pick_file()
+        }
     }
 
     #[cfg(feature = "kittest")]

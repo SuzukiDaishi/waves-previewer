@@ -100,6 +100,18 @@ impl WavesPreviewer {
                         Color32::from_rgb(112, 62, 148),
                         Color32::from_rgb(206, 156, 246),
                     ),
+                    "mts" => (
+                        "MTS".to_string(),
+                        "AVCHD video (audio track only)".to_string(),
+                        Color32::from_rgb(112, 62, 148),
+                        Color32::from_rgb(206, 156, 246),
+                    ),
+                    "m2ts" => (
+                        "M2TS".to_string(),
+                        "MPEG-2 TS video (audio track only)".to_string(),
+                        Color32::from_rgb(112, 62, 148),
+                        Color32::from_rgb(206, 156, 246),
+                    ),
                     _ => {
                         let upper = if ext.is_empty() {
                             "FILE".to_string()

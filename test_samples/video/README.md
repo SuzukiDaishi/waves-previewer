@@ -25,7 +25,29 @@ was handed.
 - `prores_422hq_64x48.mov` is ProRes 422 HQ (`apch`), opaque, with a black
   right half. It covers the half-width chroma path.
 
-Regenerate all four files from the repository root with:
+The MPEG-TS files come from the same script. They use the 192-byte packets
+AVCHD and Blu-ray write (`-mpegts_m2ts_mode 1`), whatever the extension.
+
+- `mts_sync_ac3_6s.mts` is the sync picture above at 640x360, with stereo AC-3
+  that starts 0.295 s after the picture. The row's timeline starts at the
+  first audio sample, so timeline t shows movie second floor(t + 0.295), and
+  the tick at movie second N plays at timeline N - 0.295. Picture and sound
+  agree only if the app places both streams by their timestamps.
+- `m2ts_ac3_51.m2ts` and `m2ts_lpcm_51.m2ts` are 5.1 with a different tone in
+  every speaker (L 300, R 450, C 600, LFE 60, Ls 750, Rs 900 Hz), as AC-3 and
+  as 24-bit Blu-ray LPCM. Each decoded channel must carry its own tone, in
+  channel-mask order, with mask 0x3F.
+- `mts_1440x1080i.mts` is 1080i the way AVCHD's HX/LP modes record it:
+  1440x1080 stored with 4:3 pixels, top field first, moving. It must show at
+  16:9 and without combing.
+- `m2ts_eac3_unsupported.m2ts` has E-AC-3 audio, which the app names but does
+  not decode: the row says `E-AC-3 UNSUPPORTED` and the picture plays on a
+  silent timeline.
+- `mts_no_audio.mts` has a picture only, with a single keyframe at its start.
+  It must be reported as `NO AUDIO`, and every seek into it must still find
+  its picture.
+
+Regenerate all of these files from the repository root with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File commands\generate_video_test_samples.ps1

@@ -2355,6 +2355,8 @@ impl crate::app::WavesPreviewer {
         playing: bool,
         video_secs: f64,
         spectrum_interval_secs: f64,
+        layout: Option<&[Option<crate::audio_channels::SpeakerPos>]>,
+        hrtf_active: bool,
     ) {
         use crate::app::render::mini_meter;
 
@@ -2565,6 +2567,7 @@ impl crate::app::WavesPreviewer {
 
             // ---- Spectrum ---------------------------------------------------
             painter.rect_filled(spectrum_rect, 4.0, panel_bg);
+            tab.mini_meter.spectrum_rect = Some(spectrum_rect);
             let db_floor = mini_meter::SPECTRUM_DB_FLOOR;
             let cols = (spectrum_rect.width().max(8.0) as usize).min(1_024);
             let spectrum_due = tab.mini_meter.spectrum_db.len() != cols || spectrum_time_due;
@@ -2591,31 +2594,17 @@ impl crate::app::WavesPreviewer {
                     Stroke::new(1.0_f32, Color32::from_rgb(26, 29, 36)),
                 );
             }
-            let col_w = (spectrum_rect.width() / cols.max(1) as f32).max(1.0);
-            for (x, db) in tab.mini_meter.spectrum_db.iter().enumerate() {
-                let norm = ((db - db_floor) / -db_floor).clamp(0.0, 1.0);
-                if norm <= 0.002 {
-                    continue;
-                }
-                let t0 = x as f32 / cols as f32;
-                let x0 = spectrum_rect.left() + t0 * spectrum_rect.width();
-                let bar_h = norm * (spectrum_rect.height() - 12.0);
-                // Hue sweep blue -> red across the log-frequency axis.
-                let hue = 0.62 - 0.62 * t0;
-                let color: Color32 =
-                    egui::ecolor::Hsva::new(hue, 0.78, 0.55 + 0.45 * norm, 1.0).into();
-                painter.rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(x0, spectrum_rect.bottom() - bar_h),
-                        egui::pos2(
-                            (x0 + col_w).min(spectrum_rect.right()),
-                            spectrum_rect.bottom(),
-                        ),
-                    ),
-                    0.0,
-                    color,
-                );
-            }
+            // One mesh, not a rect per column: abutting anti-aliased rects
+            // left dark seams at fractional display scales (see
+            // `render::spectrum_fill`). Hue sweeps blue -> red across the
+            // log-frequency axis.
+            painter.add(crate::app::render::spectrum_fill::spectrum_mesh(
+                spectrum_rect,
+                &tab.mini_meter.spectrum_db,
+                db_floor,
+                12.0,
+                |t, norm| egui::ecolor::Hsva::new(0.62 - 0.62 * t, 0.78, 0.55 + 0.45 * norm, 1.0).into(),
+            ));
             let nyquist = srf * 0.5;
             let f_lo = mini_meter::SPECTRUM_MIN_HZ.min(nyquist * 0.25);
             let f_hi = nyquist.max(f_lo * 2.0);
@@ -2653,8 +2642,29 @@ impl crate::app::WavesPreviewer {
             );
         });
 
-        // ---- Stereo vectorscope + correlation -----------------------------
+        // ---- Stereo vectorscope + correlation, or the SURROUND view --------
         painter.rect_filled(stereo_rect, 4.0, panel_bg);
+        let surround_layout = layout
+            .filter(|layout| layout.len() == n_ch && super::surround_meter::wants_surround(layout));
+        tab.mini_meter.channel_view = if surround_layout.is_some() {
+            "SURROUND"
+        } else {
+            "STEREO"
+        };
+        if let Some(layout) = surround_layout {
+            let take = level_n.min(end);
+            super::surround_meter::draw_surround(
+                &painter,
+                stereo_rect,
+                meter_channels,
+                end - take,
+                end,
+                layout,
+                &mut tab.mini_meter,
+                &label_font,
+                label_col,
+            );
+        } else {
         {
             let corr_h = 10.0;
             let scope_area = egui::Rect::from_min_max(
@@ -2837,6 +2847,7 @@ impl crate::app::WavesPreviewer {
                 place_right(format!("{corr:+.2}"), fill_col);
             }
         }
+        }
 
         // ---- Per-channel peak / RMS meters ---------------------------------
         painter.rect_filled(levels_rect, 4.0, panel_bg);
@@ -2848,11 +2859,18 @@ impl crate::app::WavesPreviewer {
             tab.mini_meter.peak_hold_db.resize(n_ch, meter_floor);
         }
         let scale_w = 22.0;
+        // With more than two channels the names under the bars meet the
+        // peak readout at the bottom; a wide enough panel moves it up beside
+        // the title, and the bars start a little lower to clear it.
+        let readout_on_top = n_ch > 2 && levels_rect.width() >= 90.0;
+        let bars_top = if readout_on_top { 18.0 } else { 14.0 };
+        // Names under the bars and the readout below them each need a row.
+        let bars_bottom = if !readout_on_top && n_ch > 1 { 25.0 } else { 16.0 };
         let bars_rect = egui::Rect::from_min_max(
-            egui::pos2(levels_rect.left() + 6.0, levels_rect.top() + 14.0),
+            egui::pos2(levels_rect.left() + 6.0, levels_rect.top() + bars_top),
             egui::pos2(
                 (levels_rect.right() - scale_w).max(levels_rect.left() + 10.0),
-                levels_rect.bottom() - 16.0,
+                levels_rect.bottom() - bars_bottom,
             ),
         );
         for db in [0.0f32, -6.0, -18.0, -36.0] {
@@ -2921,18 +2939,25 @@ impl crate::app::WavesPreviewer {
                 Stroke::new(1.0_f32, Color32::from_rgb(255, 196, 72)),
             );
             if show_ch_labels {
-                let label = match (n_ch, c) {
+                // The speaker the channel feeds, when its layout says.
+                let named = layout
+                    .filter(|layout| layout.len() == n_ch)
+                    .and_then(|layout| layout[c].map(|pos| pos.label(layout).to_string()));
+                let label = named.unwrap_or_else(|| match (n_ch, c) {
                     (2, 0) => "L".to_string(),
                     (2, 1) => "R".to_string(),
                     _ => format!("{}", c + 1),
-                };
-                painter.text(
-                    egui::pos2(bar_rect.center().x, bars_rect.bottom() + 1.0),
-                    egui::Align2::CENTER_TOP,
-                    label,
-                    label_font.clone(),
-                    label_col,
-                );
+                });
+                // "Ltf" under a 14 px bar needs the smaller face; anything
+                // that still does not fit its slot is left out, not overlapped.
+                let mut galley = painter.layout_no_wrap(label.clone(), label_font.clone(), label_col);
+                if galley.size().x > slot_w {
+                    galley = painter.layout_no_wrap(label, egui::FontId::monospace(7.0), label_col);
+                }
+                if galley.size().x <= slot_w + 1.0 {
+                    let at = egui::pos2(bar_rect.center().x - galley.size().x * 0.5, bars_rect.bottom() + 1.0);
+                    painter.galley(at, galley, label_col);
+                }
             }
         }
         painter.text(
@@ -2942,9 +2967,42 @@ impl crate::app::WavesPreviewer {
             label_font.clone(),
             label_col,
         );
+        // Right-click the channel views to say which speaker each channel is.
+        ui.interact(
+            stereo_rect.union(levels_rect),
+            ui.id().with("mini_meter_channel_layout"),
+            Sense::click(),
+        )
+        .on_hover_text("Right-click: channel layout, virtual speakers (HRTF)")
+        .context_menu(|ui| {
+            if ui.button("Channel layout\u{2026}").clicked() {
+                tab.mini_meter.layout_editor_requested = true;
+                ui.close();
+            }
+            if ui.button("Virtual speakers (HRTF)\u{2026}").clicked() {
+                tab.mini_meter.hrtf_window_requested = true;
+                ui.close();
+            }
+        });
+        // Say so when what is heard is the headphone rendering, not this view
+        // folded to stereo.
+        if hrtf_active {
+            painter.text(
+                stereo_rect.right_top() + egui::vec2(-4.0, 2.0),
+                egui::Align2::RIGHT_TOP,
+                "HRTF",
+                label_font.clone(),
+                ui.visuals().selection.bg_fill,
+            );
+        }
+        let (readout_at, readout_align) = if readout_on_top {
+            (egui::pos2(levels_rect.right() - 4.0, levels_rect.top() + 2.0), egui::Align2::RIGHT_TOP)
+        } else {
+            (egui::pos2(levels_rect.center().x, levels_rect.bottom() - 2.0), egui::Align2::CENTER_BOTTOM)
+        };
         painter.text(
-            egui::pos2(levels_rect.center().x, levels_rect.bottom() - 2.0),
-            egui::Align2::CENTER_BOTTOM,
+            readout_at,
+            readout_align,
             if max_peak_db <= meter_floor + 0.5 {
                 "-inf dB".to_string()
             } else {
@@ -3613,20 +3671,23 @@ impl crate::app::WavesPreviewer {
                     .sense(egui::Sense::hover()),
                 )
                 .on_hover_text(if tab.audio_track_unsupported {
-                    "This video's AAC audio has no decoder on this platform — NeoWaves ships none of its own and borrows the operating system's where there is one. The picture remains playable and seekable on a silent timeline, and there is no video encoder to write changes back out either."
+                    format!(
+                        "{} The picture remains playable and seekable on a silent timeline, and there is no video encoder to write changes back out either.",
+                        tab.unsupported_audio_reason()
+                    )
                 } else if tab.audio_track_absent {
-                    "This is a video file with no audio track. It remains playable and seekable on a silent timeline, but NeoWaves has no video encoder — so it cannot be edited or written back out."
+                    "This is a video file with no audio track. It remains playable and seekable on a silent timeline, but NeoWaves has no video encoder — so it cannot be edited or written back out.".to_string()
                 } else {
-                    "This is a video file. Its audio track plays, measures and previews like any other source, but NeoWaves has no video encoder — so it cannot be edited or written back out."
+                    "This is a video file. Its audio track plays, measures and previews like any other source, but NeoWaves has no video encoder — so it cannot be edited or written back out.".to_string()
                 });
             }
             if tab.uses_silent_video_timeline() {
                 ui.add(
                     egui::Label::new(
                         RichText::new(if tab.audio_track_unsupported {
-                            "AAC UNSUPPORTED"
+                            tab.unsupported_audio_label()
                         } else {
-                            "NO AUDIO"
+                            "NO AUDIO".to_string()
                         })
                             .small()
                             .monospace()
@@ -3635,9 +3696,12 @@ impl crate::app::WavesPreviewer {
                     .sense(egui::Sense::hover()),
                 )
                 .on_hover_text(if tab.audio_track_unsupported {
-                    "No AAC decoder on this platform: NeoWaves ships none of its own and borrows the operating system's where there is one. Playback and seeking use a silent timeline so the picture remains fully previewable."
+                    format!(
+                        "{} Playback and seeking use a silent timeline so the picture remains fully previewable.",
+                        tab.unsupported_audio_reason()
+                    )
                 } else {
-                    "This video has no audio track. Playback and seeking use a silent timeline so the picture remains fully previewable."
+                    "This video has no audio track. Playback and seeking use a silent timeline so the picture remains fully previewable.".to_string()
                 });
             }
             if tab.paged_asset {
@@ -4367,6 +4431,19 @@ impl crate::app::WavesPreviewer {
         };
         // Resolved before `self` is borrowed by the body closure below.
         let editor_keys_allowed = self.surface_keys_allowed(UiSurface::Editor);
+        let mini_meter_layout = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| self.channel_layout_for(&tab.path, tab.ch_samples.len()));
+        // The file the headphone rendering is playing now, if any.
+        let hrtf_active_path = match (&self.hrtf_runtime.status, &self.playback_session.source) {
+            (
+                crate::app::hrtf_ops::HrtfStatus::Active { .. },
+                crate::app::PlaybackSourceKind::EditorTab(path)
+                | crate::app::PlaybackSourceKind::ListPreview(path),
+            ) => Some(path.clone()),
+            _ => None,
+        };
         {
             let mut draw_editor_body = |ui: &mut egui::Ui| {
                 let tab = &mut self.tabs[tab_idx];
@@ -9197,6 +9274,8 @@ impl crate::app::WavesPreviewer {
                         playing,
                         video_secs,
                         mini_meter_spectrum_interval_secs,
+                        mini_meter_layout.as_deref(),
+                        hrtf_active_path.as_deref() == Some(tab.path.as_path()),
                     );
                     video_request = Some((video_secs, playing));
                 }
@@ -9320,11 +9399,14 @@ impl crate::app::WavesPreviewer {
                         );
                         ui.label(
                             RichText::new(if tab.audio_track_unsupported {
-                                "AAC audio has no decoder on this platform. The video remains playable and seekable on a silent timeline, but cannot be edited or written back out."
+                                format!(
+                                    "{} The video remains playable and seekable on a silent timeline, but cannot be edited or written back out.",
+                                    tab.unsupported_audio_reason()
+                                )
                             } else if tab.audio_track_absent {
-                                "No audio track. The video remains playable and seekable on a silent timeline, but cannot be edited or written back out."
+                                "No audio track. The video remains playable and seekable on a silent timeline, but cannot be edited or written back out.".to_string()
                             } else {
-                                "A video's audio can be played, measured and previewed, but not edited or written back out."
+                                "A video's audio can be played, measured and previewed, but not edited or written back out.".to_string()
                             })
                             .small()
                             .color(Color32::from_rgb(150, 158, 172)),

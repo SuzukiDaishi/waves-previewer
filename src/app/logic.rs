@@ -123,7 +123,8 @@ impl super::WavesPreviewer {
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
         let base = match ext.as_str() {
-            "mp3" | "m4a" | "ogg" | "mp4" | "mov" | "m4v" | "3gp" | "3g2" => {
+            "mp3" | "m4a" | "ogg" => LIST_PLAY_PREFIX_SECS_COMPRESSED_BASE,
+            ext if crate::media_kind::is_video_extension(ext) => {
                 LIST_PLAY_PREFIX_SECS_COMPRESSED_BASE
             }
             _ => LIST_PLAY_PREFIX_SECS_BASE,
@@ -3053,6 +3054,9 @@ impl super::WavesPreviewer {
                                         if skip_dotfiles && Self::is_dotfile_path(e.path()) {
                                             continue;
                                         }
+                                        if !audio_io::content_is_listable(e.path()) {
+                                            continue;
+                                        }
                                         if push_file(
                                             &tx,
                                             e.into_path(),
@@ -3097,7 +3101,8 @@ impl super::WavesPreviewer {
                                 .extension()
                                 .and_then(|s| s.to_str())
                                 .map(audio_io::is_supported_extension)
-                                .unwrap_or(false);
+                                .unwrap_or(false)
+                                && audio_io::content_is_listable(&path);
                             if !supported {
                                 skipped.unsupported += 1;
                                 continue;
@@ -3154,6 +3159,9 @@ impl super::WavesPreviewer {
                                             if audio_io::is_supported_extension(ext) {
                                                 if skip_dotfiles && Self::is_dotfile_path(e.path())
                                                 {
+                                                    continue;
+                                                }
+                                                if !audio_io::content_is_listable(e.path()) {
                                                     continue;
                                                 }
                                                 if push_file(

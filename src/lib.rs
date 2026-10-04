@@ -6,6 +6,8 @@ pub mod audio_channels;
 pub mod audio_io;
 #[cfg(windows)]
 pub mod audio_mf;
+pub mod audio_mpegts;
+pub mod binaural;
 pub mod cli;
 pub mod crash_report;
 pub mod flac_meta;
@@ -18,6 +20,7 @@ pub mod markers;
 pub mod media_kind;
 pub mod metadata;
 pub mod meter;
+pub mod mpegts;
 #[cfg(windows)]
 pub(crate) mod mf;
 pub mod plugin;

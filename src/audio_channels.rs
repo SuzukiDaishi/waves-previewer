@@ -10,6 +10,11 @@
 //!
 //! The matrix is pure routing arithmetic — no filtering, no delay, no bass
 //! management. Anything the output has no source for stays silent.
+//!
+//! Either side's labels can also be given explicitly: a file whose channels
+//! are in Film order, or whose WAVE header carries a channel mask, or a
+//! device whose outputs feed speakers in an order of the user's choosing
+//! (see `docs/MULTICHANNEL_SPEC.md`).
 
 /// A speaker position, named after the WAVEFORMATEXTENSIBLE channel mask bits.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -48,9 +53,244 @@ pub enum SpeakerPos {
     Tbc,
     /// Top back right.
     Tbr,
+    /// Top centre, straight overhead.
+    Tc,
+    /// Front left wide (no channel-mask bit).
+    Wl,
+    /// Front right wide (no channel-mask bit).
+    Wr,
+    /// Top side left -- Dolby's "top middle" (no channel-mask bit).
+    Tsl,
+    /// Top side right (no channel-mask bit).
+    Tsr,
 }
 
 use SpeakerPos::*;
+
+impl SpeakerPos {
+    /// Every position, in the order a layout menu lists them.
+    pub const ALL: [SpeakerPos; 22] = [
+        Fl, Fr, Fc, Lfe, Sl, Sr, Bl, Br, Bc, Flc, Frc, Wl, Wr, Tfl, Tfr, Tfc, Tsl, Tsr, Tbl, Tbr,
+        Tbc, Tc,
+    ];
+
+    /// The WAVEFORMATEXTENSIBLE channel-mask bit, where the format has one.
+    /// Channels are stored in the order of their bits.
+    pub fn mask_bit(self) -> Option<u32> {
+        Some(match self {
+            Fl => 0x1,
+            Fr => 0x2,
+            Fc => 0x4,
+            Lfe => 0x8,
+            Bl => 0x10,
+            Br => 0x20,
+            Flc => 0x40,
+            Frc => 0x80,
+            Bc => 0x100,
+            Sl => 0x200,
+            Sr => 0x400,
+            Tc => 0x800,
+            Tfl => 0x1000,
+            Tfc => 0x2000,
+            Tfr => 0x4000,
+            Tbl => 0x8000,
+            Tbc => 0x10000,
+            Tbr => 0x20000,
+            Wl | Wr | Tsl | Tsr => return None,
+        })
+    }
+
+    /// A stable name for storing a layout in prefs and sessions.
+    pub fn key(self) -> &'static str {
+        match self {
+            Fl => "FL",
+            Fr => "FR",
+            Fc => "FC",
+            Lfe => "LFE",
+            Bl => "BL",
+            Br => "BR",
+            Flc => "FLC",
+            Frc => "FRC",
+            Bc => "BC",
+            Sl => "SL",
+            Sr => "SR",
+            Tc => "TC",
+            Tfl => "TFL",
+            Tfc => "TFC",
+            Tfr => "TFR",
+            Tbl => "TBL",
+            Tbc => "TBC",
+            Tbr => "TBR",
+            Wl => "WL",
+            Wr => "WR",
+            Tsl => "TSL",
+            Tsr => "TSR",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|pos| pos.key().eq_ignore_ascii_case(key.trim()))
+    }
+
+    pub fn is_lfe(self) -> bool {
+        self == Lfe
+    }
+
+    /// Above ear level.
+    pub fn is_height(self) -> bool {
+        matches!(self, Tfl | Tfr | Tfc | Tsl | Tsr | Tbl | Tbr | Tbc | Tc)
+    }
+
+    /// What the speaker is called in `layout`. "Ls" is the back pair of a
+    /// 5.1 and the side pair of a 7.1, so the surround names depend on which
+    /// pairs the layout has.
+    pub fn label(self, layout: &[Option<SpeakerPos>]) -> &'static str {
+        let has = |pos: SpeakerPos| layout.contains(&Some(pos));
+        match self {
+            Fl => "L",
+            Fr => "R",
+            Fc => "C",
+            Lfe => "LFE",
+            Flc => "Lc",
+            Frc => "Rc",
+            Bc => "Cs",
+            Wl => "Lw",
+            Wr => "Rw",
+            Tc => "Tc",
+            Tfl => "Ltf",
+            Tfr => "Rtf",
+            Tfc => "Tfc",
+            Tsl => "Ltm",
+            Tsr => "Rtm",
+            Tbl => "Ltr",
+            Tbr => "Rtr",
+            Tbc => "Tbc",
+            Bl if has(Sl) || has(Sr) => "Lrs",
+            Br if has(Sl) || has(Sr) => "Rrs",
+            Bl => "Ls",
+            Br => "Rs",
+            Sl if has(Bl) || has(Br) => "Lss",
+            Sr if has(Bl) || has(Br) => "Rss",
+            Sl => "Ls",
+            Sr => "Rs",
+        }
+    }
+
+    /// Where the speaker stands, as (azimuth, elevation) in degrees:
+    /// azimuth 0 straight ahead, positive to the right, 180 behind;
+    /// elevation 0 at the ears, 90 overhead. ITU-R BS.2051 / Dolby angles.
+    /// A lone surround pair sits at 110 degrees, as in 5.1; with both pairs
+    /// the sides are at 90 and the backs at 135. LFE has no direction and
+    /// reports straight ahead.
+    pub fn direction(self, layout: &[Option<SpeakerPos>]) -> (f32, f32) {
+        let has = |pos: SpeakerPos| layout.contains(&Some(pos));
+        match self {
+            Fl => (-30.0, 0.0),
+            Fr => (30.0, 0.0),
+            Fc | Lfe => (0.0, 0.0),
+            Flc => (-15.0, 0.0),
+            Frc => (15.0, 0.0),
+            Wl => (-60.0, 0.0),
+            Wr => (60.0, 0.0),
+            Bc => (180.0, 0.0),
+            Bl if has(Sl) || has(Sr) => (-135.0, 0.0),
+            Br if has(Sl) || has(Sr) => (135.0, 0.0),
+            Bl => (-110.0, 0.0),
+            Br => (110.0, 0.0),
+            Sl if has(Bl) || has(Br) => (-90.0, 0.0),
+            Sr if has(Bl) || has(Br) => (90.0, 0.0),
+            Sl => (-110.0, 0.0),
+            Sr => (110.0, 0.0),
+            Tfl => (-45.0, 45.0),
+            Tfr => (45.0, 45.0),
+            Tfc => (0.0, 45.0),
+            Tsl => (-90.0, 45.0),
+            Tsr => (90.0, 45.0),
+            Tbl => (-135.0, 45.0),
+            Tbr => (135.0, 45.0),
+            Tbc => (180.0, 45.0),
+            Tc => (0.0, 90.0),
+        }
+    }
+}
+
+/// The positions a WAVEFORMATEXTENSIBLE channel mask names, in the order the
+/// channels are stored (ascending bit). `None` when its bits do not number
+/// `count`, or name a position the format reserves but this app does not.
+pub fn layout_from_mask(mask: u32, count: usize) -> Option<Vec<SpeakerPos>> {
+    if mask == 0 || mask.count_ones() as usize != count {
+        return None;
+    }
+    (0..32)
+        .map(|bit| 1u32 << bit)
+        .filter(|bit| mask & bit != 0)
+        .map(|bit| SpeakerPos::ALL.into_iter().find(|pos| pos.mask_bit() == Some(bit)))
+        .collect()
+}
+
+/// The WAVE channel mask that says `layout`, when one can: every channel a
+/// speaker with a mask bit, in rising bit order -- a mask only says which
+/// speakers are present, and the channels come in bit order. `None` for a
+/// layout no mask can say (Film order, a channel with no speaker).
+pub fn mask_for_layout(layout: &[Option<SpeakerPos>]) -> Option<u32> {
+    let mut mask = 0u32;
+    for pos in layout {
+        let bit = (*pos)?.mask_bit()?;
+        if bit <= mask {
+            return None;
+        }
+        mask |= bit;
+    }
+    (mask != 0).then_some(mask)
+}
+
+/// A named channel order the layout editor offers.
+#[derive(Debug)]
+pub struct LayoutPreset {
+    pub name: &'static str,
+    pub speakers: &'static [SpeakerPos],
+}
+
+/// The layouts on offer, grouped by channel count.
+pub const PRESETS: &[LayoutPreset] = &[
+    LayoutPreset { name: "Mono", speakers: LAYOUT_1 },
+    LayoutPreset { name: "Stereo", speakers: LAYOUT_2 },
+    LayoutPreset { name: "LCR (WAV)", speakers: LAYOUT_3 },
+    LayoutPreset { name: "2.1 (WAV)", speakers: &[Fl, Fr, Lfe] },
+    LayoutPreset { name: "Quad (WAV)", speakers: LAYOUT_4 },
+    LayoutPreset { name: "5.0 (WAV)", speakers: LAYOUT_5 },
+    LayoutPreset { name: "5.1 WAV / SMPTE", speakers: LAYOUT_6 },
+    LayoutPreset { name: "5.1 Film / Pro Tools", speakers: &[Fl, Fc, Fr, Bl, Br, Lfe] },
+    LayoutPreset { name: "5.1 DTS", speakers: &[Fl, Fr, Bl, Br, Fc, Lfe] },
+    LayoutPreset { name: "6.1 (WAV)", speakers: LAYOUT_7 },
+    LayoutPreset { name: "7.1 WAV / SMPTE", speakers: LAYOUT_8 },
+    LayoutPreset { name: "7.1 Film / Pro Tools", speakers: &[Fl, Fc, Fr, Sl, Sr, Bl, Br, Lfe] },
+    LayoutPreset { name: "5.1.2 (WAV)", speakers: &[Fl, Fr, Fc, Lfe, Bl, Br, Tsl, Tsr] },
+    LayoutPreset { name: "7.1.2 (WAV)", speakers: LAYOUT_10 },
+    LayoutPreset { name: "5.1.4 (WAV)", speakers: &[Fl, Fr, Fc, Lfe, Bl, Br, Tfl, Tfr, Tbl, Tbr] },
+    LayoutPreset { name: "7.1.4 WAV / SMPTE", speakers: LAYOUT_12 },
+    LayoutPreset {
+        name: "7.1.4 Pro Tools",
+        speakers: &[Fl, Fc, Fr, Sl, Sr, Bl, Br, Lfe, Tfl, Tfr, Tbl, Tbr],
+    },
+    LayoutPreset {
+        name: "9.1.6",
+        speakers: &[Fl, Fr, Fc, Lfe, Bl, Br, Sl, Sr, Wl, Wr, Tfl, Tfr, Tsl, Tsr, Tbl, Tbr],
+    },
+];
+
+/// The presets with `count` channels.
+pub fn presets_for(count: usize) -> impl Iterator<Item = &'static LayoutPreset> {
+    PRESETS.iter().filter(move |preset| preset.speakers.len() == count)
+}
+
+/// One speaker per channel, or none for a channel that feeds no speaker.
+pub type Layout = Vec<Option<SpeakerPos>>;
+
+/// The standard layout for `count` channels, as a [`Layout`].
+pub fn standard_layout_vec(count: usize) -> Option<Layout> {
+    standard_layout(count).map(|layout| layout.iter().copied().map(Some).collect())
+}
 
 /// -3 dB, the usual coefficient for folding a channel into a neighbour.
 const HALF_POWER: f32 = std::f32::consts::FRAC_1_SQRT_2;
@@ -128,18 +368,45 @@ pub type MixRow = Vec<(u8, f32)>;
 pub struct ChannelMixMatrix {
     rows: Vec<MixRow>,
     used_sources: Vec<u8>,
+    /// Source channels that are the LFE (bit N = channel N), which loudness
+    /// leaves out: see [`ChannelMixMatrix::mix_loudness`].
+    lfe_sources: u64,
 }
 
 impl ChannelMixMatrix {
     /// Derive the matrix for a clip of `src_channels` on a device of
-    /// `out_channels`.
+    /// `out_channels`, both in the standard layout for their count.
     pub fn build(src_channels: usize, out_channels: usize, mode: ChannelMapMode) -> Self {
+        Self::build_with_layouts(src_channels, None, out_channels, None, mode)
+    }
+
+    /// As [`ChannelMixMatrix::build`], with either side's speakers given:
+    /// `src_layout` for the clip, `out_layout` for the device. A layout that
+    /// does not have one entry per channel is ignored for the standard one.
+    pub fn build_with_layouts(
+        src_channels: usize,
+        src_layout: Option<&[Option<SpeakerPos>]>,
+        out_channels: usize,
+        out_layout: Option<&[Option<SpeakerPos>]>,
+        mode: ChannelMapMode,
+    ) -> Self {
         let out_channels = out_channels.max(1);
         let src_channels = src_channels.clamp(1, MAX_SOURCE_CHANNELS);
         let rows = match mode {
             ChannelMapMode::Direct => direct_rows(src_channels, out_channels),
-            ChannelMapMode::Auto => auto_rows(src_channels, out_channels),
+            ChannelMapMode::Auto => auto_rows(src_channels, src_layout, out_channels, out_layout),
         };
+        let lfe_sources = src_layout
+            .filter(|layout| layout.len() == src_channels)
+            .map(<[Option<SpeakerPos>]>::to_vec)
+            .or_else(|| standard_layout_vec(src_channels))
+            .map_or(0, |layout| {
+                layout
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, pos)| **pos == Some(Lfe))
+                    .fold(0u64, |mask, (ch, _)| mask | 1u64 << ch)
+            });
         let mut used_sources = Vec::with_capacity(src_channels.min(out_channels * 2));
         for row in &rows {
             for (src, _) in row {
@@ -149,7 +416,11 @@ impl ChannelMixMatrix {
             }
         }
         used_sources.sort_unstable();
-        Self { rows, used_sources }
+        Self {
+            rows,
+            used_sources,
+            lfe_sources,
+        }
     }
 
     /// The recipe for one output channel; empty means silence.
@@ -173,6 +444,21 @@ impl ChannelMixMatrix {
         }
         sum
     }
+
+    /// As [`ChannelMixMatrix::mix`], without the LFE: what the loudness
+    /// meter reads. ITU-R BS.1770 leaves the LFE out of loudness, and a
+    /// stereo fold now carries it in the front pair (see `targets_for`), so
+    /// the meter takes it out again rather than read the bass as programme.
+    pub fn mix_loudness(&self, out_ch: usize, src_frame: &[f32]) -> f32 {
+        let mut sum = 0.0f32;
+        for (src, gain) in self.row(out_ch) {
+            if (self.lfe_sources >> src) & 1 == 1 {
+                continue;
+            }
+            sum += src_frame.get(*src as usize).copied().unwrap_or(0.0) * gain;
+        }
+        sum
+    }
 }
 
 fn direct_rows(src_channels: usize, out_channels: usize) -> Vec<MixRow> {
@@ -187,15 +473,26 @@ fn direct_rows(src_channels: usize, out_channels: usize) -> Vec<MixRow> {
         .collect()
 }
 
-fn auto_rows(src_channels: usize, out_channels: usize) -> Vec<MixRow> {
+fn auto_rows(
+    src_channels: usize,
+    src_layout: Option<&[Option<SpeakerPos>]>,
+    out_channels: usize,
+    out_layout: Option<&[Option<SpeakerPos>]>,
+) -> Vec<MixRow> {
+    let given = |layout: Option<&[Option<SpeakerPos>]>, count: usize| {
+        layout
+            .filter(|layout| layout.len() == count)
+            .map(<[Option<SpeakerPos>]>::to_vec)
+            .or_else(|| standard_layout_vec(count))
+    };
     let (Some(src_layout), Some(out_layout)) =
-        (standard_layout(src_channels), standard_layout(out_channels))
+        (given(src_layout, src_channels), given(out_layout, out_channels))
     else {
         return legacy_fold_rows(src_channels, out_channels);
     };
 
     let mut rows: Vec<MixRow> = vec![Vec::new(); out_channels];
-    let index_of = |pos: SpeakerPos| out_layout.iter().position(|p| *p == pos);
+    let index_of = |pos: SpeakerPos| out_layout.iter().position(|p| *p == Some(pos));
 
     // A mono clip is a centre-agnostic signal: send it to both front speakers
     // rather than to a centre channel the listener may not have.
@@ -211,6 +508,10 @@ fn auto_rows(src_channels: usize, out_channels: usize) -> Vec<MixRow> {
     }
 
     for (src_ch, src_pos) in src_layout.iter().enumerate() {
+        // A channel assigned to no speaker is not heard.
+        let Some(src_pos) = src_pos else {
+            continue;
+        };
         for (out_ch, gain) in targets_for(*src_pos, &index_of) {
             rows[out_ch].push((src_ch as u8, gain));
         }
@@ -221,8 +522,11 @@ fn auto_rows(src_channels: usize, out_channels: usize) -> Vec<MixRow> {
 /// Where one source position lands, given which outputs exist.
 ///
 /// A direct match wins; otherwise the position folds into its nearest
-/// neighbours at -3 dB. LFE is dropped when the device has no LFE, which is
-/// what ITU-R BS.775 downmixing prescribes and keeps the fold from booming.
+/// neighbours at -3 dB. With no LFE output the LFE folds exactly where the
+/// centre does -- a phantom centre on a stereo device. ITU-R BS.775 would
+/// drop it, but on headphones or a pair of monitors that loses everything
+/// the LFE alone carries; the loudness meter still leaves it out
+/// ([`ChannelMixMatrix::mix_loudness`]).
 fn targets_for(
     src_pos: SpeakerPos,
     index_of: &impl Fn(SpeakerPos) -> Option<usize>,
@@ -252,8 +556,8 @@ fn targets_for(
     match src_pos {
         // Centre spreads into the front pair as a phantom centre.
         Fc => split(&[(Fl, Fr)]),
-        // No LFE speaker: drop it rather than fold bass into the mains.
-        Lfe => Vec::new(),
+        // No LFE speaker: wherever the centre goes, at the centre's gains.
+        Lfe => targets_for(Fc, index_of),
         Fl => first_of(&[Flc, Fc]),
         Fr => first_of(&[Frc, Fc]),
         Flc => first_of(&[Fl, Fc]),
@@ -263,12 +567,17 @@ fn targets_for(
         Sl => first_of(&[Bl, Fl]),
         Sr => first_of(&[Br, Fr]),
         Bc => split(&[(Bl, Br), (Sl, Sr), (Fl, Fr)]),
-        // Heights drop onto the bed speaker below them.
-        Tfl => first_of(&[Fl, Sl, Bl]),
-        Tfr => first_of(&[Fr, Sr, Br]),
-        Tbl => first_of(&[Bl, Sl, Fl]),
-        Tbr => first_of(&[Br, Sr, Fr]),
-        Tfc | Tbc => split(&[(Fl, Fr)]),
+        Wl => first_of(&[Fl, Sl]),
+        Wr => first_of(&[Fr, Sr]),
+        // Heights move to the nearest height speaker there is, else drop
+        // onto the bed speaker below them.
+        Tfl => first_of(&[Tsl, Fl, Sl, Bl]),
+        Tfr => first_of(&[Tsr, Fr, Sr, Br]),
+        Tsl => first_of(&[Tfl, Tbl, Sl, Fl, Bl]),
+        Tsr => first_of(&[Tfr, Tbr, Sr, Fr, Br]),
+        Tbl => first_of(&[Tsl, Bl, Sl, Fl]),
+        Tbr => first_of(&[Tsr, Br, Sr, Fr]),
+        Tfc | Tbc | Tc => split(&[(Tfl, Tfr), (Tsl, Tsr), (Fl, Fr)]),
     }
 }
 
@@ -300,6 +609,38 @@ fn legacy_fold_rows(src_channels: usize, out_channels: usize) -> Vec<MixRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_one_is_offered_for_three_channels_and_read_from_its_mask() {
+        let names: Vec<&str> = presets_for(3).map(|p| p.name).collect();
+        assert_eq!(names, ["LCR (WAV)", "2.1 (WAV)"]);
+        // FL | FR | LFE, as Windows' KSAUDIO_SPEAKER_2POINT1.
+        assert_eq!(layout_from_mask(0x0B, 3), Some(vec![Fl, Fr, Lfe]));
+        // A stereo device hears the LFE in both sides, like a centre.
+        let src = [0.0f32, 0.0, 0.8];
+        let matrix = ChannelMixMatrix::build_with_layouts(
+            3,
+            Some(&[Some(Fl), Some(Fr), Some(Lfe)]),
+            2,
+            None,
+            ChannelMapMode::Auto,
+        );
+        assert_close(
+            &[matrix.mix(0, &src), matrix.mix(1, &src)],
+            &[0.8 * HALF_POWER, 0.8 * HALF_POWER],
+        );
+    }
+
+    #[test]
+    fn a_layout_has_a_mask_only_in_bit_order() {
+        let some = |layout: &[SpeakerPos]| layout.iter().copied().map(Some).collect::<Vec<_>>();
+        assert_eq!(mask_for_layout(&some(&[Fl, Fr, Lfe])), Some(0x0B));
+        assert_eq!(mask_for_layout(&some(&[Fl, Fr, Bl, Br])), Some(0x33));
+        assert_eq!(mask_for_layout(&some(LAYOUT_8)), Some(0x63F), "7.1 in WAV order");
+        assert_eq!(mask_for_layout(&some(&[Fl, Fc, Fr])), None, "Film order");
+        assert_eq!(mask_for_layout(&[Some(Fl), None, Some(Fr)]), None);
+        assert_eq!(mask_for_layout(&[]), None);
+    }
 
     /// Render one constant source frame through the matrix.
     fn mix_all(src: &[f32], out_channels: usize, mode: ChannelMapMode) -> Vec<f32> {
@@ -356,12 +697,31 @@ mod tests {
     }
 
     #[test]
-    fn five_one_to_stereo_uses_itu_coefficients() {
-        // FL FR FC LFE BL BR; LFE (0.4) is dropped.
+    fn five_one_to_stereo_folds_the_lfe_like_the_centre() {
+        // FL FR FC LFE BL BR: the centre and the LFE both make a phantom
+        // centre at -3 dB a side; the surrounds fold at -3 dB.
         let src = [0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6];
-        let expected_l = 0.1 + HALF_POWER * 0.3 + HALF_POWER * 0.5;
-        let expected_r = 0.2 + HALF_POWER * 0.3 + HALF_POWER * 0.6;
+        let expected_l = 0.1 + HALF_POWER * 0.3 + HALF_POWER * 0.4 + HALF_POWER * 0.5;
+        let expected_r = 0.2 + HALF_POWER * 0.3 + HALF_POWER * 0.4 + HALF_POWER * 0.6;
         assert_close(&mix_auto(&src, 2), &[expected_l, expected_r]);
+        // The loudness meter's view leaves the LFE out (ITU-R BS.1770).
+        let matrix = ChannelMixMatrix::build(6, 2, ChannelMapMode::Auto);
+        assert_close(
+            &[matrix.mix_loudness(0, &src), matrix.mix_loudness(1, &src)],
+            &[
+                0.1 + HALF_POWER * 0.3 + HALF_POWER * 0.5,
+                0.2 + HALF_POWER * 0.3 + HALF_POWER * 0.6,
+            ],
+        );
+    }
+
+    #[test]
+    fn the_lfe_takes_the_centre_speaker_when_there_is_one_and_its_own_first() {
+        // LFE alone, 5.1 onto an LCR device: straight into the centre.
+        let src = [0.0f32, 0.0, 0.0, 0.8, 0.0, 0.0];
+        assert_close(&mix_auto(&src, 3), &[0.0, 0.0, 0.8]);
+        // Onto a 5.1 device it keeps its own output.
+        assert_close(&mix_auto(&src, 6), &[0.0, 0.0, 0.0, 0.8, 0.0, 0.0]);
     }
 
     #[test]
@@ -460,8 +820,11 @@ mod tests {
         let matrix = ChannelMixMatrix::build(2, 12, ChannelMapMode::Auto);
         assert_eq!(matrix.used_sources(), &[0, 1]);
         let matrix = ChannelMixMatrix::build(6, 2, ChannelMapMode::Auto);
-        // LFE (channel 3) is dropped, so it is never interpolated.
-        assert_eq!(matrix.used_sources(), &[0, 1, 2, 4, 5]);
+        // Every 5.1 channel reaches the pair, the LFE included.
+        assert_eq!(matrix.used_sources(), &[0, 1, 2, 3, 4, 5]);
+        // A 7.1.4 source on a 7.1.4 device reads all twelve; on stereo too.
+        let matrix = ChannelMixMatrix::build(12, 2, ChannelMapMode::Auto);
+        assert_eq!(matrix.used_sources().len(), 12);
     }
 
     #[test]
@@ -469,6 +832,73 @@ mod tests {
         let matrix = ChannelMixMatrix::build(0, 0, ChannelMapMode::Auto);
         assert_eq!(matrix.row(0), &[(0, 1.0)]);
         assert!(matrix.row(1).is_empty());
+    }
+
+    #[test]
+    fn a_7_1_4_channel_mask_names_the_standard_layout() {
+        let layout = layout_from_mask(0x2D63F, 12).expect("a 7.1.4 mask");
+        assert_eq!(layout, LAYOUT_12.to_vec());
+        assert_eq!(layout_from_mask(0x2D63F, 10), None, "bits that do not number the channels");
+        assert_eq!(layout_from_mask(0, 12), None, "no mask at all");
+        assert_eq!(layout_from_mask(0x4_0000, 1), None, "a bit the format reserves");
+    }
+
+    #[test]
+    fn surround_names_and_angles_follow_the_pairs_the_layout_has() {
+        let five_one = standard_layout_vec(6).expect("5.1");
+        assert_eq!(Bl.label(&five_one), "Ls");
+        assert_eq!(Bl.direction(&five_one), (-110.0, 0.0));
+        let seven_one = standard_layout_vec(8).expect("7.1");
+        assert_eq!((Bl.label(&seven_one), Sl.label(&seven_one)), ("Lrs", "Lss"));
+        assert_eq!((Bl.direction(&seven_one).0, Sl.direction(&seven_one).0), (-135.0, -90.0));
+        assert!(Tfl.is_height() && !Fl.is_height() && Lfe.is_lfe());
+        for pos in SpeakerPos::ALL {
+            assert_eq!(SpeakerPos::from_key(pos.key()), Some(pos));
+        }
+    }
+
+    #[test]
+    fn a_film_order_file_reaches_the_right_speakers() {
+        // L C R Ls Rs LFE onto a WAV-order 5.1 device: L R C LFE Ls Rs.
+        let film: Layout = presets_for(6)
+            .find(|p| p.name.contains("Film"))
+            .expect("a Film preset")
+            .speakers
+            .iter()
+            .copied()
+            .map(Some)
+            .collect();
+        let matrix = ChannelMixMatrix::build_with_layouts(6, Some(&film), 6, None, ChannelMapMode::Auto);
+        let src = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+        let out: Vec<f32> = (0..6).map(|c| matrix.mix(c, &src)).collect();
+        assert_close(&out, &[0.1, 0.3, 0.2, 0.6, 0.4, 0.5]);
+    }
+
+    #[test]
+    fn a_channel_on_no_speaker_is_silent_and_outputs_follow_their_own_layout() {
+        let src: Layout = vec![Some(Fl), None];
+        let out: Layout = vec![None, Some(Fl), Some(Fr)];
+        let matrix = ChannelMixMatrix::build_with_layouts(2, Some(&src), 3, Some(&out), ChannelMapMode::Auto);
+        let mixed: Vec<f32> = (0..3).map(|c| matrix.mix(c, &[0.5, 0.9])).collect();
+        assert_close(&mixed, &[0.0, 0.5, 0.0]);
+        // A layout of the wrong length is ignored for the standard one.
+        let wrong: Layout = vec![Some(Fr)];
+        let matrix = ChannelMixMatrix::build_with_layouts(2, Some(&wrong), 2, None, ChannelMapMode::Auto);
+        assert_close(&[matrix.mix(0, &[0.25, 0.75]), matrix.mix(1, &[0.25, 0.75])], &[0.25, 0.75]);
+    }
+
+    #[test]
+    fn presets_are_sized_and_named_once_per_count() {
+        assert!(presets_for(12).count() >= 2);
+        assert!(presets_for(16).any(|p| p.name == "9.1.6"));
+        for preset in PRESETS {
+            assert_eq!(
+                PRESETS.iter().filter(|p| p.name == preset.name).count(),
+                1,
+                "{}",
+                preset.name
+            );
+        }
     }
 
     #[test]

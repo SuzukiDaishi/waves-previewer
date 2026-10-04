@@ -17,6 +17,55 @@ const TOPBAR_METER_DB_LABEL_W: f32 = 88.0;
 /// Fits "-79 dB" / "-inf".
 const TOPBAR_METER_DB_LABEL_W_COMPACT: f32 = 48.0;
 const TOPBAR_LOUDNESS_READOUT_W: f32 = 152.0;
+/// The strip above the output meter's columns that names their speakers.
+const OUTPUT_METER_LABEL_H: f32 = 8.0;
+/// The names' size, when the columns are wide enough for it; they shrink to
+/// fit, down to the smallest that still reads, and are left out below that.
+const OUTPUT_METER_LABEL_PT: f32 = 8.0;
+const OUTPUT_METER_LABEL_MIN_PT: f32 = 5.5;
+
+/// One output's place in the top bar's output meter.
+struct MeterCell {
+    rect: egui::Rect,
+    /// A column that fills upwards, rather than a row that fills rightwards.
+    vertical: bool,
+}
+
+/// Where each output's level is drawn: a row across the bar for a mono or
+/// stereo output, a column for anything wider -- twelve rows in sixteen
+/// pixels would be a pixel each, and a row has no room for a name.
+fn output_meter_cells(track: egui::Rect, channels: usize) -> Vec<MeterCell> {
+    let n = channels.max(1);
+    if n <= 2 {
+        let h = track.height() / n as f32;
+        return (0..n)
+            .map(|i| {
+                let top = track.top() + h * i as f32;
+                MeterCell {
+                    rect: egui::Rect::from_min_max(
+                        egui::pos2(track.left(), top + 0.5),
+                        egui::pos2(track.right(), top + h - 0.5),
+                    ),
+                    vertical: false,
+                }
+            })
+            .collect();
+    }
+    let gap = if track.width() / n as f32 >= 4.0 { 1.0 } else { 0.0 };
+    let w = (track.width() - gap * (n - 1) as f32) / n as f32;
+    (0..n)
+        .map(|i| {
+            let left = track.left() + (w + gap) * i as f32;
+            MeterCell {
+                rect: egui::Rect::from_min_max(
+                    egui::pos2(left, track.top()),
+                    egui::pos2(left + w, track.bottom()),
+                ),
+                vertical: true,
+            }
+        })
+        .collect()
+}
 /// egui's `separator()` in a horizontal layout.
 const TOPBAR_SEPARATOR_W: f32 = 6.0;
 
@@ -107,6 +156,44 @@ pub(crate) fn format_list_meta_status(
 }
 
 impl WavesPreviewer {
+    /// What the output meter calls each output of the device: the speaker it
+    /// feeds (`output_layout_for`), else its number. One per meter slot; a
+    /// device wider than the slots has its last ones summed into the last.
+    pub(in crate::app) fn output_meter_names(&self, out_channels: usize) -> Vec<String> {
+        let slots = crate::audio::METER_CH_SLOTS;
+        let layout = self.output_layout_for(self.audio.output_device_name(), out_channels);
+        (0..out_channels.min(slots))
+            .map(|i| {
+                if out_channels > slots && i == slots - 1 {
+                    return format!("{}-{out_channels}", i + 1);
+                }
+                match layout.as_deref().and_then(|layout| layout.get(i).copied().flatten()) {
+                    Some(pos) => pos.label(layout.as_deref().unwrap_or(&[])).to_string(),
+                    None => (i + 1).to_string(),
+                }
+            })
+            .collect()
+    }
+
+    /// Each output's (level, peak hold) in dB for `count` meter cells. An
+    /// output the callback has not reported reads the floor -- unless it
+    /// reports nothing at all while the source is measured instead (no
+    /// output stream), when that level stands for every output.
+    pub(in crate::app) fn output_meter_levels(&self, count: usize) -> Vec<(f32, f32)> {
+        let floor = crate::levels::METER_FLOOR_DB;
+        if self.meter_ch_db.is_empty() && self.meter_db > floor {
+            return vec![(self.meter_db, floor); count];
+        }
+        (0..count)
+            .map(|i| {
+                (
+                    self.meter_ch_db.get(i).map_or(floor, |(rms, _)| *rms),
+                    self.meter_ch_hold_db.get(i).copied().unwrap_or(floor),
+                )
+            })
+            .collect()
+    }
+
     pub(super) fn ui_topbar_status_row(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let available_w = ui.available_width();
         let compact = available_w < 760.0;
@@ -783,9 +870,16 @@ impl WavesPreviewer {
         } else {
             TOPBAR_METER_DB_LABEL_W
         };
-        // volume | sep | bar | dB label  (+ loudness readout when roomy)
-        let mut w =
-            volume_w + spacing_x + TOPBAR_SEPARATOR_W + spacing_x + bar_w + spacing_x + db_label_w;
+        // HRTF | volume | sep | bar | dB label  (+ loudness readout when roomy)
+        let mut w = crate::app::ui::hrtf_window::HRTF_CHIP_W
+            + spacing_x
+            + volume_w
+            + spacing_x
+            + TOPBAR_SEPARATOR_W
+            + spacing_x
+            + bar_w
+            + spacing_x
+            + db_label_w;
         if !compact {
             w += spacing_x + TOPBAR_LOUDNESS_READOUT_W;
         }
@@ -799,6 +893,9 @@ impl WavesPreviewer {
             egui::vec2(group_w, 26.0),
             egui::Layout::left_to_right(Align::Center),
             |ui| {
+                // Headphone monitoring sits with the volume: both say how
+                // the programme is heard, not what it is.
+                self.ui_hrtf_chip(ui);
                 self.ui_topbar_volume_control(ui, ctx, compact);
                 ui.separator();
                 self.ui_topbar_output_meter(ui, compact);
@@ -1089,53 +1186,93 @@ impl WavesPreviewer {
         let db = self.meter_db;
         let bar_w = if compact { 90.0 } else { 150.0 };
         let bar_h = 16.0;
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::empty());
+        // What the device is sent -- after the volume, the HRTF and the
+        // speaker routing -- one cell per output it has.
+        let out_channels = self.audio.output_channels().max(1);
+        let names = self.output_meter_names(out_channels);
+        let levels = self.output_meter_levels(names.len());
+        // Three outputs or more are columns, their speakers named in a strip
+        // above them: a name drawn over the level could not be read.
+        let columns = names.len() > 2;
+        let label_h = if columns { OUTPUT_METER_LABEL_H } else { 0.0 };
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(bar_w, bar_h + label_h), egui::Sense::hover());
         self.topbar_output_meter_rect = Some(rect);
         let painter = ui.painter_at(rect);
         let palette = self.palette();
-        let track_rect = rect.shrink(1.0);
+        let track_rect =
+            egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + label_h), rect.max)
+                .shrink(1.0);
         painter.rect_filled(track_rect, 2.0, palette.meter_track);
         let norm_of = |db: f32| ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-        let ch_count = self.meter_ch_db.len();
-        if ch_count >= 2 {
-            // Per-output-channel sub-bars (RMS fill + peak-hold tick).
-            let sub_h = track_rect.height() / ch_count as f32;
-            for (i, &(rms_db, _peak_db)) in self.meter_ch_db.iter().enumerate() {
-                let top = track_rect.top() + sub_h * i as f32;
-                let sub = egui::Rect::from_min_max(
-                    egui::pos2(track_rect.left(), top + 0.5),
-                    egui::pos2(track_rect.right(), top + sub_h - 0.5),
-                );
-                let n = norm_of(rms_db);
+        let cells = output_meter_cells(track_rect, names.len());
+        let label_color = ui.visuals().text_color().gamma_multiply(0.75);
+        // One size for every name: the largest at which the widest fits its
+        // column, or none at all -- some names and not others reads as a
+        // pattern that is not there.
+        let label_font = if columns {
+            let probe = egui::FontId::proportional(OUTPUT_METER_LABEL_PT);
+            let widest = names
+                .iter()
+                .map(|name| {
+                    painter
+                        .layout_no_wrap(name.clone(), probe.clone(), label_color)
+                        .size()
+                        .x
+                })
+                .fold(0.0f32, f32::max);
+            let col_w = cells.first().map_or(0.0, |cell| cell.rect.width());
+            let pt = (OUTPUT_METER_LABEL_PT * 0.95 * col_w / widest.max(1.0))
+                .min(OUTPUT_METER_LABEL_PT);
+            (pt >= OUTPUT_METER_LABEL_MIN_PT).then(|| egui::FontId::proportional(pt))
+        } else {
+            None
+        };
+        for ((cell, &(rms_db, hold_db)), name) in cells.iter().zip(&levels).zip(&names) {
+            let n = norm_of(rms_db);
+            let hn = norm_of(hold_db);
+            if cell.vertical {
+                if n > 0.0 {
+                    let fill = egui::Rect::from_min_max(
+                        egui::pos2(cell.rect.left(), cell.rect.bottom() - cell.rect.height() * n),
+                        cell.rect.max,
+                    );
+                    painter.rect_filled(fill, 0.0, palette.meter_fill);
+                }
+                if hn > 0.01 {
+                    let y = cell.rect.bottom() - cell.rect.height() * hn;
+                    painter.line_segment(
+                        [egui::pos2(cell.rect.left(), y), egui::pos2(cell.rect.right(), y)],
+                        egui::Stroke::new(1.0_f32, palette.meter_peak_tick),
+                    );
+                }
+                if let Some(font) = label_font.as_ref() {
+                    painter.text(
+                        egui::pos2(cell.rect.center().x, rect.top() + label_h * 0.5),
+                        egui::Align2::CENTER_CENTER,
+                        name,
+                        font.clone(),
+                        label_color,
+                    );
+                }
+            } else {
                 if n > 0.0 {
                     painter.rect_filled(
                         egui::Rect::from_min_size(
-                            sub.min,
-                            egui::vec2(sub.width() * n, sub.height()),
+                            cell.rect.min,
+                            egui::vec2(cell.rect.width() * n, cell.rect.height()),
                         ),
                         1.0,
                         palette.meter_fill,
                     );
                 }
-                if let Some(&hold_db) = self.meter_ch_hold_db.get(i) {
-                    let hn = norm_of(hold_db);
-                    if hn > 0.01 {
-                        let x = sub.left() + sub.width() * hn;
-                        painter.line_segment(
-                            [egui::pos2(x, sub.top()), egui::pos2(x, sub.bottom())],
-                            egui::Stroke::new(1.0_f32, palette.meter_peak_tick),
-                        );
-                    }
+                if hn > 0.01 {
+                    let x = cell.rect.left() + cell.rect.width() * hn;
+                    painter.line_segment(
+                        [egui::pos2(x, cell.rect.top()), egui::pos2(x, cell.rect.bottom())],
+                        egui::Stroke::new(1.0_f32, palette.meter_peak_tick),
+                    );
                 }
-            }
-        } else {
-            let norm = norm_of(db);
-            if norm > 0.0 {
-                let fill = egui::Rect::from_min_size(
-                    track_rect.min,
-                    egui::vec2(track_rect.width() * norm, track_rect.height()),
-                );
-                painter.rect_filled(fill, 2.0, palette.meter_fill);
             }
         }
         painter.rect_stroke(
@@ -1144,6 +1281,27 @@ impl WavesPreviewer {
             egui::Stroke::new(1.0_f32, Color32::GRAY),
             egui::StrokeKind::Inside,
         );
+        if response.hovered() {
+            let device = self.audio.output_device_name().unwrap_or("output");
+            let mut text = format!(
+                "{device}: {out_channels} ch, as sent to the device (after Volume and HRTF)"
+            );
+            for (name, &(rms_db, hold_db)) in names.iter().zip(&levels) {
+                let level = |db: f32| {
+                    if db <= crate::levels::METER_FLOOR_DB + 0.1 {
+                        "-inf".to_string()
+                    } else {
+                        format!("{db:.1}")
+                    }
+                };
+                text.push_str(&format!(
+                    "\n{name:>5}  {} dB  (peak {})",
+                    level(rms_db),
+                    level(hold_db)
+                ));
+            }
+            response.on_hover_text(text);
+        }
         let db_label = if db <= -79.9 {
             if compact {
                 "-inf".to_string()
@@ -1173,6 +1331,31 @@ impl WavesPreviewer {
             font,
             ui.visuals().text_color(),
         );
+    }
+}
+
+#[cfg(test)]
+mod output_meter_tests {
+    use super::output_meter_cells;
+
+    #[test]
+    fn stereo_is_two_rows_and_surround_is_a_column_per_output() {
+        let track = egui::Rect::from_min_size(egui::pos2(10.0, 4.0), egui::vec2(148.0, 14.0));
+        let rows = output_meter_cells(track, 2);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|cell| !cell.vertical && cell.rect.width() == 148.0));
+        assert!(rows[0].rect.bottom() <= rows[1].rect.top());
+
+        for channels in [3, 6, 12, 32] {
+            let columns = output_meter_cells(track, channels);
+            assert_eq!(columns.len(), channels);
+            assert!(columns.iter().all(|cell| cell.vertical));
+            assert!(columns.windows(2).all(|w| w[0].rect.right() <= w[1].rect.left() + 1e-3));
+            assert!((columns[0].rect.left() - track.left()).abs() < 1e-3);
+            assert!((columns[channels - 1].rect.right() - track.right()).abs() < 1e-3);
+            assert!(columns.iter().all(|cell| cell.rect.height() == track.height()));
+        }
+        assert_eq!(output_meter_cells(track, 0).len(), 1, "a mono row at least");
     }
 }
 

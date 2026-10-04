@@ -419,6 +419,7 @@ impl WavesPreviewer {
         let sr_hint = (meta.sample_rate > 0).then_some(meta.sample_rate);
         let audio_track_absent = meta.audio_track_absent;
         let audio_track_unsupported = meta.audio_track_unsupported;
+        let unsupported_audio_codec = meta.unsupported_audio_codec;
         let silent_video_timeline = audio_track_absent || audio_track_unsupported;
         let silent_frames = meta
             .duration_secs
@@ -458,6 +459,7 @@ impl WavesPreviewer {
             for tab in self.tabs.iter_mut().filter(|tab| tab.path == path) {
                 tab.audio_track_absent = audio_track_absent;
                 tab.audio_track_unsupported = audio_track_unsupported;
+                tab.unsupported_audio_codec = unsupported_audio_codec;
                 tab.loading = false;
                 tab.paged_asset = false;
                 tab.buffer_sample_rate = out_sr;

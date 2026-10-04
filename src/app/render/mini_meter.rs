@@ -196,6 +196,39 @@ pub fn smooth_spectrum_db(smoothed: &mut Vec<f32>, target: &[f32], dt: f32) {
     }
 }
 
+/// Where sound comes from among a set of speakers: the energy vector (after
+/// Gerzon, rE). Each speaker is (energy, azimuth, elevation) in degrees --
+/// azimuth 0 ahead, positive to the right; elevation 0 at the ears. The
+/// result is (x right, y ahead, z up): the speakers' directions weighted by
+/// their energy over the total. Its length is 1 when one speaker plays alone
+/// and falls toward 0 as the sound comes from all round. `None` in silence.
+pub fn energy_vector(speakers: &[(f32, f32, f32)]) -> Option<[f32; 3]> {
+    let total: f32 = speakers.iter().map(|s| s.0.max(0.0)).sum();
+    if total <= 1.0e-12 {
+        return None;
+    }
+    let mut v = [0.0f32; 3];
+    for &(energy, azimuth, elevation) in speakers {
+        let (az_sin, az_cos) = azimuth.to_radians().sin_cos();
+        let (el_sin, el_cos) = elevation.to_radians().sin_cos();
+        let w = energy.max(0.0) / total;
+        v[0] += w * az_sin * el_cos;
+        v[1] += w * az_cos * el_cos;
+        v[2] += w * el_sin;
+    }
+    Some(v)
+}
+
+/// The share of the energy in speakers above the ears; each speaker is
+/// (energy, is it a height speaker). 0 in silence.
+pub fn height_share(speakers: &[(f32, bool)]) -> f32 {
+    let total: f32 = speakers.iter().map(|s| s.0.max(0.0)).sum();
+    if total <= 1.0e-12 {
+        return 0.0;
+    }
+    speakers.iter().filter(|s| s.1).map(|s| s.0.max(0.0)).sum::<f32>() / total
+}
+
 /// Goniometer (Lissajous) points for the stereo vectorscope: normalizes the
 /// window toward ~0.9 full scale (gain capped at 16x), decimates to at most
 /// `max_points`, and maps each frame into mid/side space — x = (L-R)/sqrt2
@@ -266,6 +299,21 @@ pub fn stereo_correlation(l: &[f32], r: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_speaker_alone_points_at_itself_and_an_even_ring_points_nowhere() {
+        let left = energy_vector(&[(1.0, -30.0, 0.0), (0.0, 30.0, 0.0)]).expect("sound");
+        let (s, c) = (-30.0f32).to_radians().sin_cos();
+        assert!((left[0] - s).abs() < 1e-5 && (left[1] - c).abs() < 1e-5 && left[2].abs() < 1e-6);
+        let ring: Vec<(f32, f32, f32)> = (0..8).map(|i| (0.5, i as f32 * 45.0, 0.0)).collect();
+        let even = energy_vector(&ring).expect("sound");
+        assert!(even.iter().all(|v| v.abs() < 1e-5), "all round: {even:?}");
+        let overhead = energy_vector(&[(1.0, 0.0, 90.0)]).expect("sound");
+        assert!((overhead[2] - 1.0).abs() < 1e-6);
+        assert_eq!(energy_vector(&[(0.0, 0.0, 0.0)]), None, "silence");
+        assert!((height_share(&[(1.0, false), (3.0, true)]) - 0.75).abs() < 1e-6);
+        assert_eq!(height_share(&[]), 0.0);
+    }
 
     fn sine(freq: f32, sr: u32, secs: f32, amp: f32) -> Vec<f32> {
         let n = (sr as f32 * secs) as usize;

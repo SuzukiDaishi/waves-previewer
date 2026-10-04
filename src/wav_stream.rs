@@ -37,6 +37,9 @@ pub struct WavePcmInfo {
     pub data_offset: u64,
     pub data_len: u64,
     pub frame_count: u64,
+    /// The WAVE_FORMAT_EXTENSIBLE channel mask: which speaker each channel
+    /// feeds, in bit order. `None` for a plain fmt chunk, or a mask of 0.
+    pub channel_mask: Option<u32>,
 }
 
 /// Returns true when mutating RIFF chunks would require an unsafe/expensive
@@ -79,6 +82,7 @@ pub fn read_wave_pcm_info(path: &Path) -> Result<Option<WavePcmInfo>> {
     let mut sample_rate = 0u32;
     let mut bits_per_sample = 0u16;
     let mut block_align = 0u16;
+    let mut channel_mask = None;
     let mut data = None;
     loop {
         let mut header = [0u8; 8];
@@ -109,6 +113,8 @@ pub fn read_wave_pcm_info(path: &Path) -> Result<Option<WavePcmInfo>> {
                     block_align = u16::from_le_bytes(bytes[12..14].try_into().unwrap());
                     bits_per_sample = u16::from_le_bytes(bytes[14..16].try_into().unwrap());
                     if audio_format == 0xFFFE && bytes.len() >= 26 {
+                        channel_mask = Some(u32::from_le_bytes(bytes[20..24].try_into().unwrap()))
+                            .filter(|mask| *mask != 0);
                         audio_format = u16::from_le_bytes(bytes[24..26].try_into().unwrap());
                     }
                 }
@@ -154,6 +160,7 @@ pub fn read_wave_pcm_info(path: &Path) -> Result<Option<WavePcmInfo>> {
         data_offset,
         data_len,
         frame_count: data_len / block_align as u64,
+        channel_mask,
     }))
 }
 

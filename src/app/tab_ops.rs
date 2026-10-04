@@ -315,6 +315,9 @@ impl super::WavesPreviewer {
         let audio_track_unsupported = self
             .meta_for_path(path)
             .is_some_and(|meta| meta.audio_track_unsupported);
+        let unsupported_audio_codec = self
+            .meta_for_path(path)
+            .and_then(|meta| meta.unsupported_audio_codec);
         let silent_video_timeline = audio_track_absent || audio_track_unsupported;
         // 郢ｧ・ｿ郢晄じ・帝ｫ｢荵晢ｿ･/郢ｧ・｢郢ｧ・ｯ郢昴・縺・ｹ晞摩蝟ｧ邵ｺ蜷ｶ・玖ｭ弱ｅ竊馴ｫｻ・ｳ陞｢・ｰ郢ｧ雋樞酪雎・ｽ｢
         if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
@@ -430,6 +433,7 @@ impl super::WavesPreviewer {
         tab.loading = loading;
         tab.audio_track_absent = audio_track_absent;
         tab.audio_track_unsupported = audio_track_unsupported;
+        tab.unsupported_audio_codec = unsupported_audio_codec;
         tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
         tab.samples_len_visual = estimated_visual_frames.unwrap_or(0);
         if silent_video_timeline {

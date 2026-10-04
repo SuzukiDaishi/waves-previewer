@@ -32,6 +32,8 @@ mod capture;
 pub mod channel_routing_ops;
 mod cli_ops;
 mod cli_workspace;
+mod channel_layout_ops;
+mod hrtf_ops;
 mod clipboard_ops;
 mod comment_ops;
 pub mod comments;
@@ -904,6 +906,10 @@ pub struct WavesPreviewer {
     // single click = select + audition (default). When false, single click only
     // selects; audition happens via Space / keyboard nav / autoplay.
     list_click_audition: bool,
+    /// Leave the red "Decode failed" text off the list's waveform cells
+    /// (prefs; on by default). Display only: a row that failed is still
+    /// treated as failed everywhere else.
+    list_hide_decode_errors: bool,
     suppress_list_enter: bool,
     list_has_focus: bool,
     /// Set on a frame the list moved its selection with an arrow key, read on
@@ -1305,6 +1311,23 @@ pub struct WavesPreviewer {
     lufs_worker_busy: bool,
     // Sample rate conversion (non-destructive)
     sample_rate_override: HashMap<PathBuf, u32>,
+    /// Layouts chosen for single files (stored in the session).
+    channel_layout_overrides: HashMap<PathBuf, crate::audio_channels::Layout>,
+    /// Layouts chosen per channel count (stored in prefs).
+    channel_layout_defaults: std::collections::BTreeMap<usize, crate::audio_channels::Layout>,
+    /// Bumped whenever either of those changes.
+    channel_layout_rev: u64,
+    /// What playback was last told: (source, timeline format, channels,
+    /// mask, rev).
+    channel_layout_applied: Option<(Option<PathBuf>, Option<String>, usize, Option<u32>, u64)>,
+    channel_layout_editor: Option<channel_layout_ops::ChannelLayoutEditor>,
+    /// Speakers chosen per output device, by device name (prefs).
+    output_speakers: std::collections::BTreeMap<String, channel_layout_ops::OutputSpeakers>,
+    /// What the output was last told: (engine, device, channels, rev).
+    output_layout_applied: Option<(usize, Option<String>, usize, u64)>,
+    /// Headphone monitoring through an HRTF (prefs). See `hrtf_ops`.
+    hrtf: hrtf_ops::HrtfSettings,
+    hrtf_runtime: hrtf_ops::HrtfRuntime,
     sample_rate_probe_cache: rustc_hash::FxHashMap<PathBuf, u32>,
     bit_depth_override: HashMap<PathBuf, crate::wave::WavBitDepth>,
     format_override: HashMap<PathBuf, String>,
@@ -2262,6 +2285,8 @@ impl WavesPreviewer {
         FileMeta {
             audio_track_absent: false,
             audio_track_unsupported: false,
+            unsupported_audio_codec: None,
+            channel_mask: None,
             channels: channels.len().max(1) as u16,
             sample_rate,
             bits_per_sample,

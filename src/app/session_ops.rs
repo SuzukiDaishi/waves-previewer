@@ -2206,6 +2206,15 @@ impl super::WavesPreviewer {
             })
             .collect();
         sample_rate_overrides.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut channel_layouts: Vec<crate::app::project::ProjectChannelLayout> = self
+            .channel_layout_overrides
+            .iter()
+            .map(|(path, layout)| crate::app::project::ProjectChannelLayout {
+                path: session_path(path, base_dir, path_mode),
+                speakers: crate::app::channel_layout_ops::layout_to_string(layout),
+            })
+            .collect();
+        channel_layouts.sort_by(|a, b| a.path.cmp(&b.path));
         let mut bit_depth_overrides: Vec<ProjectBitDepthOverride> = self
             .bit_depth_override
             .iter()
@@ -2413,6 +2422,7 @@ impl super::WavesPreviewer {
             items: list_items,
             sample_rate_overrides,
             bit_depth_overrides,
+            channel_layouts,
             format_overrides,
             virtual_items,
             transcript_languages,
@@ -4992,6 +5002,14 @@ impl super::WavesPreviewer {
                 item.transcript_document = Some(std::sync::Arc::new(stored.document.clone()));
             }
         }
+        self.channel_layout_overrides.clear();
+        for item in project.list.channel_layouts.iter() {
+            if let Some(layout) = crate::app::channel_layout_ops::layout_from_string(&item.speakers) {
+                self.channel_layout_overrides
+                    .insert(resolve_path(&item.path, &base_dir), layout);
+            }
+        }
+        self.channel_layout_rev = self.channel_layout_rev.wrapping_add(1);
         self.sample_rate_override.clear();
         for override_item in project.list.sample_rate_overrides.iter() {
             if override_item.sample_rate == 0 {

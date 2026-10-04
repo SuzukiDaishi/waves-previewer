@@ -320,6 +320,26 @@ pub(super) struct ListWaveCellOutcome {
 }
 
 impl crate::app::WavesPreviewer {
+    /// The line under a row's waveform, and whether it is an error (red) or
+    /// a note on the audio (amber): `<codec> UNSUPPORTED`, `NO AUDIO`, or the
+    /// decode error -- unless the user hides those (`list_hide_decode_errors`).
+    pub(in crate::app) fn list_wave_status_text(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<(std::borrow::Cow<'_, str>, bool)> {
+        let meta = self.meta_for_path(path)?;
+        let status: Option<(std::borrow::Cow<'_, str>, bool)> = if meta.audio_track_unsupported {
+            let codec = meta.unsupported_audio_codec.unwrap_or("AAC");
+            Some((format!("{codec} UNSUPPORTED").into(), false))
+        } else {
+            meta.decode_error
+                .as_deref()
+                .map(|text| (text.into(), text != "AAC UNSUPPORTED"))
+                .or_else(|| meta.audio_track_absent.then_some(("NO AUDIO".into(), false)))
+        };
+        status.filter(|(_, is_error)| !(*is_error && self.list_hide_decode_errors))
+    }
+
     pub(super) fn ui_list_wave_cell(
         &mut self,
         row: &mut egui_extras::TableRow<'_, '_>,
@@ -343,16 +363,7 @@ impl crate::app::WavesPreviewer {
                     format!("List seek row {}", cell.row_idx),
                 )
             });
-            let status_text = self.meta_for_path(cell.path).and_then(|meta| {
-                if meta.audio_track_unsupported {
-                    Some(("AAC UNSUPPORTED", false))
-                } else {
-                    meta.decode_error
-                        .as_deref()
-                        .map(|text| (text, text != "AAC UNSUPPORTED"))
-                        .or_else(|| meta.audio_track_absent.then_some(("NO AUDIO", false)))
-                }
-            });
+            let status_text = self.list_wave_status_text(cell.path);
             let (wave_rect, error_rect) = if status_text.is_some() {
                 let err_max = (rect2.height() * 0.45).max(8.0);
                 let mut err_h = (cell.row_h * 0.36).max(8.0);

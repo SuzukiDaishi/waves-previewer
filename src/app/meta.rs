@@ -157,22 +157,107 @@ fn task_path(task: &MetaTask) -> &PathBuf {
     }
 }
 
-/// Pending work as a per-path task map plus two FIFO lanes of paths.
+/// Pending work as a per-path task map plus FIFO lanes of paths.
 /// Every operation (enqueue, promote, cancel, pop) is O(1); stale lane
-/// entries (path no longer in `tasks`) are skipped at pop time. The old
-/// single-VecDeque design made `promote_path` a linear scan under the lock,
-/// which the UI thread paid for every visible row every frame.
+/// entries (path no longer in `tasks`, or now holding a task of the other
+/// kind) are skipped at pop time. The old single-VecDeque design made
+/// `promote_path` a linear scan under the lock, which the UI thread paid for
+/// every visible row every frame.
+///
+/// Quick work -- headers, transcripts -- has lanes of its own and is always
+/// taken before a full decode, so a row's length and rate never wait behind
+/// another row's waveform. A `Header` task is itself split: the worker reads
+/// the header, reports it, and puts the full decode back in the queue.
 struct QueueInner {
     tasks: HashMap<PathBuf, MetaTask>,
     /// High-priority lane: visible rows, near-selected rows, active tab.
     hi: VecDeque<PathBuf>,
     /// Background lane: prefetch pumps, CSV export top-ups.
     lo: VecDeque<PathBuf>,
-    /// Paths currently sitting in `hi` (avoids duplicate pushes when a row
-    /// promotes itself every frame while visible).
+    /// The same two lanes for full decodes (`MetaTask::Decode`).
+    decode_hi: VecDeque<PathBuf>,
+    decode_lo: VecDeque<PathBuf>,
+    /// Paths currently sitting in `hi` / `decode_hi` (avoids duplicate pushes
+    /// when a row promotes itself every frame while visible).
     promoted: HashSet<PathBuf>,
+    decode_promoted: HashSet<PathBuf>,
     /// Cancel flags for tasks a worker has already started.
     running: HashMap<PathBuf, Arc<AtomicBool>>,
+}
+
+/// Everything but a full decode: work that takes milliseconds, not seconds.
+fn is_quick(task: &MetaTask) -> bool {
+    !matches!(task, MetaTask::Decode(_))
+}
+
+impl QueueInner {
+    fn new() -> Self {
+        Self {
+            tasks: HashMap::new(),
+            hi: VecDeque::new(),
+            lo: VecDeque::new(),
+            decode_hi: VecDeque::new(),
+            decode_lo: VecDeque::new(),
+            promoted: HashSet::new(),
+            decode_promoted: HashSet::new(),
+            running: HashMap::new(),
+        }
+    }
+
+    fn push_back(&mut self, path: PathBuf, quick: bool) {
+        if quick {
+            self.lo.push_back(path);
+        } else {
+            self.decode_lo.push_back(path);
+        }
+    }
+
+    /// Put `path` at the front of its kind's high-priority lane, unless it
+    /// is there already.
+    fn push_front(&mut self, path: &PathBuf, quick: bool) -> bool {
+        let (set, lane) = if quick {
+            (&mut self.promoted, &mut self.hi)
+        } else {
+            (&mut self.decode_promoted, &mut self.decode_hi)
+        };
+        if set.insert(path.clone()) {
+            lane.push_front(path.clone());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The next path to run and whether it came from a high-priority lane:
+    /// quick work first, high before low, then full decodes the same way.
+    fn pop_next(&mut self) -> Option<(PathBuf, bool)> {
+        let wants = |tasks: &HashMap<PathBuf, MetaTask>, p: &PathBuf, quick: bool| {
+            tasks.get(p).is_some_and(|task| is_quick(task) == quick)
+        };
+        while let Some(p) = self.hi.pop_front() {
+            self.promoted.remove(&p);
+            if wants(&self.tasks, &p, true) {
+                return Some((p, true));
+            }
+        }
+        while let Some(p) = self.lo.pop_front() {
+            if wants(&self.tasks, &p, true) {
+                return Some((p, false));
+            }
+        }
+        while let Some(p) = self.decode_hi.pop_front() {
+            self.decode_promoted.remove(&p);
+            if wants(&self.tasks, &p, false) {
+                return Some((p, true));
+            }
+        }
+        while let Some(p) = self.decode_lo.pop_front() {
+            if wants(&self.tasks, &p, false) {
+                return Some((p, false));
+            }
+        }
+        None
+    }
 }
 
 struct MetaQueue {
@@ -259,27 +344,32 @@ impl MetaPool {
 
     pub fn enqueue(&self, task: MetaTask) {
         let path = task_path(&task).clone();
+        let quick = is_quick(&task);
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.tasks.insert(path.clone(), task).is_none() {
-            inner.lo.push_back(path);
+        // A task of the other kind sits in the other lanes: this one needs
+        // an entry in its own.
+        let queued = inner.tasks.insert(path.clone(), task);
+        if queued.is_none_or(|prev| is_quick(&prev) != quick) {
+            inner.push_back(path, quick);
         }
         self.shared.cv.notify_one();
     }
 
     pub fn enqueue_front(&self, task: MetaTask) {
         let path = task_path(&task).clone();
+        let quick = is_quick(&task);
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.tasks.insert(path.clone(), task);
-        if inner.promoted.insert(path.clone()) {
-            inner.hi.push_front(path);
-        }
+        inner.push_front(&path, quick);
         self.shared.cv.notify_one();
     }
 
     pub fn promote_path(&self, path: &PathBuf) {
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.tasks.contains_key(path) && inner.promoted.insert(path.clone()) {
-            inner.hi.push_front(path.clone());
+        let Some(quick) = inner.tasks.get(path).map(is_quick) else {
+            return;
+        };
+        if inner.push_front(path, quick) {
             self.shared.cv.notify_one();
         }
     }
@@ -292,6 +382,7 @@ impl MetaPool {
     pub fn cancel_path(&self, path: &Path) -> bool {
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.promoted.remove(path);
+        inner.decode_promoted.remove(path);
         let removed = inner.tasks.remove(path).is_some();
         if let Some(flag) = inner.running.get(path) {
             flag.store(true, Ordering::Relaxed);
@@ -316,90 +407,58 @@ impl Drop for MetaPool {
     }
 }
 
-fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
-    fn quick_peak_db(path: &PathBuf) -> Option<f32> {
-        let (mono, _sr, _truncated, _decode_errors) =
-            audio_io::decode_audio_mono_prefix_with_errors(path, 0.25).ok()?;
-        let mut peak_abs = 0.0f32;
-        for &v in &mono {
-            let a = v.abs();
-            if a > peak_abs {
-                peak_abs = a;
-            }
+/// Peak of the first quarter second, the header stage's estimate of a file's
+/// level. `None` when that prefix does not decode.
+fn quick_peak_db(path: &PathBuf) -> Option<f32> {
+    let (mono, _sr, _truncated, _decode_errors) =
+        audio_io::decode_audio_mono_prefix_with_errors(path, 0.25).ok()?;
+    let mut peak_abs = 0.0f32;
+    for &v in &mono {
+        let a = v.abs();
+        if a > peak_abs {
+            peak_abs = a;
         }
-        let silent_thresh = crate::levels::silence_amplitude();
-        Some(if peak_abs > silent_thresh {
-            20.0 * peak_abs.log10()
-        } else {
-            f32::NEG_INFINITY
-        })
     }
+    let silent_thresh = crate::levels::silence_amplitude();
+    Some(if peak_abs > silent_thresh {
+        20.0 * peak_abs.log10()
+    } else {
+        f32::NEG_INFINITY
+    })
+}
 
+/// The whole header stage: what the header says, then the extras.
+#[cfg(test)]
+fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
+    let mut meta = basic_header_meta(path)?;
+    enrich_header_meta(path, &mut meta);
+    Ok(meta)
+}
+
+/// What the container's header alone says -- length, rate, channels,
+/// depth, dates -- and nothing that decodes. The list shows this the moment
+/// it arrives, before the estimated peak, markers, BPM and cover art
+/// (`enrich_header_meta`), which together cost far more than the header.
+fn basic_header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
     if let Some(meta) = no_audio_video_meta(path, false) {
         return Ok(meta);
     }
-    // An AAC track is only readable where the OS lends its decoder. Where it is
-    // not, nothing is asked to decode the file: the row says `AAC UNSUPPORTED`
-    // rather than reporting a damaged file. Where it is, a decode that still
-    // fails (an N edition without the Media Feature Pack, a truncated track)
-    // lands in the same place, because the reason the user needs is the same.
-    let track_is_aac = audio_io::is_isobmff_path(path)
-        && audio_io::probe_isobmff_aac_audio_track(path).unwrap_or(false);
-    let aac_decodable = !track_is_aac || audio_io::aac_decode_available();
     match audio_io::read_audio_info(path) {
-        Ok(info) => {
-            let peak_db = aac_decodable.then(|| quick_peak_db(path)).flatten();
-            let aac_unsupported = track_is_aac && peak_db.is_none();
-            let (marker_fracs, loop_frac) = read_wave_annotation_fracs(
-                path,
-                info.sample_rate,
-                info.total_frames,
-                info.duration_secs,
-            );
-            Ok(FileMeta {
-                audio_track_absent: false,
-                audio_track_unsupported: false,
-                channels: info.channels,
-                sample_rate: info.sample_rate,
-                bits_per_sample: info.bits_per_sample,
-                sample_value_kind: map_sample_value_kind(info.sample_value_kind),
-                bit_rate_bps: info.bit_rate_bps,
-                duration_secs: info.duration_secs,
-                total_frames: info.total_frames,
-                rms_db: None,
-                peak_db,
-                peak_db_estimate: true,
-                lufs_i: None,
-                lufs_m_max: None,
-                lufs_s_max: None,
-                true_peak_db: None,
-                bpm: audio_io::read_audio_bpm(path),
-                silence_lead_ms: None,
-                silence_tail_ms: None,
-                edge_abs: None,
-                blank_pad: None,
-                created_at: info.created_at,
-                modified_at: info.modified_at,
-                cover_art: decode_cover_art_thumbnail(path),
-                thumb: Vec::new(),
-                marker_fracs,
-                loop_frac,
-                decode_error: aac_unsupported.then(|| "AAC UNSUPPORTED".to_string()),
-            })
-        }
-        Err(_) => Err(FileMeta {
+        Ok(info) => Ok(FileMeta {
             audio_track_absent: false,
             audio_track_unsupported: false,
-            channels: 0,
-            sample_rate: 0,
-            bits_per_sample: 0,
-            sample_value_kind: SampleValueKind::Unknown,
-            bit_rate_bps: None,
-            duration_secs: None,
-            total_frames: None,
+            unsupported_audio_codec: None,
+            channel_mask: info.channel_mask,
+            channels: info.channels,
+            sample_rate: info.sample_rate,
+            bits_per_sample: info.bits_per_sample,
+            sample_value_kind: map_sample_value_kind(info.sample_value_kind),
+            bit_rate_bps: info.bit_rate_bps,
+            duration_secs: info.duration_secs,
+            total_frames: info.total_frames,
             rms_db: None,
             peak_db: None,
-            peak_db_estimate: false,
+            peak_db_estimate: true,
             lufs_i: None,
             lufs_m_max: None,
             lufs_s_max: None,
@@ -409,27 +468,107 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             silence_tail_ms: None,
             edge_abs: None,
             blank_pad: None,
-            created_at: None,
-            modified_at: None,
+            created_at: info.created_at,
+            modified_at: info.modified_at,
             cover_art: None,
             thumb: Vec::new(),
             marker_fracs: Vec::new(),
             loop_frac: None,
-            decode_error: Some(if track_is_aac {
-                "AAC UNSUPPORTED".to_string()
-            } else {
-                "Decode failed".to_string()
-            }),
+            decode_error: None,
         }),
+        Err(_) => {
+            let track_is_aac = audio_io::is_isobmff_path(path)
+                && audio_io::probe_isobmff_aac_audio_track(path).unwrap_or(false);
+            Err(FileMeta {
+                audio_track_absent: false,
+                audio_track_unsupported: false,
+                unsupported_audio_codec: None,
+                channel_mask: None,
+                channels: 0,
+                sample_rate: 0,
+                bits_per_sample: 0,
+                sample_value_kind: SampleValueKind::Unknown,
+                bit_rate_bps: None,
+                duration_secs: None,
+                total_frames: None,
+                rms_db: None,
+                peak_db: None,
+                peak_db_estimate: false,
+                lufs_i: None,
+                lufs_m_max: None,
+                lufs_s_max: None,
+                true_peak_db: None,
+                bpm: None,
+                silence_lead_ms: None,
+                silence_tail_ms: None,
+                edge_abs: None,
+                blank_pad: None,
+                created_at: None,
+                modified_at: None,
+                cover_art: None,
+                thumb: Vec::new(),
+                marker_fracs: Vec::new(),
+                loop_frac: None,
+                decode_error: Some(if track_is_aac {
+                    "AAC UNSUPPORTED".to_string()
+                } else {
+                    "Decode failed".to_string()
+                }),
+            })
+        }
     }
+}
+
+/// The rest of the header stage, onto what `basic_header_meta` read: the
+/// peak of the first quarter second, markers and loop, BPM, cover art.
+fn enrich_header_meta(path: &PathBuf, meta: &mut FileMeta) {
+    // A video with no audio to read came back whole.
+    if meta.audio_track_absent || meta.audio_track_unsupported {
+        return;
+    }
+    // An AAC track is only readable where the OS lends its decoder. Where it is
+    // not, nothing is asked to decode the file: the row says `AAC UNSUPPORTED`
+    // rather than reporting a damaged file. Where it is, a decode that still
+    // fails (an N edition without the Media Feature Pack, a truncated track)
+    // lands in the same place, because the reason the user needs is the same.
+    let track_is_aac = audio_io::is_isobmff_path(path)
+        && audio_io::probe_isobmff_aac_audio_track(path).unwrap_or(false);
+    let aac_decodable = !track_is_aac || audio_io::aac_decode_available();
+    let peak_db = aac_decodable.then(|| quick_peak_db(path)).flatten();
+    let aac_unsupported = track_is_aac && peak_db.is_none();
+    let (marker_fracs, loop_frac) = read_wave_annotation_fracs(
+        path,
+        meta.sample_rate,
+        meta.total_frames,
+        meta.duration_secs,
+    );
+    meta.peak_db = peak_db;
+    meta.bpm = audio_io::read_audio_bpm(path);
+    meta.cover_art = decode_cover_art_thumbnail(path);
+    meta.marker_fracs = marker_fracs;
+    meta.loop_frac = loop_frac;
+    meta.decode_error = aac_unsupported.then(|| "AAC UNSUPPORTED".to_string());
 }
 
 fn no_audio_video_meta(path: &PathBuf, allow_video_poster: bool) -> Option<FileMeta> {
     if !crate::media_kind::is_video_path(path) {
         return None;
     }
-    let has_audio_track = audio_io::probe_isobmff_audio_track(path).ok()?;
-    let audio_track_unsupported = has_audio_track && audio_io::isobmff_aac_audio_unsupported(path);
+    // `Some(codec)` when the audio is there but nothing here decodes it.
+    let (has_audio_track, unsupported_audio_codec) = if crate::mpegts::is_mpegts_path(path) {
+        use crate::audio_mpegts::TsAudioPresence;
+        let probe = crate::mpegts::TsProbe::open_head(path).ok()?;
+        match crate::audio_mpegts::audio_presence(&probe) {
+            TsAudioPresence::Decodable => return None,
+            TsAudioPresence::Absent => (false, None),
+            TsAudioPresence::Unsupported(codec) => (true, Some(codec)),
+        }
+    } else {
+        let has_audio_track = audio_io::probe_isobmff_audio_track(path).ok()?;
+        let unsupported = has_audio_track && audio_io::isobmff_aac_audio_unsupported(path);
+        (has_audio_track, unsupported.then_some("AAC"))
+    };
+    let audio_track_unsupported = unsupported_audio_codec.is_some();
     if has_audio_track && !audio_track_unsupported {
         return None;
     }
@@ -438,6 +577,8 @@ fn no_audio_video_meta(path: &PathBuf, allow_video_poster: bool) -> Option<FileM
     Some(FileMeta {
         audio_track_absent: !has_audio_track,
         audio_track_unsupported,
+        unsupported_audio_codec,
+        channel_mask: None,
         channels: 0,
         sample_rate: 0,
         bits_per_sample: 0,
@@ -578,6 +719,8 @@ fn decode_full_meta(
         return Some(FileMeta {
             audio_track_absent: false,
             audio_track_unsupported: false,
+            unsupported_audio_codec: None,
+            channel_mask: info.as_ref().and_then(|i| i.channel_mask),
             channels: ch,
             sample_rate: sr,
             bits_per_sample: bits,
@@ -652,6 +795,8 @@ fn decode_full_meta(
         return Some(FileMeta {
             audio_track_absent: false,
             audio_track_unsupported: false,
+            unsupported_audio_codec: None,
+            channel_mask: info.as_ref().and_then(|i| i.channel_mask),
             channels: info.as_ref().map(|i| i.channels).unwrap_or(0),
             sample_rate: resolved_sr,
             bits_per_sample: info.as_ref().map(|i| i.bits_per_sample).unwrap_or(0),
@@ -695,13 +840,7 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
     let worker_count = workers.max(1);
     let (tx, rx) = mpsc::sync_channel(worker_count.saturating_mul(4).max(8));
     let shared = Arc::new(MetaQueue {
-        inner: Mutex::new(QueueInner {
-            tasks: HashMap::new(),
-            hi: VecDeque::new(),
-            lo: VecDeque::new(),
-            promoted: HashSet::new(),
-            running: HashMap::new(),
-        }),
+        inner: Mutex::new(QueueInner::new()),
         cv: Condvar::new(),
         stop: AtomicBool::new(false),
         paused: AtomicBool::new(false),
@@ -740,32 +879,16 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                             guard = next;
                             continue;
                         }
-                        let next_path = loop {
-                            if let Some(p) = guard.hi.pop_front() {
-                                guard.promoted.remove(&p);
-                                if guard.tasks.contains_key(&p) {
-                                    break Some(p);
-                                }
-                                continue; // stale lane entry
-                            }
-                            if let Some(p) = guard.lo.pop_front() {
-                                if guard.tasks.contains_key(&p) {
-                                    break Some(p);
-                                }
-                                continue;
-                            }
-                            break None;
-                        };
-                        if let Some(p) = next_path {
+                        if let Some((p, from_hi)) = guard.pop_next() {
                             let task = guard.tasks.remove(&p).expect("task checked above");
                             let cancel = Arc::new(AtomicBool::new(false));
                             guard.running.insert(p, Arc::clone(&cancel));
-                            break Some((task, cancel));
+                            break Some((task, cancel, from_hi));
                         }
                         guard = shared.cv.wait(guard).unwrap();
                     }
                 };
-                let Some((task, cancel)) = popped else {
+                let Some((task, cancel, from_hi)) = popped else {
                     break;
                 };
                 let task_path_owned = task_path(&task).clone();
@@ -774,71 +897,110 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                 let blank_threshold =
                     f32::from_bits(shared.blank_threshold_bits.load(Ordering::Relaxed));
                 let poster_permit = PosterPermit::try_acquire(&shared);
-                run_meta_task(task, &cancel, &tx, blank_threshold, poster_permit.is_some());
+                let follow_up =
+                    run_meta_task(task, &cancel, &tx, blank_threshold, poster_permit.is_some());
                 drop(poster_permit);
                 let mut guard = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 guard.running.remove(&task_path_owned);
+                // The full decode of a header just read goes back in the
+                // queue, behind every header still waiting. Under the same
+                // lock as `running`, so a cancel lands either on the running
+                // task (seen here) or on the queued one (`cancel_path`).
+                let Some(next) = follow_up else {
+                    continue;
+                };
+                if cancel.load(Ordering::Relaxed) {
+                    drop(guard);
+                    let _ = tx.send(MetaUpdate::Cancelled(task_path_owned));
+                } else if !guard.tasks.contains_key(&task_path_owned) {
+                    guard.tasks.insert(task_path_owned.clone(), next);
+                    if from_hi {
+                        guard.push_front(&task_path_owned, false);
+                    } else {
+                        guard.push_back(task_path_owned, false);
+                    }
+                    shared.cv.notify_one();
+                }
             }
         });
     }
     (MetaPool { shared }, rx)
 }
 
+/// Run one task, reporting as it goes. Returns the task to queue next for
+/// the same path, if any: a `Header` task reports the header and hands its
+/// full decode back to the queue, so it waits behind other rows' headers.
 fn run_meta_task(
     task: MetaTask,
     cancel: &AtomicBool,
     tx: &std::sync::mpsc::SyncSender<MetaUpdate>,
     blank_threshold_dbfs: f32,
     allow_video_poster: bool,
-) {
+) -> Option<MetaTask> {
     // `p` is the path the update is reported under, `src` the file read.
-    // They differ only for a virtual row.
-    let (p, src, do_header, do_decode) = match task {
-        MetaTask::Header(path) => (path.clone(), path, true, true),
-        MetaTask::HeaderOnly(path) => (path.clone(), path, true, false),
-        MetaTask::Decode(path) => (path.clone(), path, false, true),
-        MetaTask::VirtualFile { row, file } => (row, file, true, true),
+    // They differ only for a virtual row, which decodes in the same task:
+    // there are few of them, and a `Decode` names one path, not two.
+    let (p, src, do_header, do_decode, decode_later) = match task {
+        MetaTask::Header(path) => (path.clone(), path, true, true, true),
+        MetaTask::HeaderOnly(path) => (path.clone(), path, true, false, false),
+        MetaTask::Decode(path) => (path.clone(), path, false, true, false),
+        MetaTask::VirtualFile { row, file } => (row, file, true, true, false),
         MetaTask::Transcript(path) => {
             let transcript_data =
                 transcript::srt_path_for_audio(&path).and_then(|p| transcript::load_srt(&p));
             let _ = tx.send(MetaUpdate::Transcript(path, transcript_data));
-            return;
+            return None;
         }
         MetaTask::External(_) => {
-            return;
+            return None;
         }
     };
 
     if cancel.load(Ordering::Relaxed) {
         let _ = tx.send(MetaUpdate::Cancelled(p));
-        return;
+        return None;
     }
 
-    // Stage 1: quick header-only metadata
+    // Stage 1: the header. What it says (length, rate, channels) goes out at
+    // once; the extras that cost a partial decode follow.
     let mut header_meta_opt: Option<FileMeta> = None;
     if do_header {
-        match header_meta(&src) {
-            Ok(meta) => {
-                let _ = tx.send(MetaUpdate::Header {
-                    path: p.clone(),
-                    meta: meta.clone(),
-                    finalized: !do_decode,
-                });
-                header_meta_opt = Some(meta);
-            }
+        let mut meta = match basic_header_meta(&src) {
+            Ok(meta) => meta,
             Err(err_meta) => {
                 let _ = tx.send(MetaUpdate::Full(p.clone(), err_meta));
-                return;
+                return None;
             }
+        };
+        let _ = tx.send(MetaUpdate::Header {
+            path: p.clone(),
+            meta: meta.clone(),
+            finalized: false,
+        });
+        if cancel.load(Ordering::Relaxed) {
+            let _ = tx.send(MetaUpdate::Cancelled(p));
+            return None;
         }
+        enrich_header_meta(&src, &mut meta);
+        if do_decode {
+            let _ = tx.send(MetaUpdate::Header {
+                path: p.clone(),
+                meta: meta.clone(),
+                finalized: false,
+            });
+        }
+        header_meta_opt = Some(meta);
     }
 
+    if do_decode && decode_later {
+        return Some(MetaTask::Decode(p));
+    }
     if do_decode {
         // Stage boundary: skip the expensive full decode when the task was
         // cancelled while the header stage ran.
         if cancel.load(Ordering::Relaxed) {
             let _ = tx.send(MetaUpdate::Cancelled(p));
-            return;
+            return None;
         }
         // Stage 2: decode and compute RMS/thumbnail/LUFS(I)
         if let Some(full) = decode_full_meta(&src, blank_threshold_dbfs, allow_video_poster) {
@@ -862,6 +1024,7 @@ fn run_meta_task(
         // Header-only tasks are finalized here intentionally.
         let _ = tx.send(MetaUpdate::Full(p.clone(), header_meta));
     }
+    None
 }
 
 #[cfg(test)]
@@ -970,6 +1133,127 @@ mod tests {
             rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(),
             "queued work must resume after playback protection ends"
         );
+    }
+
+    /// Every update the pool sends until each of `paths` has its `Full`.
+    fn updates_until_full(
+        rx: &std::sync::mpsc::Receiver<super::MetaUpdate>,
+        paths: &[PathBuf],
+    ) -> Vec<super::MetaUpdate> {
+        use super::MetaUpdate;
+        let mut pending: Vec<PathBuf> = paths.to_vec();
+        let mut updates = Vec::new();
+        while !pending.is_empty() {
+            let update = rx
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("the pool reports");
+            if let MetaUpdate::Full(path, _) = &update {
+                pending.retain(|p| p != path);
+            }
+            updates.push(update);
+        }
+        updates
+    }
+
+    /// A row's length and rate never wait behind another row's waveform:
+    /// the pool reads every queued header before any full decode, and a
+    /// `Header` task hands its own decode back to the queue.
+    #[test]
+    fn headers_are_read_before_any_full_decode() {
+        use super::MetaUpdate;
+        let dir = make_temp_dir("header_first");
+        let sr = 48_000;
+        let paths: Vec<PathBuf> = (0..4).map(|i| dir.join(format!("f{i}.wav"))).collect();
+        for path in &paths {
+            crate::wave::export_channels_audio(&synth_stereo(sr, 1.5), sr, path)
+                .expect("export wav");
+        }
+        let (pool, rx) = spawn_meta_pool(1);
+        pool.set_paused(true);
+        for path in &paths[..3] {
+            pool.enqueue(MetaTask::Decode(path.clone()));
+        }
+        pool.enqueue(MetaTask::Header(paths[3].clone()));
+        pool.set_paused(false);
+        let updates = updates_until_full(&rx, &paths);
+        let first_full = updates
+            .iter()
+            .position(|u| matches!(u, MetaUpdate::Full(..)))
+            .expect("a full decode");
+        assert!(
+            updates[..first_full].iter().any(|u| matches!(
+                u,
+                MetaUpdate::Header { path, meta, .. }
+                    if *path == paths[3] && meta.duration_secs.is_some() && meta.sample_rate == sr
+            )),
+            "the header queued last arrives before the decodes queued first: {updates:?}"
+        );
+        // Its own decode went to the back of the decode lane.
+        let fulls: Vec<&PathBuf> = updates
+            .iter()
+            .filter_map(|u| match u {
+                MetaUpdate::Full(path, _) => Some(path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fulls, paths.iter().collect::<Vec<_>>());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The header goes out the moment it is read; the extras that cost a
+    /// partial decode (the estimated peak) follow; the waveform last.
+    #[test]
+    fn a_header_task_reports_the_header_then_its_extras_then_the_decode() {
+        use super::MetaUpdate;
+        let dir = make_temp_dir("header_stages");
+        let path = dir.join("a.wav");
+        let sr = 48_000;
+        crate::wave::export_channels_audio(&synth_stereo(sr, 1.5), sr, &path).expect("export wav");
+        let (pool, rx) = spawn_meta_pool(1);
+        pool.enqueue(MetaTask::Header(path.clone()));
+        let updates = updates_until_full(&rx, std::slice::from_ref(&path));
+        let metas: Vec<(&'static str, &super::FileMeta)> = updates
+            .iter()
+            .map(|u| match u {
+                MetaUpdate::Header { meta, finalized, .. } => {
+                    assert!(!finalized, "the decode is still to come");
+                    ("header", meta)
+                }
+                MetaUpdate::Full(_, meta) => ("full", meta),
+                other => panic!("unexpected update: {other:?}"),
+            })
+            .collect();
+        let kinds: Vec<&str> = metas.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, ["header", "header", "full"]);
+        let (basic, enriched, full) = (metas[0].1, metas[1].1, metas[2].1);
+        assert!(basic.duration_secs.is_some() && basic.sample_rate == sr && basic.channels == 2);
+        assert!(basic.peak_db.is_none(), "nothing decoded yet");
+        assert!(enriched.peak_db.is_some(), "the quarter-second estimate");
+        assert!(enriched.thumb.is_empty());
+        assert!(!full.thumb.is_empty(), "the waveform");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A task replaced by one of the other kind still runs: it is found
+    /// through its own kind's lane, not the stale entry in the other.
+    #[test]
+    fn a_task_replaced_by_the_other_kind_still_runs() {
+        let dir = make_temp_dir("kind_change");
+        let path = dir.join("a.wav");
+        let sr = 48_000;
+        crate::wave::export_channels_audio(&synth_stereo(sr, 0.5), sr, &path).expect("export wav");
+        let (pool, rx) = spawn_meta_pool(1);
+        pool.set_paused(true);
+        pool.enqueue(MetaTask::Decode(path.clone()));
+        pool.enqueue(MetaTask::Header(path.clone()));
+        pool.promote_path(&path);
+        pool.set_paused(false);
+        let updates = updates_until_full(&rx, std::slice::from_ref(&path));
+        assert!(
+            matches!(updates.first(), Some(super::MetaUpdate::Header { .. })),
+            "the header ran: {updates:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A virtual row's metadata comes from the file behind it, and arrives

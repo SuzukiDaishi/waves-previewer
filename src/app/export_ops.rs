@@ -5,6 +5,28 @@ use super::types::{
     ConflictPolicy, ExportResult, ExportState, MediaSource, SaveMode, VirtualSourceRef,
 };
 
+/// Say in a just-written WAV's channel mask which speakers its channels
+/// feed. hound writes `(1 << n) - 1`: LCR for three channels, the wrong
+/// speakers for quad or 7.1. A layout no mask can say (Film order, an
+/// unnamed channel) gets no mask at all rather than a wrong one. Stereo and
+/// mono are left as written.
+fn write_layout_mask(dst: &Path, layout: Option<&[Option<crate::audio_channels::SpeakerPos>]>) {
+    let Some(layout) = layout.filter(|layout| layout.len() > 2) else {
+        return;
+    };
+    if !dst
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+    {
+        return;
+    }
+    let mask = crate::audio_channels::mask_for_layout(layout).unwrap_or(0);
+    if let Err(err) = crate::wave::write_wav_channel_mask(dst, layout.len(), mask) {
+        eprintln!("write channel mask failed {}: {err:?}", dst.display());
+    }
+}
+
 #[derive(Clone)]
 struct EditAnnotationSnapshot {
     markers: Vec<crate::markers::MarkerEntry>,
@@ -232,6 +254,8 @@ impl super::WavesPreviewer {
             write_markers: bool,
             write_loop_markers: bool,
             format_override: Option<String>,
+            /// The speakers its channels feed, for the WAV's channel mask.
+            channel_layout: Option<crate::audio_channels::Layout>,
         }
         let cfg = self.export_cfg.clone();
         // Encoders run on worker threads; publish the configured lossy-codec
@@ -265,6 +289,8 @@ impl super::WavesPreviewer {
             write_markers: bool,
             write_loop_markers: bool,
             marker_source: Option<PathBuf>,
+            /// The speakers its channels feed, for the WAV's channel mask.
+            channel_layout: Option<crate::audio_channels::Layout>,
         }
         let mut virtual_tasks: Vec<VirtualSaveTask> = Vec::new();
         let mut skipped_video: Vec<PathBuf> = Vec::new();
@@ -435,6 +461,12 @@ impl super::WavesPreviewer {
                         _ => None,
                     })
                 };
+                let channel_layout = audio
+                    .as_ref()
+                    .map(|audio| audio.channels.len())
+                    .or_else(|| self.meta_for_path(&p).map(|meta| meta.channels as usize))
+                    .filter(|channels| *channels > 2)
+                    .and_then(|channels| self.channel_layout_for(&p, channels));
                 virtual_tasks.push(VirtualSaveTask {
                     src: p.clone(),
                     dst,
@@ -450,6 +482,7 @@ impl super::WavesPreviewer {
                     write_markers,
                     write_loop_markers,
                     marker_source,
+                    channel_layout,
                 });
             } else {
                 let mut dirty_audio = false;
@@ -591,6 +624,12 @@ impl super::WavesPreviewer {
                     let write_markers = markers_dirty || (write_audio && !markers.is_empty());
                     let write_loop_markers =
                         loop_markers_dirty || (write_audio && loop_region.is_some());
+                    let channel_layout = audio
+                        .as_ref()
+                        .map(|audio| audio.channels.len())
+                        .or_else(|| self.meta_for_path(&p).map(|meta| meta.channels as usize))
+                        .filter(|channels| *channels > 2)
+                        .and_then(|channels| self.channel_layout_for(&p, channels));
                     edit_tasks.push(EditSaveTask {
                         src: p.clone(),
                         audio,
@@ -609,6 +648,7 @@ impl super::WavesPreviewer {
                         write_markers,
                         write_loop_markers,
                         format_override: path_format_override,
+                        channel_layout,
                     });
                     edit_sources.push(p);
                 } else if db.abs() > 0.0001 {
@@ -1012,6 +1052,9 @@ impl super::WavesPreviewer {
                         marker_ok = false;
                     }
                 }
+                if task.write_audio {
+                    write_layout_mask(&dst, task.channel_layout.as_deref());
+                }
                 if marker_ok {
                     ok += 1;
                     success_paths.push(dst.clone());
@@ -1170,6 +1213,7 @@ impl super::WavesPreviewer {
                                 marker_ok = false;
                             }
                         }
+                        write_layout_mask(&dst, task.channel_layout.as_deref());
                         if marker_ok {
                             ok += 1;
                             success_paths.push(dst.clone());

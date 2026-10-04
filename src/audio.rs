@@ -9,6 +9,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use memmap2::Mmap;
 
 use crate::audio_channels::{ChannelMapMode, ChannelMixMatrix, MAX_SOURCE_CHANNELS};
+
 /// How long the output meter keeps its last reading once samples stop
 /// arriving, before it resets. Bridges the gap between two clips in a
 /// playlist without a visible drop to the floor.
@@ -61,7 +62,10 @@ impl AudioBuffer {
     }
 }
 
-pub const METER_CH_SLOTS: usize = 8;
+/// Output channels the per-channel meters keep apart: every output of a
+/// 7.1.4 or 9.1.6 system, with room to spare. A wider device sums the rest
+/// into the last slot.
+pub const METER_CH_SLOTS: usize = 32;
 
 /// Ring capacity for the realtime metering tap, in frames (power of two).
 pub const METER_TAP_CAPACITY: usize = 1 << 15;
@@ -159,6 +163,18 @@ pub struct SharedAudio {
     /// the callback every invocation so the setting can change without
     /// rebuilding the stream.
     pub channel_map_mode: std::sync::atomic::AtomicU8,
+    /// Which speaker each source channel feeds; `None` takes the standard
+    /// layout for the clip's channel count. A layout of another length is
+    /// ignored, so a stale one cannot misroute a different clip.
+    pub src_layout: ArcSwapOption<Vec<Option<crate::audio_channels::SpeakerPos>>>,
+    /// Which speaker each output channel feeds; `None` takes the standard
+    /// layout for the device's channel count.
+    pub out_layout: ArcSwapOption<Vec<Option<crate::audio_channels::SpeakerPos>>>,
+    /// Headphone monitoring: HRIR filters for a source of exactly their
+    /// channel count. Installed, they replace the speaker matrix for such a
+    /// source and feed the device's front pair. Built for one output rate, so
+    /// a replacement engine starts without them and the app sends new ones.
+    pub binaural: ArcSwapOption<crate::binaural::BinauralFilters>,
     /// Bumped by the cpal error callback. The app watches it so a device that
     /// disappears mid-playback triggers a reopen instead of silence.
     pub stream_error_seq: std::sync::atomic::AtomicU32,
@@ -336,6 +352,38 @@ fn read_mapped_wav_header(file: &mut File, path: &Path) -> Result<Option<MappedW
     }))
 }
 
+/// The outputs the two ears reach: the device's front pair by its speaker
+/// layout, or its first two outputs, or both ears mixed on a mono device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EarOutputs {
+    left: usize,
+    right: usize,
+}
+
+impl EarOutputs {
+    fn mix(self, out_ch: usize, left: f32, right: f32) -> f32 {
+        match (out_ch == self.left, out_ch == self.right) {
+            (true, true) => 0.5 * (left + right),
+            (true, false) => left,
+            (false, true) => right,
+            (false, false) => 0.0,
+        }
+    }
+}
+
+fn ear_outputs(
+    out_layout: Option<&[Option<crate::audio_channels::SpeakerPos>]>,
+    out_channels: usize,
+) -> EarOutputs {
+    use crate::audio_channels::SpeakerPos;
+    let find = |pos: SpeakerPos| out_layout.and_then(|layout| layout.iter().position(|p| *p == Some(pos)));
+    match (find(SpeakerPos::Fl), find(SpeakerPos::Fr)) {
+        (Some(left), Some(right)) => EarOutputs { left, right },
+        _ if out_channels >= 2 => EarOutputs { left: 0, right: 1 },
+        _ => EarOutputs { left: 0, right: 0 },
+    }
+}
+
 impl AudioEngine {
     fn loop_xfade_uses_through_zero(style: u8) -> bool {
         style >= 2
@@ -499,6 +547,9 @@ impl AudioEngine {
             _out_channels: out_channels,
             out_sample_rate,
             channel_map_mode: std::sync::atomic::AtomicU8::new(ChannelMapMode::default().to_u8()),
+            src_layout: ArcSwapOption::from(None),
+            out_layout: ArcSwapOption::from(None),
+            binaural: ArcSwapOption::from(None),
             stream_error_seq: std::sync::atomic::AtomicU32::new(0),
             loop_enabled: std::sync::atomic::AtomicBool::new(false),
             loop_start: std::sync::atomic::AtomicUsize::new(0),
@@ -558,6 +609,7 @@ impl AudioEngine {
             previous.channel_map_mode.load(Ordering::Relaxed),
             Ordering::Relaxed,
         );
+        shared.src_layout.store(previous.src_layout.load_full());
         shared.loop_enabled.store(
             previous.loop_enabled.load(Ordering::Relaxed),
             Ordering::Relaxed,
@@ -815,7 +867,14 @@ impl AudioEngine {
             cpal::SampleFormat::U16 => {
                 Self::build_stream::<u16>(&device, &cfg.into(), shared.clone())?
             }
-            _ => anyhow::bail!("Unsupported sample format"),
+            // Some drivers run 32-bit integer or 64-bit float.
+            cpal::SampleFormat::I32 => {
+                Self::build_stream::<i32>(&device, &cfg.into(), shared.clone())?
+            }
+            cpal::SampleFormat::F64 => {
+                Self::build_stream::<f64>(&device, &cfg.into(), shared.clone())?
+            }
+            other => anyhow::bail!("Unsupported sample format: {other:?}"),
         };
 
         Ok(Self {
@@ -882,7 +941,13 @@ impl AudioEngine {
             cpal::SampleFormat::U16 => {
                 Self::build_stream::<u16>(&device, &stream_cfg, shared.clone())?
             }
-            _ => anyhow::bail!("Unsupported sample format"),
+            cpal::SampleFormat::I32 => {
+                Self::build_stream::<i32>(&device, &stream_cfg, shared.clone())?
+            }
+            cpal::SampleFormat::F64 => {
+                Self::build_stream::<f64>(&device, &stream_cfg, shared.clone())?
+            }
+            other => anyhow::bail!("Unsupported sample format: {other:?}"),
         };
 
         self._stream = Some(stream);
@@ -892,7 +957,12 @@ impl AudioEngine {
     }
 
     pub fn new_for_test() -> Self {
-        let shared = Self::new_shared(2, crate::sample_rate::FALLBACK_SAMPLE_RATE);
+        Self::new_for_test_with_channels(2)
+    }
+
+    /// A test engine whose device has `out_channels` outputs and no stream.
+    pub fn new_for_test_with_channels(out_channels: usize) -> Self {
+        let shared = Self::new_shared(out_channels, crate::sample_rate::FALLBACK_SAMPLE_RATE);
         Self {
             _stream: None,
             shared,
@@ -942,6 +1012,10 @@ impl AudioEngine {
                 }
             }
         };
+        // The binaural convolution's history lives with the callback: it is
+        // the only thing that runs it, and it must survive from one block to
+        // the next.
+        let mut binaural = crate::binaural::BinauralState::default();
         let stream = device.build_output_stream(
             cfg,
             move |data: &mut [T], _| {
@@ -953,6 +1027,8 @@ impl AudioEngine {
                 let playing = shared.playing.load(std::sync::atomic::Ordering::Relaxed);
                 if !playing {
                     Self::fill_silence::<T>(data, &shared);
+                    // Resuming must not play what was ringing when it stopped.
+                    binaural.reset();
                     return;
                 }
 
@@ -1017,6 +1093,7 @@ impl AudioEngine {
                         samples.channel_count(),
                         samples.len(),
                         &params,
+                        &mut binaural,
                         |c, p| Self::sample_at_interp(samples, c, p),
                     );
                     return;
@@ -1030,6 +1107,7 @@ impl AudioEngine {
                         stream.channel_count(),
                         stream.len(),
                         &params,
+                        &mut binaural,
                         |c, p| stream.sample_at_interp(c, p),
                     );
                     return;
@@ -1043,6 +1121,7 @@ impl AudioEngine {
                         1,
                         silent_frames,
                         &params,
+                        &mut binaural,
                         |_c, _p| 0.0,
                     );
                     return;
@@ -1084,6 +1163,7 @@ impl AudioEngine {
         src_channels: usize,
         len: usize,
         params: &RenderParams,
+        binaural: &mut crate::binaural::BinauralState,
         sample_at: S,
     ) where
         T: cpal::SizedSample + cpal::FromSample<f32>,
@@ -1094,6 +1174,7 @@ impl AudioEngine {
                 .playing
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             Self::fill_silence::<T>(data, shared);
+            binaural.reset();
             return;
         }
 
@@ -1124,9 +1205,29 @@ impl AudioEngine {
 
         // Only the source channels the matrix actually reads are interpolated,
         // so a stereo clip on a 7.1.4 device costs two reads per frame.
-        let matrix = ChannelMixMatrix::build(src_channels, out_channels, map_mode);
+        let (src_layout, out_layout) = (shared.src_layout.load(), shared.out_layout.load());
+        let matrix = ChannelMixMatrix::build_with_layouts(
+            src_channels,
+            src_layout.as_deref().map(Vec::as_slice),
+            out_channels,
+            out_layout.as_deref().map(Vec::as_slice),
+            map_mode,
+        );
         let mut src_frame = [0.0f32; MAX_SOURCE_CHANNELS];
         let is_audible = |c: usize| c >= 64 || (audible_mask >> c) & 1 == 1;
+        // Headphone monitoring: with filters installed for this many channels
+        // the source reaches the two ears through HRIRs instead of the speaker
+        // matrix. The matrix still feeds the loudness tap -- like the volume,
+        // the binaural path is how the programme is monitored, not the
+        // programme, so turning it on must not move the LUFS reading.
+        let binaural_filters = shared
+            .binaural
+            .load_full()
+            .filter(|filters| filters.channels() == src_channels);
+        if binaural_filters.is_none() {
+            binaural.reset();
+        }
+        let ears = ear_outputs(out_layout.as_deref().map(Vec::as_slice), out_channels);
 
         let mut meter_sum_sq = 0.0f64;
         let mut meter_count = 0usize;
@@ -1175,9 +1276,8 @@ impl AudioEngine {
                 pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
             }
 
-            for &src_ch in matrix.used_sources() {
-                let src_ch = src_ch as usize;
-                src_frame[src_ch] = if !is_audible(src_ch) {
+            let fetch = |src_ch: usize| {
+                if !is_audible(src_ch) {
                     0.0
                 } else if valid_loop && xfade > 0 {
                     Self::sample_loop_with_xfade(
@@ -1190,15 +1290,31 @@ impl AudioEngine {
                     )
                 } else {
                     sample_at(src_ch, pos_f)
-                };
+                }
+            };
+            if binaural_filters.is_some() {
+                // Every channel feeds the ears, whatever the matrix reads.
+                for src_ch in 0..src_channels.min(MAX_SOURCE_CHANNELS) {
+                    src_frame[src_ch] = fetch(src_ch);
+                }
+            } else {
+                for &src_ch in matrix.used_sources() {
+                    src_frame[src_ch as usize] = fetch(src_ch as usize);
+                }
             }
+            let ear_frame = binaural_filters
+                .as_ref()
+                .map(|filters| binaural.process_frame(filters, &src_frame[..src_channels.min(MAX_SOURCE_CHANNELS)]));
 
             let mut tap_frame = [0.0f32; 2];
             for (out_ch, out_sample) in frame.iter_mut().enumerate() {
-                // `mixed` is the programme: routing and any per-channel mute or
-                // solo have been applied, but nothing to do with how loudly it
-                // is being monitored. `out` is what the device gets.
-                let mixed = matrix.mix(out_ch, &src_frame);
+                // `mixed` is what is monitored: the matrix's routing with any
+                // per-channel mute or solo applied, or the ears. `out` is what
+                // the device gets.
+                let mixed = match ear_frame {
+                    Some([left, right]) => ears.mix(out_ch, left, right),
+                    None => matrix.mix(out_ch, &src_frame),
+                };
                 let out = (mixed * vol * ramp_gain).clamp(-1.0, 1.0);
                 *out_sample = T::from_sample(out);
                 if out_ch < 2 {
@@ -1208,8 +1324,10 @@ impl AudioEngine {
                     // list's LUFS column or with any target -- turning the
                     // monitor down made the material look quieter than it is.
                     // Master volume, the anti-click seek ramp and the output
-                    // clamp are all monitoring, so none of them belong here.
-                    tap_frame[out_ch] = mixed;
+                    // clamp are all monitoring, so none of them belong here --
+                    // and neither does the binaural path. Nor the LFE, which
+                    // the fold now carries but loudness (BS.1770) leaves out.
+                    tap_frame[out_ch] = matrix.mix_loudness(out_ch, &src_frame);
                 }
                 meter_sum_sq += f64::from(out * out);
                 meter_count = meter_count.saturating_add(1);
@@ -1715,6 +1833,44 @@ impl AudioEngine {
 
     /// Choose how source channels reach the device. Takes effect on the next
     /// callback block; the stream is not rebuilt.
+    /// Which speaker each channel of the playing clip feeds.
+    pub fn set_source_layout(&self, layout: Option<Vec<Option<crate::audio_channels::SpeakerPos>>>) {
+        self.shared.src_layout.store(layout.map(Arc::new));
+    }
+
+    /// Which speaker each output channel of the device feeds.
+    /// Install headphone filters (`None`: speakers again). They apply to a
+    /// source of exactly their channel count; see [`SharedAudio::binaural`].
+    pub fn set_binaural(&self, filters: Option<Arc<crate::binaural::BinauralFilters>>) {
+        self.shared.binaural.store(filters);
+    }
+
+    /// The headphone filters installed now, if any.
+    pub fn binaural_filters(&self) -> Option<Arc<crate::binaural::BinauralFilters>> {
+        self.shared.binaural.load_full()
+    }
+
+    pub fn set_output_layout(&self, layout: Option<Vec<Option<crate::audio_channels::SpeakerPos>>>) {
+        self.shared.out_layout.store(layout.map(Arc::new));
+    }
+
+    /// How many channels the source being played has, if any.
+    pub fn source_channels(&self) -> Option<usize> {
+        if let Some(samples) = self.shared.samples.load().as_ref() {
+            return Some(samples.channel_count());
+        }
+        self.shared
+            .streamed_wav
+            .load()
+            .as_ref()
+            .map(|stream| stream.channel_count())
+    }
+
+    /// How many channels the output device was opened with.
+    pub fn output_channels(&self) -> usize {
+        self.shared._out_channels
+    }
+
     pub fn set_channel_map_mode(&self, mode: ChannelMapMode) {
         self.shared
             .channel_map_mode
@@ -1998,6 +2154,7 @@ mod tests {
             2,
             FRAMES,
             &params,
+            &mut crate::binaural::BinauralState::default(),
             // A quiet tone, so nothing is lost to the output clamp and the two
             // renders differ only by the gain under test.
             |_ch, pos| (pos as f32 * 0.05).sin() * 0.25,
@@ -2036,6 +2193,152 @@ mod tests {
             quiet_rms < loud_rms * 0.2,
             "output should still follow the monitor volume: {quiet_rms} vs {loud_rms}"
         );
+    }
+
+    /// HRIRs that say where a channel is by which ear hears it: the left
+    /// ear hears a speaker on the left, the right ear one on the right, and
+    /// both hear one straight ahead -- one tap, so levels are easy to read.
+    struct EarByAzimuth;
+
+    impl crate::binaural::HrirSource for EarByAzimuth {
+        fn hrir(&self, direction: crate::binaural::Direction) -> [Vec<f32>; 2] {
+            let left = (0.5 - direction.azimuth_deg / 180.0).clamp(0.0, 1.0);
+            [vec![left], vec![1.0 - left]]
+        }
+    }
+
+    fn surround_filters(channels: usize) -> Arc<crate::binaural::BinauralFilters> {
+        use crate::binaural::{ChannelRoute, Direction};
+        let routes: Vec<ChannelRoute> = (0..channels)
+            .map(|ch| ChannelRoute::Speaker {
+                direction: Direction::new(if ch % 2 == 0 { -90.0 } else { 90.0 }, 0.0),
+                gain: 1.0,
+            })
+            .collect();
+        Arc::new(crate::binaural::BinauralFilters::build(
+            &EarByAzimuth,
+            &routes,
+            48_000,
+            1.0,
+        ))
+    }
+
+    /// Render `frames` of a constant `src_channels` source (channel `c` at
+    /// `0.05 * (c + 1)`) to `out_channels`, returning the device block and the
+    /// loudness tap's left side.
+    fn render_surround(
+        shared: &SharedAudio,
+        src_channels: usize,
+        out_channels: usize,
+        frames: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let params = RenderParams {
+            vol: 1.0,
+            audible_mask: u64::MAX,
+            rate: 1.0,
+            looping: false,
+            loop_start: 0,
+            loop_end: 0,
+            loop_xfade_samples: 0,
+            loop_xfade_shape: 0,
+            map_mode: ChannelMapMode::Auto,
+            pos_f: 0.0,
+        };
+        let mut data = vec![0.0f32; frames * out_channels];
+        let mut binaural = crate::binaural::BinauralState::default();
+        let cursor = shared.meter_tap.read_since(0, &mut Vec::new(), &mut Vec::new());
+        AudioEngine::render_block::<f32, _>(
+            &mut data,
+            out_channels,
+            shared,
+            src_channels,
+            frames * 4,
+            &params,
+            &mut binaural,
+            |ch, _pos| 0.05 * (ch + 1) as f32,
+        );
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        shared.meter_tap.read_since(cursor, &mut left, &mut right);
+        (data, left)
+    }
+
+    #[test]
+    fn a_surround_source_reaches_only_the_front_pair_through_the_hrtf() {
+        const FRAMES: usize = 4 * crate::binaural::BINAURAL_PARTITION_FRAMES;
+        let shared = AudioEngine::new_shared(6, 48_000);
+        let (speakers, speaker_tap) = render_surround(&shared, 6, 6, FRAMES);
+        shared.binaural.store(Some(surround_filters(6)));
+        let (ears, ear_tap) = render_surround(&shared, 6, 6, FRAMES);
+
+        let last = &ears[(FRAMES - 1) * 6..];
+        // Even channels stand on the left: 0.05 + 0.15 + 0.25 in the left
+        // ear, 0.1 + 0.2 + 0.3 in the right, and nothing anywhere else.
+        assert!((last[0] - 0.45).abs() < 1e-4, "left ear {}", last[0]);
+        assert!((last[1] - 0.6).abs() < 1e-4, "right ear {}", last[1]);
+        assert!(last[2..].iter().all(|v| *v == 0.0), "only the front pair: {last:?}");
+        // The speakers got the six channels, one each.
+        assert!(speakers[(FRAMES - 1) * 6..].iter().all(|v| *v > 0.0));
+        // Monitoring through the HRTF does not move the loudness reading.
+        assert_eq!(speaker_tap, ear_tap);
+    }
+
+    #[test]
+    fn a_stereo_device_hears_the_lfe_but_the_loudness_meter_does_not() {
+        let shared = AudioEngine::new_shared(2, 48_000);
+        let params = RenderParams {
+            vol: 1.0,
+            audible_mask: u64::MAX,
+            rate: 1.0,
+            looping: false,
+            loop_start: 0,
+            loop_end: 0,
+            loop_xfade_samples: 0,
+            loop_xfade_shape: 0,
+            map_mode: ChannelMapMode::Auto,
+            pos_f: 0.0,
+        };
+        const FRAMES: usize = 64;
+        let mut data = vec![0.0f32; FRAMES * 2];
+        // 5.1 with only the LFE (channel 4 of 6) sounding.
+        AudioEngine::render_block::<f32, _>(
+            &mut data,
+            2,
+            &shared,
+            6,
+            FRAMES * 4,
+            &params,
+            &mut crate::binaural::BinauralState::default(),
+            |ch, _pos| if ch == 3 { 0.5 } else { 0.0 },
+        );
+        let half_power = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(
+            data.iter().all(|v| (v - 0.5 * half_power).abs() < 1e-6),
+            "the LFE folds into both sides like the centre"
+        );
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        shared.meter_tap.read_since(0, &mut left, &mut right);
+        assert!(left.iter().chain(&right).all(|v| *v == 0.0), "and is not loudness");
+    }
+
+    #[test]
+    fn filters_for_another_channel_count_are_left_alone() {
+        const FRAMES: usize = 256;
+        let shared = AudioEngine::new_shared(2, 48_000);
+        let (before, _) = render_surround(&shared, 6, 2, FRAMES);
+        shared.binaural.store(Some(surround_filters(8)));
+        let (after, _) = render_surround(&shared, 6, 2, FRAMES);
+        assert_eq!(before, after, "8-channel filters must not touch a 6-channel source");
+    }
+
+    #[test]
+    fn the_ears_follow_the_device_front_pair() {
+        use crate::audio_channels::SpeakerPos::*;
+        // Film order on the device: FL, FC, FR, ...
+        let film = vec![Some(Fl), Some(Fc), Some(Fr), Some(Bl), Some(Br), Some(Lfe)];
+        assert_eq!(ear_outputs(Some(&film), 6), EarOutputs { left: 0, right: 2 });
+        assert_eq!(ear_outputs(None, 2), EarOutputs { left: 0, right: 1 });
+        let mono = ear_outputs(None, 1);
+        assert_eq!(mono.mix(0, 0.2, 0.4), 0.3 as f32);
     }
 
     #[test]
@@ -2368,6 +2671,7 @@ mod tests {
             1,
             96_000,
             &params,
+            &mut crate::binaural::BinauralState::default(),
             |_channel, _position| 0.0,
         );
         assert!(output.iter().all(|sample| *sample == 0.0));

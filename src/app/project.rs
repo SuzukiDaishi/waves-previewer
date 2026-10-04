@@ -199,6 +199,11 @@ pub struct ProjectList {
     pub sample_rate_overrides: Vec<ProjectSampleRateOverride>,
     #[serde(default)]
     pub bit_depth_overrides: Vec<ProjectBitDepthOverride>,
+    /// Channel layouts chosen for single files (see `channel_layout_ops`).
+    /// No merge rule: two people choosing at once get the whole-document
+    /// conflict choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channel_layouts: Vec<ProjectChannelLayout>,
     #[serde(default)]
     pub format_overrides: Vec<ProjectFormatOverride>,
     #[serde(default)]
@@ -254,6 +259,13 @@ pub struct ProjectListItem {
 pub struct ProjectSampleRateOverride {
     pub path: String,
     pub sample_rate: u32,
+}
+
+/// One file's channel layout: speaker keys, comma-separated, `-` for none.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectChannelLayout {
+    pub path: String,
+    pub speakers: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1045,6 +1057,13 @@ fn project_source_paths(project: &ProjectFile) -> Vec<&str> {
     out.extend(
         project
             .list
+            .channel_layouts
+            .iter()
+            .map(|item| item.path.as_str()),
+    );
+    out.extend(
+        project
+            .list
             .format_overrides
             .iter()
             .map(|item| item.path.as_str()),
@@ -1338,6 +1357,9 @@ pub(super) fn repair_project_source_paths(
         repair(&mut item.path);
     }
     for item in &mut project.list.bit_depth_overrides {
+        repair(&mut item.path);
+    }
+    for item in &mut project.list.channel_layouts {
         repair(&mut item.path);
     }
     for item in &mut project.list.format_overrides {
@@ -2148,6 +2170,8 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
     FileMeta {
         audio_track_absent: false,
         audio_track_unsupported: false,
+        unsupported_audio_codec: None,
+        channel_mask: None,
         channels: 0,
         sample_rate: 0,
         bits_per_sample: 0,
@@ -2510,6 +2534,7 @@ files = []
             items: Vec::new(),
             sample_rate_overrides: Vec::new(),
             bit_depth_overrides: Vec::new(),
+            channel_layouts: Vec::new(),
             format_overrides: Vec::new(),
             transcript_languages: Vec::new(),
             statuses: Vec::new(),
@@ -2555,6 +2580,7 @@ files = []
             items: Vec::new(),
             sample_rate_overrides: Vec::new(),
             bit_depth_overrides: Vec::new(),
+            channel_layouts: Vec::new(),
             format_overrides: Vec::new(),
             statuses: Vec::new(),
             tags: Vec::new(),

@@ -411,6 +411,10 @@ impl WavesPreviewer {
                 self.open_effect_graph_workspace();
                 ui.close();
             }
+            if ui.button("Virtual Speakers (HRTF)...").clicked() {
+                self.open_hrtf_window();
+                ui.close();
+            }
             if ui.button("Recording...").clicked() {
                 self.workspace_view = WorkspaceView::Recording;
                 self.recording_tab.tab_open = true;

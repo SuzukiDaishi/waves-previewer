@@ -9,19 +9,20 @@
 //! measures it. The mix is rendered on a worker too and handed to the
 //! playback engine whole, the way "Play Selected Together" is.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 use super::loading_ops::{poll_job, JobPoll};
-use super::multi_edit::{ClipSource, MultiEditDoc, NewClip, TrackKind, MIN_CLIP_SECS};
+use super::multi_edit::{ClipSource, MultiEditDoc, NewClip, TrackKind, TrackOutput, MIN_CLIP_SECS};
 use super::multi_edit_render::{SourceAudio, SourceMap};
 use super::render::waveform_pyramid::{PeakPyramid, DEFAULT_BASE_BIN_SAMPLES};
 use super::types::{MediaSource, ToastSeverity, UndoScope, WorkspaceView};
 use super::{PlaybackSourceKind, WavesPreviewer};
 use crate::audio::AudioBuffer;
+use crate::audio_channels::{standard_layout_vec, Layout};
 
 /// Snapshots kept per timeline for Ctrl+Z.
 const MULTI_EDIT_UNDO_LIMIT: usize = 100;
@@ -63,12 +64,15 @@ pub(crate) struct DropPreview {
     /// Which drag this is (the payload's address).
     pub key: usize,
     /// (name, length) of the audio rows, in list order. They land back to
-    /// back on an audio track from the drop point.
-    pub audio: Vec<(String, f64)>,
+    /// back on an audio track from the drop point. A length is `None` while
+    /// the row's is not known: that clip lands as its start alone.
+    pub audio: Vec<(String, Option<f64>)>,
     /// The same for the video rows, which land on a video track.
-    pub video: Vec<(String, f64)>,
+    pub video: Vec<(String, Option<f64>)>,
     pub audio_secs: f64,
     pub video_secs: f64,
+    /// How many of the rows have no length yet.
+    pub pending: usize,
 }
 
 impl DropPreview {
@@ -80,14 +84,19 @@ impl DropPreview {
             ..Self::default()
         };
         for clip in clips {
-            if !(clip.len_secs.is_finite() && clip.len_secs >= MIN_CLIP_SECS) {
+            if clip
+                .len_secs
+                .is_some_and(|len| !(len.is_finite() && len >= MIN_CLIP_SECS))
+            {
                 continue;
             }
+            let len = clip.len_secs.unwrap_or(0.0);
+            preview.pending += usize::from(clip.len_secs.is_none());
             if clip.is_video {
-                preview.video_secs += clip.len_secs;
+                preview.video_secs += len;
                 preview.video.push((clip.name, clip.len_secs));
             } else {
-                preview.audio_secs += clip.len_secs;
+                preview.audio_secs += len;
                 preview.audio.push((clip.name, clip.len_secs));
             }
         }
@@ -99,7 +108,7 @@ impl DropPreview {
     }
 
     /// One group: the clips and their length together.
-    pub fn group(&self, kind: TrackKind) -> (&[(String, f64)], f64) {
+    pub fn group(&self, kind: TrackKind) -> (&[(String, Option<f64>)], f64) {
         match kind {
             TrackKind::Audio => (&self.audio, self.audio_secs),
             TrackKind::Video => (&self.video, self.video_secs),
@@ -134,7 +143,24 @@ pub(crate) struct LoadedSource {
     pub playback: Arc<SourceAudio>,
     /// Peaks of `playback`, for drawing clips.
     pub peaks: Arc<PeakPyramid>,
+    /// Peaks of each channel of `playback` (none for a mono source), for a
+    /// clip that plays one channel.
+    pub channel_peaks: Vec<Arc<PeakPyramid>>,
     stamp: SourceStamp,
+}
+
+impl LoadedSource {
+    /// The peaks a clip that plays `channel` (or every channel) draws.
+    pub fn peaks_for(&self, channel: Option<u16>) -> &Arc<PeakPyramid> {
+        channel
+            .and_then(|ch| self.channel_peaks.get(ch as usize))
+            .unwrap_or(&self.peaks)
+    }
+
+    /// How many channels the source has.
+    pub fn channel_count(&self) -> usize {
+        self.native.channels.len()
+    }
 }
 
 /// What a row looked like when its audio was read. A different stamp means
@@ -190,6 +216,8 @@ pub(crate) struct ExportJob {
     /// Fraction done, as `f32::to_bits`.
     pub progress: Arc<AtomicU32>,
     pub doc_id: String,
+    /// The timeline's output format when the mixdown began.
+    layout: Layout,
 }
 
 impl ExportJob {
@@ -213,6 +241,19 @@ pub(crate) enum ClipDragKind {
 pub(crate) struct ClipDrag {
     pub clip_id: String,
     pub kind: ClipDragKind,
+    /// For a move: every selected clip as (id, start, track) when the drag
+    /// began, so the group goes where the pointer says from there.
+    pub group: Vec<(String, f64, usize)>,
+}
+
+/// A rectangle being dragged over the tracks to select the clips it meets.
+#[derive(Clone, Debug)]
+pub(crate) struct Marquee {
+    /// Where the drag began, on screen.
+    pub origin: egui::Pos2,
+    /// Ctrl or Shift held: the clips it meets are added to `base`.
+    pub additive: bool,
+    pub base: HashSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -224,7 +265,15 @@ pub(crate) struct LaneDrag {
 
 #[derive(Default)]
 pub(crate) struct MultiEditUi {
+    /// The clip acted on alone (the last one clicked); always one of
+    /// `selected_clips` when there is one.
     pub selected_clip: Option<String>,
+    /// Every selected clip. Change it through `multi_edit_select_clips`.
+    pub selected_clips: HashSet<String>,
+    pub marquee: Option<Marquee>,
+    /// The modifiers of the last pointer press: a drag that starts frames
+    /// later still knows what was held when it was pressed.
+    pub press_mods: egui::Modifiers,
     /// A selected track; exclusive with `selected_clip`.
     pub selected_track: Option<String>,
     pub clip_drag: Option<ClipDrag>,
@@ -270,7 +319,12 @@ pub(crate) struct MultiEditUi {
     pub renaming_doc: Option<(String, String)>,
     pub confirm_delete_doc: Option<String>,
     /// The clip Ctrl+C took, for Ctrl+V (`multi_edit_clipboard.rs`).
-    pub clip_clipboard: Option<super::multi_edit_clipboard::CopiedClip>,
+    pub clip_clipboard: Option<Vec<super::multi_edit_clipboard::CopiedClip>>,
+    /// A track picked with the up/down keys, to scroll into view on the
+    /// next frame (when its row's place is known).
+    pub reveal_track: Option<String>,
+    /// The cut tool: a click on a clip splits it there.
+    pub cut_tool: bool,
 }
 
 #[derive(Default)]
@@ -390,10 +444,21 @@ fn load_source(
         playback.frames(),
         DEFAULT_BASE_BIN_SAMPLES,
     ));
+    // Any source of two or more channels can be split into them.
+    let channel_peaks = if playback.channels.len() > 1 {
+        playback
+            .channels
+            .iter()
+            .map(|channel| Arc::new(PeakPyramid::from_samples(channel, DEFAULT_BASE_BIN_SAMPLES)))
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(LoadedSource {
         native,
         playback,
         peaks,
+        channel_peaks,
         stamp: request.stamp,
     })
 }
@@ -611,30 +676,43 @@ impl WavesPreviewer {
         self.multi_edit_restore(true)
     }
 
-    /// Clips for list rows, with what the list knows about each. A row with
-    /// no known length yet is left out; `insert_clips` would skip it anyway.
+    /// How long a list row is, from what is known about it: its metadata,
+    /// its asset, a virtual row's samples, or -- for a row a clip uses -- its
+    /// source decoded for the mix. `None` while nothing knows yet.
+    pub(super) fn multi_edit_row_len_secs(&self, path: &Path) -> Option<f64> {
+        let item = self.item_for_path(path)?;
+        item.meta
+            .as_ref()
+            .and_then(|meta| meta.duration_secs)
+            .map(f64::from)
+            .or_else(|| {
+                let asset = &item.audio_asset;
+                asset
+                    .frame_count
+                    .filter(|_| asset.sample_rate > 0)
+                    .map(|frames| frames as f64 / asset.sample_rate as f64)
+            })
+            .or_else(|| {
+                item.virtual_audio
+                    .as_ref()
+                    .map(|audio| audio.len() as f64 / item.audio_asset.sample_rate.max(1) as f64)
+            })
+            .or_else(|| match self.multi_edit.sources.get(path) {
+                Some(SourceSlot::Ready(source)) if source.native.sample_rate > 0 => {
+                    Some(source.native.frames() as f64 / source.native.sample_rate as f64)
+                }
+                _ => None,
+            })
+    }
+
+    /// Clips for list rows, with what the list knows about each. A row whose
+    /// length is not known yet comes with none, and is placed as its start.
     pub(super) fn multi_edit_new_clips(&self, paths: &[PathBuf]) -> Vec<NewClip> {
         paths
             .iter()
             .filter_map(|path| {
                 let item = self.item_for_path(path)?;
-                let len_secs = item
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.duration_secs)
-                    .map(f64::from)
-                    .or_else(|| {
-                        let asset = &item.audio_asset;
-                        asset
-                            .frame_count
-                            .filter(|_| asset.sample_rate > 0)
-                            .map(|frames| frames as f64 / asset.sample_rate as f64)
-                    })
-                    .or_else(|| {
-                        item.virtual_audio.as_ref().map(|audio| {
-                            audio.len() as f64 / item.audio_asset.sample_rate.max(1) as f64
-                        })
-                    })?;
+                let len_secs = self.multi_edit_row_len_secs(path);
                 let asset_id = (item.source == MediaSource::Virtual)
                     .then(|| item.audio_asset.id.to_hex());
                 Some(NewClip {
@@ -663,10 +741,7 @@ impl WavesPreviewer {
         let clips = self.multi_edit_new_clips(paths);
         if clips.is_empty() {
             if !paths.is_empty() {
-                self.push_toast(
-                    ToastSeverity::Info,
-                    "Nothing placed: the rows' lengths are not known yet",
-                );
+                self.push_toast(ToastSeverity::Info, "Nothing placed: the rows are not in the list");
             }
             return 0;
         }
@@ -723,37 +798,202 @@ impl WavesPreviewer {
         self.path_for_row(row).cloned().into_iter().collect()
     }
 
+    /// Select the track `steps` rows below the selected one (above when
+    /// negative) -- or below the selected clip's -- stopping at the first and
+    /// the last. With nothing selected, down starts from the top and up from
+    /// the bottom. The track is scrolled into view on the next frame.
+    pub(super) fn multi_edit_step_track(&mut self, steps: i32) {
+        let Some(doc) = self.multi_edit_active_doc() else {
+            return;
+        };
+        let count = doc.tracks.len();
+        if count == 0 || steps == 0 {
+            return;
+        }
+        let current = self
+            .multi_edit
+            .ui
+            .selected_track
+            .as_deref()
+            .and_then(|id| doc.tracks.iter().position(|t| t.id == id))
+            .or_else(|| {
+                self.multi_edit
+                    .ui
+                    .selected_clip
+                    .as_deref()
+                    .and_then(|id| doc.clip_location(id))
+                    .map(|(ti, _)| ti)
+            });
+        let next = match current {
+            Some(ti) => (ti as i64 + steps as i64).clamp(0, count as i64 - 1) as usize,
+            None if steps > 0 => (steps as usize - 1).min(count - 1),
+            None => count.saturating_sub(steps.unsigned_abs() as usize),
+        };
+        let id = doc.tracks[next].id.clone();
+        self.multi_edit_select_track(Some(id.clone()));
+        self.multi_edit.ui.reveal_track = Some(id);
+    }
+
     /// Select a track (and no clip).
     pub(super) fn multi_edit_select_track(&mut self, track_id: Option<String>) {
         self.multi_edit.ui.selected_track = track_id;
         if self.multi_edit.ui.selected_track.is_some() {
             self.multi_edit.ui.selected_clip = None;
+            self.multi_edit.ui.selected_clips.clear();
         }
     }
 
-    /// Delete what is selected: a clip, or else a track. Returns whether
-    /// anything went.
+    /// Delete what is selected: the clips, or else a track. One undo step.
+    /// Returns whether anything went.
     pub(super) fn multi_edit_delete_selected(&mut self) -> bool {
-        let clip = self.multi_edit.ui.selected_clip.clone();
+        let clips = self.multi_edit_selected_ids();
         let track = self.multi_edit.ui.selected_track.clone();
-        if clip.is_none() && track.is_none() {
+        if clips.is_empty() && track.is_none() {
             return false;
         }
         self.multi_edit_checkpoint();
         let Some(doc) = self.multi_edit_active_doc_mut() else {
             return false;
         };
-        let removed = match (clip, track) {
-            (Some(clip), _) => doc.remove_clip(&clip),
-            (None, Some(track)) => doc.remove_track(&track),
-            (None, None) => false,
+        let removed = match track {
+            _ if !clips.is_empty() => doc.remove_clips(&clips) > 0,
+            Some(track) => doc.remove_track(&track),
+            None => false,
         };
         self.multi_edit.ui.selected_clip = None;
+        self.multi_edit.ui.selected_clips.clear();
         self.multi_edit.ui.selected_track = None;
         if removed {
             self.multi_edit_touched();
         }
         removed
+    }
+
+    /// The speakers of the source a clip plays, one per channel, once it is
+    /// read: its layout in the list, else the standard order, else none.
+    fn multi_edit_clip_source_layout(&self, clip_id: &str) -> Option<Layout> {
+        let path = &self.multi_edit_active_doc()?.clip(clip_id)?.source.path;
+        let channels = self.multi_edit.ready_source(path)?.channel_count();
+        Some(
+            self.channel_layout_for(path, channels)
+                .or_else(|| standard_layout_vec(channels))
+                .unwrap_or_else(|| vec![None; channels]),
+        )
+    }
+
+    /// Why a clip of the active timeline cannot be split into its
+    /// channels, or `None` when it can.
+    pub(super) fn multi_edit_split_by_channel_refusal(&self, clip_id: &str) -> Option<&'static str> {
+        let Some(doc) = self.multi_edit_active_doc() else {
+            return Some("no timeline is open");
+        };
+        let channels = match doc.clip(clip_id).map(|clip| self.multi_edit.sources.get(&clip.source.path)) {
+            Some(Some(SourceSlot::Ready(source))) => source.channel_count(),
+            Some(Some(SourceSlot::Failed(_) | SourceSlot::NotInList)) => {
+                return Some("its source could not be read")
+            }
+            _ => 0,
+        };
+        doc.split_by_channel_refusal(clip_id, channels)
+    }
+
+    /// What a clip that plays channel `ch` of `path` calls it: its speaker,
+    /// else its number.
+    pub(super) fn multi_edit_source_channel_name(&self, path: &Path, ch: u16) -> String {
+        self.multi_edit
+            .ready_source(path)
+            .and_then(|source| self.channel_layout_for(path, source.channel_count()))
+            .and_then(|layout| {
+                let pos = layout.get(ch as usize).copied().flatten()?;
+                Some(pos.label(&layout).to_string())
+            })
+            .unwrap_or_else(|| format!("Ch {}", ch + 1))
+    }
+
+    /// The channel count of a clip's source, once it is read.
+    pub(super) fn multi_edit_clip_source_channels(&self, clip_id: &str) -> Option<usize> {
+        let path = &self.multi_edit_active_doc()?.clip(clip_id)?.source.path;
+        Some(self.multi_edit.ready_source(path)?.channel_count())
+    }
+
+    /// Split a clip into one track per channel of its source, each sent to
+    /// its speaker (the clip menu's "Split into channels"). One undo step.
+    /// Returns how many tracks it made.
+    pub(super) fn multi_edit_split_clip_by_channel(&mut self, clip_id: &str) -> usize {
+        if self.multi_edit_split_by_channel_refusal(clip_id).is_some() {
+            return 0;
+        }
+        let Some(source_layout) = self.multi_edit_clip_source_layout(clip_id) else {
+            return 0;
+        };
+        self.multi_edit_checkpoint();
+        let Some(doc) = self.multi_edit_active_doc_mut() else {
+            return 0;
+        };
+        let format_before = doc.layout.clone();
+        let ids = doc.split_clip_by_channel(clip_id, &source_layout);
+        let format_changed = (doc.layout != format_before).then(|| doc.output_layout());
+        if ids.is_empty() {
+            return 0;
+        }
+        self.multi_edit_touched();
+        let primary = ids.first().cloned();
+        self.multi_edit_select_clips(ids.clone(), primary);
+        if let Some(layout) = format_changed {
+            self.push_toast(
+                ToastSeverity::Info,
+                format!(
+                    "Split into {} tracks; the timeline now outputs {}",
+                    ids.len(),
+                    super::channel_layout_ops::layout_name(&layout)
+                ),
+            );
+        }
+        ids.len()
+    }
+
+    /// Change the active timeline's output format. One undo step.
+    pub(super) fn multi_edit_set_output_layout(&mut self, layout: Layout) {
+        let Some(doc) = self.multi_edit_active_doc() else {
+            return;
+        };
+        if doc.output_layout() == layout {
+            return;
+        }
+        self.multi_edit_checkpoint();
+        let Some(doc) = self.multi_edit_active_doc_mut() else {
+            return;
+        };
+        let reverted = doc.set_output_layout(&layout);
+        self.multi_edit_touched();
+        if reverted > 0 {
+            self.push_toast(
+                ToastSeverity::Info,
+                format!(
+                    "{reverted} mono track(s) went back to stereo: {} has no speaker for them",
+                    super::channel_layout_ops::layout_name(&layout)
+                ),
+            );
+        }
+    }
+
+    /// Send a track of the active timeline to `output`. One undo step.
+    pub(super) fn multi_edit_set_track_output(&mut self, track_id: &str, output: TrackOutput) {
+        let unchanged = self
+            .multi_edit_active_doc()
+            .and_then(|doc| doc.tracks.iter().find(|track| track.id == track_id))
+            .is_none_or(|track| track.output == output);
+        if unchanged {
+            return;
+        }
+        self.multi_edit_checkpoint();
+        if let Some(track) = self
+            .multi_edit_active_doc_mut()
+            .and_then(|doc| doc.tracks.iter_mut().find(|track| track.id == track_id))
+        {
+            track.output = output;
+        }
+        self.multi_edit_touched();
     }
 
     /// A marker at the playhead (the M key). Returns its id.
@@ -815,8 +1055,9 @@ impl WavesPreviewer {
         self.multi_edit_seek(target);
     }
 
-    /// Move the selected clip one arrow step. `checkpoint` is true for the
-    /// first step of a held key, so one hold is one undo.
+    /// Move the selected clips one arrow step -- as far as the step takes
+    /// the primary one. `checkpoint` is true for the first step of a held
+    /// key, so one hold is one undo.
     pub(super) fn multi_edit_nudge_selected_clip(&mut self, dir: i32, fine: bool, checkpoint: bool) -> bool {
         let Some(clip_id) = self.multi_edit.ui.selected_clip.clone() else {
             return false;
@@ -829,37 +1070,124 @@ impl WavesPreviewer {
             return false;
         };
         let target = self.multi_edit_arrow_target(start, dir, fine);
+        let origins = self.multi_edit_selection_origins();
         if checkpoint {
             self.multi_edit_checkpoint();
         }
         if let Some(doc) = self.multi_edit_active_doc_mut() {
-            doc.move_clip(&clip_id, target, None);
+            doc.move_group(&origins, target - start, 0);
         }
         self.multi_edit_touched();
         true
     }
 
-    /// Select a clip, and its row in the list with it.
+    /// Select one clip, or none.
     pub(super) fn multi_edit_select_clip(&mut self, clip_id: Option<String>) {
-        if clip_id.is_some() {
+        self.multi_edit_select_clips(clip_id.clone(), clip_id);
+    }
+
+    /// Select these clips -- `primary` the one acted on alone, such as the
+    /// one whose drag carries the rest; else the first track by track -- and
+    /// their rows in the list with them. Selecting clips unselects a track.
+    pub(super) fn multi_edit_select_clips(
+        &mut self,
+        ids: impl IntoIterator<Item = String>,
+        primary: Option<String>,
+    ) {
+        let mut set: HashSet<String> = ids.into_iter().collect();
+        if let Some(primary) = &primary {
+            set.insert(primary.clone());
+        }
+        if !set.is_empty() {
             self.multi_edit.ui.selected_track = None;
         }
-        let source = clip_id.as_deref().and_then(|id| {
-            self.multi_edit_active_doc()
-                .and_then(|doc| doc.clip(id))
-                .map(|clip| clip.source.path.clone())
-        });
-        self.multi_edit.ui.selected_clip = clip_id;
-        let Some(path) = source else {
+        self.multi_edit.ui.selected_clips = set;
+        self.multi_edit.ui.selected_clip =
+            primary.or_else(|| self.multi_edit_selected_ids().into_iter().next());
+        self.multi_edit_sync_list_selection();
+    }
+
+    /// Put a clip in the selection, or take it out (Ctrl+click).
+    pub(super) fn multi_edit_toggle_clip(&mut self, id: String) {
+        let mut ids = self.multi_edit.ui.selected_clips.clone();
+        if ids.remove(&id) {
+            let primary = self.multi_edit.ui.selected_clip.clone().filter(|p| *p != id);
+            self.multi_edit_select_clips(ids, primary);
+        } else {
+            self.multi_edit_select_clips(ids, Some(id));
+        }
+    }
+
+    /// The selected clips that exist, track by track and by start: what a
+    /// group operation acts on.
+    pub(super) fn multi_edit_selected_ids(&self) -> Vec<String> {
+        let selected = &self.multi_edit.ui.selected_clips;
+        let Some(doc) = self.multi_edit_active_doc().filter(|_| !selected.is_empty()) else {
+            return Vec::new();
+        };
+        doc.tracks
+            .iter()
+            .flat_map(|track| {
+                let mut clips: Vec<_> = track.clips.iter().filter(|c| selected.contains(&c.id)).collect();
+                clips.sort_by(|a, b| a.start_secs.total_cmp(&b.start_secs));
+                clips.into_iter().map(|c| c.id.clone())
+            })
+            .collect()
+    }
+
+    /// The selected clips as (id, start, track): where a group move starts.
+    pub(super) fn multi_edit_selection_origins(&self) -> Vec<(String, f64, usize)> {
+        let selected = &self.multi_edit.ui.selected_clips;
+        let Some(doc) = self.multi_edit_active_doc() else {
+            return Vec::new();
+        };
+        doc.tracks
+            .iter()
+            .enumerate()
+            .flat_map(|(ti, track)| {
+                track
+                    .clips
+                    .iter()
+                    .filter(|c| selected.contains(&c.id))
+                    .map(move |c| (c.id.clone(), c.start_secs, ti))
+            })
+            .collect()
+    }
+
+    /// Select the selected clips' rows in the list too, the primary clip's
+    /// as the list's own. Leaves the list alone when no clip is selected.
+    fn multi_edit_sync_list_selection(&mut self) {
+        let Some(doc) = self.multi_edit_active_doc() else {
             return;
         };
-        if let Some(row) = self.row_for_path(&path) {
-            self.selected = Some(row);
-            self.selected_multi.clear();
-            self.selected_multi.insert(row);
-            self.select_anchor = Some(row);
-            self.scroll_to_selected = true;
-        }
+        let selected = &self.multi_edit.ui.selected_clips;
+        let primary_path = self
+            .multi_edit
+            .ui
+            .selected_clip
+            .as_deref()
+            .and_then(|id| doc.clip(id))
+            .map(|clip| clip.source.path.clone());
+        let paths: Vec<PathBuf> = doc
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .filter(|clip| selected.contains(&clip.id))
+            .map(|clip| clip.source.path.clone())
+            .collect();
+        let rows: Vec<usize> = paths.iter().filter_map(|path| self.row_for_path(path)).collect();
+        let Some(primary_row) = primary_path
+            .and_then(|path| self.row_for_path(&path))
+            .or_else(|| rows.first().copied())
+        else {
+            return;
+        };
+        self.selected = Some(primary_row);
+        self.selected_multi.clear();
+        self.selected_multi.extend(rows);
+        self.selected_multi.insert(primary_row);
+        self.select_anchor = Some(primary_row);
+        self.scroll_to_selected = true;
     }
 
     fn multi_edit_source_stamp(&self, path: &Path) -> Option<SourceStamp> {
@@ -1266,6 +1594,8 @@ impl WavesPreviewer {
         let (tx, rx) = mpsc::channel();
         let (cancel_w, progress_w) = (cancel.clone(), progress.clone());
         let doc_id = doc.id.clone();
+        let layout = doc.output_layout();
+        let mask_layout = layout.clone();
         std::thread::spawn(move || {
             crate::app::threading::lower_current_thread_priority();
             let result = (|| {
@@ -1312,6 +1642,14 @@ impl WavesPreviewer {
                     Some(crate::wave::WavBitDepth::Float32),
                 )
                 .map_err(|err| err.to_string())?;
+                // The mix's speakers, in the WAV itself where a mask can say
+                // them (hound's own mask is LCR for 2.1); none where it
+                // cannot, and the row is told instead (below).
+                if mask_layout.len() > 2 {
+                    let mask = crate::audio_channels::mask_for_layout(&mask_layout).unwrap_or(0);
+                    crate::wave::write_wav_channel_mask(&path, mask_layout.len(), mask)
+                        .map_err(|err| err.to_string())?;
+                }
                 Ok(path)
             })();
             let _ = tx.send(result);
@@ -1322,6 +1660,7 @@ impl WavesPreviewer {
             cancel,
             progress,
             doc_id,
+            layout,
         });
     }
 
@@ -1351,6 +1690,11 @@ impl WavesPreviewer {
                     .map(|doc| format!("{}.wav", doc.name))
                     .unwrap_or_else(|| "Multi Edit.wav".to_string());
                 let row = self.add_file_backed_virtual_row(&path, &name);
+                // The WAV says nothing of an order other than the standard
+                // one for its channel count, so the row is told.
+                if standard_layout_vec(job.layout.len()).as_ref() != Some(&job.layout) {
+                    self.set_channel_layout_override(&row, Some(job.layout.clone()));
+                }
                 if let Some(idx) = self.row_for_path(&row) {
                     self.selected = Some(idx);
                     self.selected_multi.clear();
@@ -1466,6 +1810,34 @@ impl WavesPreviewer {
         }
     }
 
+    /// Give clips placed before their row's length was known that length,
+    /// once the list or the source cache knows it -- moving the rest of their
+    /// drop along. Not an edit: no undo step and no unsaved mark (the next
+    /// session save stores it), only a new mix.
+    fn multi_edit_resolve_pending(&mut self) {
+        let mut known: Vec<(usize, String, f64)> = Vec::new();
+        for (di, doc) in self.multi_edit.docs.iter().enumerate() {
+            for clip in doc
+                .tracks
+                .iter()
+                .flat_map(|track| track.clips.iter())
+                .filter(|clip| clip.len_pending)
+            {
+                if let Some(len) = self.multi_edit_row_len_secs(&clip.source.path) {
+                    known.push((di, clip.id.clone(), len));
+                }
+            }
+        }
+        for (di, clip_id, len) in known {
+            let doc = &mut self.multi_edit.docs[di];
+            if doc.resolve_len(&clip_id, len) {
+                let id = doc.id.clone();
+                *self.multi_edit.revs.entry(id).or_default() += 1;
+                self.multi_edit.edited_at = Some(Instant::now());
+            }
+        }
+    }
+
     /// Per-frame upkeep: sources in, mixes out, the playhead followed.
     pub(super) fn tick_multi_edit(&mut self, ctx: &egui::Context) {
         if !self.is_multi_edit_workspace_active() && !self.multi_edit.video_panels.is_empty() {
@@ -1476,6 +1848,7 @@ impl WavesPreviewer {
             return;
         }
         self.multi_edit_drain_sources();
+        self.multi_edit_resolve_pending();
         if self.is_multi_edit_workspace_active() || self.multi_edit.play_when_ready.is_some() {
             self.multi_edit_request_sources();
             self.multi_edit_maybe_render();

@@ -44,7 +44,8 @@ impl super::WavesPreviewer {
         match ext.as_str() {
             // Video containers carry the same lossy audio and the same decode
             // latency as the compressed formats, so they get the same treatment.
-            "mp3" | "m4a" | "ogg" | "mp4" | "mov" | "m4v" | "3gp" | "3g2" => SrcQuality::Fast,
+            "mp3" | "m4a" | "ogg" => SrcQuality::Fast,
+            ext if crate::media_kind::is_video_extension(ext) => SrcQuality::Fast,
             _ => match self.src_quality {
                 SrcQuality::Best => SrcQuality::Good,
                 q => q,

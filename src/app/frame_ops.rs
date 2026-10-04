@@ -861,6 +861,10 @@ impl WavesPreviewer {
         self.ui_list_filter_dialog(ctx);
         self.ui_status_tags_window(ctx);
         self.ui_shortcuts_window(ctx);
+        self.ui_channel_layout_window(ctx);
+        self.sync_playback_channel_layout();
+        self.ui_hrtf_window(ctx);
+        self.sync_binaural();
         self.ui_keymap_window(ctx);
         self.ui_licenses_window(ctx);
         self.ui_undo_history_window(ctx);

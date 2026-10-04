@@ -1,15 +1,15 @@
 //! Copying clips on a Multi Edits timeline, and pasting them back.
 //!
-//! The clipboard is the app's own and holds one clip: what was selected
-//! (its source, in-point, length and fades) and the kind of track it sat on.
-//! The OS clipboard is left alone -- a clip is a reference into a list row,
-//! nothing another program could paste -- and a clip copied on one timeline
-//! pastes onto another.
+//! The clipboard is the app's own and holds the selected clips: each one's
+//! source, in-point, length and fades, how far below the topmost of them its
+//! track was, and its kind. The OS clipboard is left alone -- a clip is a
+//! reference into a list row, nothing another program could paste -- and
+//! clips copied on one timeline paste onto another.
 //!
-//! Ctrl+V pastes at the playhead and, when stopped, moves the playhead to
-//! the end of the pasted clip, so pressing it again lays the next copy right
-//! after the last. While playing it only pastes: moving the playhead would
-//! make the sound jump.
+//! Ctrl+V pastes the group with its earliest clip at the playhead and, when
+//! stopped, moves the playhead to the group's end, so pressing it again lays
+//! the next copy right after the last. While playing it only pastes: moving
+//! the playhead would make the sound jump.
 
 use super::multi_edit::{Clip, TrackKind};
 use super::WavesPreviewer;
@@ -22,6 +22,8 @@ pub(crate) struct CopiedClip {
     /// The track it was copied from: where a paste goes when neither a
     /// track nor a clip is selected.
     pub track_id: String,
+    /// How many tracks below the topmost copied clip's its track was.
+    pub track_offset: usize,
 }
 
 impl WavesPreviewer {
@@ -60,77 +62,100 @@ impl WavesPreviewer {
         }
     }
 
-    /// Copy the selected clip. Returns whether there was one.
+    /// Copy the selected clips. Returns whether there were any.
     pub(super) fn multi_edit_copy_selected(&mut self) -> bool {
-        let Some(clip_id) = self.multi_edit.ui.selected_clip.clone() else {
-            return false;
-        };
+        let ids = self.multi_edit_selected_ids();
         let Some(doc) = self.multi_edit_active_doc() else {
             return false;
         };
-        let Some((ti, ci)) = doc.clip_location(&clip_id) else {
+        let located: Vec<(usize, usize)> = ids.iter().filter_map(|id| doc.clip_location(id)).collect();
+        let Some(top) = located.iter().map(|&(ti, _)| ti).min() else {
             return false;
         };
-        let track = &doc.tracks[ti];
-        self.multi_edit.ui.clip_clipboard = Some(CopiedClip {
-            clip: track.clips[ci].clone(),
-            kind: track.kind,
-            track_id: track.id.clone(),
-        });
+        let copied = located
+            .into_iter()
+            .map(|(ti, ci)| {
+                let track = &doc.tracks[ti];
+                CopiedClip {
+                    clip: track.clips[ci].clone(),
+                    kind: track.kind,
+                    track_id: track.id.clone(),
+                    track_offset: ti - top,
+                }
+            })
+            .collect();
+        self.multi_edit.ui.clip_clipboard = Some(copied);
         true
     }
 
-    /// Copy the selected clip and take it off the timeline.
+    /// Copy the selected clips and take them off the timeline.
     pub(super) fn multi_edit_cut_selected(&mut self) -> bool {
         if !self.multi_edit_copy_selected() {
             return false;
         }
-        let Some(clip_id) = self.multi_edit.ui.selected_clip.take() else {
-            return false;
-        };
+        let ids = self.multi_edit_selected_ids();
         self.multi_edit_checkpoint();
         if let Some(doc) = self.multi_edit_active_doc_mut() {
-            doc.remove_clip(&clip_id);
+            doc.remove_clips(&ids);
         }
+        self.multi_edit_select_clip(None);
         self.multi_edit_touched();
         true
     }
 
-    /// Paste the copied clip at the playhead, on the track `paste_target`
-    /// picks (made when there is none), and select it. One undo step.
-    /// Returns the new clip's id.
+    /// Paste the copied clips with the earliest at the playhead, keeping
+    /// their spacing and their tracks' order below the track `paste_target`
+    /// picks; a clip whose track that would not be (none there, or the other
+    /// kind) goes where `paste_target` puts its own kind. The pasted clips
+    /// are selected. One undo step. Returns the first new clip's id.
     pub(super) fn multi_edit_paste(&mut self) -> Option<String> {
-        let copied = self.multi_edit.ui.clip_clipboard.clone()?;
+        let copied = self.multi_edit.ui.clip_clipboard.clone().filter(|c| !c.is_empty())?;
         let doc_id = self.multi_edit.active.clone()?;
         let at = self.multi_edit_playhead(&doc_id);
         let playing = self.multi_edit_is_playing(&doc_id);
         let selected_track = self.multi_edit.ui.selected_track.clone();
         let selected_clip = self.multi_edit.ui.selected_clip.clone();
-        let source_sr = Some(self.resolve_file_sample_rate(&copied.clip.source.path))
+        let first = copied.iter().map(|c| c.clip.start_secs).reduce(f64::min)?;
+        let end = copied.iter().map(|c| c.clip.end_secs()).fold(first, f64::max);
+        let top = copied.iter().min_by_key(|c| c.track_offset)?.clone();
+        let source_sr = Some(self.resolve_file_sample_rate(&top.clip.source.path))
             .filter(|rate| !rate.is_assumed())
             .map(|rate| rate.hz);
         self.multi_edit_checkpoint();
         let doc = self.multi_edit_active_doc_mut()?;
-        let target = doc
+        let base = doc
             .paste_target(
-                copied.kind,
+                top.kind,
                 selected_track.as_deref(),
                 selected_clip.as_deref(),
-                Some(&copied.track_id),
+                Some(&top.track_id),
             )
-            .unwrap_or_else(|| doc.add_track(copied.kind));
-        let id = doc.paste_clip(target, &copied.clip, at)?;
+            .unwrap_or_else(|| doc.add_track(top.kind));
+        let mut ids = Vec::with_capacity(copied.len());
+        for c in &copied {
+            let below = base + c.track_offset;
+            let target = if doc.tracks.get(below).is_some_and(|t| t.kind == c.kind) {
+                below
+            } else {
+                doc.paste_target(c.kind, None, None, Some(&c.track_id))
+                    .unwrap_or_else(|| doc.add_track(c.kind))
+            };
+            if let Some(id) = doc.paste_clip(target, &c.clip, at + (c.clip.start_secs - first)) {
+                ids.push(id);
+            }
+        }
         // A first clip on an empty timeline sets its rate, as a drop does.
         if doc.timeline_sr == 0 {
             if let Some(sr) = source_sr {
                 doc.timeline_sr = sr;
             }
         }
-        self.multi_edit_select_clip(Some(id.clone()));
+        let first_id = ids.first().cloned();
+        self.multi_edit_select_clips(ids, first_id.clone());
         self.multi_edit_touched();
         if !playing {
-            self.multi_edit_seek(at + copied.clip.len_secs);
+            self.multi_edit_seek(at + (end - first));
         }
-        Some(id)
+        first_id
     }
 }

@@ -26,17 +26,33 @@ impl super::WavesPreviewer {
         }
     }
 
+    /// Evict the least recently used spectrograms until the cache fits its
+    /// budget -- passing over any still being computed, and any an open tab
+    /// is showing.
+    ///
+    /// A shown one stays even when it alone is over budget. A 7.1.4 file is
+    /// about 200 MB of spectrogram against a budget of 22-130 MB; evicting it
+    /// the moment it completed sent the tab straight back to computing it,
+    /// and the analysis restarted forever without ever being drawn.
     pub(super) fn evict_spectro_cache_if_needed(&mut self) {
         let max_bytes = self.perf.spectro_cache_bytes();
-        while self.spectro_cache_bytes > max_bytes {
-            let Some(path) = self.spectro_cache_order.pop_front() else {
-                break;
-            };
-            if self.spectro_inflight.contains(&path) {
-                // Keep in-flight items; push to back for later eviction.
-                self.spectro_cache_order.push_back(path);
-                break;
+        if self.spectro_cache_bytes <= max_bytes {
+            return;
+        }
+        let shown: std::collections::HashSet<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.leaf_view_mode() != super::types::ViewMode::Waveform)
+            .map(|tab| tab.path.clone())
+            .collect();
+        let mut at = 0;
+        while self.spectro_cache_bytes > max_bytes && at < self.spectro_cache_order.len() {
+            let path = self.spectro_cache_order[at].clone();
+            if self.spectro_inflight.contains(&path) || shown.contains(&path) {
+                at += 1;
+                continue;
             }
+            // Removes it from the order too: the next one is now at `at`.
             self.purge_spectro_cache_entry(&path);
         }
     }

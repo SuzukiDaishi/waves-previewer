@@ -392,20 +392,11 @@ pub(super) fn source_audio_has_timing_risk(audio_path: &Path) -> bool {
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase());
-    matches!(
-        ext.as_deref(),
-        Some("mp3")
-            | Some("aac")
-            | Some("m4a")
-            | Some("mp4")
-            | Some("mov")
-            | Some("m4v")
-            | Some("3gp")
-            | Some("3g2")
-            | Some("ogg")
-            | Some("opus")
-            | Some("wma")
-    )
+    ext.as_deref().is_some_and(crate::media_kind::is_video_extension)
+        || matches!(
+            ext.as_deref(),
+            Some("mp3") | Some("aac") | Some("m4a") | Some("ogg") | Some("opus") | Some("wma")
+        )
 }
 
 fn normalize_loaded_stem_channels(

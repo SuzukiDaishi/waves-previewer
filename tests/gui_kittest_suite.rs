@@ -11490,6 +11490,144 @@ mod kittest_suite {
         );
     }
 
+    /// A video with no audio to read has nothing for a full decode to find:
+    /// no waveform, no level. Its row used to look unanswered every frame
+    /// and asked again -- a decode (and a poster frame) per frame, and a
+    /// "Meta: 1" in the status bar that blinked on and off.
+    #[test]
+    fn a_video_with_no_audio_is_decoded_once_not_every_frame() {
+        let dir = make_temp_dir("video_no_audio_requeue");
+        let path = dir.join("video_no_audio_6s_30fps.mp4");
+        std::fs::copy(video_fixture_path("video_no_audio_6s_30fps.mp4"), &path)
+            .expect("copy the fixture");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        wait_for_video_metadata(&mut harness, &path);
+        for _ in 0..20 {
+            harness.run_steps(1);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (_, _, settled) = harness.state().test_meta_task_counts();
+        for _ in 0..60 {
+            harness.run_steps(1);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (_, _, later) = harness.state().test_meta_task_counts();
+        assert_eq!(later, settled, "no decode after the row is answered");
+        assert!(settled <= 1, "one decode at most: {settled}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TypeScript writes `.mts` too: a folder holding `index.d.mts` lists the
+    /// camera clip and the audio, not the declaration file.
+    #[test]
+    fn a_typescript_mts_gets_no_row() {
+        let dir = make_temp_dir("typescript_mts");
+        let clip = dir.join("clip.mts");
+        std::fs::copy(video_fixture_path("mts_no_audio.mts"), &clip).expect("copy the clip");
+        let declaration = dir.join("index.d.mts");
+        std::fs::write(&declaration, "export declare const version: string;\n")
+            .expect("write the declaration");
+        let tone = dir.join("tone.wav");
+        neowaves::wave::export_channels_audio(&[vec![0.1f32; 4_800]], 48_000, &tone)
+            .expect("write the tone");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        let mut listed: Vec<String> = harness
+            .state()
+            .items
+            .iter()
+            .map(|item| item.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        listed.sort();
+        assert_eq!(listed, ["clip.mts", "tone.wav"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Decode failed" is left off the list unless asked for; the amber
+    /// notes on a row's audio ("NO AUDIO") stay either way.
+    #[test]
+    fn decode_failed_is_hidden_from_the_list_by_default() {
+        let dir = make_temp_dir("hide_decode_failed");
+        let broken = dir.join("broken.wav");
+        std::fs::copy(wav_dir().join("formats").join("edge_not_a_wav.wav"), &broken)
+            .expect("copy the broken fixture");
+        let silent_video = dir.join("video_no_audio_6s_30fps.mp4");
+        std::fs::copy(video_fixture_path("video_no_audio_6s_30fps.mp4"), &silent_video)
+            .expect("copy the video fixture");
+        let mut harness = harness_default();
+        harness.run_steps(2);
+        harness
+            .state_mut()
+            .test_replace_with_files(&[broken.clone(), silent_video.clone()]);
+        let start = Instant::now();
+        while harness.state().test_path_decode_error(&broken).is_none()
+            || harness.state().test_path_audio_track_absent(&silent_video).is_none()
+        {
+            assert!(start.elapsed() < SCAN_TIMEOUT, "timed out reading metadata");
+            harness.run_steps(1);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(harness.state().test_list_wave_status(&broken), None);
+        assert_eq!(
+            harness.state().test_list_wave_status(&silent_video).as_deref(),
+            Some("NO AUDIO")
+        );
+        harness.state_mut().test_set_list_hide_decode_errors(false);
+        assert_eq!(
+            harness.state().test_list_wave_status(&broken).as_deref(),
+            Some("Decode failed")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every row's length is in before any row's waveform: headers are read
+    /// ahead of full decodes, whatever order the rows were asked in.
+    #[test]
+    fn lengths_fill_in_before_any_waveform() {
+        let dir = make_temp_dir("lengths_first");
+        let sr = 48_000u32;
+        let files: Vec<PathBuf> = (0..8)
+            .map(|i| {
+                let path = dir.join(format!("long_{i:02}.wav"));
+                let frames = sr as usize * 8;
+                let tone: Vec<f32> = (0..frames)
+                    .map(|n| (n as f32 * 0.01 * (i + 1) as f32).sin() * 0.3)
+                    .collect();
+                neowaves::wave::export_channels_audio(&[tone.clone(), tone], sr, &path)
+                    .expect("write a long wav");
+                path
+            })
+            .collect();
+        let mut harness = harness_default();
+        // One metadata worker, as a two-core machine has: with more workers
+        // than rows, every header is read at once whatever the order.
+        harness.state_mut().test_pin_low_perf_tier();
+        harness.run_steps(2);
+        harness.state_mut().test_replace_with_files(&files);
+        let start = Instant::now();
+        loop {
+            assert!(start.elapsed() < SCAN_TIMEOUT, "timed out waiting for a waveform");
+            harness.run_steps(1);
+            if files.iter().any(|f| harness.state().test_path_has_waveform(f)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let missing: Vec<&PathBuf> = files
+            .iter()
+            .filter(|f| {
+                harness
+                    .state()
+                    .test_path_meta_summary(f)
+                    .and_then(|(_, _, _, secs, _)| secs)
+                    .is_none()
+            })
+            .collect();
+        assert!(missing.is_empty(), "no length yet for {missing:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn video_without_audio_is_playable_seekable_and_not_a_file_error() {
         let video_dir = wav_dir().join("video");
@@ -11543,6 +11681,89 @@ mod kittest_suite {
             (marker - 0.5125).abs() < 0.06,
             "3-second fixture image is displaced: marker={marker:.3}"
         );
+    }
+
+    #[test]
+    fn an_avchd_mts_plays_its_ac3_audio_and_keeps_the_picture_on_its_timestamps() {
+        let video_dir = wav_dir().join("video");
+        let path = video_fixture_path("mts_sync_ac3_6s.mts");
+        let surround = video_fixture_path("m2ts_ac3_51.m2ts");
+        let no_audio = video_fixture_path("mts_no_audio.mts");
+        let eac3 = video_fixture_path("m2ts_eac3_unsupported.m2ts");
+        let mut harness = harness_with_folder(video_dir);
+        wait_for_scan(&mut harness);
+        for p in [&path, &surround, &no_audio, &eac3] {
+            wait_for_video_metadata(&mut harness, p);
+        }
+        // AC-3 is bundled, so it plays whether or not the OS lends a decoder.
+        let (channels, sample_rate, _, secs, codec) = harness
+            .state()
+            .test_path_meta_summary(&path)
+            .expect("mts meta");
+        assert_eq!((channels, sample_rate, codec), (2, 48_000, None));
+        assert!(secs.is_some_and(|s| (s - 5.7).abs() < 0.1), "length {secs:?}");
+        assert!(harness.state().test_path_decode_error(&path).is_none());
+        // 5.1 comes with its channel mask, so it lays out like a 5.1 WAV.
+        let (channels, _, mask, _, _) = harness
+            .state()
+            .test_path_meta_summary(&surround)
+            .expect("m2ts meta");
+        assert_eq!((channels, mask), (6, Some(0x3F)));
+        assert_eq!(
+            harness.state().test_path_audio_track_absent(&no_audio),
+            Some(true)
+        );
+        assert!(harness.state().test_path_decode_error(&no_audio).is_none());
+        assert_eq!(
+            harness.state().test_path_audio_track_unsupported(&eac3),
+            Some(true)
+        );
+        assert_eq!(
+            harness
+                .state()
+                .test_path_meta_summary(&eac3)
+                .and_then(|meta| meta.4),
+            Some("E-AC-3")
+        );
+        // Read-only, like every video.
+        assert!(!neowaves::media_kind::source_allows_destructive_edit(&path));
+        assert!(!neowaves::media_kind::source_allows_export(&path));
+        assert!(!neowaves::media_kind::source_allows_metadata_write(&path));
+
+        assert!(harness.state_mut().test_open_tab_for_path(&path));
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+        assert!(!harness.state().test_audio_is_silent_timeline());
+        assert!(harness.state().test_audio_has_samples());
+        // The picture starts 0.295 s before the audio, whose first sample is
+        // the timeline's zero: timeline t shows movie second floor(t + 0.295).
+        for movie_second in [1usize, 4, 2] {
+            let target_secs = movie_second as f64 + 0.5 - 0.295;
+            let sr = harness
+                .state()
+                .test_active_editor_display_sample_rate()
+                .expect("display sample rate");
+            assert!(harness
+                .state_mut()
+                .test_seek_active_editor_display_sample((target_secs * sr as f64) as usize));
+            let pts = wait_for_video_pts(&mut harness, target_secs);
+            let marker = harness
+                .state()
+                .test_active_video_yellow_marker_center_frac()
+                .expect("yellow fixture marker");
+            let expected = (movie_second as f32 * 288.0 + 120.0) / 1920.0;
+            assert!(
+                (marker - expected).abs() < 0.06,
+                "picture off its timestamp: pts={pts:.3}, marker={marker:.3}, expected={expected:.3}"
+            );
+        }
+
+        // E-AC-3 is named, not decoded: the picture plays on a silent timeline.
+        assert!(harness.state_mut().test_open_tab_for_path(&eac3));
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+        assert!(harness.state().test_active_tab_audio_track_unsupported());
+        assert!(harness.state().test_audio_is_silent_timeline());
     }
 
     #[test]
@@ -11780,6 +12001,99 @@ mod kittest_suite {
 
         eprintln!("[shot] wrote {}", out_dir.join("01_inline.png").display());
         eprintln!("[shot] wrote {}", out_dir.join("02_detached.png").display());
+    }
+
+    /// Evidence for the transport stream preview: the list's MTS / M2TS rows
+    /// (badges, `E-AC-3 UNSUPPORTED`), a 1080i AVCHD picture shown at 16:9
+    /// without combing, and a 5.1 AC-3 track on the SURROUND meter.
+    ///   CARGO_TARGET_DIR=target/codex-screenshot-verify cargo test --features kittest_render --test gui_kittest_suite -- --ignored mts_preview_screenshots --nocapture
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    #[ignore]
+    fn mts_preview_screenshots() {
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("mts");
+        std::fs::create_dir_all(&out_dir).expect("create mts screenshot directory");
+
+        let interlaced = video_fixture_path("mts_1440x1080i.mts");
+        let surround = video_fixture_path("m2ts_ac3_51.m2ts");
+        let eac3 = video_fixture_path("m2ts_eac3_unsupported.m2ts");
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(wav_dir().join("video"));
+        let mut harness = harness_with_startup_size(cfg, egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        for path in [&interlaced, &surround, &eac3] {
+            wait_for_video_metadata(&mut harness, path);
+        }
+        harness.run_steps(5);
+        harness
+            .render()
+            .expect("render list")
+            .save(out_dir.join("01_list.png"))
+            .expect("save list screenshot");
+
+        assert!(harness.state_mut().test_open_tab_for_path(&interlaced));
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+        let sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("display sample rate");
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample((0.5 * sr as f64) as usize));
+        wait_for_video_pts(&mut harness, 0.5);
+        harness.run_steps(2);
+        harness
+            .render()
+            .expect("render 1080i editor")
+            .save(out_dir.join("02_1080i_editor.png"))
+            .expect("save 1080i screenshot");
+
+        assert!(harness.state_mut().test_open_tab_for_path(&surround));
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+        let sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("display sample rate");
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample((0.3 * sr as f64) as usize));
+        wait_for_video_pts(&mut harness, 0.3);
+        harness.state_mut().test_request_workspace_play_toggle();
+        let deadline = Instant::now() + Duration::from_millis(800);
+        while Instant::now() < deadline {
+            harness.run_steps(1);
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        harness
+            .render()
+            .expect("render 5.1 editor")
+            .save(out_dir.join("03_51_surround.png"))
+            .expect("save surround screenshot");
+        harness.state_mut().test_request_workspace_play_toggle();
+
+        assert!(harness.state_mut().test_open_tab_for_path(&eac3));
+        wait_for_tab_ready(&mut harness);
+        harness.run_steps(3);
+        let sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("display sample rate");
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample((0.3 * sr as f64) as usize));
+        wait_for_video_pts(&mut harness, 0.3);
+        harness.run_steps(2);
+        harness
+            .render()
+            .expect("render e-ac-3 editor")
+            .save(out_dir.join("04_eac3_unsupported.png"))
+            .expect("save e-ac-3 screenshot");
+        eprintln!("[shot] wrote {}", out_dir.display());
     }
 
     /// Regression evidence for AAC padding extending the audio clock slightly

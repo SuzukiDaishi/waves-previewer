@@ -2800,6 +2800,15 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
     }
     writer.finalize()?;
     try_copy_audio_metadata_from_source(src, dst);
+    // A gain keeps the source's speakers: hound on its own writes
+    // `(1 << n) - 1` (LCR for a 2.1 file). No mask in the source, none here.
+    if spec.channels > 2 {
+        let mask = audio_io::read_audio_info(src)
+            .ok()
+            .and_then(|info| info.channel_mask)
+            .unwrap_or(0);
+        write_wav_channel_mask(dst, spec.channels as usize, mask)?;
+    }
     Ok(())
 }
 
@@ -3696,6 +3705,51 @@ pub fn overwrite_audio_from_channels_with_depth(
     replace_file_with_tmp(&tmp, src, backup)
 }
 
+/// Set the channel mask of a WAVE_FORMAT_EXTENSIBLE file in place. hound
+/// writes `(1 << channels) - 1`, which is LCR for three channels and names
+/// the wrong speakers for quad or 7.1; a caller that knows the layout writes
+/// the right one here (0 for "no speaker assignment"). Leaves alone a file
+/// with a plain fmt chunk or another channel count, and says whether it
+/// wrote.
+pub fn write_wav_channel_mask(path: &Path, channels: usize, mask: u32) -> Result<bool> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let mut riff = [0u8; 12];
+    file.read_exact(&mut riff)?;
+    if &riff[0..4] != b"RIFF" || &riff[8..12] != b"WAVE" {
+        return Ok(false);
+    }
+    let len = file.metadata()?.len();
+    let mut offset = 12u64;
+    while offset + 8 <= len {
+        let mut head = [0u8; 8];
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut head)?;
+        let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as u64;
+        if &head[0..4] == b"fmt " {
+            // tag, channels, rate, byte rate, block align, bits, cbSize,
+            // valid bits, then the mask at 20.
+            if size < 40 {
+                return Ok(false);
+            }
+            let mut fmt = [0u8; 24];
+            file.read_exact(&mut fmt)?;
+            let tag = u16::from_le_bytes([fmt[0], fmt[1]]);
+            let count = u16::from_le_bytes([fmt[2], fmt[3]]) as usize;
+            let cb_size = u16::from_le_bytes([fmt[16], fmt[17]]);
+            if tag != 0xFFFE || cb_size < 22 || count != channels {
+                return Ok(false);
+            }
+            crate::app::watch::note_self_write(path);
+            file.seek(SeekFrom::Start(offset + 8 + 20))?;
+            file.write_all(&mask.to_le_bytes())?;
+            return Ok(true);
+        }
+        offset += 8 + size + (size & 1);
+    }
+    Ok(false)
+}
+
 // Overwrite: apply gain and replace the source file safely with optional .bak
 pub fn overwrite_gain_wav(src: &Path, gain_db: f32, backup: bool) -> Result<()> {
     let tmp = unique_sibling_tmp(src, "gain", "wav");
@@ -4047,6 +4101,34 @@ pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f
 
 #[cfg(test)]
 mod tests {
+
+    /// What hound writes for three channels is LCR; the mask is put right
+    /// afterwards, and a file of another channel count is left alone.
+    #[test]
+    fn a_written_wav_takes_the_channel_mask_it_is_given() {
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_wav_mask_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("two_one.wav");
+        let chans = vec![vec![0.1f32; 64], vec![0.2; 64], vec![0.3; 64]];
+        super::export_channels_audio(&chans, 48_000, &path).expect("write");
+        let info = crate::audio_io::read_audio_info(&path).expect("read");
+        assert_eq!(info.channel_mask, Some(0x7), "hound's own: LCR");
+        assert!(super::write_wav_channel_mask(&path, 3, 0x0B).expect("patch"));
+        let info = crate::audio_io::read_audio_info(&path).expect("read again");
+        assert_eq!(info.channel_mask, Some(0x0B));
+        assert!(!super::write_wav_channel_mask(&path, 4, 0x33).expect("wrong count"));
+        let (decoded, _) = crate::audio_io::decode_audio_multi(&path).expect("still decodes");
+        assert_eq!(decoded.len(), 3);
+        assert!((decoded[2][10] - 0.3).abs() < 1e-6);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A video source has no encodable form, so the format picker must refuse
     /// it rather than fall back to the source extension and hand an audio

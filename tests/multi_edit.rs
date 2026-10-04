@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 use neowaves::app::SortKey;
 use neowaves::kittest::harness_default;
@@ -536,6 +536,59 @@ fn kittest_render_multi_edit_timeline() {
 }
 
 /// A click at `pos`: press and release where it is.
+#[cfg(feature = "kittest_render")]
+#[test]
+fn kittest_render_multi_edit_split_channels() {
+    let dir = temp_dir("render_split");
+    let surround = dir.join("surround.wav");
+    let voice = dir.join("voice.wav");
+    write_surround(&surround, 4.0);
+    write_tone(&voice, 2.0);
+    let mut harness = list_with(&[surround.clone(), voice.clone()]);
+    harness.set_size(egui::vec2(1600.0, 900.0));
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_set_zoom(120.0);
+    harness.state_mut().test_multi_edit_drop(Some(0), 0.5, &[surround.clone()]);
+    harness.state_mut().test_multi_edit_drop(Some(0), 5.0, &[voice.clone()]);
+    for (secs, pan) in [(5.0, -1.0), (7.0, 1.0)] {
+        harness.state_mut().test_multi_edit_add_lane_point(0, "Pan", secs, pan);
+    }
+    wait_for_mix(&mut harness);
+    harness.run_steps(4);
+
+    let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("debug")
+        .join("screenshot_verify")
+        .join("multi_edit");
+    std::fs::create_dir_all(&out_dir).expect("create evidence dir");
+    let save = |harness: &mut App, name: &str| {
+        harness
+            .render()
+            .expect("render the timeline")
+            .save(out_dir.join(name))
+            .expect("save the screenshot");
+    };
+    let track = harness.get_by_label("Track 01").rect();
+    let on_clip = egui::pos2(harness.state().test_multi_edit_x_for(2.0), track.center().y + 12.0);
+    right_click_at(&mut harness, on_clip);
+    save(&mut harness, "10_clip_menu_split_channels.png");
+    harness.get_by_label("Split into channels (6)").click();
+    harness.run_steps(3);
+    harness.hover_at(egui::pos2(800.0, 880.0));
+    harness.run_steps(4);
+    save(&mut harness, "11_split_into_six_tracks.png");
+
+    // Track 01's voice sent to the centre in mono: its Pan lane is not heard.
+    let chip = harness.get_by_label("St").rect();
+    click_at(&mut harness, chip.center());
+    harness.run_steps(2);
+    save(&mut harness, "12_output_chip_menu.png");
+    harness.get_by_label("Mono \u{2192} C").click();
+    harness.run_steps(4);
+    save(&mut harness, "13_mono_track_no_pan.png");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn click_at(harness: &mut App, pos: egui::Pos2) {
     harness.hover_at(pos);
     harness.run_steps(1);
@@ -1080,6 +1133,190 @@ fn a_clip_is_copied_and_pasted_from_the_right_click_menus() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Six channels of one tone, channel N at `(N + 1) / 10`: which channel
+/// ended up where shows in its level.
+fn write_surround(path: &Path, secs: f32) {
+    let frames = (FIXTURE_SR as f32 * secs) as usize;
+    let channels: Vec<Vec<f32>> = (0..6)
+        .map(|ch| {
+            let amp = (ch + 1) as f32 / 10.0;
+            (0..frames)
+                .map(|i| (i as f32 / FIXTURE_SR as f32 * 330.0 * std::f32::consts::TAU).sin() * amp)
+                .collect()
+        })
+        .collect();
+    neowaves::wave::export_channels_audio(&channels, FIXTURE_SR, path).expect("write 5.1");
+}
+
+fn assert_channel_levels(peaks: &[f32]) {
+    assert_eq!(peaks.len(), 6, "{peaks:?}");
+    for (ch, peak) in peaks.iter().enumerate() {
+        let want = (ch + 1) as f32 / 10.0;
+        assert!((peak - want).abs() < 0.02, "channel {ch}: {peak} for {want} ({peaks:?})");
+    }
+}
+
+#[test]
+fn a_surround_clip_splits_into_a_track_per_speaker_and_mixes_back_to_its_channels() {
+    let dir = temp_dir("split_channels");
+    let a = dir.join("surround.wav");
+    write_surround(&a, 1.0);
+    let mut harness = list_with(&[a.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_set_zoom(80.0);
+    harness.state_mut().test_multi_edit_drop(Some(0), 0.5, &[a.clone()]);
+    // The menu knows the channel count once the source is read.
+    wait_for_mix(&mut harness);
+    assert_eq!(harness.state().test_multi_edit_output().as_deref(), Some("FL,FR"));
+    harness.run_steps(2);
+    let track = harness.get_by_label("Track 01").rect();
+    let on_clip = egui::pos2(harness.state().test_multi_edit_x_for(1.0), track.center().y + 12.0);
+    right_click_at(&mut harness, on_clip);
+    harness.get_by_label("Split into channels (6)").click();
+    harness.run_steps(3);
+
+    let names: Vec<String> = harness
+        .state()
+        .test_multi_edit_tracks()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Track 01",
+            "Track 01 \u{b7} L",
+            "Track 01 \u{b7} R",
+            "Track 01 \u{b7} C",
+            "Track 01 \u{b7} LFE",
+            "Track 01 \u{b7} Ls",
+            "Track 01 \u{b7} Rs",
+        ]
+    );
+    assert_eq!(
+        harness.state().test_multi_edit_track_outputs(),
+        ["St", "L", "R", "C", "LFE", "Ls", "Rs"]
+    );
+    assert_eq!(
+        harness.state().test_multi_edit_clip_channels(),
+        (0..6).map(Some).collect::<Vec<_>>()
+    );
+    // A stereo timeline could not keep the channels apart: it is 5.1 now.
+    assert_eq!(
+        harness.state().test_multi_edit_output().as_deref(),
+        Some("FL,FR,FC,LFE,BL,BR")
+    );
+    // A combo box carries its choice as its value, not its label.
+    assert!(
+        harness
+            .query_all_by_value("5.1 WAV / SMPTE")
+            .any(|node| node.accesskit_node().role() == egui::accesskit::Role::ComboBox),
+        "the Output combo says so"
+    );
+    wait_for_mix(&mut harness);
+    assert_channel_levels(&harness.state().test_multi_edit_mix_channel_peaks().unwrap());
+
+    // Playing it tells the device which speaker each channel is.
+    harness.state_mut().test_request_workspace_play_toggle();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().test_playback_source_layout().as_deref(),
+        Some("FL,FR,FC,LFE,BL,BR")
+    );
+    harness.state_mut().test_request_workspace_play_toggle();
+    harness.run_steps(1);
+
+    // A track's chip sends it elsewhere: the LFE's channel onto the centre.
+    let lfe_chip = harness.get_by_label("LFE").rect();
+    click_at(&mut harness, lfe_chip.center());
+    harness.get_by_label("Mono \u{2192} C").click();
+    harness.run_steps(3);
+    assert_eq!(harness.state().test_multi_edit_track_outputs()[4], "C");
+    wait_for_mix(&mut harness);
+    let peaks = harness.state().test_multi_edit_mix_channel_peaks().unwrap();
+    assert!((peaks[2] - 0.7).abs() < 0.03, "C carries 0.3 + 0.4: {peaks:?}");
+    assert!(peaks[3] < 1e-4, "and the LFE nothing: {peaks:?}");
+    assert!(harness.state_mut().test_multi_edit_undo());
+    harness.run_steps(2);
+    assert_eq!(harness.state().test_multi_edit_track_outputs()[4], "LFE");
+
+    // One undo step takes the split back whole.
+    assert!(harness.state_mut().test_multi_edit_undo());
+    harness.run_steps(2);
+    assert_eq!(harness.state().test_multi_edit_tracks().len(), 1);
+    assert_eq!(harness.state().test_multi_edit_output().as_deref(), Some("FL,FR"));
+    assert!(harness.state_mut().test_multi_edit_redo());
+    harness.run_steps(2);
+    assert_eq!(harness.state().test_multi_edit_tracks().len(), 7);
+
+    // The mixdown keeps the six channels.
+    wait_for_mix(&mut harness);
+    harness.state_mut().test_multi_edit_export();
+    wait_until(&mut harness, "the mixdown", |h| {
+        !h.state().test_multi_edit_export_in_flight()
+    });
+    let row = harness
+        .state()
+        .items
+        .iter()
+        .find(|item| item.display_name == "Multi Edit 1.wav")
+        .map(|item| item.path.clone())
+        .expect("the mixdown's row");
+    let mut channels = 0;
+    wait_until(&mut harness, "the mixdown row's channels", |h| {
+        channels = h
+            .state()
+            .items
+            .iter()
+            .find(|item| item.path == row)
+            .and_then(|item| item.meta.as_ref())
+            .map(|meta| meta.channels)
+            .unwrap_or(0);
+        channels > 0
+    });
+    assert_eq!(channels, 6);
+
+    // And a session keeps the outputs and the clips' channels.
+    let session = dir.join("split.nwsess");
+    assert!(harness.state_mut().test_save_session_to(&session));
+    let mut reopened = harness_default();
+    reopened.run_steps(2);
+    assert!(reopened.state_mut().test_open_session_from(&session));
+    reopened.run_steps(2);
+    assert_eq!(
+        reopened.state().test_multi_edit_track_outputs(),
+        ["St", "L", "R", "C", "LFE", "Ls", "Rs"]
+    );
+    assert_eq!(
+        reopened.state().test_multi_edit_output().as_deref(),
+        Some("FL,FR,FC,LFE,BL,BR")
+    );
+    assert_eq!(
+        reopened.state().test_multi_edit_clip_channels(),
+        (0..6).map(Some).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_mono_source_offers_no_split() {
+    let dir = temp_dir("split_mono");
+    let a = dir.join("a.wav");
+    write_tone(&a, 1.0);
+    let mut harness = list_with(&[a.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_set_zoom(80.0);
+    harness.state_mut().test_multi_edit_drop(Some(0), 0.5, &[a.clone()]);
+    wait_for_mix(&mut harness);
+    harness.run_steps(2);
+    let track = harness.get_by_label("Track 01").rect();
+    let on_clip = egui::pos2(harness.state().test_multi_edit_x_for(1.0), track.center().y + 12.0);
+    right_click_at(&mut harness, on_clip);
+    let item = harness.get_by_label("Split into channels");
+    assert!(item.accesskit_node().is_disabled(), "a mono source has one channel to give");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn arrows_stop_at_a_marker_on_the_way() {
     let dir = temp_dir("arrow_markers");
@@ -1111,6 +1348,523 @@ fn arrows_stop_at_a_marker_on_the_way() {
         stops.iter().zip(expected).all(|(got, want)| (got - want).abs() < 1e-9),
         "{stops:?}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn click_with(harness: &mut App, pos: egui::Pos2, modifiers: egui::Modifiers) {
+    harness.hover_at(pos);
+    harness.run_steps(1);
+    for pressed in [true, false] {
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        });
+        harness.run_steps(1);
+    }
+    harness.run_steps(1);
+}
+
+/// A file with a wave's name and no wave in it: its length is never known.
+fn write_unreadable(path: &Path) {
+    std::fs::write(path, b"not a wave file at all").expect("write the unreadable file");
+}
+
+/// A list holding these files, waiting only for `readable` to be measured.
+fn list_waiting_for(files: &[PathBuf], readable: &[PathBuf]) -> App {
+    let mut harness = harness_default();
+    harness.state_mut().test_replace_with_files(files);
+    harness.run_steps(2);
+    let readable = readable.to_vec();
+    wait_until(&mut harness, "row metadata", |h| {
+        readable.iter().all(|f| h.state().test_meta_loaded(f))
+    });
+    harness
+}
+
+#[test]
+fn up_and_down_pick_a_track_and_bring_it_into_view() {
+    let dir = temp_dir("track_keys");
+    let a = dir.join("a.wav");
+    write_tone(&a, 1.0);
+    let mut harness = list_with(&[a.clone()]);
+    harness.set_size(egui::vec2(1280.0, 560.0));
+    harness.state_mut().test_multi_edit_new();
+    for _ in 0..7 {
+        harness.state_mut().test_multi_edit_drop(None, 0.0, &[a.clone()]);
+    }
+    harness.state_mut().test_multi_edit_set_row_zoom(2.0);
+    harness.run_steps(4);
+    assert_eq!(harness.state().test_multi_edit_tracks().len(), 8);
+    assert!(harness.state().test_multi_edit_max_scroll_y() > 0.0, "the rows overflow the view");
+    focus_timeline(&mut harness);
+    let selected = |h: &App| h.state().test_multi_edit_selected_track();
+    let scroll_y = |h: &App| h.state().test_multi_edit_view().2;
+
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run_steps(3);
+    assert_eq!(selected(&harness), Some(0), "down from nothing: the first track");
+    for _ in 0..10 {
+        harness.key_press(egui::Key::ArrowDown);
+        harness.run_steps(2);
+    }
+    harness.run_steps(3);
+    assert_eq!(selected(&harness), Some(7), "held at the last");
+    assert!(scroll_y(&harness) > 0.0, "scrolled down to it");
+    for _ in 0..10 {
+        harness.key_press(egui::Key::ArrowUp);
+        harness.run_steps(2);
+    }
+    harness.run_steps(3);
+    assert_eq!(selected(&harness), Some(0), "held at the first");
+    assert!(scroll_y(&harness) < 1.0, "scrolled back up: {}", scroll_y(&harness));
+
+    // From a selected clip, up and down start at its track.
+    assert!(harness.state_mut().test_multi_edit_select_clip(2));
+    harness.key_press(egui::Key::ArrowUp);
+    harness.run_steps(3);
+    assert_eq!(selected(&harness), Some(2), "the clip's track is 3; up is 2");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rows_placed_before_their_lengths_are_read_close_up_when_they_are() {
+    let dir = temp_dir("unread");
+    let (a, b, c) = (dir.join("a.wav"), dir.join("b.wav"), dir.join("c.wav"));
+    write_tone(&a, 1.0);
+    write_tone(&b, 0.5);
+    write_tone(&c, 2.0);
+    let mut harness = list_with(&[a.clone(), b.clone(), c.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .state_mut()
+            .test_multi_edit_drop_unread(0, 0.5, &[a.clone(), b.clone(), c.clone()]),
+        3,
+        "placed without lengths"
+    );
+    assert_eq!(harness.state().test_multi_edit_pending_clips(), 3);
+    let clips = harness.state().test_multi_edit_clips();
+    assert!(clips.iter().all(|clip| clip.2 == 0.5 && clip.3 == 0.0), "starts only: {clips:?}");
+
+    harness.run_steps(3);
+    assert_eq!(harness.state().test_multi_edit_pending_clips(), 0);
+    let clips = harness.state().test_multi_edit_clips();
+    let got: Vec<(f64, f64)> = clips.iter().map(|clip| (clip.2, clip.3)).collect();
+    let want = [(0.5, 1.0), (1.5, 0.5), (2.0, 2.0)];
+    assert!(
+        got.iter()
+            .zip(want)
+            .all(|(g, w)| (g.0 - w.0).abs() < 1e-3 && (g.1 - w.1).abs() < 1e-3),
+        "back to back once read: {got:?}"
+    );
+    // Reading a length is not an edit: one undo takes the whole drop back.
+    assert!(harness.state_mut().test_multi_edit_undo());
+    assert!(harness.state().test_multi_edit_clips().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_row_whose_length_is_not_known_still_lands_as_its_start() {
+    let dir = temp_dir("unknown_len");
+    let (a, broken) = (dir.join("a.wav"), dir.join("broken.wav"));
+    write_tone(&a, 1.0);
+    write_unreadable(&broken);
+    let mut harness = list_waiting_for(&[a.clone(), broken.clone()], &[a.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_set_zoom(80.0);
+    harness.run_steps(3);
+    let track = harness.get_by_label("Track 01").rect();
+    let target = egui::pos2(harness.state().test_multi_edit_x_for(2.0) + 1.0, track.center().y + 12.0);
+    let row = harness.get_by_label("broken.wav").rect().center();
+    drag_hold(&mut harness, row, target);
+    let (_, span, count) = harness
+        .state()
+        .test_multi_edit_drop_preview()
+        .expect("shown while held over the track");
+    assert_eq!((span, count), (0.0, 1), "a start, no length");
+    release(&mut harness, target);
+    let clips = harness.state().test_multi_edit_clips();
+    assert_eq!(clips.len(), 1, "placed, not refused: {clips:?}");
+    assert!((clips[0].2 - 2.0).abs() < 0.02 && clips[0].3 == 0.0, "{clips:?}");
+    harness.run_steps(20);
+    assert_eq!(harness.state().test_multi_edit_pending_clips(), 1, "still waiting");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn where_clips_overlap_the_one_that_starts_later_lies_on_top() {
+    let dir = temp_dir("overlap_top");
+    let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+    write_tone(&a, 2.0);
+    write_tone(&b, 2.0);
+    let mut harness = list_with(&[a.clone(), b.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_set_zoom(80.0);
+    // b goes down first, so it is first on the track; a starts earlier.
+    harness.state_mut().test_multi_edit_drop(Some(0), 1.0, &[b.clone()]);
+    harness.state_mut().test_multi_edit_drop(Some(0), 0.0, &[a.clone()]);
+    harness.run_steps(3);
+    let track = harness.get_by_label("Track 01").rect();
+    let y = track.center().y + 12.0;
+    let (over, before) = (
+        egui::pos2(harness.state().test_multi_edit_x_for(1.5), y),
+        egui::pos2(harness.state().test_multi_edit_x_for(0.5), y),
+    );
+    click_at(&mut harness, over);
+    assert_eq!(harness.state().test_selected_path(), Some(&b), "the later clip is on top");
+    click_at(&mut harness, before);
+    assert_eq!(harness.state().test_selected_path(), Some(&a));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_cut_tool_splits_a_clip_where_it_is_clicked() {
+    let dir = temp_dir("cut_tool");
+    let a = dir.join("a.wav");
+    write_tone(&a, 2.0);
+    let mut harness = list_with(&[a.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_set_zoom(80.0);
+    harness.state_mut().test_multi_edit_drop(Some(0), 0.0, &[a.clone()]);
+    harness.run_steps(3);
+    focus_timeline(&mut harness);
+    harness.key_press(egui::Key::C);
+    harness.run_steps(2);
+    assert!(harness.state().test_multi_edit_cut_tool(), "C takes the tool");
+
+    let track = harness.get_by_label("Track 01").rect();
+    let y = track.center().y + 12.0;
+    let x_for = |h: &App, t: f64| h.state().test_multi_edit_x_for(t);
+    // Three pixels past the 1 s grid line: snapped onto it.
+    let near_line = egui::pos2(x_for(&harness, 1.0) + 3.0, y);
+    click_at(&mut harness, near_line);
+    let starts = |h: &App| -> Vec<(f64, f64)> {
+        h.state().test_multi_edit_clips().iter().map(|c| (c.2, c.3)).collect()
+    };
+    let got = starts(&harness);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!((got[0].1 - 1.0).abs() < 1e-6 && (got[1].0 - 1.0).abs() < 1e-6, "split at 1 s: {got:?}");
+
+    // With the tool a drag moves nothing.
+    let from = egui::pos2(x_for(&harness, 0.5), y);
+    drag(&mut harness, from, from + egui::vec2(120.0, 0.0));
+    assert_eq!(starts(&harness), got, "the clips stayed put");
+
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    assert!(!harness.state().test_multi_edit_cut_tool(), "Escape puts it away");
+    harness.key_press(egui::Key::C);
+    harness.run_steps(2);
+    harness.key_press(egui::Key::C);
+    harness.run_steps(2);
+    assert!(!harness.state().test_multi_edit_cut_tool(), "C toggles");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn alt_click_splits_a_clip_without_the_tool() {
+    let dir = temp_dir("alt_cut");
+    let a = dir.join("a.wav");
+    write_tone(&a, 2.0);
+    let mut harness = list_with(&[a.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_set_zoom(80.0);
+    harness.state_mut().test_multi_edit_drop(Some(0), 0.0, &[a.clone()]);
+    harness.run_steps(3);
+    let track = harness.get_by_label("Track 01").rect();
+    let pos = egui::pos2(harness.state().test_multi_edit_x_for(1.37), track.center().y + 12.0);
+    click_with(&mut harness, pos, egui::Modifiers::ALT);
+    let clips = harness.state().test_multi_edit_clips();
+    assert_eq!(clips.len(), 2, "{clips:?}");
+    assert!((clips[1].2 - 1.37).abs() < 0.02, "where it was clicked, unsnapped: {clips:?}");
+    assert!(!harness.state().test_multi_edit_cut_tool());
+    assert!(harness.state_mut().test_multi_edit_undo());
+    assert_eq!(harness.state().test_multi_edit_clips().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Overlapping clips, a clip waiting for its length, and the cut tool:
+/// `debug/screenshot_verify/multi_edit/06_overlap.png`, `07_cut_tool.png`.
+#[cfg(feature = "kittest_render")]
+#[test]
+fn kittest_render_multi_edit_overlap_and_cut() {
+    let dir = temp_dir("render_overlap");
+    let (long, mid, short, broken) = (
+        dir.join("long.wav"),
+        dir.join("mid.wav"),
+        dir.join("short.wav"),
+        dir.join("broken.wav"),
+    );
+    write_tone(&long, 6.0);
+    write_tone(&mid, 3.0);
+    write_tone(&short, 1.5);
+    write_unreadable(&broken);
+    let all = [long.clone(), mid.clone(), short.clone(), broken.clone()];
+    let mut harness = list_waiting_for(&all, &all[..3]);
+    harness.set_size(egui::vec2(1600.0, 700.0));
+    harness.state_mut().test_multi_edit_new();
+    let state = harness.state_mut();
+    // Track 01: two clips crossing over 2.6 - 3.2 s.
+    state.test_multi_edit_drop(Some(0), 0.2, &[mid.clone()]);
+    state.test_multi_edit_drop(Some(0), 2.6, &[mid.clone()]);
+    // Track 02: a short clip wholly inside a long one.
+    state.test_multi_edit_drop(None, 0.5, &[long.clone()]);
+    state.test_multi_edit_drop(Some(1), 2.0, &[short.clone()]);
+    // Track 03: a row whose length is not known, as its start.
+    state.test_multi_edit_drop(None, 1.0, &[broken.clone()]);
+    state.test_multi_edit_seek(4.5);
+    wait_for_mix(&mut harness);
+    harness.run_steps(10);
+
+    let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("debug")
+        .join("screenshot_verify")
+        .join("multi_edit");
+    std::fs::create_dir_all(&out_dir).expect("create evidence dir");
+    harness
+        .render()
+        .expect("render the overlaps")
+        .save(out_dir.join("06_overlap.png"))
+        .expect("save the screenshot");
+
+    // The cut tool over the long clip.
+    harness.state_mut().test_multi_edit_set_cut_tool(true);
+    let track = harness.get_by_label("Track 02").rect();
+    let on_long = egui::pos2(harness.state().test_multi_edit_x_for(4.8), track.center().y + 12.0);
+    harness.hover_at(on_long);
+    harness.run_steps(4);
+    harness
+        .render()
+        .expect("render the cut tool")
+        .save(out_dir.join("07_cut_tool.png"))
+        .expect("save the screenshot");
+
+    // A selection rectangle over both tracks, mid-drag.
+    harness.state_mut().test_multi_edit_set_cut_tool(false);
+    let row1 = harness.get_by_label("Track 01").rect();
+    let from = egui::pos2(harness.state().test_multi_edit_x_for(0.05), row1.center().y + 14.0);
+    let to = egui::pos2(harness.state().test_multi_edit_x_for(3.0), track.center().y + 14.0);
+    drag_hold(&mut harness, from, to);
+    harness.run_steps(2);
+    harness
+        .render()
+        .expect("render the selection")
+        .save(out_dir.join("08_marquee.png"))
+        .expect("save the screenshot");
+    release(&mut harness, to);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn close(got: &[(usize, f64)], want: &[(usize, f64)]) -> bool {
+    got.len() == want.len()
+        && got
+            .iter()
+            .zip(want)
+            .all(|(g, w)| g.0 == w.0 && (g.1 - w.1).abs() < 1e-6)
+}
+
+#[test]
+fn a_rectangle_dragged_over_the_tracks_selects_what_it_meets() {
+    let dir = temp_dir("marquee");
+    let (a, b, c) = (dir.join("a.wav"), dir.join("b.wav"), dir.join("c.wav"));
+    for f in [&a, &b, &c] {
+        write_tone(f, 1.0);
+    }
+    let mut harness = list_with(&[a.clone(), b.clone(), c.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_set_zoom(80.0);
+    harness.state_mut().test_multi_edit_drop(Some(0), 1.0, &[a.clone()]);
+    harness.state_mut().test_multi_edit_drop(None, 1.5, &[b.clone()]);
+    harness.state_mut().test_multi_edit_drop(Some(0), 5.0, &[c.clone()]);
+    harness.run_steps(3);
+    focus_timeline(&mut harness);
+    let (row0, row1) = (
+        harness.get_by_label("Track 01").rect(),
+        harness.get_by_label("Track 02").rect(),
+    );
+    let x_for = |h: &App, t: f64| h.state().test_multi_edit_x_for(t);
+    // From empty space before the first clip, over both tracks, short of c.
+    let from = egui::pos2(x_for(&harness, 0.5), row0.center().y + 12.0);
+    let to = egui::pos2(x_for(&harness, 3.0), row1.center().y + 12.0);
+    drag(&mut harness, from, to);
+    let selected = harness.state().test_multi_edit_selected_clips();
+    assert!(close(&selected, &[(0, 1.0), (1, 1.5)]), "a and b, not c: {selected:?}");
+
+    harness.key_press(egui::Key::Delete);
+    harness.run_steps(2);
+    let clips = harness.state().test_multi_edit_clips();
+    assert_eq!(clips.len(), 1, "both went: {clips:?}");
+    assert_eq!(clips[0].1, c);
+    assert!(harness.state_mut().test_multi_edit_undo());
+    assert_eq!(harness.state().test_multi_edit_clips().len(), 3, "one undo brings both back");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ctrl_and_shift_clicks_build_a_selection() {
+    let dir = temp_dir("click_select");
+    let a = dir.join("a.wav");
+    write_tone(&a, 1.0);
+    let mut harness = list_with(&[a.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_set_zoom(80.0);
+    for start in [0.0, 2.0, 4.0] {
+        harness.state_mut().test_multi_edit_drop(Some(0), start, &[a.clone()]);
+    }
+    harness.run_steps(3);
+    let y = harness.get_by_label("Track 01").rect().center().y + 12.0;
+    let at = |h: &App, t: f64| egui::pos2(h.state().test_multi_edit_x_for(t), y);
+    let starts = |h: &App| -> Vec<f64> {
+        h.state().test_multi_edit_selected_clips().iter().map(|s| s.1).collect()
+    };
+    let (p0, p2, p4) = (at(&harness, 0.5), at(&harness, 2.5), at(&harness, 4.5));
+    click_at(&mut harness, p0);
+    assert_eq!(starts(&harness), vec![0.0]);
+    click_with(&mut harness, p2, egui::Modifiers::COMMAND);
+    assert_eq!(starts(&harness), vec![0.0, 2.0], "Ctrl adds");
+    click_with(&mut harness, p4, egui::Modifiers::SHIFT);
+    assert_eq!(starts(&harness), vec![0.0, 2.0, 4.0], "Shift adds");
+    click_with(&mut harness, p0, egui::Modifiers::COMMAND);
+    assert_eq!(starts(&harness), vec![2.0, 4.0], "Ctrl on a selected clip takes it out");
+    click_at(&mut harness, p0);
+    assert_eq!(starts(&harness), vec![0.0], "a plain click selects it alone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dragging_a_selected_clip_carries_the_whole_selection() {
+    let dir = temp_dir("group_drag");
+    let a = dir.join("a.wav");
+    write_tone(&a, 1.0);
+    let mut harness = list_with(&[a.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_set_zoom(80.0);
+    harness.state_mut().test_multi_edit_drop(Some(0), 1.0, &[a.clone()]);
+    harness.state_mut().test_multi_edit_drop(None, 2.0, &[a.clone()]);
+    harness.state_mut().test_multi_edit_drop(None, 8.0, &[a.clone()]);
+    harness.run_steps(3);
+    // a on Track 01 and b on Track 02 selected; the clip on Track 03 not.
+    assert!(harness.state_mut().test_multi_edit_select_clips(&[0, 1]));
+    harness.run_steps(1);
+    let (row0, row1) = (
+        harness.get_by_label("Track 01").rect(),
+        harness.get_by_label("Track 02").rect(),
+    );
+    let from = egui::pos2(harness.state().test_multi_edit_x_for(1.5), row0.center().y + 12.0);
+    let to = egui::pos2(harness.state().test_multi_edit_x_for(2.5), row1.center().y + 12.0);
+    drag(&mut harness, from, to);
+    let placed: Vec<(usize, f64)> = harness
+        .state()
+        .test_multi_edit_clips()
+        .iter()
+        .map(|c| (c.0, c.2))
+        .collect();
+    assert!(
+        close(&placed, &[(1, 2.0), (2, 3.0), (2, 8.0)]),
+        "both a second later, one track down: {placed:?}"
+    );
+    assert_eq!(harness.state().test_multi_edit_selected_clips().len(), 2, "still selected");
+    assert!(harness.state_mut().test_multi_edit_undo());
+    let placed: Vec<(usize, f64)> = harness
+        .state()
+        .test_multi_edit_clips()
+        .iter()
+        .map(|c| (c.0, c.2))
+        .collect();
+    assert!(close(&placed, &[(0, 1.0), (1, 2.0), (2, 8.0)]), "one undo: {placed:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ctrl_a_selects_every_clip_and_escape_lets_go() {
+    let dir = temp_dir("select_all");
+    let a = dir.join("a.wav");
+    write_tone(&a, 1.0);
+    let mut harness = list_with(&[a.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_drop(Some(0), 0.0, &[a.clone()]);
+    harness.state_mut().test_multi_edit_drop(None, 3.0, &[a.clone()]);
+    harness.run_steps(3);
+    focus_timeline(&mut harness);
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness.run_steps(2);
+    assert_eq!(harness.state().test_multi_edit_selected_clips().len(), 2);
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    assert!(harness.state().test_multi_edit_selected_clips().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_copied_group_pastes_with_its_spacing_and_its_tracks() {
+    let dir = temp_dir("group_paste");
+    let a = dir.join("a.wav");
+    write_tone(&a, 1.0);
+    let mut harness = list_with(&[a.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_drop(Some(0), 1.0, &[a.clone()]);
+    harness.state_mut().test_multi_edit_drop(None, 1.5, &[a.clone()]);
+    harness.run_steps(3);
+    focus_timeline(&mut harness);
+    assert!(harness.state_mut().test_multi_edit_select_clips(&[0, 1]));
+    harness.event(egui::Event::Copy);
+    harness.run_steps(2);
+    harness.state_mut().test_multi_edit_seek(5.0);
+    paste(&mut harness);
+    let placed = |h: &App| -> Vec<(usize, f64)> {
+        h.state().test_multi_edit_clips().iter().map(|c| (c.0, c.2)).collect()
+    };
+    assert!(
+        close(&placed(&harness), &[(0, 1.0), (0, 5.0), (1, 1.5), (1, 5.5)]),
+        "{:?}",
+        placed(&harness)
+    );
+    let playhead = harness.state().test_multi_edit_playhead();
+    assert!((playhead - 6.5).abs() < 1e-3, "to the group's end: {playhead}");
+    paste(&mut harness);
+    assert!(
+        close(
+            &placed(&harness),
+            &[(0, 1.0), (0, 5.0), (0, 6.5), (1, 1.5), (1, 5.5), (1, 7.0)]
+        ),
+        "again, right after: {:?}",
+        placed(&harness)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn alt_arrows_and_s_act_on_every_selected_clip() {
+    let dir = temp_dir("group_keys");
+    let a = dir.join("a.wav");
+    write_tone(&a, 2.0);
+    let mut harness = list_with(&[a.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_set_zoom(80.0);
+    harness.state_mut().test_multi_edit_drop(Some(0), 0.0, &[a.clone()]);
+    harness.state_mut().test_multi_edit_drop(None, 0.5, &[a.clone()]);
+    harness.run_steps(3);
+    focus_timeline(&mut harness);
+    assert!(harness.state_mut().test_multi_edit_select_clips(&[0, 1]));
+    // At 80 px a second an arrow step is 1 s: both move by the primary's.
+    harness.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowRight);
+    harness.run_steps(2);
+    let placed: Vec<(usize, f64)> = harness
+        .state()
+        .test_multi_edit_clips()
+        .iter()
+        .map(|c| (c.0, c.2))
+        .collect();
+    assert!(close(&placed, &[(0, 1.0), (1, 1.5)]), "{placed:?}");
+
+    harness.state_mut().test_multi_edit_seek(2.0);
+    harness.key_press(egui::Key::S);
+    harness.run_steps(2);
+    let clips = harness.state().test_multi_edit_clips();
+    assert_eq!(clips.len(), 4, "both split at the playhead: {clips:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

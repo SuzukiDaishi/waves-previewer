@@ -105,6 +105,9 @@ impl std::fmt::Display for VideoOpenError {
 /// Used to decide whether the editor should reserve a video panel at all, and
 /// what to say in it when no decoder can be had.
 pub fn probe_video_stream(path: &Path) -> Result<VideoStreamInfo, VideoOpenError> {
+    if crate::mpegts::is_mpegts_path(path) {
+        return ts_stream_info(path).map(|(info, _)| info);
+    }
     match container::VideoContainer::open(path) {
         Ok(container) => Ok(container.info),
         Err(err) => Err(classify_open_error(&err)),
@@ -120,8 +123,78 @@ fn classify_open_error(err: &anyhow::Error) -> VideoOpenError {
     }
 }
 
+/// A transport stream's picture as its timestamps describe it, and where its
+/// first frame sits on the row's timeline (negative when the picture starts
+/// before the audio).
+///
+/// The size is a 16:9 placeholder: a transport stream says nothing about it
+/// short of the codec's own headers, and the decoder reports the real one
+/// when it opens.
+fn ts_stream_info(path: &Path) -> Result<(VideoStreamInfo, f64), VideoOpenError> {
+    use crate::mpegts::{StreamKind, TsProbe, PTS_CLOCK_HZ};
+    let probe = TsProbe::open(path).map_err(|err| VideoOpenError::Failed(format!("{err:#}")))?;
+    let video = probe.first_video().ok_or(VideoOpenError::NoVideoTrack)?;
+    let start_secs = match (video.first_pts, crate::audio_mpegts::timeline_zero_pts(&probe)) {
+        (Some(first), Some(zero)) => TsProbe::secs_between(first, zero),
+        _ => 0.0,
+    };
+    let codec = match video.kind {
+        StreamKind::H264 => VideoCodec::H264,
+        StreamKind::Hevc => VideoCodec::H265,
+        _ => VideoCodec::Unknown,
+    };
+    let nominal_fps = video
+        .pts_step
+        .filter(|step| *step > 0)
+        .map(|step| (PTS_CLOCK_HZ / step as f64) as f32)
+        .unwrap_or(0.0);
+    let duration_secs = video
+        .span_secs()
+        .map(|span| (start_secs + span).max(0.0))
+        .unwrap_or(0.0);
+    let info = VideoStreamInfo {
+        coded_width: 16,
+        coded_height: 9,
+        display_width: 16,
+        display_height: 9,
+        rotation: Rotation::None,
+        duration_secs,
+        nominal_fps,
+        codec_label: video.kind.label().to_string(),
+        codec,
+    };
+    Ok((info, start_secs))
+}
+
+/// A transport stream's decoder: Media Foundation reads `.mts` / `.m2ts`
+/// itself, so only the timing comes from [`crate::mpegts`].
+fn open_ts_decoder(path: &Path) -> Result<Box<dyn VideoDecoder>, VideoOpenError> {
+    let (info, picture_start_secs) = ts_stream_info(path)?;
+    #[cfg(windows)]
+    {
+        let failed = |err: anyhow::Error| VideoOpenError::Failed(format!("{err:#}"));
+        let mut decoder =
+            decoder_mf::MediaFoundationDecoder::open(path, Rotation::None).map_err(failed)?;
+        decoder.adopt_container_info(&info);
+        decoder.align_to_timeline(picture_start_secs).map_err(failed)?;
+        Ok(Box::new(decoder))
+    }
+    #[cfg(not(windows))]
+    {
+        // The OpenH264 path needs a sample index, which this demuxer does
+        // not build; the audio still plays.
+        let _ = (info, picture_start_secs);
+        Err(VideoOpenError::UnsupportedCodec(
+            "MPEG-TS video preview is Windows-only".to_string(),
+        ))
+    }
+}
+
 /// Open a decoder for `path`, preferring the OS decoder where there is one.
 pub fn open_video_decoder(path: &Path) -> Result<Box<dyn VideoDecoder>, VideoOpenError> {
+    if crate::mpegts::is_mpegts_path(path) {
+        return open_ts_decoder(path);
+    }
     // The container is parsed first either way: it is the only source of the
     // duration, frame rate and codec name the UI shows, and on the OpenH264
     // path it is also the demuxer.
@@ -350,5 +423,130 @@ mod tests {
             Err(_) => {}
         }
         let _ = std::fs::remove_file(&truncated);
+    }
+}
+
+/// Transport streams through Media Foundation, against the fixtures in
+/// `test_samples/video`.
+#[cfg(all(test, windows))]
+mod mpegts_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test_samples")
+            .join("video")
+            .join(name)
+    }
+
+    /// Whether the sync fixture's yellow "second N" box is lit in `image`.
+    fn second_box_lit(image: &egui::ColorImage, second: usize) -> bool {
+        let [w, h] = image.size;
+        let x = ((288 * second + 120) as f32 / 1920.0 * w as f32) as usize;
+        let y = (891.0 / 1080.0 * h as f32) as usize;
+        let p = image.pixels[y * w + x];
+        p.r() > 150 && p.g() > 150 && p.b() < 110
+    }
+
+    #[test]
+    fn an_mts_picture_follows_its_timestamps_onto_the_audio_timeline() {
+        let mut decoder = open_video_decoder(&fixture("mts_sync_ac3_6s.mts")).expect("decoder");
+        assert_eq!(decoder.info().codec, VideoCodec::H264);
+        assert!((decoder.info().nominal_fps - 30.0).abs() < 0.5);
+        let cancel = AtomicBool::new(false);
+        // The picture starts 0.295 s before the audio, so timeline t shows
+        // movie time t + 0.295. Aim at the middle of each movie second, going
+        // backwards as well as forwards.
+        for movie_second in [0usize, 3, 1, 4, 2] {
+            let timeline = movie_second as f64 + 0.5 - 0.295;
+            decoder.seek(timeline, 2).expect("seek");
+            let frame = decoder
+                .next_frame((640, 360), &cancel)
+                .expect("decode")
+                .expect("frame");
+            assert!(
+                (frame.pts_secs - timeline).abs() < 0.05,
+                "asked for {timeline}, got {}",
+                frame.pts_secs
+            );
+            for second in 0..6 {
+                assert_eq!(
+                    second_box_lit(&frame.image, second),
+                    second == movie_second,
+                    "at {timeline}: box {second}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_on_a_whole_time_comes_back_on_exactly_that_time() {
+        // No audio this build decodes, so the picture's first frame is the
+        // timeline's zero and frame 9 of 30 fps is exactly 0.3 s. Adding the
+        // source offset in seconds made it 0.30000000000000004, a frame from
+        // the future for a playhead at 0.3.
+        let mut decoder =
+            open_video_decoder(&fixture("m2ts_eac3_unsupported.m2ts")).expect("decoder");
+        let cancel = AtomicBool::new(false);
+        decoder.seek(0.3, usize::MAX).expect("seek");
+        let frame = decoder
+            .next_frame((40, 40), &cancel)
+            .expect("decode")
+            .expect("frame");
+        assert!(frame.pts_secs <= 0.3, "{}", frame.pts_secs);
+        assert!(0.3 - frame.pts_secs < 1.0e-6, "{}", frame.pts_secs);
+    }
+
+    #[test]
+    fn an_avchd_1440_wide_picture_is_shown_at_16_9() {
+        // Stored 1440 wide with 4:3 pixels. Media Foundation may hand over
+        // the stored frames or stretch them itself; either way the picture
+        // is shown at 16:9, never stretched twice.
+        let decoder = open_video_decoder(&fixture("mts_1440x1080i.mts")).expect("decoder");
+        assert!(matches!(decoder.info().coded_width, 1440 | 1920));
+        let aspect = decoder.info().aspect();
+        assert!((aspect - 16.0 / 9.0).abs() < 0.01, "{aspect}");
+    }
+
+    #[test]
+    fn an_mts_is_described_and_gives_a_poster_frame() {
+        let path = fixture("mts_no_audio.mts");
+        let info = probe_video_stream(&path).expect("probe");
+        assert_eq!(info.codec_label, "H.264");
+        assert!((info.duration_secs - 2.0).abs() < 0.05, "{}", info.duration_secs);
+        // Media Foundation's MPEG-2 source, sought back to zero, sometimes
+        // came down just past the only keyframe and read to the end without
+        // a picture: a poster frame that was there one time in two.
+        for attempt in 0..10 {
+            let frame = decode_poster_frame(&path, 40)
+                .unwrap_or_else(|| panic!("no poster frame on attempt {attempt}"));
+            assert!(frame.image.size[0] > 0 && frame.image.size[0] <= 40);
+        }
+        // .m2ts reaches Media Foundation's MPEG-2 source as readily as .mts,
+        // whether or not its audio is one this build decodes.
+        for name in ["m2ts_ac3_51.m2ts", "m2ts_eac3_unsupported.m2ts"] {
+            assert!(decode_poster_frame(&fixture(name), 40).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_seek_into_a_stream_with_one_keyframe_still_finds_its_picture() {
+        // The fixture is two seconds with a keyframe only at the start, so
+        // any seek past it must be retried from further back.
+        let mut decoder = open_video_decoder(&fixture("mts_no_audio.mts")).expect("decoder");
+        let cancel = AtomicBool::new(false);
+        for target in [1.0, 0.4, 1.7, 1.0] {
+            decoder.seek(target, 0).expect("seek");
+            let frame = decoder
+                .next_frame((40, 40), &cancel)
+                .expect("decode")
+                .unwrap_or_else(|| panic!("no picture at {target}"));
+            assert!(
+                frame.pts_secs <= target + 1.0e-6 && target - frame.pts_secs < 0.04,
+                "asked for {target}, got {}",
+                frame.pts_secs
+            );
+        }
     }
 }

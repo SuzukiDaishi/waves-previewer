@@ -20,7 +20,8 @@ use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
     MFCreateSourceReaderFromURL, MFMediaType_Video, MFVideoFormat_RGB32, MF_MT_FRAME_SIZE,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+    MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+    MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
     MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
     MF_SOURCE_READER_FIRST_VIDEO_STREAM,
 };
@@ -31,6 +32,93 @@ use crate::mf::MfSession;
 use super::container::{VideoCodec, VideoStreamInfo};
 use super::frame::{bgra_stride_to_color_image, Rotation, VideoFrame};
 use super::VideoDecoder;
+
+/// How far before a seek target a transport stream is asked to land. Media
+/// Foundation's MPEG-2 source seeks by estimate and can come down past the
+/// target; half a second is an AVCHD GOP, and the forward walk decodes the
+/// rest of the way.
+const TS_SEEK_PREROLL_SECS: f64 = 0.5;
+/// The first step back when a transport stream seek still came down too late.
+/// Each further retry doubles it, so even a file with one keyframe is found
+/// in a handful of tries rather than a walk back a second at a time.
+const TS_SEEK_RETRY_SECS: f64 = 2.0;
+
+/// The width a picture is shown at: its stored width stretched by the pixel
+/// aspect ratio, which is what turns AVCHD's 1440x1080 into 16:9.
+fn display_width_for(coded_width: u32, pixel_aspect: (u32, u32)) -> u32 {
+    let (num, den) = pixel_aspect;
+    if num == 0 || den == 0 {
+        return coded_width;
+    }
+    let width = (u64::from(coded_width) * u64::from(num) + u64::from(den) / 2) / u64::from(den);
+    u32::try_from(width).unwrap_or(coded_width).max(1)
+}
+
+/// The pixel aspect ratio to apply to frames of `output` size, or 1:1 when
+/// Media Foundation has already applied it.
+///
+/// Which it does depends on the source: for AVCHD's 1440x1080 the MPEG-2
+/// source hands over 1920x1080, for an anamorphic mp4 the stored size. So
+/// the ratio is applied only when the output is still the stored size; a
+/// rotated output (also not the stored size) is left alone the same way.
+fn pending_pixel_aspect(reader: &IMFSourceReader, output: (u32, u32)) -> (u32, u32) {
+    let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+    let Ok(native) = (unsafe { reader.GetNativeMediaType(stream, 0) }) else {
+        return (1, 1);
+    };
+    let unpack = |packed: u64| ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32);
+    let stored = unsafe { native.GetUINT64(&MF_MT_FRAME_SIZE) }.map(unpack);
+    let ratio = unsafe { native.GetUINT64(&MF_MT_PIXEL_ASPECT_RATIO) }.map(unpack);
+    match (stored, ratio) {
+        (Ok(stored), Ok(ratio)) if stored == output && ratio.0 > 0 && ratio.1 > 0 => ratio,
+        _ => (1, 1),
+    }
+}
+
+/// A source reader on `url` that hands over RGB32 frames at the stream's own
+/// size.
+fn create_reader(url: &HSTRING) -> Result<IMFSourceReader> {
+    let attributes: IMFAttributes = unsafe {
+        let mut attributes = None;
+        MFCreateAttributes(&mut attributes, 2).context("MFCreateAttributes")?;
+        let attributes = attributes.context("MFCreateAttributes returned nothing")?;
+        // Lets the reader insert a converter/scaler, which is what makes
+        // "give me RGB32" work for any input format.
+        attributes
+            .SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)
+            .context("enable advanced video processing")?;
+        // This is opportunistic: systems without a matching hardware MFT
+        // continue through Media Foundation's software transforms.
+        attributes
+            .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)
+            .context("enable hardware transforms")?;
+        attributes
+    };
+
+    let reader: IMFSourceReader = unsafe {
+        MFCreateSourceReaderFromURL(PCWSTR(url.as_ptr()), &attributes)
+            .context("MFCreateSourceReaderFromURL")?
+    };
+
+    // Ask for straight RGB32 so no colour conversion is left to do here.
+    unsafe {
+        let media_type: IMFMediaType = MFCreateMediaType().context("MFCreateMediaType")?;
+        media_type
+            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+            .context("set major type")?;
+        media_type
+            .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
+            .context("set subtype")?;
+        reader
+            .SetCurrentMediaType(
+                MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                None,
+                &media_type,
+            )
+            .context("no video stream, or RGB32 unavailable for it")?;
+    }
+    Ok(reader)
+}
 
 pub struct MediaFoundationDecoder {
     // Field order matters: the reader must be released before MFShutdown runs.
@@ -55,6 +143,29 @@ pub struct MediaFoundationDecoder {
     /// decoding from here instead of restarting at the preceding keyframe.
     last_returned_secs: Option<f64>,
     finished: bool,
+    /// Added to Media Foundation's sample times (100 ns units) to put them on
+    /// the row's timeline. Zero for ISO-BMFF; a transport stream's source
+    /// picks a zero of its own, which [`Self::align_to_timeline`] measures.
+    /// Kept in the source's own integer unit so a frame lands on the same
+    /// exact time it would without an offset: added in seconds, a frame at
+    /// 0.3 s came out at 0.30000000000000004 and missed a playhead at 0.3.
+    timeline_offset_hns: i64,
+    /// How far before a seek target to ask the source to land.
+    seek_preroll_secs: f64,
+    /// The file, for opening a fresh reader.
+    url: HSTRING,
+    /// A transport stream: its seeks are estimates that can come down past
+    /// the target, or past the last keyframe, so they are checked and
+    /// retried further back.
+    transport_stream: bool,
+    /// Where (in the source's own seconds) the last transport stream seek
+    /// aimed, until a picture at or before its target shows it landed early
+    /// enough.
+    seek_aim_secs: Option<f64>,
+    /// Retries spent on the current seek.
+    seek_retries: u32,
+    /// Nothing has been read since the reader was created.
+    reader_at_start: bool,
 }
 
 impl MediaFoundationDecoder {
@@ -62,45 +173,7 @@ impl MediaFoundationDecoder {
         let session = MfSession::start()?;
         let url = HSTRING::from(path.as_os_str());
 
-        let attributes: IMFAttributes = unsafe {
-            let mut attributes = None;
-            MFCreateAttributes(&mut attributes, 2).context("MFCreateAttributes")?;
-            let attributes = attributes.context("MFCreateAttributes returned nothing")?;
-            // Lets the reader insert a converter/scaler, which is what makes
-            // "give me RGB32" work for any input format.
-            attributes
-                .SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)
-                .context("enable advanced video processing")?;
-            // This is opportunistic: systems without a matching hardware MFT
-            // continue through Media Foundation's software transforms.
-            attributes
-                .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)
-                .context("enable hardware transforms")?;
-            attributes
-        };
-
-        let reader: IMFSourceReader = unsafe {
-            MFCreateSourceReaderFromURL(PCWSTR(url.as_ptr()), &attributes)
-                .context("MFCreateSourceReaderFromURL")?
-        };
-
-        // Ask for straight RGB32 so no colour conversion is left to do here.
-        unsafe {
-            let media_type: IMFMediaType = MFCreateMediaType().context("MFCreateMediaType")?;
-            media_type
-                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-                .context("set major type")?;
-            media_type
-                .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
-                .context("set subtype")?;
-            reader
-                .SetCurrentMediaType(
-                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
-                    None,
-                    &media_type,
-                )
-                .context("no video stream, or RGB32 unavailable for it")?;
-        }
+        let reader = create_reader(&url)?;
 
         let native = unsafe {
             reader
@@ -117,8 +190,14 @@ impl MediaFoundationDecoder {
         // Media Foundation applies the container's rotation itself, so the
         // frames arrive display-oriented and the container's matrix must not
         // be applied a second time. The hint is kept only for the declared
-        // display size.
-        let (display_width, display_height) = (coded_width, coded_height);
+        // display size. Where the source leaves the pixel aspect ratio to us,
+        // frames come out at the stored size and the panel stretches them to
+        // this one.
+        let display_width = display_width_for(
+            coded_width,
+            pending_pixel_aspect(&reader, (coded_width, coded_height)),
+        );
+        let display_height = coded_height;
         let info = VideoStreamInfo {
             coded_width,
             coded_height,
@@ -144,7 +223,133 @@ impl MediaFoundationDecoder {
             queued_frame: None,
             last_returned_secs: None,
             finished: false,
+            timeline_offset_hns: 0,
+            seek_preroll_secs: 0.0,
+            url,
+            transport_stream: false,
+            seek_aim_secs: None,
+            seek_retries: 0,
+            reader_at_start: true,
         })
+    }
+
+    /// A fresh reader on the same file, at its start, keeping the output
+    /// size already negotiated. This is how a transport stream goes back to
+    /// the start: seeking Media Foundation's MPEG-2 source to zero can come
+    /// down just past the first keyframe and, in a file with no other, read
+    /// on to the end without a picture.
+    fn reopen(&mut self) -> Result<()> {
+        self.reader = create_reader(&self.url)?;
+        if self.frame_size != self.native_frame_size {
+            let media_type = Self::rgb32_type(Some(self.frame_size))?;
+            let resized = unsafe {
+                self.reader.SetCurrentMediaType(
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                    None,
+                    &media_type,
+                )
+            };
+            if resized.is_err() {
+                self.frame_size = self.native_frame_size;
+                self.native_resize_available = false;
+            }
+        }
+        self.reader_at_start = true;
+        self.finished = false;
+        Ok(())
+    }
+
+    /// Point the reader at `source_secs` of the source's own time.
+    fn position_source(&mut self, source_secs: f64) -> Result<()> {
+        if self.transport_stream {
+            if source_secs <= 0.0 {
+                // From the start, whatever comes first is right.
+                self.seek_aim_secs = None;
+                if !self.reader_at_start {
+                    self.reopen()?;
+                }
+                return Ok(());
+            }
+            self.seek_aim_secs = Some(source_secs);
+        }
+        // 100-nanosecond units, the unit every Media Foundation time uses.
+        // An all-zero time format GUID means "the default", which for a media
+        // source is exactly those units.
+        let position = PROPVARIANT::from((source_secs * 10_000_000.0) as i64);
+        let moved = unsafe {
+            self.reader
+                .SetCurrentPosition(&windows::core::GUID::zeroed(), &position)
+        };
+        match moved {
+            Ok(()) => {}
+            Err(err) if !self.transport_stream => {
+                return Err(anyhow::Error::from(err).context("SetCurrentPosition"));
+            }
+            // The MPEG-2 source refuses some positions outright (near the
+            // end of a short file, 0xC00D36E5); the start of a fresh reader it
+            // never refuses, and the walk forward reaches the target from
+            // there.
+            Err(_) => {
+                self.seek_aim_secs = None;
+                return self.reopen();
+            }
+        }
+        self.reader_at_start = false;
+        Ok(())
+    }
+
+    /// A transport stream seek that came down past its target, or past the
+    /// last keyframe: aim further back, twice as far each time, and from the
+    /// start of the file once that is nearer.
+    fn retry_seek_earlier(&mut self, aim_secs: f64) -> Result<()> {
+        self.seek_retries = self.seek_retries.saturating_add(1);
+        let back = TS_SEEK_RETRY_SECS * f64::from(1u32 << (self.seek_retries - 1).min(16));
+        self.queued_frame = None;
+        self.finished = false;
+        self.position_source((aim_secs - back).max(0.0))
+    }
+
+    /// Put a transport stream's pictures on the row's timeline.
+    ///
+    /// `picture_start_secs` is where the first picture belongs on that
+    /// timeline, from the stream's own timestamps (see `audio_mpegts`).
+    /// Media Foundation's MPEG-2 source renumbers time from a zero it does
+    /// not report, so the first picture's time is read once and the
+    /// difference kept; its seeks are estimates, so they are aimed early.
+    pub fn align_to_timeline(&mut self, picture_start_secs: f64) -> Result<()> {
+        let stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+        let first_hns = loop {
+            let mut stream_flags = 0u32;
+            let mut timestamp = 0i64;
+            let mut sample = None;
+            unsafe {
+                self.reader
+                    .ReadSample(
+                        stream,
+                        0,
+                        None,
+                        Some(&mut stream_flags),
+                        Some(&mut timestamp),
+                        Some(&mut sample),
+                    )
+                    .context("ReadSample for the first picture")?;
+            }
+            if stream_flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                anyhow::bail!("the video stream ended before its first picture");
+            }
+            if sample.is_some() {
+                break timestamp;
+            }
+        };
+        self.reopen().context("rewind after the first picture")?;
+        self.timeline_offset_hns = (picture_start_secs * 10_000_000.0).round() as i64 - first_hns;
+        self.seek_preroll_secs = TS_SEEK_PREROLL_SECS;
+        self.transport_stream = true;
+        self.pending_seek_secs = None;
+        self.queued_frame = None;
+        self.last_returned_secs = None;
+        self.finished = false;
+        Ok(())
     }
 
     /// Fill in the parts of the stream description only the container knows
@@ -213,6 +418,7 @@ impl MediaFoundationDecoder {
         if self.finished {
             return Ok(None);
         }
+        self.reader_at_start = false;
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return Ok(None);
@@ -265,7 +471,7 @@ impl MediaFoundationDecoder {
                 continue;
             };
             return Ok(Some(VideoFrame {
-                pts_secs: timestamp as f64 / 10_000_000.0,
+                pts_secs: (timestamp + self.timeline_offset_hns) as f64 / 10_000_000.0,
                 image: Arc::new(image),
             }));
         }
@@ -339,16 +545,10 @@ impl VideoDecoder for MediaFoundationDecoder {
             self.finished = false;
             return Ok(());
         }
-        // 100-nanosecond units, the unit every Media Foundation time uses.
-        // An all-zero time format GUID means "the default", which for a media
-        // source is exactly those units.
-        let hns = (secs * 10_000_000.0) as i64;
-        let position = PROPVARIANT::from(hns);
-        unsafe {
-            self.reader
-                .SetCurrentPosition(&windows::core::GUID::zeroed(), &position)
-                .context("SetCurrentPosition")?;
-        }
+        let offset_secs = self.timeline_offset_hns as f64 / 10_000_000.0;
+        let source_secs = (secs - offset_secs - self.seek_preroll_secs).max(0.0);
+        self.seek_retries = 0;
+        self.position_source(source_secs)?;
         self.pending_seek_secs = Some(secs);
         self.queued_frame = None;
         self.last_returned_secs = None;
@@ -379,12 +579,22 @@ impl VideoDecoder for MediaFoundationDecoder {
         let mut at_or_before: Option<VideoFrame> = None;
         loop {
             let Some(frame) = take_next(self)? else {
+                if at_or_before.is_none() && !cancel.load(Ordering::Relaxed) {
+                    if let Some(aim) = self.seek_aim_secs {
+                        // The stream ended without a picture: the seek came
+                        // down past the last keyframe.
+                        self.retry_seek_earlier(aim)?;
+                        continue;
+                    }
+                }
                 if let Some(frame) = &at_or_before {
                     self.last_returned_secs = Some(frame.pts_secs);
                 }
                 return Ok(at_or_before);
             };
             if frame.pts_secs <= target + 1.0e-7 {
+                // Landed early enough; the walk forward does the rest.
+                self.seek_aim_secs = None;
                 at_or_before = Some(frame);
                 continue;
             }
@@ -392,6 +602,12 @@ impl VideoDecoder for MediaFoundationDecoder {
                 self.queued_frame = Some((box_px, frame));
                 self.last_returned_secs = Some(frame_at_target.pts_secs);
                 return Ok(Some(frame_at_target));
+            }
+            if let Some(aim) = self.seek_aim_secs {
+                // The seek came down after the target, so the picture that
+                // is showing then lies further back.
+                self.retry_seek_earlier(aim)?;
+                continue;
             }
             // The requested time precedes the first timestamp in the file.
             self.last_returned_secs = Some(frame.pts_secs);

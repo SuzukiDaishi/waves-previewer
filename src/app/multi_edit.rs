@@ -17,6 +17,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::audio_channels::{standard_layout_vec, Layout, SpeakerPos};
+
 /// Shortest clip an edit may leave behind. Anything shorter is a click, not
 /// a clip, and a trim or split that would produce one is refused instead.
 pub const MIN_CLIP_SECS: f64 = 0.01;
@@ -196,6 +198,29 @@ impl TrackKind {
             TrackKind::Video => "Video",
         }
     }
+}
+
+/// Where a track's sound goes in the timeline's output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackOutput {
+    /// Its clips as two channels, panned, into the output's front pair.
+    #[default]
+    Stereo,
+    /// Its clips as one channel into output channel `index` alone. No pan:
+    /// there is nowhere to pan it to.
+    Channel { index: usize },
+}
+
+impl TrackOutput {
+    pub fn is_mono(self) -> bool {
+        matches!(self, TrackOutput::Channel { .. })
+    }
+}
+
+/// The output of a timeline nobody has changed: a stereo pair.
+pub fn stereo_layout() -> Layout {
+    standard_layout_vec(2).expect("stereo has a standard layout")
 }
 
 /// What an automation lane moves.
@@ -420,6 +445,23 @@ pub struct Clip {
     pub fade_in_secs: f64,
     #[serde(default)]
     pub fade_out_secs: f64,
+    /// Its row's length was not known when it was placed: `len_secs` is 0
+    /// and the clip is its start alone until `resolve_len` gives it one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub len_pending: bool,
+    /// Placed in one drop right after this clip (by id), while a clip up
+    /// that chain was still without a length. When that length arrives the
+    /// clip moves along with it, so the drop stays back to back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follows: Option<String>,
+    /// The one source channel it plays (0-based), when it is a channel of a
+    /// split clip; `None` plays them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u16>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Clip {
@@ -470,6 +512,8 @@ pub struct Track {
     /// A video track's picture window is open.
     #[serde(default = "default_true")]
     pub show_video: bool,
+    #[serde(default)]
+    pub output: TrackOutput,
 }
 
 impl Track {
@@ -516,7 +560,8 @@ pub struct TimelineMarker {
 pub struct NewClip {
     pub source: ClipSource,
     pub name: String,
-    pub len_secs: f64,
+    /// `None` while the row's length is not known yet.
+    pub len_secs: Option<f64>,
     pub is_video: bool,
 }
 
@@ -538,6 +583,10 @@ pub struct MultiEditDoc {
     /// Sorted by time.
     #[serde(default)]
     pub markers: Vec<TimelineMarker>,
+    /// The output's speakers, one per mixed channel, as
+    /// `channel_layout_ops::layout_to_string` writes them. Empty: stereo.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub layout: String,
 }
 
 impl MultiEditDoc {
@@ -550,7 +599,145 @@ impl MultiEditDoc {
             open: true,
             view: MultiEditView::default(),
             markers: Vec::new(),
+            layout: String::new(),
         }
+    }
+
+    /// The output's speakers, one per channel the mix has.
+    pub fn output_layout(&self) -> Layout {
+        crate::app::channel_layout_ops::layout_from_string(&self.layout)
+            .filter(|layout| !layout.is_empty())
+            .unwrap_or_else(stereo_layout)
+    }
+
+    /// Change the output's speakers. A mono track follows its speaker to
+    /// wherever the new layout has it; one whose speaker it lacks goes back
+    /// to stereo. Returns how many did.
+    pub fn set_output_layout(&mut self, layout: &[Option<SpeakerPos>]) -> usize {
+        let old = self.output_layout();
+        let new: Layout = if layout.is_empty() {
+            stereo_layout()
+        } else {
+            layout.to_vec()
+        };
+        let mut reverted = 0;
+        for track in &mut self.tracks {
+            let TrackOutput::Channel { index } = track.output else {
+                continue;
+            };
+            let target = match old.get(index).copied().flatten() {
+                Some(pos) => new.iter().position(|p| *p == Some(pos)),
+                // A channel with no speaker is known by its number alone.
+                None => (new.get(index) == Some(&None)).then_some(index),
+            };
+            match target {
+                Some(index) => track.output = TrackOutput::Channel { index },
+                None => {
+                    track.output = TrackOutput::Stereo;
+                    reverted += 1;
+                }
+            }
+        }
+        self.layout = if new == stereo_layout() {
+            String::new()
+        } else {
+            crate::app::channel_layout_ops::layout_to_string(&new)
+        };
+        reverted
+    }
+
+    /// Why `split_clip_by_channel` would not split this clip of a source
+    /// with `source_channels` channels (0 while it is being read).
+    pub fn split_by_channel_refusal(&self, clip_id: &str, source_channels: usize) -> Option<&'static str> {
+        let Some((ti, ci)) = self.clip_location(clip_id) else {
+            return Some("the clip is gone");
+        };
+        let clip = &self.tracks[ti].clips[ci];
+        if self.tracks[ti].kind == TrackKind::Video {
+            return Some("a video track's clip: its picture would be repeated on every new track");
+        }
+        if clip.channel.is_some() {
+            return Some("it already plays one channel");
+        }
+        if clip.len_pending {
+            return Some("its length is not known yet");
+        }
+        match source_channels {
+            0 => Some("its source is still being read"),
+            1 => Some("its source is mono"),
+            _ => None,
+        }
+    }
+
+    /// Split a clip into one clip per source channel, each on a track of its
+    /// own right below the clip's, sent to the output channel of the same
+    /// speaker. `source_layout` names the source's speakers, one per
+    /// channel. A stereo output takes the source's layout first: it could
+    /// not keep a surround source's channels apart. A channel the output has
+    /// no place for plays as a stereo track. The new tracks copy the
+    /// original's fader, mute, solo and lanes -- all but Pan, which a mono
+    /// track has no use for. Returns the new clips' ids, in channel order.
+    pub fn split_clip_by_channel(&mut self, clip_id: &str, source_layout: &[Option<SpeakerPos>]) -> Vec<String> {
+        let channels = source_layout.len();
+        if self.split_by_channel_refusal(clip_id, channels).is_some() {
+            return Vec::new();
+        }
+        if self.output_layout().len() <= 2 && channels > 2 {
+            self.set_output_layout(source_layout);
+        }
+        let out = self.output_layout();
+        let Some((ti, ci)) = self.clip_location(clip_id) else {
+            return Vec::new();
+        };
+        let original = self.tracks[ti].clips.remove(ci);
+        let parent = &self.tracks[ti];
+        let mut ids = Vec::with_capacity(channels);
+        let mut new_tracks = Vec::with_capacity(channels);
+        for (ch, pos) in source_layout.iter().enumerate() {
+            let label = match pos {
+                Some(pos) => pos.label(source_layout).to_string(),
+                None => format!("Ch {}", ch + 1),
+            };
+            let index = match pos {
+                Some(pos) => out.iter().position(|p| *p == Some(*pos)),
+                None => (out.get(ch) == Some(&None)).then_some(ch),
+            };
+            let mut clip = original.clone();
+            clip.id = new_id();
+            clip.follows = None;
+            clip.channel = Some(ch as u16);
+            ids.push(clip.id.clone());
+            new_tracks.push(Track {
+                id: new_id(),
+                kind: TrackKind::Audio,
+                name: format!("{} \u{b7} {label}", parent.name),
+                volume_db: parent.volume_db,
+                mute: parent.mute,
+                solo: parent.solo,
+                clips: vec![clip],
+                lanes: parent
+                    .lanes
+                    .iter()
+                    .filter(|lane| lane.param != LaneParam::Pan)
+                    .map(|lane| AutomationLane {
+                        id: new_id(),
+                        ..lane.clone()
+                    })
+                    .collect(),
+                height: parent.height,
+                lanes_collapsed: parent.lanes_collapsed,
+                show_video: true,
+                output: index.map_or(TrackOutput::Stereo, |index| TrackOutput::Channel { index }),
+            });
+        }
+        // Nothing may wait on a clip that is gone.
+        for clip in self.tracks.iter_mut().flat_map(|track| track.clips.iter_mut()) {
+            if clip.follows.as_deref() == Some(original.id.as_str()) {
+                clip.follows = None;
+            }
+        }
+        self.tracks.splice(ti + 1..ti + 1, new_tracks);
+        ids
     }
 
     /// Where the last clip ends.
@@ -607,6 +794,7 @@ impl MultiEditDoc {
             height: DEFAULT_TRACK_HEIGHT,
             lanes_collapsed: false,
             show_video: true,
+            output: TrackOutput::Stereo,
         });
         self.tracks.len() - 1
     }
@@ -618,33 +806,120 @@ impl MultiEditDoc {
     }
 
     /// Place clips back to back on a track, the first at `at_secs`. Returns
-    /// their ids. Rows of unknown length are skipped: a clip needs a length.
+    /// their ids.
+    ///
+    /// A row whose length is not known yet is placed as its start alone
+    /// (`len_pending`), taking no room; the rows after it follow it
+    /// (`follows`) and move along when `resolve_len` gives it a length. A
+    /// row known to be too short to be a clip is skipped.
     pub fn insert_clips(&mut self, track_idx: usize, at_secs: f64, clips: Vec<NewClip>) -> Vec<String> {
         let Some(track) = self.tracks.get_mut(track_idx) else {
             return Vec::new();
         };
         let mut cursor = at_secs.max(0.0);
-        let mut ids = Vec::new();
+        let mut ids: Vec<String> = Vec::new();
+        let mut pending_before = false;
         for new in clips {
-            if !(new.len_secs.is_finite() && new.len_secs >= MIN_CLIP_SECS) {
-                continue;
-            }
+            let len = match new.len_secs {
+                Some(len) if len.is_finite() && len >= MIN_CLIP_SECS => len,
+                Some(_) => continue,
+                None => 0.0,
+            };
             let clip = Clip {
                 id: new_id(),
                 source: new.source,
                 name: new.name,
                 start_secs: cursor,
                 in_secs: 0.0,
-                len_secs: new.len_secs,
-                source_len_secs: new.len_secs,
+                len_secs: len,
+                source_len_secs: len,
                 fade_in_secs: 0.0,
                 fade_out_secs: 0.0,
+                len_pending: new.len_secs.is_none(),
+                follows: if pending_before { ids.last().cloned() } else { None },
+                channel: None,
             };
+            pending_before |= clip.len_pending;
             cursor += clip.len_secs;
             ids.push(clip.id.clone());
             track.clips.push(clip);
         }
         ids
+    }
+
+    /// Whether any clip is still waiting for its length.
+    pub fn has_pending(&self) -> bool {
+        self.tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .any(|clip| clip.len_pending)
+    }
+
+    /// Give a clip placed without a length its length, and move the clips
+    /// placed right after it in the same drop -- those that still sit there
+    /// -- along by as much, so the drop stays back to back. A clip the user
+    /// has moved since no longer sits at the old end and stays put. Returns
+    /// whether the clip was waiting for a length.
+    pub fn resolve_len(&mut self, clip_id: &str, len_secs: f64) -> bool {
+        if !(len_secs.is_finite() && len_secs > 0.0) {
+            return false;
+        }
+        let len = len_secs.max(MIN_CLIP_SECS);
+        let Some(clip) = self.clip_mut(clip_id).filter(|clip| clip.len_pending) else {
+            return false;
+        };
+        let old_end = clip.end_secs();
+        clip.len_pending = false;
+        clip.len_secs = len;
+        clip.source_len_secs = len;
+        let delta = len - (old_end - clip.start_secs);
+        // Followers, and theirs: each one that still starts where its
+        // leader used to end moves by the same amount.
+        let mut leaders = vec![(clip_id.to_string(), old_end)];
+        while let Some((leader, end)) = leaders.pop() {
+            for clip in self.tracks.iter_mut().flat_map(|track| track.clips.iter_mut()) {
+                if clip.follows.as_deref() == Some(leader.as_str())
+                    && (clip.start_secs - end).abs() < 1e-6
+                {
+                    let old_end = clip.end_secs();
+                    clip.start_secs += delta;
+                    leaders.push((clip.id.clone(), old_end));
+                }
+            }
+        }
+        self.prune_follows();
+        true
+    }
+
+    /// Drop each `follows` link with no clip waiting for a length up its
+    /// chain: nothing is left to move it.
+    fn prune_follows(&mut self) {
+        let links: std::collections::HashMap<String, (bool, Option<String>)> = self
+            .tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .map(|clip| (clip.id.clone(), (clip.len_pending, clip.follows.clone())))
+            .collect();
+        let pending_upstream = |start: &str| {
+            let mut at = Some(start.to_string());
+            // Bounded: a cycle (from a hand-edited session) cannot loop.
+            for _ in 0..=links.len() {
+                let Some(id) = at else {
+                    return false;
+                };
+                match links.get(&id) {
+                    Some((true, _)) => return true,
+                    Some((false, next)) => at = next.clone(),
+                    None => return false,
+                }
+            }
+            false
+        };
+        for clip in self.tracks.iter_mut().flat_map(|track| track.clips.iter_mut()) {
+            if clip.follows.as_deref().is_some_and(|leader| !pending_upstream(leader)) {
+                clip.follows = None;
+            }
+        }
     }
 
     /// Move a clip to `start_secs`, and onto another track when one is given
@@ -666,7 +941,7 @@ impl MultiEditDoc {
     /// Move a clip's left edge to `new_start_secs`, keeping the audio under
     /// it where it was: the source offset moves with the edge.
     pub fn trim_clip_start(&mut self, clip_id: &str, new_start_secs: f64) -> bool {
-        let Some(clip) = self.clip_mut(clip_id) else {
+        let Some(clip) = self.clip_mut(clip_id).filter(|clip| !clip.len_pending) else {
             return false;
         };
         let earliest = (clip.start_secs - clip.in_secs).max(0.0);
@@ -686,7 +961,7 @@ impl MultiEditDoc {
     /// Move a clip's right edge to `new_end_secs`, never past the end of its
     /// source.
     pub fn trim_clip_end(&mut self, clip_id: &str, new_end_secs: f64) -> bool {
-        let Some(clip) = self.clip_mut(clip_id) else {
+        let Some(clip) = self.clip_mut(clip_id).filter(|clip| !clip.len_pending) else {
             return false;
         };
         let len = (new_end_secs - clip.start_secs).clamp(MIN_CLIP_SECS, clip.max_len_secs());
@@ -709,6 +984,103 @@ impl MultiEditDoc {
         };
         clip.fade_out_secs = secs.clamp(0.0, (clip.len_secs - clip.fade_in_secs).max(0.0));
         true
+    }
+
+    /// The clips on `tracks` that meet the time span `t0`..`t1` (either way
+    /// round) -- one still waiting for a length by its start. Track by
+    /// track, in each track's order.
+    pub fn clips_in_range(&self, tracks: &[usize], t0: f64, t1: f64) -> Vec<String> {
+        let (t0, t1) = (t0.min(t1), t0.max(t1));
+        tracks
+            .iter()
+            .filter_map(|&ti| self.tracks.get(ti))
+            .flat_map(|track| track.clips.iter())
+            .filter(|clip| {
+                if clip.len_pending {
+                    clip.start_secs >= t0 && clip.start_secs <= t1
+                } else {
+                    clip.start_secs < t1 && clip.end_secs() > t0
+                }
+            })
+            .map(|clip| clip.id.clone())
+            .collect()
+    }
+
+    /// Move clips together from where they were -- `origins` holds each
+    /// one's id, start and track then -- by `delta_secs` and `delta_tracks`
+    /// rows. The group stops at 0: no clip goes before it. It changes tracks
+    /// only when every clip lands on a track of its own kind, and otherwise
+    /// moves in time alone. Measured from the origins, so a drag can call it
+    /// every frame and land where the pointer says.
+    pub fn move_group(&mut self, origins: &[(String, f64, usize)], delta_secs: f64, delta_tracks: i32) {
+        let Some(earliest) = origins.iter().map(|o| o.1).reduce(f64::min) else {
+            return;
+        };
+        let delta = delta_secs.max(-earliest);
+        let lands = |ti: usize| {
+            let to = ti as i64 + delta_tracks as i64;
+            to >= 0
+                && (to as usize) < self.tracks.len()
+                && self.tracks.get(ti).is_some_and(|from| from.kind == self.tracks[to as usize].kind)
+        };
+        let across = delta_tracks != 0 && origins.iter().all(|(_, _, ti)| lands(*ti));
+        for (id, start, ti) in origins {
+            let Some((now, ci)) = self.clip_location(id) else {
+                continue;
+            };
+            let to = if across {
+                (*ti as i64 + delta_tracks as i64) as usize
+            } else if *ti < self.tracks.len() {
+                *ti
+            } else {
+                now
+            };
+            let mut clip = self.tracks[now].clips.remove(ci);
+            clip.start_secs = (start + delta).max(0.0);
+            self.tracks[to].clips.push(clip);
+        }
+    }
+
+    /// Remove these clips. Returns how many went.
+    pub fn remove_clips(&mut self, ids: &[String]) -> usize {
+        ids.iter().filter(|id| self.remove_clip(id)).count()
+    }
+
+    /// Copies of these clips laid right after the group -- moved by its whole
+    /// span, each on its own track. Returns the copies' ids.
+    pub fn duplicate_clips(&mut self, ids: &[String]) -> Vec<String> {
+        let group: Vec<(usize, Clip)> = ids
+            .iter()
+            .filter_map(|id| {
+                let (ti, ci) = self.clip_location(id)?;
+                Some((ti, self.tracks[ti].clips[ci].clone()))
+            })
+            .collect();
+        let Some(first) = group.iter().map(|(_, clip)| clip.start_secs).reduce(f64::min) else {
+            return Vec::new();
+        };
+        let span = group.iter().map(|(_, clip)| clip.end_secs()).fold(first, f64::max) - first;
+        group
+            .into_iter()
+            .filter_map(|(ti, clip)| self.paste_clip(ti, &clip, clip.start_secs + span))
+            .collect()
+    }
+
+    /// Split each of these clips that `at_secs` falls inside. Returns the
+    /// right halves' ids.
+    pub fn split_clips_at(&mut self, ids: &[String], at_secs: f64) -> Vec<String> {
+        let cut: Vec<String> = ids.iter().filter(|id| self.can_split(id, at_secs)).cloned().collect();
+        cut.iter().filter_map(|id| self.split_clip(id, at_secs)).collect()
+    }
+
+    /// Whether `split_clip` would cut this clip at `at_secs`: far enough
+    /// from both ends, and the clip has a length.
+    pub fn can_split(&self, clip_id: &str, at_secs: f64) -> bool {
+        self.clip(clip_id).is_some_and(|clip| {
+            !clip.len_pending
+                && at_secs >= clip.start_secs + MIN_CLIP_SECS
+                && at_secs <= clip.end_secs() - MIN_CLIP_SECS
+        })
     }
 
     /// Cut a clip in two at `at_secs`. The left half keeps the fade-in, the
@@ -744,23 +1116,13 @@ impl MultiEditDoc {
         true
     }
 
-    /// A copy of a clip placed right after it. Returns the copy's id.
-    pub fn duplicate_clip(&mut self, clip_id: &str) -> Option<String> {
-        let (ti, ci) = self.clip_location(clip_id)?;
-        let mut copy = self.tracks[ti].clips[ci].clone();
-        copy.id = new_id();
-        copy.start_secs = self.tracks[ti].clips[ci].end_secs();
-        let id = copy.id.clone();
-        self.tracks[ti].clips.insert(ci + 1, copy);
-        Some(id)
-    }
-
     /// A copy of `clip` on track `track_idx` at `at_secs`, under a new id:
     /// the same source, in-point, length and fades. Returns the copy's id.
     pub fn paste_clip(&mut self, track_idx: usize, clip: &Clip, at_secs: f64) -> Option<String> {
         let track = self.tracks.get_mut(track_idx)?;
         let mut copy = clip.clone();
         copy.id = new_id();
+        copy.follows = None;
         copy.start_secs = at_secs.max(0.0);
         let id = copy.id.clone();
         track.clips.push(copy);
@@ -922,11 +1284,126 @@ mod tests {
             vec![NewClip {
                 source: src("a.wav"),
                 name: "a.wav".into(),
-                len_secs: len,
+                len_secs: Some(len),
                 is_video: false,
             }],
         );
         (doc, ids[0].clone())
+    }
+
+    fn layout(text: &str) -> Layout {
+        crate::app::channel_layout_ops::layout_from_string(text).expect("a layout")
+    }
+
+    #[test]
+    fn a_surround_clip_splits_onto_one_track_per_speaker() {
+        let (mut doc, id) = doc_with_clip(4.0);
+        doc.tracks[0].name = "Music".into();
+        doc.tracks[0].volume_db = -3.0;
+        doc.ensure_lane(0, LaneParam::Gain);
+        doc.ensure_lane(0, LaneParam::Pan);
+        doc.set_fade_in(&id, 0.5);
+        let five_one = layout("FL,FR,FC,LFE,BL,BR");
+        let ids = doc.split_clip_by_channel(&id, &five_one);
+        assert_eq!(ids.len(), 6);
+        // A stereo timeline cannot hold them apart: it takes 5.1.
+        assert_eq!(doc.output_layout(), five_one);
+        assert_eq!(doc.tracks.len(), 7);
+        assert!(doc.tracks[0].clips.is_empty(), "the original clip is replaced");
+        for (ch, track) in doc.tracks[1..].iter().enumerate() {
+            assert_eq!(track.output, TrackOutput::Channel { index: ch });
+            assert_eq!(track.volume_db, -3.0);
+            assert_eq!(
+                track.lanes.iter().map(|lane| lane.param).collect::<Vec<_>>(),
+                vec![LaneParam::Gain],
+                "every lane but Pan"
+            );
+            assert_ne!(track.lanes[0].id, doc.tracks[0].lanes[0].id);
+            let clip = &track.clips[0];
+            assert_eq!(clip.channel, Some(ch as u16));
+            assert_eq!((clip.start_secs, clip.len_secs, clip.fade_in_secs), (1.0, 4.0, 0.5));
+        }
+        assert_eq!(doc.tracks[1].name, "Music \u{b7} L");
+        assert_eq!(doc.tracks[4].name, "Music \u{b7} LFE");
+        // A split clip is one channel already.
+        assert!(doc.split_clip_by_channel(&ids[0], &five_one).is_empty());
+    }
+
+    #[test]
+    fn a_split_lands_on_the_speakers_the_output_has() {
+        let (mut doc, id) = doc_with_clip(2.0);
+        doc.set_output_layout(&layout("FL,FR,FC,LFE,BL,BR,SL,SR"));
+        // Film order onto a WAV-order 7.1: by speaker, not by number.
+        doc.split_clip_by_channel(&id, &layout("FL,FC,FR,BL,BR,LFE"));
+        let outputs: Vec<TrackOutput> = doc.tracks[1..].iter().map(|t| t.output).collect();
+        assert_eq!(
+            outputs,
+            [0, 2, 1, 4, 5, 3].map(|index| TrackOutput::Channel { index }).to_vec()
+        );
+        // A speaker the output lacks plays as stereo.
+        let (mut doc, id) = doc_with_clip(2.0);
+        doc.set_output_layout(&layout("FL,FR,FC,LFE,BL,BR"));
+        doc.split_clip_by_channel(&id, &layout("FL,FR,FC,LFE,BL,BR,SL,SR"));
+        assert_eq!(doc.tracks[7].output, TrackOutput::Stereo);
+    }
+
+    #[test]
+    fn some_clips_are_not_split() {
+        let (doc, id) = doc_with_clip(2.0);
+        assert_eq!(doc.split_by_channel_refusal(&id, 1), Some("its source is mono"));
+        assert_eq!(doc.split_by_channel_refusal(&id, 0), Some("its source is still being read"));
+        assert_eq!(doc.split_by_channel_refusal(&id, 2), None);
+        let mut doc = MultiEditDoc::new("t");
+        let video = doc.add_track(TrackKind::Video);
+        let ids = doc.insert_clips(
+            video,
+            0.0,
+            vec![NewClip {
+                source: src("v.mp4"),
+                name: "v".into(),
+                len_secs: Some(2.0),
+                is_video: true,
+            }],
+        );
+        assert!(doc.split_by_channel_refusal(&ids[0], 6).is_some());
+        assert!(doc.split_clip_by_channel(&ids[0], &layout("FL,FR,FC,LFE,BL,BR")).is_empty());
+        assert_eq!(doc.tracks.len(), 1);
+    }
+
+    #[test]
+    fn a_mono_track_follows_its_speaker_when_the_output_changes() {
+        let mut doc = MultiEditDoc::new("t");
+        doc.set_output_layout(&layout("FL,FR,FC,LFE,BL,BR"));
+        let c = doc.add_track(TrackKind::Audio);
+        doc.tracks[c].output = TrackOutput::Channel { index: 2 };
+        let lfe = doc.add_track(TrackKind::Audio);
+        doc.tracks[lfe].output = TrackOutput::Channel { index: 3 };
+        // Film order moves the centre to 1; 5.0 has no LFE.
+        let reverted = doc.set_output_layout(&layout("FL,FC,FR,BL,BR"));
+        assert_eq!(reverted, 1);
+        assert_eq!(doc.tracks[c].output, TrackOutput::Channel { index: 1 });
+        assert_eq!(doc.tracks[lfe].output, TrackOutput::Stereo);
+        // Back to stereo stores nothing.
+        doc.set_output_layout(&stereo_layout());
+        assert!(doc.layout.is_empty());
+        assert_eq!(doc.output_layout().len(), 2);
+    }
+
+    #[test]
+    fn a_timeline_from_before_outputs_reads_as_stereo_and_round_trips() {
+        let (mut doc, id) = doc_with_clip(2.0);
+        let mut json: serde_json::Value = serde_json::to_value(&doc).expect("serialize");
+        // What an older session holds: no layout, no output, no channel.
+        assert!(json.get("layout").is_none());
+        assert!(json["tracks"][0]["clips"][0].get("channel").is_none());
+        json["tracks"][0].as_object_mut().unwrap().remove("output");
+        let old: MultiEditDoc = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(old.output_layout(), stereo_layout());
+        assert_eq!(old.tracks[0].output, TrackOutput::Stereo);
+        doc.split_clip_by_channel(&id, &layout("FL,FR,FC,LFE,BL,BR"));
+        let text = serde_json::to_string(&doc).expect("serialize");
+        let back: MultiEditDoc = serde_json::from_str(&text).expect("deserialize");
+        assert_eq!(back, doc);
     }
 
     #[test]
@@ -940,19 +1417,19 @@ mod tests {
                 NewClip {
                     source: src("a.wav"),
                     name: "a".into(),
-                    len_secs: 1.5,
+                    len_secs: Some(1.5),
                     is_video: false,
                 },
                 NewClip {
                     source: src("b.wav"),
                     name: "b".into(),
-                    len_secs: 0.0,
+                    len_secs: Some(0.0),
                     is_video: false,
                 },
                 NewClip {
                     source: src("c.wav"),
                     name: "c".into(),
-                    len_secs: 3.0,
+                    len_secs: Some(3.0),
                     is_video: false,
                 },
             ],
@@ -1137,7 +1614,7 @@ mod tests {
             vec![NewClip {
                 source: src("a.wav"),
                 name: "a.wav".into(),
-                len_secs: 1.0,
+                len_secs: Some(1.0),
                 is_video: false,
             }],
         )[0]
@@ -1154,6 +1631,155 @@ mod tests {
         assert_eq!(doc.paste_target(TrackKind::Video, Some(a0_id), None, Some(a0_id)), Some(v));
         let empty = MultiEditDoc::new("e");
         assert_eq!(empty.paste_target(audio, None, None, None), None);
+    }
+
+    fn row(name: &str, len: Option<f64>) -> NewClip {
+        NewClip {
+            source: src(name),
+            name: name.into(),
+            len_secs: len,
+            is_video: false,
+        }
+    }
+
+    #[test]
+    fn a_row_without_a_length_is_placed_as_its_start_and_its_drop_closes_up_when_it_arrives() {
+        let mut doc = MultiEditDoc::new("t");
+        let t = doc.add_track(TrackKind::Audio);
+        let ids = doc.insert_clips(
+            t,
+            1.0,
+            vec![
+                row("a", Some(2.0)),
+                row("b", None),
+                row("c", Some(1.0)),
+                row("d", None),
+                row("e", Some(0.5)),
+            ],
+        );
+        assert_eq!(ids.len(), 5, "every row is placed");
+        let start = |doc: &MultiEditDoc, i: usize| doc.clip(&ids[i]).expect("clip").start_secs;
+        let pending = |doc: &MultiEditDoc, i: usize| doc.clip(&ids[i]).expect("clip").len_pending;
+        // a 1-3, b at 3 taking no room, c 3-4, d at 4, e 4-4.5.
+        assert_eq!((0..5).map(|i| start(&doc, i)).collect::<Vec<_>>(), vec![1.0, 3.0, 3.0, 4.0, 4.0]);
+        assert!(pending(&doc, 1) && pending(&doc, 3) && !pending(&doc, 0));
+        assert!(doc.has_pending());
+
+        // b is 1.5 s: c, d and e move along.
+        assert!(doc.resolve_len(&ids[1], 1.5));
+        assert_eq!(doc.clip(&ids[1]).expect("b").len_secs, 1.5);
+        assert_eq!((start(&doc, 2), start(&doc, 3), start(&doc, 4)), (4.5, 5.5, 5.5));
+        // d is 2 s: e moves along.
+        assert!(doc.resolve_len(&ids[3], 2.0));
+        assert_eq!(start(&doc, 4), 7.5);
+        assert!(!doc.has_pending());
+        assert!(
+            doc.tracks[t].clips.iter().all(|clip| clip.follows.is_none()),
+            "nothing is left to follow"
+        );
+        assert!(!doc.resolve_len(&ids[3], 9.0), "a length arrives once");
+    }
+
+    #[test]
+    fn a_clip_moved_before_the_length_arrives_stays_where_it_was_put() {
+        let mut doc = MultiEditDoc::new("t");
+        let t = doc.add_track(TrackKind::Audio);
+        let ids = doc.insert_clips(t, 0.0, vec![row("a", None), row("b", Some(1.0))]);
+        assert!(doc.move_clip(&ids[1], 5.0, None));
+        assert!(doc.resolve_len(&ids[0], 2.0));
+        assert_eq!(doc.clip(&ids[1]).expect("b").start_secs, 5.0);
+        assert!(!doc.trim_clip_end(&ids[0], 9.0) || doc.clip(&ids[0]).expect("a").len_secs > 0.0);
+    }
+
+    #[test]
+    fn a_clip_without_a_length_cannot_be_trimmed_or_split() {
+        let mut doc = MultiEditDoc::new("t");
+        let t = doc.add_track(TrackKind::Audio);
+        let id = doc.insert_clips(t, 1.0, vec![row("a", None)])[0].clone();
+        assert!(!doc.trim_clip_end(&id, 3.0));
+        assert!(!doc.trim_clip_start(&id, 0.5));
+        assert!(!doc.can_split(&id, 1.0));
+        assert!(doc.split_clip(&id, 1.0).is_none());
+        // A row known to be too short is still skipped.
+        assert!(doc.insert_clips(t, 0.0, vec![row("z", Some(0.0))]).is_empty());
+    }
+
+    /// A timeline of audio tracks with clips at (track, start, length), and
+    /// the clips' ids in the order given.
+    fn timeline(tracks: usize, clips: &[(usize, f64, f64)]) -> (MultiEditDoc, Vec<String>) {
+        let mut doc = MultiEditDoc::new("t");
+        for _ in 0..tracks {
+            doc.add_track(TrackKind::Audio);
+        }
+        let ids = clips
+            .iter()
+            .map(|&(ti, start, len)| doc.insert_clips(ti, start, vec![row("c", Some(len))])[0].clone())
+            .collect();
+        (doc, ids)
+    }
+
+    #[test]
+    fn clips_in_a_range_are_those_that_meet_it_on_its_tracks() {
+        let (mut doc, ids) = timeline(3, &[(0, 0.0, 1.0), (0, 2.0, 1.0), (1, 1.5, 1.0), (2, 1.0, 1.0)]);
+        let pending = doc.insert_clips(1, 2.8, vec![row("p", None)])[0].clone();
+        let got = doc.clips_in_range(&[0, 1], 2.9, 0.5);
+        assert_eq!(
+            got,
+            vec![ids[0].clone(), ids[1].clone(), ids[2].clone(), pending.clone()],
+            "either way round"
+        );
+        assert!(!got.contains(&ids[3]), "a track outside the range");
+        assert_eq!(doc.clips_in_range(&[1], 2.4, 2.9), vec![ids[2].clone(), pending.clone()]);
+        assert_eq!(doc.clips_in_range(&[1], 2.7, 2.9), vec![pending], "a start alone counts");
+        assert!(doc.clips_in_range(&[0], 1.0, 2.0).is_empty(), "touching edges do not meet");
+        doc.tracks.clear();
+        assert!(doc.clips_in_range(&[0, 5], 0.0, 9.0).is_empty());
+    }
+
+    #[test]
+    fn a_group_moves_together_from_where_it_started() {
+        let (mut doc, ids) = timeline(3, &[(0, 1.0, 1.0), (1, 3.0, 1.0)]);
+        let origins: Vec<(String, f64, usize)> = vec![(ids[0].clone(), 1.0, 0), (ids[1].clone(), 3.0, 1)];
+        let at = |doc: &MultiEditDoc, i: usize| {
+            let (ti, ci) = doc.clip_location(&ids[i]).expect("clip");
+            (ti, doc.tracks[ti].clips[ci].start_secs)
+        };
+        doc.move_group(&origins, 0.5, 1);
+        assert_eq!((at(&doc, 0), at(&doc, 1)), ((1, 1.5), (2, 3.5)));
+        // Called again from the same origins: from there, not from here.
+        doc.move_group(&origins, 2.0, 0);
+        assert_eq!((at(&doc, 0), at(&doc, 1)), ((0, 3.0), (1, 5.0)));
+        // Not before 0: the whole group stops where its first clip meets it.
+        doc.move_group(&origins, -5.0, 0);
+        assert_eq!((at(&doc, 0), at(&doc, 1)), ((0, 0.0), (1, 2.0)));
+        // Down two rows would take the second clip off the last track.
+        doc.move_group(&origins, 0.0, 2);
+        assert_eq!((at(&doc, 0), at(&doc, 1)), ((0, 1.0), (1, 3.0)), "time only");
+    }
+
+    #[test]
+    fn a_group_does_not_cross_onto_a_track_of_the_other_kind() {
+        let (mut doc, ids) = timeline(1, &[(0, 1.0, 1.0)]);
+        doc.add_track(TrackKind::Video);
+        doc.move_group(&[(ids[0].clone(), 1.0, 0)], 0.0, 1);
+        assert_eq!(doc.clip_location(&ids[0]).map(|(ti, _)| ti), Some(0));
+    }
+
+    #[test]
+    fn a_group_duplicates_after_itself_and_splits_where_the_time_falls() {
+        let (mut doc, ids) = timeline(2, &[(0, 1.0, 1.0), (1, 2.5, 1.0), (0, 6.0, 1.0)]);
+        let group = vec![ids[0].clone(), ids[1].clone()];
+        let copies = doc.duplicate_clips(&group);
+        assert_eq!(copies.len(), 2);
+        let start_of = |doc: &MultiEditDoc, id: &str| doc.clip(id).expect("clip").start_secs;
+        // The group spans 1 - 3.5: its copies come 2.5 s later.
+        assert_eq!((start_of(&doc, &copies[0]), start_of(&doc, &copies[1])), (3.5, 5.0));
+        assert_eq!(doc.clip_location(&copies[1]).map(|(ti, _)| ti), Some(1));
+
+        let halves = doc.split_clips_at(&[ids[0].clone(), ids[1].clone(), ids[2].clone()], 1.5);
+        assert_eq!(halves.len(), 1, "only the clip 1.5 s falls inside");
+        assert_eq!(doc.clip(&ids[0]).expect("left half").len_secs, 0.5);
+        assert_eq!(doc.remove_clips(&[ids[1].clone(), copies[0].clone(), "gone".into()]), 2);
     }
 
     #[test]

@@ -9,16 +9,22 @@
 //! the result to the master. Pitch is the one stage that needs the whole
 //! track at once (the shifter carries state across the timeline), which is
 //! why a track is rendered whole rather than in blocks.
+//!
+//! The master has one channel per speaker of the timeline's output layout
+//! (stereo unless changed). A stereo track renders two channels and lands on
+//! the output's front pair; a mono track renders one and lands on its own
+//! output channel alone.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::multi_edit::{AutomationLane, Clip, LaneParam, MultiEditDoc, Track};
+use super::multi_edit::{AutomationLane, Clip, LaneParam, MultiEditDoc, Track, TrackOutput};
+use crate::audio_channels::SpeakerPos;
 
-/// The mix is stereo whatever the sources are; see `fold_to_stereo`.
-pub const MIX_CHANNELS: usize = 2;
+/// The channels a stereo track renders; a mono track renders one.
+const STEREO: usize = 2;
 
 /// How long a Mute step takes to fade, so switching a track off does not
 /// click: short enough to read as a cut.
@@ -55,7 +61,8 @@ pub struct XfadeSeg {
 /// `CONTAINED_XFADE_SECS` at its ends, and the outer clip is silent between.
 pub fn crossfade_segments(clips: &[Clip]) -> Vec<Vec<XfadeSeg>> {
     let mut out = vec![Vec::new(); clips.len()];
-    let mut order: Vec<usize> = (0..clips.len()).collect();
+    // A clip still waiting for its length is not heard, and crosses nothing.
+    let mut order: Vec<usize> = (0..clips.len()).filter(|&i| !clips[i].len_pending).collect();
     order.sort_by(|&a, &b| {
         clips[a]
             .start_secs
@@ -106,6 +113,50 @@ pub fn xfade_gain(segs: &[XfadeSeg], t: f64) -> f32 {
         };
     }
     gain as f32
+}
+
+/// Per clip, in the order given: the spans where it lies over a clip drawn
+/// before it. Clips are drawn in order of start (then end), so a clip that
+/// starts later lies over the one it overlaps -- these are where it is drawn
+/// see-through, and where it draws the crossfade. Merged and sorted.
+pub fn covered_spans(clips: &[Clip]) -> Vec<Vec<(f64, f64)>> {
+    let mut out = vec![Vec::new(); clips.len()];
+    let order = draw_order(clips);
+    for (pos, &bi) in order.iter().enumerate() {
+        let b = &clips[bi];
+        let mut spans: Vec<(f64, f64)> = order[..pos]
+            .iter()
+            .map(|&ai| &clips[ai])
+            .filter_map(|a| {
+                let (s, e) = (a.start_secs.max(b.start_secs), a.end_secs().min(b.end_secs()));
+                (e > s).then_some((s, e))
+            })
+            .collect();
+        spans.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let mut merged: Vec<(f64, f64)> = Vec::new();
+        for (s, e) in spans {
+            match merged.last_mut() {
+                Some(last) if s <= last.1 => last.1 = last.1.max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+        out[bi] = merged;
+    }
+    out
+}
+
+/// The order clips on a track are drawn in, back to front: by start, then
+/// end, then as given. Clips waiting for a length are left out.
+pub fn draw_order(clips: &[Clip]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..clips.len()).filter(|&i| !clips[i].len_pending).collect();
+    order.sort_by(|&a, &b| {
+        clips[a]
+            .start_secs
+            .total_cmp(&clips[b].start_secs)
+            .then(clips[a].end_secs().total_cmp(&clips[b].end_secs()))
+            .then(a.cmp(&b))
+    });
+    order
 }
 
 /// A clip's source, decoded, at the rate the render runs at.
@@ -163,7 +214,24 @@ fn stereo_frame(channels: &[Vec<f32>], frame: usize) -> (f32, f32) {
     }
 }
 
-/// Add one clip, trimmed, faded and crossfaded, into a stereo track buffer.
+/// One frame of a clip's source the way its track takes it: the clip's own
+/// channel when it has one (on both sides of a stereo track), every channel
+/// averaged on a mono track, else the stereo fold.
+fn clip_frame(channels: &[Vec<f32>], clip_channel: Option<u16>, frame: usize, mono: bool) -> (f32, f32) {
+    let at = |ch: &Vec<f32>| ch.get(frame).copied().unwrap_or(0.0);
+    if let Some(ch) = clip_channel {
+        let v = channels.get(ch as usize).map_or(0.0, at);
+        return (v, v);
+    }
+    if mono {
+        let v = channels.iter().map(at).sum::<f32>() / channels.len().max(1) as f32;
+        return (v, v);
+    }
+    stereo_frame(channels, frame)
+}
+
+/// Add one clip, trimmed, faded and crossfaded, into a track buffer of one
+/// channel (a mono track) or two.
 fn place_clip(
     out: &mut [Vec<f32>],
     clip: &Clip,
@@ -183,8 +251,10 @@ fn place_clip(
     let fade_in = secs_to_frames(clip.fade_in_secs, sr).min(len);
     let fade_out = secs_to_frames(clip.fade_out_secs, sr).min(len);
     let channels = source.channels.as_slice();
+    let mono = out.len() == 1;
     let (left, right) = out.split_at_mut(1);
-    let (left, right) = (&mut left[0], &mut right[0]);
+    let left = &mut left[0];
+    let mut right = right.first_mut();
     for i in 0..len {
         let mut gain = 1.0f32;
         if i < fade_in {
@@ -197,9 +267,11 @@ fn place_clip(
         if !xfades.is_empty() {
             gain *= xfade_gain(xfades, (start + i) as f64 / sr as f64);
         }
-        let (l, r) = stereo_frame(channels, src_in + i);
+        let (l, r) = clip_frame(channels, clip.channel, src_in + i, mono);
         left[start + i] += l * gain;
-        right[start + i] += r * gain;
+        if let Some(right) = right.as_deref_mut() {
+            right[start + i] += r * gain;
+        }
     }
 }
 
@@ -272,7 +344,11 @@ fn apply_track_processing(buf: &mut Vec<Vec<f32>>, track: &Track, sr: u32) {
         }
     }
     let frames = buf.first().map(Vec::len).unwrap_or(0);
-    if let Some(lane) = track.lane(LaneParam::Pan).filter(|lane| !lane.is_neutral()) {
+    // A mono track has nowhere to pan to: its Pan lane is not heard.
+    let pan_lane = track
+        .lane(LaneParam::Pan)
+        .filter(|lane| !lane.is_neutral() && buf.len() == STEREO);
+    if let Some(lane) = pan_lane {
         let mut cursor = LaneCursor::new(lane);
         for frame in 0..frames {
             let (gl, gr) = pan_gains(cursor.value(frame as f64 / sr as f64));
@@ -295,8 +371,9 @@ fn apply_track_processing(buf: &mut Vec<Vec<f32>>, track: &Track, sr: u32) {
             } else if gain > target {
                 gain = (gain - step).max(target);
             }
-            buf[0][frame] *= gain;
-            buf[1][frame] *= gain;
+            for channel in buf.iter_mut() {
+                channel[frame] *= gain;
+            }
         }
     }
 }
@@ -326,7 +403,8 @@ pub fn render_track(
     frames: usize,
     cancel: Option<&AtomicBool>,
 ) -> Option<Vec<Vec<f32>>> {
-    let mut buf = vec![vec![0.0f32; frames]; MIX_CHANNELS];
+    let width = if track.output.is_mono() { 1 } else { STEREO };
+    let mut buf = vec![vec![0.0f32; frames]; width];
     if !doc.track_audible(track) {
         return Some(buf);
     }
@@ -346,9 +424,51 @@ pub fn render_track(
     Some(buf)
 }
 
-/// The whole timeline as stereo at `sr`, from the start to the end of the
-/// last clip. Every source must already be at `sr`. `progress` is told the
-/// fraction done after each track. `None` when cancelled.
+/// Add `src` into `dst`, sample by sample, times `gain`.
+fn add_into(dst: &mut [f32], src: &[f32], gain: f32) {
+    for (d, s) in dst.iter_mut().zip(src) {
+        *d += *s * gain;
+    }
+}
+
+/// Add one rendered track into the master: a stereo track onto the output's
+/// front pair (its first two channels when it names none; both sides
+/// averaged onto a mono output), a mono track onto its own channel alone.
+fn mix_track_into(
+    master: &mut [Vec<f32>],
+    layout: &[Option<SpeakerPos>],
+    output: TrackOutput,
+    buf: &[Vec<f32>],
+) {
+    match output {
+        TrackOutput::Channel { index } => {
+            if let (Some(dst), Some(src)) = (master.get_mut(index), buf.first()) {
+                add_into(dst, src, 1.0);
+            }
+        }
+        TrackOutput::Stereo => {
+            if master.len() == 1 {
+                for src in buf {
+                    add_into(&mut master[0], src, 1.0 / buf.len().max(1) as f32);
+                }
+                return;
+            }
+            let find = |pos: SpeakerPos| layout.iter().position(|p| *p == Some(pos));
+            let (left, right) = match (find(SpeakerPos::Fl), find(SpeakerPos::Fr)) {
+                (Some(l), Some(r)) => (l, r),
+                _ => (0, 1),
+            };
+            for (dst, src) in [left, right].into_iter().zip(buf) {
+                add_into(&mut master[dst], src, 1.0);
+            }
+        }
+    }
+}
+
+/// The whole timeline at `sr`, one channel per speaker of its output layout,
+/// from the start to the end of the last clip. Every source must already be
+/// at `sr`. `progress` is told the fraction done after each track. `None`
+/// when cancelled.
 pub fn render_timeline(
     doc: &MultiEditDoc,
     sources: &SourceMap,
@@ -358,15 +478,12 @@ pub fn render_timeline(
 ) -> Option<Vec<Vec<f32>>> {
     let sr = sr.max(1);
     let frames = secs_to_frames(doc.end_secs(), sr);
-    let mut master = vec![vec![0.0f32; frames]; MIX_CHANNELS];
+    let layout = doc.output_layout();
+    let mut master = vec![vec![0.0f32; frames]; layout.len().max(1)];
     let tracks = doc.tracks.len().max(1);
     for (idx, track) in doc.tracks.iter().enumerate() {
         let buf = render_track(doc, track, sources, sr, frames, cancel)?;
-        for (dst, src) in master.iter_mut().zip(buf.iter()) {
-            for (d, s) in dst.iter_mut().zip(src.iter()) {
-                *d += *s;
-            }
-        }
+        mix_track_into(&mut master, &layout, track.output, &buf);
         progress((idx + 1) as f32 / tracks as f32);
     }
     Some(master)
@@ -406,7 +523,7 @@ mod tests {
                         asset_id: None,
                     },
                     name: name.to_string(),
-                    len_secs: *len,
+                    len_secs: Some(*len),
                     is_video: false,
                 }],
             );
@@ -554,6 +671,87 @@ mod tests {
         assert!((mix[1][10] - 0.2).abs() < 1e-6, "(0.4 + 0.0) / 2");
     }
 
+    fn layout(text: &str) -> crate::audio_channels::Layout {
+        crate::app::channel_layout_ops::layout_from_string(text).expect("a layout")
+    }
+
+    #[test]
+    fn a_split_surround_clip_mixes_back_into_its_own_channels() {
+        // Six channels of noise, each its own.
+        let frames = SR as usize / 2;
+        let channels: Vec<Vec<f32>> = (0..6u32)
+            .map(|ch| {
+                let mut state = (ch + 1).wrapping_mul(2_654_435_761);
+                (0..frames)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 17;
+                        state ^= state << 5;
+                        (state as f32 / u32::MAX as f32) - 0.5
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut doc = doc_with(&[("surround", 0.5)]);
+        let id = doc.tracks[0].clips[0].id.clone();
+        assert_eq!(doc.split_clip_by_channel(&id, &layout("FL,FR,FC,LFE,BL,BR")).len(), 6);
+        let mut sources = SourceMap::new();
+        sources.insert("surround".into(), source(channels.clone()));
+        let mix = render(&doc, &sources);
+        assert_eq!(mix.len(), 6, "the timeline is 5.1 now");
+        for (ch, (got, want)) in mix.iter().zip(&channels).enumerate() {
+            assert_eq!(got.len(), frames);
+            assert!(got.iter().zip(want).all(|(g, w)| g == w), "channel {ch} is the source's");
+        }
+    }
+
+    #[test]
+    fn a_mono_track_reaches_its_channel_alone() {
+        let mut doc = doc_with(&[("stereo", 0.1)]);
+        doc.set_output_layout(&layout("FL,FR,FC,LFE,BL,BR"));
+        doc.tracks[0].output = TrackOutput::Channel { index: 2 };
+        let frames = SR as usize / 10;
+        let mut sources = SourceMap::new();
+        sources.insert("stereo".into(), source(vec![vec![0.2; frames], vec![0.6; frames]]));
+        let mix = render(&doc, &sources);
+        assert_eq!(mix.len(), 6);
+        assert!((mix[2][10] - 0.4).abs() < 1e-6, "both sides averaged into the centre");
+        for ch in [0, 1, 3, 4, 5] {
+            assert_eq!(peak(&mix[ch]), 0.0, "channel {ch}");
+        }
+    }
+
+    #[test]
+    fn a_stereo_track_feeds_the_front_pair_of_a_surround_output() {
+        let mut doc = doc_with(&[("stereo", 0.1)]);
+        // Film order: L C R Ls Rs LFE, so the front pair is 0 and 2.
+        doc.set_output_layout(&layout("FL,FC,FR,BL,BR,LFE"));
+        let frames = SR as usize / 10;
+        let mut sources = SourceMap::new();
+        sources.insert("stereo".into(), source(vec![vec![0.2; frames], vec![0.6; frames]]));
+        let mix = render(&doc, &sources);
+        assert!((mix[0][10] - 0.2).abs() < 1e-6);
+        assert!((mix[2][10] - 0.6).abs() < 1e-6);
+        assert_eq!(peak(&mix[1]), 0.0);
+    }
+
+    #[test]
+    fn a_mono_track_ignores_pan_but_not_mute() {
+        let mut doc = doc_with(&[("a", 1.0)]);
+        doc.set_output_layout(&layout("FL,FR,FC"));
+        doc.tracks[0].output = TrackOutput::Channel { index: 2 };
+        doc.ensure_lane(0, LaneParam::Pan);
+        doc.tracks[0].lanes[0].insert_point(0.0, -1.0);
+        let mut sources = SourceMap::new();
+        sources.insert("a".into(), source(vec![vec![0.5; SR as usize]]));
+        let mix = render(&doc, &sources);
+        assert!((mix[2][100] - 0.5).abs() < 1e-6, "hard left means nothing on one channel");
+        let mute = doc.ensure_lane(0, LaneParam::Mute).expect("lane");
+        doc.tracks[0].lanes[mute].insert_point(0.0, 1.0);
+        let mix = render(&doc, &sources);
+        assert_eq!(peak(&mix[2][1000..]), 0.0);
+    }
+
     /// Two clips on one track, overlapping.
     fn overlapping(a: (f64, f64), b: (f64, f64)) -> MultiEditDoc {
         let mut doc = MultiEditDoc::new("t");
@@ -568,7 +766,7 @@ mod tests {
                         asset_id: None,
                     },
                     name: name.to_string(),
-                    len_secs: len,
+                    len_secs: Some(len),
                     is_video: false,
                 }],
             );
@@ -620,6 +818,62 @@ mod tests {
         assert!((at(0.5) - 1.0).abs() < 1e-6);
         assert!((at(1.5) - 0.5).abs() < 1e-6, "only the inner clip: {}", at(1.5));
         assert!((at(3.0) - 1.0).abs() < 1e-6, "the outer clip comes back");
+    }
+
+    /// Clips on one track at (start, length), placed in the order given.
+    fn clips_at(spans: &[(f64, f64)]) -> Vec<Clip> {
+        let mut doc = MultiEditDoc::new("t");
+        let track = doc.add_track(TrackKind::Audio);
+        for (i, &(start, len)) in spans.iter().enumerate() {
+            doc.insert_clips(
+                track,
+                start,
+                vec![NewClip {
+                    source: ClipSource {
+                        path: PathBuf::from(format!("c{i}")),
+                        asset_id: None,
+                    },
+                    name: format!("c{i}"),
+                    len_secs: Some(len),
+                    is_video: false,
+                }],
+            );
+        }
+        doc.tracks.remove(track).clips
+    }
+
+    #[test]
+    fn covered_spans_are_where_a_later_clip_lies_over_an_earlier_one() {
+        // Given out of order: B 3-6, D 8-9, A 0-4, C 1-2 (inside A), E 3.5-5.
+        let clips = clips_at(&[(3.0, 3.0), (8.0, 1.0), (0.0, 4.0), (1.0, 1.0), (3.5, 1.5)]);
+        let covered = covered_spans(&clips);
+        assert_eq!(covered[2], vec![], "A starts first: nothing under it");
+        assert_eq!(covered[3], vec![(1.0, 2.0)], "C lies wholly over A");
+        assert_eq!(covered[0], vec![(3.0, 4.0)], "B over A's end");
+        assert_eq!(covered[4], vec![(3.5, 5.0)], "E over A and B, merged");
+        assert_eq!(covered[1], vec![], "D overlaps nothing");
+        assert_eq!(draw_order(&clips), vec![2, 3, 0, 4, 1], "back to front by start");
+    }
+
+    #[test]
+    fn a_clip_without_a_length_is_not_heard_and_crosses_nothing() {
+        let mut doc = MultiEditDoc::new("t");
+        let track = doc.add_track(TrackKind::Audio);
+        let new = |name: &str, len: Option<f64>| NewClip {
+            source: ClipSource {
+                path: PathBuf::from(name),
+                asset_id: None,
+            },
+            name: name.to_string(),
+            len_secs: len,
+            is_video: false,
+        };
+        doc.insert_clips(track, 0.0, vec![new("a", Some(2.0))]);
+        doc.insert_clips(track, 1.0, vec![new("b", None)]);
+        let clips = &doc.tracks[track].clips;
+        assert!(crossfade_segments(clips).iter().all(Vec::is_empty));
+        assert!(covered_spans(clips).iter().all(Vec::is_empty));
+        assert_eq!(draw_order(clips), vec![0], "drawn as its start, apart");
     }
 
     #[test]

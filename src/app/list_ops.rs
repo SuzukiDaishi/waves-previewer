@@ -162,7 +162,7 @@ impl super::WavesPreviewer {
                         continue;
                     }
                     if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                        if audio_io::is_supported_extension(ext) {
+                        if audio_io::is_supported_extension(ext) && audio_io::content_is_listable(&p) {
                             if self.path_index.contains_key(&p) {
                                 continue;
                             }
@@ -202,7 +202,9 @@ impl super::WavesPreviewer {
                     continue;
                 }
                 match p.extension().and_then(|s| s.to_str()) {
-                    Some(ext) if audio_io::is_supported_extension(ext) => {
+                    Some(ext)
+                        if audio_io::is_supported_extension(ext) && audio_io::content_is_listable(p) =>
+                    {
                         if self.path_index.contains_key(p) {
                             counts.duplicates += 1;
                             continue;
@@ -261,7 +263,7 @@ impl super::WavesPreviewer {
                     continue;
                 }
                 if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                    if audio_io::is_supported_extension(ext) {
+                    if audio_io::is_supported_extension(ext) && audio_io::content_is_listable(p) {
                         if set.insert(p.clone()) {
                             let item = self.make_media_item(p.clone());
                             let id = item.id;

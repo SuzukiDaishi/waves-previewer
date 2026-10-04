@@ -2859,9 +2859,13 @@ impl VideoPanelState {
     /// The frame that should be on screen at `secs`: the latest one whose
     /// presentation time has already arrived.
     pub fn frame_at(&self, secs: f64) -> Option<(f64, std::sync::Arc<egui::ColorImage>)> {
+        // A frame and a playhead that mean the same instant can differ in the
+        // last bits of a double, or by one tick of a container clock; neither
+        // is a frame from the future. Far below one sample at any rate.
+        const ARRIVED_SLACK_SECS: f64 = 1.0e-6;
         self.ring
             .iter()
-            .filter(|(pts, _)| *pts <= secs)
+            .filter(|(pts, _)| *pts <= secs + ARRIVED_SLACK_SECS)
             .next_back()
             .cloned()
     }
@@ -2884,6 +2888,18 @@ pub struct MiniMeterState {
     pub last_time: f64,          // ui time of the previous update
     pub spectrum_last_time: f64, // ui time of the previous FFT update
     pub active: bool,            // decay animation still in motion
+    /// Where the spectrum was last drawn, for tests that look at its pixels.
+    pub spectrum_rect: Option<egui::Rect>,
+    /// "Channel layout..." was chosen from the meter's menu this frame.
+    pub layout_editor_requested: bool,
+    /// The same, for the HRTF's virtual speakers window.
+    pub hrtf_window_requested: bool,
+    /// The view the channel panel showed last: "STEREO" or "SURROUND".
+    pub channel_view: &'static str,
+    /// The SURROUND view's energy vector (x right, y ahead, z up).
+    pub surround_vector: Option<[f32; 3]>,
+    /// Its recent positions on the plan view, oldest first.
+    pub surround_trail: std::collections::VecDeque<(f32, f32)>,
 }
 
 /// WORLD aperiodicity edit draft: a per-frame multiplier applied to every
@@ -3007,6 +3023,8 @@ pub struct EditorTab {
     /// The video has an audio track, but its codec is intentionally disabled.
     /// It uses the same silent transport while the UI labels the distinction.
     pub audio_track_unsupported: bool,
+    /// Which codec that is, for the label (`None` reads as AAC).
+    pub unsupported_audio_codec: Option<&'static str>,
     /// Large file-backed asset: overview is resident, PCM stays paged/mapped.
     pub paged_asset: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
@@ -3313,6 +3331,20 @@ impl EditorTab {
         self.audio_track_absent || self.audio_track_unsupported
     }
 
+    /// The `<codec> UNSUPPORTED` badge of a video whose audio nothing here
+    /// decodes.
+    pub fn unsupported_audio_label(&self) -> String {
+        format!("{} UNSUPPORTED", self.unsupported_audio_codec.unwrap_or("AAC"))
+    }
+
+    /// Why that audio does not play, in a sentence.
+    pub fn unsupported_audio_reason(&self) -> String {
+        match self.unsupported_audio_codec.unwrap_or("AAC") {
+            "AAC" => "No AAC decoder on this platform: NeoWaves ships none of its own and borrows the operating system's where there is one.".to_string(),
+            codec => format!("NeoWaves does not decode {codec} audio."),
+        }
+    }
+
     /// Every selected range as sorted, merged, non-empty `[start, end)` spans:
     /// `extra_selections` plus the primary `selection`.
     ///
@@ -3363,6 +3395,7 @@ impl EditorTab {
             read_only,
             audio_track_absent: false,
             audio_track_unsupported: false,
+            unsupported_audio_codec: None,
             paged_asset: false,
             ch_samples: Vec::new(),
             pencil_draft: None,
@@ -3579,7 +3612,14 @@ pub struct FileMeta {
     /// Valid video container whose audio codec is deliberately unsupported.
     /// This is also terminal metadata, not a damaged-file error.
     pub audio_track_unsupported: bool,
+    /// The codec of that audio, for the `<codec> UNSUPPORTED` label: AAC
+    /// where the OS lends no decoder; E-AC-3, DTS, TrueHD and the rest in a
+    /// transport stream.
+    pub unsupported_audio_codec: Option<&'static str>,
     pub channels: u16,
+    /// Which speaker each channel feeds, as a WAVE channel mask, when the
+    /// file says. See `app::channel_layout_ops`.
+    pub channel_mask: Option<u32>,
     pub sample_rate: u32,
     pub bits_per_sample: u16,
     pub sample_value_kind: SampleValueKind,

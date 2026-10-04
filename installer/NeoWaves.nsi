@@ -341,6 +341,14 @@ Section "!${APP_SHORT}" SecCore
   File /r "${REPO_DIR}\commands\*"
   SetOutPath "$INSTDIR"
 
+  ; The bundled HRTF for headphone monitoring (SADIE II D1, University of
+  ; York, Apache-2.0 -- its notice is in THIRD_PARTY_NOTICES.txt). hrtf_ops
+  ; looks for it here; only the 48 kHz file ships, other rates resample.
+  SetOutPath "$INSTDIR\hrtf"
+  File "${REPO_DIR}\assets\sofas\D1_HRIR_SOFA\D1_48K_24bit_256tap_FIR_SOFA.sofa"
+  File "${REPO_DIR}\assets\sofas\D1_HRIR_SOFA\README.md"
+  SetOutPath "$INSTDIR"
+
   ; Start menu entry (Inno created this unconditionally).
   CreateDirectory "$SMPROGRAMS\${APP_SHORT}"
   CreateShortcut "$SMPROGRAMS\${APP_SHORT}\${APP_SHORT}.lnk" \
@@ -471,6 +479,7 @@ Section "Uninstall"
   RMDir  "$SMPROGRAMS\${APP_SHORT}"
 
   RMDir /r "$INSTDIR\commands"
+  RMDir /r "$INSTDIR\hrtf"
 
   Delete "$INSTDIR\${APP_EXE}"
   Delete "$INSTDIR\${WORKER_EXE}"

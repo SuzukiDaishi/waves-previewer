@@ -63,6 +63,11 @@
       "id": "NeoWaves-Compliance",
       "name": "What you may do with a NeoWaves build",
       "text_file": "NEOWAVES-COMPLIANCE.txt"
+    },
+    {
+      "id": "Apache-2.0-SADIE-II",
+      "name": "Apache License 2.0 (SADIE II database, University of York)",
+      "text_file": "Apache-2.0-SADIE-II.txt"
     }
   ],
   "components": [
@@ -76,7 +81,7 @@
       "authors": "zukky",
       "repository": "https://github.com/SuzukiDaishi/waves-previewer",
       "flag": null,
-      "note": "NeoWaves's own source is MIT. MP3 export loads a separate, user-replaceable LAME shared library using the LGPL-2.0 section 6(b) mechanism; LAME is not incorporated into the executable. No AAC codec is shipped: AAC audio is decoded by the operating system's own decoder where there is one, and AAC encoding is unsupported. Open this entry for the redistribution checklist."
+      "note": "NeoWaves's own source is MIT. MP3 export loads a separate, user-replaceable LAME shared library using the LGPL-2.0 section 6(b) mechanism; LAME is not incorporated into the executable. No AAC codec is shipped: AAC audio is decoded by the operating system's own decoder where there is one, and AAC encoding is unsupported. An AC-3 decoder is shipped (its patents have expired); E-AC-3 is not decoded. Open this entry for the redistribution checklist."
     },
     {
       "name": "LAME (libmp3lame)",
@@ -203,6 +208,18 @@
       "note": "assets/zoo/default.gif and assets/zoo/default.wav, embedded in the binary by src/app/zoo_assets.rs. Made by the author of NeoWaves and covered by the same MIT licence as the rest of the project."
     },
     {
+      "name": "SADIE II HRIR database, subject D1 (KU100)",
+      "version": "D1_HRIR_SOFA",
+      "kind": "data",
+      "license_ids": [
+        "Apache-2.0-SADIE-II"
+      ],
+      "authors": "University of York (AudioLab, Department of Electronic Engineering)",
+      "repository": "https://www.york.ac.uk/sadie-project/database.html",
+      "flag": "notice",
+      "note": "Head-related impulse responses of the KU100 dummy head as SOFA files under assets/sofas/D1_HRIR_SOFA/ (44.1 kHz/16-bit and 48 kHz/24-bit at 256 taps, 96 kHz/24-bit at 512 taps), unmodified. Copyright 2018, University of York; Apache License 2.0. The database asks that the original dataset be referenced wherever it is used, in original or modified form: Armstrong, Thresh, Murphy and Kearney, \"A Perceptual Evaluation of Individual and Non-Individual HRTFs: A Case Study of the SADIE II Database\", Applied Sciences 8(11), 2029 (2018), doi:10.3390/app8112029. The bundled HRTF for headphone monitoring: the installer copies the 48 kHz file to hrtf\\ beside NeoWaves; the 44.1 kHz file stays in the repository for tests, and the 96 kHz file is not committed."
+    },
+    {
       "name": "Steinberg VST 3 interface",
       "version": "-",
       "kind": "spec",
@@ -273,6 +290,11 @@
     "option-ext": {
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft, pulled in transitively by the directory-lookup crates. Same shape as Symphonia: unmodified use imposes only the notice requirement."
+    },
+    "oxideav-ac3": {
+      "flag": "notice",
+      "note": "MIT. Decodes the AC-3 audio of AVCHD and Blu-ray video. AC-3's patents have expired, so decoding it needs no licence from Dolby; \"Dolby\" and \"Dolby Digital\" are trademarks, which is why the app calls the format AC-3. E-AC-3, whose patents are younger, is never decoded.",
+      "topic": "ac3"
     },
     "symphonia*": {
       "flag": "notice",

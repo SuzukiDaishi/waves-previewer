@@ -236,10 +236,19 @@ pub fn spawn_folder_watch(
                         pending_since = None;
                         continue;
                     }
-                    let events = match &snapshot {
+                    let mut events = match &snapshot {
                         Some(old) => diff_snapshots(old, &new),
                         None => Vec::new(),
                     };
+                    // A `.mts` that is TypeScript gets no row. Asked of new
+                    // and changed files only, so a `node_modules` is not
+                    // read again on every walk.
+                    events.retain(|event| match event {
+                        WatchEvent::Added(path) | WatchEvent::Modified(path) => {
+                            crate::audio_io::content_is_listable(path)
+                        }
+                        WatchEvent::Removed(_) => true,
+                    });
                     snapshot = Some(new);
                     let quiet = events.is_empty();
                     for event in events {

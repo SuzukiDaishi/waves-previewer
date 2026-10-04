@@ -82,6 +82,11 @@ debug/
 installer/out/
 out/
 
+# SADIE II's 96 kHz HRIRs (72 MB). Nothing uses them -- the installer ships
+# the 48 kHz file and a test loads the 44.1 kHz one -- so they stay out of the
+# history; assets/sofas/D1_HRIR_SOFA/README.md says where to get them.
+assets/sofas/D1_HRIR_SOFA/D1_96K_24bit_512tap_FIR_SOFA.sofa
+
 # Python
 .mypy_cache/
 .pytest_cache/

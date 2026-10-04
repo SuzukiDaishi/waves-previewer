@@ -35,7 +35,7 @@ use super::types::{
 };
 use super::WavesPreviewer;
 use crate::audio_io::{
-    decode_audio_mono, decode_audio_multi, is_supported_audio_path, read_audio_info,
+    decode_audio_mono, decode_audio_multi, read_audio_info,
     read_embedded_artwork, AudioInfo,
 };
 use crate::cli::{
@@ -3245,7 +3245,7 @@ fn session_entries_from_sources(
                     });
                 }
             }
-        } else if is_supported_audio_path(&path) && seen.insert(path_key(&path)) {
+        } else if crate::audio_io::is_listable_media_file(&path) && seen.insert(path_key(&path)) {
             out.push(SessionListEntry {
                 path,
                 pending_gain_db: 0.0,
@@ -3291,6 +3291,7 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
                 .collect(),
             sample_rate_overrides: Vec::new(),
             bit_depth_overrides: Vec::new(),
+            channel_layouts: Vec::new(),
             format_overrides: Vec::new(),
             virtual_items: Vec::new(),
             transcript_languages: Vec::new(),
@@ -5631,7 +5632,7 @@ fn scan_audio_paths(folder: &Path) -> Result<Vec<PathBuf>> {
         .into_iter()
         .filter_map(|entry| entry.ok())
     {
-        if entry.file_type().is_file() && is_supported_audio_path(entry.path()) {
+        if entry.file_type().is_file() && crate::audio_io::is_listable_media_file(entry.path()) {
             out.push(entry.into_path());
         }
     }

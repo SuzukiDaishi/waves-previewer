@@ -400,6 +400,12 @@ impl WavesPreviewer {
         let mut spectro_overlap_legacy: Option<f32> = None;
         for line in text.lines() {
             let line = line.trim();
+            if self.load_channel_layout_prefs_line(line) {
+                continue;
+            }
+            if self.hrtf.load_prefs_line(line) {
+                continue;
+            }
             if let Some(rest) = line.strip_prefix("theme=") {
                 self.theme_mode = match rest {
                     "light" => ThemeMode::Light,
@@ -583,6 +589,8 @@ impl WavesPreviewer {
                 }
             } else if let Some(rest) = line.strip_prefix("list_click_audition=") {
                 self.list_click_audition = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("list_hide_decode_errors=") {
+                self.list_hide_decode_errors = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("multi_edit_list_columns=") {
                 let mut cols = ListColumnConfig::multi_edit_pane_default();
                 for column in super::types::ColumnId::ALL {
@@ -982,6 +990,7 @@ impl WavesPreviewer {
             "0"
         };
         let list_click_audition = if self.list_click_audition { "1" } else { "0" };
+        let list_hide_decode_errors = if self.list_hide_decode_errors { "1" } else { "0" };
         let list_columns_window_pos = self
             .list_columns_window_global_pos
             .filter(|pos| pos.x.is_finite() && pos.y.is_finite())
@@ -1115,6 +1124,7 @@ audio_channel_map={}\n\
 auto_play_list_nav={}\n\
 list_stop_returns_to_start={}\n\
 list_click_audition={}\n\
+list_hide_decode_errors={}\n\
 list_columns_window_pos={}\n\
 list_col_widths={}\n\
 multi_edit_list_columns={}\n\
@@ -1195,6 +1205,7 @@ zoo_flip_manual={}\n",
             auto_play_list_nav,
             list_stop_returns_to_start,
             list_click_audition,
+            list_hide_decode_errors,
             list_columns_window_pos,
             list_col_widths,
             multi_edit_list_columns,
@@ -1256,6 +1267,8 @@ zoo_flip_manual={}\n",
         out.push_str("perf_tier=");
         out.push_str(self.perf.preference.as_str());
         out.push('\n');
+        out.push_str(&self.channel_layout_prefs_lines());
+        out.push_str(&self.hrtf.prefs_lines());
         if let Some(name) = &self.session_display_name {
             out.push_str("display_name=");
             out.push_str(&name.replace('\n', " "));
@@ -1567,6 +1580,8 @@ mod tests {
         app.list_col_widths.insert("file".to_string(), 314.5);
         app.list_col_widths.insert("wave".to_string(), 220.0);
         app.list_click_audition = false;
+        assert!(app.list_hide_decode_errors, "hidden by default");
+        app.list_hide_decode_errors = false;
         app.save_prefs_to_path(&prefs);
 
         let mut loaded =
@@ -1575,6 +1590,7 @@ mod tests {
         assert_eq!(loaded.list_col_widths.get("file").copied(), Some(314.5));
         assert_eq!(loaded.list_col_widths.get("wave").copied(), Some(220.0));
         assert!(!loaded.list_click_audition);
+        assert!(!loaded.list_hide_decode_errors);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -345,6 +345,22 @@ impl super::WavesPreviewer {
         self.meter_ch_db.clone()
     }
 
+    /// Test-only: play through a stream-less device with this many outputs.
+    pub fn test_use_output_device_channels(&mut self, out_channels: usize) {
+        self.audio = crate::audio::AudioEngine::new_for_test_with_channels(out_channels);
+    }
+
+    /// Test-only: the top bar output meter's cells, as (name, level dB).
+    pub fn test_output_meter(&self) -> Vec<(String, f32)> {
+        let names = self.output_meter_names(self.audio.output_channels().max(1));
+        let levels = self.output_meter_levels(names.len());
+        names
+            .into_iter()
+            .zip(levels)
+            .map(|(name, (rms_db, _))| (name, rms_db))
+            .collect()
+    }
+
     pub fn test_set_inline_rename_buffer(&mut self, text: &str) -> bool {
         if self.inline_rename_path.is_none() {
             return false;
@@ -509,6 +525,18 @@ impl super::WavesPreviewer {
             tab.mini_meter.peak_hold_db.len(),
             tab.mini_meter.corr,
         ))
+    }
+
+    /// Test-only: the active tab's channel panel ("STEREO" / "SURROUND") and
+    /// the SURROUND view's energy vector.
+    pub fn test_mini_meter_channel_view(&self) -> Option<(&'static str, Option<[f32; 3]>)> {
+        let meter = &self.tabs.get(self.active_tab?)?.mini_meter;
+        Some((meter.channel_view, meter.surround_vector))
+    }
+
+    /// Test-only: where the active tab's mini meter drew its spectrum.
+    pub fn test_mini_meter_spectrum_rect(&self) -> Option<egui::Rect> {
+        self.tabs.get(self.active_tab?)?.mini_meter.spectrum_rect
     }
 
     pub fn test_show_transcription_settings(&self) -> bool {
@@ -2670,6 +2698,19 @@ impl super::WavesPreviewer {
         self.write_loop_markers_for_tab(tab_idx)
     }
 
+    /// Test-only: a path's spectrogram as (complete in the cache, being
+    /// computed, its generation). The generation moves each time a
+    /// computation starts.
+    pub fn test_spectro_state(&self, path: &Path) -> (bool, bool, Option<u64>) {
+        let inflight = self.spectro_inflight.contains(path);
+        let cached = !inflight
+            && self
+                .spectro_cache
+                .get(path)
+                .is_some_and(|specs| specs.iter().all(|s| s.frames > 0 && !s.values_db.is_empty()));
+        (cached, inflight, self.spectro_generation.get(path).copied())
+    }
+
     pub fn test_set_view_mode(&mut self, mode: ViewMode) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -2976,9 +3017,40 @@ impl super::WavesPreviewer {
             .map(|meta| meta.audio_track_unsupported)
     }
 
+    /// Test-only: the line under a row's waveform, as the list draws it.
+    pub fn test_list_wave_status(&self, path: &Path) -> Option<String> {
+        self.list_wave_status_text(path).map(|(text, _)| text.into_owned())
+    }
+
+    /// Test-only: whether a row's waveform (the full decode) has arrived.
+    pub fn test_path_has_waveform(&self, path: &Path) -> bool {
+        self.meta_for_path(path).is_some_and(|meta| !meta.thumb.is_empty())
+    }
+
+    pub fn test_set_list_hide_decode_errors(&mut self, hide: bool) {
+        self.list_hide_decode_errors = hide;
+    }
+
     pub fn test_path_decode_error(&self, path: &Path) -> Option<String> {
         self.meta_for_path(path)
             .and_then(|meta| meta.decode_error.clone())
+    }
+
+    /// Channels, sample rate, channel mask, length and unsupported audio
+    /// codec from the row's metadata, once it has some.
+    pub fn test_path_meta_summary(
+        &self,
+        path: &Path,
+    ) -> Option<(u16, u32, Option<u32>, Option<f32>, Option<&'static str>)> {
+        self.meta_for_path(path).map(|meta| {
+            (
+                meta.channels,
+                meta.sample_rate,
+                meta.channel_mask,
+                meta.duration_secs,
+                meta.unsupported_audio_codec,
+            )
+        })
     }
 
     pub fn test_active_tab_audio_track_absent(&self) -> bool {
@@ -3199,6 +3271,8 @@ impl super::WavesPreviewer {
         let mut meta = item.meta.as_deref().cloned().unwrap_or(FileMeta {
             audio_track_absent: false,
             audio_track_unsupported: false,
+            unsupported_audio_codec: None,
+            channel_mask: None,
             channels: 1,
             sample_rate: TEST_HOOK_SAMPLE_RATE,
             bits_per_sample: 16,
@@ -3921,6 +3995,109 @@ impl super::WavesPreviewer {
 
     pub fn test_default_status(&self) -> Option<String> {
         self.default_status.as_deref().map(str::to_string)
+    }
+
+    /// Test-only: `path`'s channel layout as stored keys ("FL,FR,-"), and
+    /// where it came from.
+    pub fn test_channel_layout(&self, path: &Path, channels: usize) -> Option<(String, String)> {
+        self.channel_layout_resolved(path, channels).map(|(layout, origin)| {
+            (
+                super::channel_layout_ops::layout_to_string(&layout),
+                origin.describe().to_string(),
+            )
+        })
+    }
+
+    pub fn test_set_channel_layout_override(&mut self, path: &Path, keys: Option<&str>) -> bool {
+        let layout = match keys {
+            Some(keys) => match super::channel_layout_ops::layout_from_string(keys) {
+                Some(layout) => Some(layout),
+                None => return false,
+            },
+            None => None,
+        };
+        self.set_channel_layout_override(path, layout);
+        true
+    }
+
+    /// Test-only: the layout the audio callback routes the playing clip by.
+    pub fn test_playback_source_layout(&self) -> Option<String> {
+        self.audio
+            .shared
+            .src_layout
+            .load()
+            .as_deref()
+            .map(|layout| super::channel_layout_ops::layout_to_string(layout))
+    }
+
+    /// Test-only: open the channel layout window on the active tab, as its
+    /// mini meter's menu does.
+    pub fn test_request_channel_layout_editor(&mut self) -> bool {
+        let Some(tab) = self.active_tab.and_then(|idx| self.tabs.get_mut(idx)) else {
+            return false;
+        };
+        tab.mini_meter.layout_editor_requested = true;
+        true
+    }
+
+    pub fn test_channel_layout_editor_open(&self) -> bool {
+        self.channel_layout_editor.is_some()
+    }
+
+    // ---- Headphone monitoring (HRTF) ----------------------------------------
+
+    /// What the HRTF is doing, as `Debug` text (`Off`, `Loading`,
+    /// `Active { channels: 6 }`, ...).
+    pub fn test_hrtf_status(&self) -> String {
+        format!("{:?}", self.hrtf_runtime.status)
+    }
+
+    /// The channel count of the headphone filters the callback has, if any.
+    pub fn test_binaural_channels(&self) -> Option<usize> {
+        self.audio.binaural_filters().map(|filters| filters.channels())
+    }
+
+    /// An identity for the installed filters, to see that they were rebuilt.
+    pub fn test_binaural_filters_id(&self) -> Option<usize> {
+        self.audio
+            .binaural_filters()
+            .map(|filters| std::sync::Arc::as_ptr(&filters) as usize)
+    }
+
+    pub fn test_hrtf_window_open(&self) -> bool {
+        self.hrtf_runtime.window_open
+    }
+
+    /// Test-only: open the virtual speakers window on the active tab, as its
+    /// mini meter's menu does.
+    pub fn test_request_hrtf_window(&mut self) -> bool {
+        let Some(tab) = self.active_tab.and_then(|idx| self.tabs.get_mut(idx)) else {
+            return false;
+        };
+        tab.mini_meter.hrtf_window_requested = true;
+        true
+    }
+
+    /// Test-only: pick a speaker in the virtual speakers window, by key.
+    pub fn test_hrtf_select(&mut self, key: &str) -> bool {
+        let Some(pos) = crate::audio_channels::SpeakerPos::from_key(key) else {
+            return false;
+        };
+        self.hrtf_runtime.selected = Some(super::hrtf_ops::SpeakerItem::Named(pos));
+        true
+    }
+
+    pub fn test_hrtf_profile_label(&self) -> String {
+        self.hrtf.profile.label()
+    }
+
+    /// The room preset, by its prefs key.
+    pub fn test_hrtf_room(&self) -> String {
+        self.hrtf
+            .prefs_lines()
+            .lines()
+            .find_map(|line| line.strip_prefix("hrtf_room=").map(str::to_string))
+            .unwrap_or_default()
     }
 
     pub fn test_save_session_to(&mut self, path: &Path) -> bool {
@@ -5302,6 +5479,47 @@ impl super::WavesPreviewer {
         true
     }
 
+    /// Test-only: select the clips at these places in `test_multi_edit_clips`'
+    /// order, the first as the primary one.
+    pub fn test_multi_edit_select_clips(&mut self, indices: &[usize]) -> bool {
+        let Some(doc) = self.multi_edit_active_doc() else {
+            return false;
+        };
+        let mut ids = Vec::new();
+        for track in &doc.tracks {
+            let mut clips: Vec<_> = track.clips.iter().collect();
+            clips.sort_by(|a, b| a.start_secs.total_cmp(&b.start_secs));
+            ids.extend(clips.into_iter().map(|c| c.id.clone()));
+        }
+        let Some(picked) = indices.iter().map(|&n| ids.get(n).cloned()).collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        let primary = picked.first().cloned();
+        self.multi_edit_select_clips(picked, primary);
+        true
+    }
+
+    /// Test-only: the selected clips as (track, start), track by track.
+    pub fn test_multi_edit_selected_clips(&self) -> Vec<(usize, f64)> {
+        let Some(doc) = self.multi_edit_active_doc() else {
+            return Vec::new();
+        };
+        let mut out: Vec<(usize, f64)> = doc
+            .tracks
+            .iter()
+            .enumerate()
+            .flat_map(|(ti, track)| {
+                track
+                    .clips
+                    .iter()
+                    .filter(|c| self.multi_edit.ui.selected_clips.contains(&c.id))
+                    .map(move |c| (ti, c.start_secs))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        out
+    }
+
     /// Test-only: frames in the current playback mix of the active timeline,
     /// once one exists and reflects the latest edit.
     pub fn test_multi_edit_mix_frames(&self) -> Option<usize> {
@@ -5327,6 +5545,62 @@ impl super::WavesPreviewer {
             }
         }
         Some(peak)
+    }
+
+    /// Test-only: the peak of each channel of the current mix.
+    pub fn test_multi_edit_mix_channel_peaks(&self) -> Option<Vec<f32>> {
+        let id = self.multi_edit.active.as_deref()?;
+        let rev = self.multi_edit.rev(id);
+        let mix = self
+            .multi_edit
+            .mix
+            .as_ref()
+            .filter(|mix| mix.doc_id == id && mix.rev == rev)?;
+        Some(
+            mix.audio
+                .channels
+                .iter()
+                .map(|channel| channel.iter().fold(0.0f32, |peak, v| peak.max(v.abs())))
+                .collect(),
+        )
+    }
+
+    /// Test-only: the active timeline's output format, as speaker keys.
+    pub fn test_multi_edit_output(&self) -> Option<String> {
+        self.multi_edit_active_doc()
+            .map(|doc| super::channel_layout_ops::layout_to_string(&doc.output_layout()))
+    }
+
+    /// Test-only: what each track's output chip says ("St", "L", "LFE").
+    pub fn test_multi_edit_track_outputs(&self) -> Vec<String> {
+        let Some(doc) = self.multi_edit_active_doc() else {
+            return Vec::new();
+        };
+        let out = doc.output_layout();
+        doc.tracks
+            .iter()
+            .map(|track| match track.output {
+                super::multi_edit::TrackOutput::Stereo => "St".to_string(),
+                super::multi_edit::TrackOutput::Channel { index } => {
+                    match out.get(index).copied().flatten() {
+                        Some(pos) => pos.label(&out).to_string(),
+                        None => format!("Ch {}", index + 1),
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Test-only: the source channel each clip plays, track by track.
+    pub fn test_multi_edit_clip_channels(&self) -> Vec<Option<u16>> {
+        self.multi_edit_active_doc()
+            .map(|doc| {
+                doc.tracks
+                    .iter()
+                    .flat_map(|track| track.clips.iter().map(|clip| clip.channel))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn test_multi_edit_is_playing(&self) -> bool {
@@ -5455,6 +5729,44 @@ impl super::WavesPreviewer {
     /// Test-only: how far the rows can scroll down, as last measured.
     pub fn test_multi_edit_max_scroll_y(&self) -> f32 {
         self.multi_edit.ui.max_scroll_y
+    }
+
+    /// Test-only: place rows as a drop does, but as though none of their
+    /// lengths were known yet. Returns how many clips were placed.
+    pub fn test_multi_edit_drop_unread(&mut self, track: usize, at_secs: f64, paths: &[PathBuf]) -> usize {
+        let mut clips = self.multi_edit_new_clips(paths);
+        for clip in &mut clips {
+            clip.len_secs = None;
+        }
+        self.multi_edit_checkpoint();
+        let placed = self
+            .multi_edit_active_doc_mut()
+            .map(|doc| doc.insert_clips(track, at_secs, clips).len())
+            .unwrap_or(0);
+        self.multi_edit_touched();
+        placed
+    }
+
+    /// Test-only: how many clips of the active timeline wait for a length.
+    pub fn test_multi_edit_pending_clips(&self) -> usize {
+        self.multi_edit_active_doc()
+            .map(|doc| {
+                doc.tracks
+                    .iter()
+                    .flat_map(|t| t.clips.iter())
+                    .filter(|c| c.len_pending)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Test-only: whether the cut tool is on.
+    pub fn test_multi_edit_cut_tool(&self) -> bool {
+        self.multi_edit.ui.cut_tool
+    }
+
+    pub fn test_multi_edit_set_cut_tool(&mut self, on: bool) {
+        self.multi_edit.ui.cut_tool = on;
     }
 
     /// Test-only: open a track's name field, as a double-click on the name

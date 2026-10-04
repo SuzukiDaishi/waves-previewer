@@ -285,11 +285,13 @@ impl crate::app::WavesPreviewer {
                             if let Some(next) = pending_output_change {
                                 let _ = self.apply_audio_output_device_selection(next, true);
                             }
+                            self.ui_output_speakers(ui);
+                            self.ui_hrtf_settings_row(ui);
                             let mut direct_map = self.audio_channel_map_direct;
                             if ui
                                 .checkbox(&mut direct_map, "Direct channel mapping")
                                 .on_hover_text(
-                                    "Send source channel N straight to output channel N. Off (the                                      default), channels are matched by speaker position: a stereo                                      clip reaches only the front pair of a 5.1 / 7.1.4 device, and                                      a surround clip folds down to stereo with -3 dB centre and                                      surround coefficients. On, extra outputs stay silent and                                      source channels past the device's count are dropped.",
+                                    "Send source channel N straight to output channel N. Off (the                                      default), channels are matched by speaker position: a stereo                                      clip reaches only the front pair of a 5.1 / 7.1.4 device, and                                      a surround clip folds down to stereo with -3 dB centre, LFE and                                      surround coefficients. On, extra outputs stay silent and                                      source channels past the device's count are dropped.",
                                 )
                                 .changed()
                             {
@@ -374,6 +376,19 @@ impl crate::app::WavesPreviewer {
                                 .on_hover_text(
                                     "Off: single click only selects; play the selection with \
                                      Space or keyboard navigation.",
+                                )
+                                .changed()
+                            {
+                                self.save_prefs();
+                            }
+                            if ui
+                                .checkbox(
+                                    &mut self.list_hide_decode_errors,
+                                    "Hide \"Decode failed\" in the list",
+                                )
+                                .on_hover_text(
+                                    "Rows whose audio could not be read show no red error text. \
+                                     \"NO AUDIO\" and \"<codec> UNSUPPORTED\" still show.",
                                 )
                                 .changed()
                             {
