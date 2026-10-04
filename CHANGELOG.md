@@ -4,6 +4,8 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+## 0.20261004.0 - 2026-10-04
+
 ### TypeScript の `.mts` をリストに出さないようにした
 
 - `.mts` は TypeScript のモジュールの拡張子でもあり、`node_modules` には `index.d.mts` などが大量にある。今までは、それらを動画の行として並べ、読めない行（長さ `...`、SR `?`）が並んでいた。

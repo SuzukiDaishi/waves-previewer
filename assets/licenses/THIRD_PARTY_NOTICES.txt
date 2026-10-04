@@ -1924,7 +1924,7 @@ ndarray 0.17.2
   Authors: Ulrik Sverdrup "bluss", Jim Turner
   Source: https://github.com/rust-ndarray/ndarray
 
-neowaves 0.20260928.0
+neowaves 0.20261004.0
   Kind: crate
   Licence: MIT
 
