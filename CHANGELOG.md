@@ -4,6 +4,8 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+## 0.20261009.0 - 2026-10-09
+
 ### 安定版に向けた修正
 
 - **Pitch / Stretch モードのリスト再生で、加工していない音が鳴ることがあった**のを直した。
