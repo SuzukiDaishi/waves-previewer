@@ -293,6 +293,13 @@ impl super::WavesPreviewer {
         if self.is_virtual_path(path) {
             return;
         }
+        // Object audio is final at its header (see `meta::run_meta_task`).
+        if self
+            .meta_for_path(path)
+            .is_some_and(|meta| meta.object_audio.is_some())
+        {
+            return;
+        }
         self.ensure_meta_pool();
         if let Some(pool) = &self.meta_pool {
             if self.meta_inflight.contains(path) {

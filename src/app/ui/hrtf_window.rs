@@ -17,6 +17,12 @@ use crate::audio_channels::{Layout, SpeakerPos};
 const STEREO_HOVER: &str = "On: stereo is heard from the room's L and R virtual speakers \
      (\u{b1}30\u{b0} in the standard room), as from a pair of monitors. Off: stereo goes \
      straight to the ears, and only 3 or more channels use the HRTF.";
+/// What the centre switch does, wherever it is.
+const CENTRE_LABEL: &str = "Centre \u{b1}0 dB";
+const CENTRE_HOVER: &str = "On: the HRTF is levelled so a sound in the centre -- the centre \
+     channel, or a mono sound in a stereo mix -- is as loud through it as without it \
+     (\u{b1}0 dB). Off: the HRTF plays at its own level, which can make the centre a few dB \
+     louder. The LFE keeps its own gain.";
 
 /// The top bar toggle's width: "HRTF" at body size, and its frame.
 pub(in crate::app) const HRTF_CHIP_W: f32 = 46.0;
@@ -131,24 +137,24 @@ fn top_view(
     painter.rect_filled(rect, 4.0, visuals.extreme_bg_color);
     let center = rect.center();
     let radius = rect.width() * 0.5 - 22.0;
-    let ring = Stroke::new(1.0, visuals.weak_text_color().gamma_multiply(0.6));
+    let ring = Stroke::new(1.0_f32, visuals.weak_text_color().gamma_multiply(0.6));
     painter.circle_stroke(center, radius, ring);
     painter.circle_stroke(center, radius * std::f32::consts::FRAC_1_SQRT_2, ring);
     // The listener: a head with a nose pointing front.
-    painter.circle_stroke(center, 9.0, Stroke::new(1.5, visuals.text_color()));
+    painter.circle_stroke(center, 9.0, Stroke::new(1.5_f32, visuals.text_color()));
     painter.line_segment(
         [
             center + Vec2::new(-4.0, -8.0),
             center + Vec2::new(0.0, -14.0),
         ],
-        Stroke::new(1.5, visuals.text_color()),
+        Stroke::new(1.5_f32, visuals.text_color()),
     );
     painter.line_segment(
         [
             center + Vec2::new(4.0, -8.0),
             center + Vec2::new(0.0, -14.0),
         ],
-        Stroke::new(1.5, visuals.text_color()),
+        Stroke::new(1.5_f32, visuals.text_color()),
     );
     let font = FontId::proportional(11.0);
     let at = |p: SpeakerPlacement| -> Pos2 {
@@ -166,7 +172,7 @@ fn top_view(
         let color = speaker_color(s.channel.is_some(), is_selected, &visuals);
         let size = if is_selected { 7.0 } else { 5.5 };
         if s.placement.elevation_deg < -0.5 {
-            painter.circle_stroke(p, size, Stroke::new(2.0, color));
+            painter.circle_stroke(p, size, Stroke::new(2.0_f32, color));
         } else {
             painter.circle_filled(p, size, color);
         }
@@ -242,7 +248,7 @@ fn side_view(
     painter.rect_filled(rect, 4.0, visuals.extreme_bg_color);
     let center = Pos2::new(rect.left() + 26.0, rect.center().y);
     let radius = (rect.width() - 46.0).min(rect.height() * 0.5 - 22.0);
-    let ring = Stroke::new(1.0, visuals.weak_text_color().gamma_multiply(0.6));
+    let ring = Stroke::new(1.0_f32, visuals.weak_text_color().gamma_multiply(0.6));
     let arc: Vec<Pos2> = (0..=36)
         .map(|i| {
             let el = (-90.0 + i as f32 * 5.0).to_radians();
@@ -251,7 +257,7 @@ fn side_view(
         .collect();
     painter.add(egui::Shape::line(arc, ring));
     painter.line_segment([center, center + Vec2::new(radius, 0.0)], ring);
-    painter.circle_stroke(center, 7.0, Stroke::new(1.5, visuals.text_color()));
+    painter.circle_stroke(center, 7.0, Stroke::new(1.5_f32, visuals.text_color()));
     let font = FontId::proportional(11.0);
     for (deg, text) in [
         (90.0f32, "90\u{b0}"),
@@ -275,7 +281,7 @@ fn side_view(
         let el = s.placement.elevation_deg.to_radians();
         let p = center + Vec2::new(el.cos() * radius, -el.sin() * radius);
         let color = visuals.selection.bg_fill;
-        painter.line_segment([center, p], Stroke::new(1.0, color));
+        painter.line_segment([center, p], Stroke::new(1.0_f32, color));
         painter.circle_filled(p, 7.0, color);
         painter.text(
             rect.left_bottom() + Vec2::new(6.0, -4.0),
@@ -385,6 +391,7 @@ impl WavesPreviewer {
             self.set_hrtf_enabled(enabled);
         }
         self.ui_hrtf_stereo_checkbox(ui);
+        self.ui_hrtf_centre_checkbox(ui);
         ui.separator();
         for profile in self.hrtf_profiles() {
             if ui
@@ -420,6 +427,19 @@ impl WavesPreviewer {
         }
     }
 
+    /// The HRTF levelled so the centre is as loud as without it, or not.
+    fn ui_hrtf_centre_checkbox(&mut self, ui: &mut egui::Ui) {
+        let mut centre = self.hrtf.centre_unity;
+        if ui
+            .checkbox(&mut centre, CENTRE_LABEL)
+            .on_hover_text(CENTRE_HOVER)
+            .changed()
+        {
+            self.hrtf.centre_unity = centre;
+            self.hrtf_settings_changed(true);
+        }
+    }
+
     /// The settings window's row, under the output device.
     pub(in crate::app) fn ui_hrtf_settings_row(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
@@ -436,6 +456,7 @@ impl WavesPreviewer {
                 self.set_hrtf_enabled(enabled);
             }
             self.ui_hrtf_stereo_checkbox(ui);
+            self.ui_hrtf_centre_checkbox(ui);
             let mut profile = self.hrtf.profile.clone();
             egui::ComboBox::from_id_salt("hrtf_settings_profile")
                 .selected_text(profile.label())
@@ -501,6 +522,7 @@ impl WavesPreviewer {
         let (status_line, problem) = self.hrtf_status_line();
         let loading = matches!(self.hrtf_runtime.status, HrtfStatus::Loading);
         let info = self.hrtf_loaded().map(|hrtf| hrtf.describe());
+        let centre_match_db = self.hrtf_runtime.centre_match_db;
         let profiles = self.hrtf_profiles();
         let mut action: Option<WindowAction> = None;
         let mut open = true;
@@ -606,6 +628,14 @@ impl WavesPreviewer {
                             );
                             ui.checkbox(&mut settings.stereo_too, "Stereo from L / R speakers")
                                 .on_hover_text(STEREO_HOVER);
+                            ui.checkbox(&mut settings.centre_unity, CENTRE_LABEL)
+                                .on_hover_text(CENTRE_HOVER);
+                            if let Some(db) = centre_match_db.filter(|_| settings.centre_unity) {
+                                ui.label(RichText::new(format!("{db:+.1} dB")).small().weak())
+                                    .on_hover_text(
+                                        "The level the centre match applies to what is playing now.",
+                                    );
+                            }
                         });
                         ui.add_space(4.0);
 

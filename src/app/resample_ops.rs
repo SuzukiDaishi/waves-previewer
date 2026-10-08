@@ -1,10 +1,26 @@
 use std::path::PathBuf;
 
-use super::types::BulkResampleState;
+use super::types::{BulkResampleState, ToastSeverity};
 use super::{BULK_RESAMPLE_CHUNK, BULK_RESAMPLE_FRAME_BUDGET_MS, BULK_RESAMPLE_THRESHOLD};
 
 impl super::WavesPreviewer {
     pub(super) fn open_resample_dialog(&mut self, paths: Vec<PathBuf>) {
+        // Object audio's metadata is timed against its own rate; converting
+        // the samples would leave it pointing at the wrong ones.
+        let before = paths.len();
+        let paths: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|p| !self.source_content(p).object_audio)
+            .collect();
+        if paths.len() < before {
+            self.push_toast(
+                ToastSeverity::Info,
+                format!(
+                    "{} object-audio file(s) left out: their samples are read-only",
+                    before - paths.len()
+                ),
+            );
+        }
         if paths.is_empty() {
             return;
         }

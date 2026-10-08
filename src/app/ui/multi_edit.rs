@@ -14,12 +14,13 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeK
 
 use crate::app::input_focus::UiSurface;
 use crate::app::multi_edit::{
-    clamp_scroll_secs, grid_points, grid_step_secs, snap_secs, snap_span, zoom_out_limit,
-    AutomationLane,
+    clamp_scroll_secs, grid_points, grid_step_secs, pan_rotates, snap_secs, snap_span,
+    track_pans, zoom_out_limit, AutomationLane,
     Clip, LaneParam, MultiEditDoc, Track, TrackKind, TrackOutput, MAX_LANE_HEIGHT, MAX_PX_PER_SEC,
     MAX_TRACK_HEIGHT, MAX_TRACK_ZOOM, MIN_LANE_HEIGHT, MIN_TRACK_HEIGHT, MIN_TRACK_ZOOM,
     TRACK_GAIN_MAX_DB, TRACK_GAIN_MIN_DB,
 };
+use crate::app::ui::pan_controls::{pan_knob, pan_sweep, pan_text, NO_PAN_HOVER};
 use crate::app::multi_edit_ops::{
     ClipDrag, ClipDragKind, DropPreview, LaneDrag, Marquee, PointEditor, RowResize, SourceSlot,
     MULTI_EDIT_GRID_MIN_PX,
@@ -36,7 +37,7 @@ use crate::audio_channels::{Layout, SpeakerPos, PRESETS};
 pub(crate) struct MultiEditRowDrag(pub Vec<PathBuf>);
 
 /// Width of the track header column (name, fader, M/S).
-const HEADER_W: f32 = 176.0;
+const HEADER_W: f32 = 224.0;
 /// Inner padding of a track or lane header.
 const HEADER_PAD: f32 = 6.0;
 /// One line of header controls.
@@ -47,6 +48,8 @@ const HEADER_BUTTON: f32 = 22.0;
 const VIDEO_BUTTON_W: f32 = 46.0;
 /// Width of a track's output chip ("St", "L", "LFE", "Ch 13").
 const OUTPUT_CHIP_W: f32 = 34.0;
+/// The fader's value beside it, wide enough for "-60.0 dB" in small text.
+const VOLUME_VALUE_W: f32 = 52.0;
 /// Ruler height: tick labels below, marker flags above.
 const RULER_H: f32 = 30.0;
 /// The row under the tracks that holds the add button and takes drops that
@@ -208,6 +211,7 @@ enum Action {
     },
     Checkpoint,
     SetVolume(usize, f32),
+    SetPan(usize, f32),
     ToggleMute(usize),
     ToggleSolo(usize),
     ToggleLanes(usize),
@@ -429,13 +433,13 @@ fn paint_crossfade(painter: &egui::Painter, rect: Rect, map: TimeMap, seg: &Xfad
     if own_rising {
         painter.add(egui::Shape::dashed_line(
             &[Pos2::new(b, rect.top()), Pos2::new(b, rect.bottom())],
-            Stroke::new(1.2, Color32::WHITE.gamma_multiply(0.8)),
+            Stroke::new(1.2_f32, Color32::WHITE.gamma_multiply(0.8)),
             4.0,
             3.0,
         ));
     }
-    painter.add(egui::Shape::line(curve(!own_rising), Stroke::new(2.0, WAVE_COLOR)));
-    painter.add(egui::Shape::line(curve(own_rising), Stroke::new(2.0, XFADE_COLOR)));
+    painter.add(egui::Shape::line(curve(!own_rising), Stroke::new(2.0_f32, WAVE_COLOR)));
+    painter.add(egui::Shape::line(curve(own_rising), Stroke::new(2.0_f32, XFADE_COLOR)));
     if b - a >= 56.0 {
         let label = format!("X {}", format_len(seg.end - seg.start));
         let galley = painter.layout_no_wrap(label, FontId::proportional(11.0), Color32::WHITE);
@@ -466,7 +470,7 @@ fn paint_pending_clip(
 ) -> Rect {
     painter.line_segment(
         [Pos2::new(x, band.top()), Pos2::new(x, band.bottom())],
-        Stroke::new(2.0, fill),
+        Stroke::new(2.0_f32, fill),
     );
     let rows = ((band.height() - 4.0) / PENDING_CHIP_H).floor().max(1.0) as usize;
     let top = band.top() + 2.0 + (stack % rows) as f32 * PENDING_CHIP_H;
@@ -476,7 +480,7 @@ fn paint_pending_clip(
     painter.rect_filled(chip, 3.0, fill);
     painter.add(egui::Shape::dashed_line(
         &[chip.left_top(), chip.right_top(), chip.right_bottom(), chip.left_bottom(), chip.left_top()],
-        Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.7)),
+        Stroke::new(1.0_f32, Color32::WHITE.gamma_multiply(0.7)),
         3.0,
         2.0,
     ));
@@ -772,7 +776,7 @@ impl WavesPreviewer {
             let x = map.x(marker.secs);
             painter.add(egui::Shape::dashed_line(
                 &[Pos2::new(x, body.top()), Pos2::new(x, body.bottom())],
-                Stroke::new(1.0, MARKER_COLOR.gamma_multiply(0.7)),
+                Stroke::new(1.0_f32, MARKER_COLOR.gamma_multiply(0.7)),
                 4.0,
                 4.0,
             ));
@@ -781,7 +785,7 @@ impl WavesPreviewer {
         if px >= map.left && px <= map.right {
             ui.painter_at(area).line_segment(
                 [Pos2::new(px, ruler.top()), Pos2::new(px, area.bottom())],
-                Stroke::new(1.5, PLAYHEAD_COLOR),
+                Stroke::new(1.5_f32, PLAYHEAD_COLOR),
             );
         }
 
@@ -799,7 +803,7 @@ impl WavesPreviewer {
                 rect,
                 2.0,
                 selection.bg_fill.gamma_multiply(0.18),
-                Stroke::new(1.0, selection.stroke.color),
+                Stroke::new(1.0_f32, selection.stroke.color),
                 StrokeKind::Inside,
             );
         }
@@ -954,6 +958,29 @@ impl WavesPreviewer {
             if loading > 0 {
                 ui.spinner();
                 ui.label(RichText::new(format!("reading {loading} source(s)")).weak());
+            }
+            // A solo silences every other track, and a short row hides its
+            // S button: say it is on, wherever the soloed track is.
+            let soloed: Vec<&str> = doc
+                .tracks
+                .iter()
+                .filter(|track| track.solo)
+                .map(|track| track.name.as_str())
+                .collect();
+            if !soloed.is_empty() {
+                let text = RichText::new(format!("SOLO \u{d7}{}", soloed.len()))
+                    .strong()
+                    .color(ui.visuals().warn_fg_color);
+                if ui
+                    .button(text)
+                    .on_hover_text(format!(
+                        "Only the soloed tracks are heard: {}. Click to clear every solo.",
+                        soloed.join(", ")
+                    ))
+                    .clicked()
+                {
+                    self.multi_edit_clear_solo();
+                }
             }
             ui.separator();
             if ui.small_button("\u{2212}").on_hover_text("Zoom out (Ctrl+wheel)").clicked() {
@@ -1112,7 +1139,7 @@ impl WavesPreviewer {
             let x = map.x(t);
             painter.line_segment(
                 [Pos2::new(x, ruler.bottom() - 6.0), Pos2::new(x, ruler.bottom())],
-                Stroke::new(1.0, visuals.weak_text_color()),
+                Stroke::new(1.0_f32, visuals.weak_text_color()),
             );
             painter.text(
                 Pos2::new(x + 3.0, ruler.bottom() - 9.0),
@@ -1222,7 +1249,7 @@ impl WavesPreviewer {
             let x = map.x(t);
             painter.line_segment(
                 [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
         }
     }
@@ -1257,23 +1284,24 @@ impl WavesPreviewer {
             .rect_filled(lane, 0.0, visuals.extreme_bg_color.gamma_multiply(0.6));
         Self::paint_grid(&ui.painter_at(lane), lane, map, line.gamma_multiply(0.35));
         ui.painter()
-            .line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0, line));
+            .line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0_f32, line));
         ui.painter()
-            .line_segment([header.right_top(), header.right_bottom()], Stroke::new(1.0, line));
+            .line_segment([header.right_top(), header.right_bottom()], Stroke::new(1.0_f32, line));
 
         // Header background: a click selects the track; the menu adds lanes.
         let header_resp = ui.interact(header, ui.id().with(("me_track_hdr", &track.id)), Sense::click());
         if header_resp.clicked() {
             actions.push(Action::SelectTrack(Some(track.id.clone())));
         }
+        let out = doc.output_layout();
         header_resp.context_menu(|ui| {
             ui.menu_button("Add lane", |ui| {
                 for param in LaneParam::ALL {
                     let exists = track.lane(param).is_some();
-                    let mono_pan = param == LaneParam::Pan && track.output.is_mono();
+                    let mono_pan = param == LaneParam::Pan && !track_pans(&out, track.output);
                     let mut resp = ui.add_enabled(!exists && !mono_pan, egui::Button::new(param.label()));
                     if mono_pan {
-                        resp = resp.on_disabled_hover_text("A mono track has nothing to pan");
+                        resp = resp.on_disabled_hover_text(NO_PAN_HOVER);
                     }
                     if resp.clicked() {
                         actions.push(Action::AddLane(ti, param));
@@ -1290,7 +1318,7 @@ impl WavesPreviewer {
                 ui.close();
             }
         });
-        self.ui_multi_edit_track_header(ui, track, ti, header, &doc.output_layout(), actions);
+        self.ui_multi_edit_track_header(ui, track, ti, header, &out, actions);
         Self::resize_grip(
             ui,
             header,
@@ -1401,6 +1429,7 @@ impl WavesPreviewer {
         let ui = &mut child;
         let inner = header.shrink(HEADER_PAD);
         let line1 = Rect::from_min_size(inner.min, Vec2::new(inner.width(), HEADER_LINE_H));
+        let two_lines = inner.height() >= HEADER_LINE_H * 2.0 + 4.0;
         let mut left = line1.left();
         let mut right = line1.right();
         if !track.lanes.is_empty() {
@@ -1478,6 +1507,31 @@ impl WavesPreviewer {
             });
             right = rect.left() - 4.0;
         }
+        // A row too short for the second line keeps its Mute and Solo here:
+        // a solo nobody can see is a mix that leaves tracks out for no
+        // visible reason.
+        let mute_solo = |rect_solo: Rect, ui: &mut egui::Ui, actions: &mut Vec<Action>| {
+            let rect_mute = rect_solo.translate(Vec2::new(-(HEADER_BUTTON + 2.0), 0.0));
+            if ui
+                .put(rect_mute, egui::Button::selectable(track.mute, "M").small())
+                .on_hover_text("Mute")
+                .clicked()
+            {
+                actions.push(Action::ToggleMute(ti));
+            }
+            if ui
+                .put(rect_solo, egui::Button::selectable(track.solo, "S").small())
+                .on_hover_text("Solo: only soloed tracks are heard")
+                .clicked()
+            {
+                actions.push(Action::ToggleSolo(ti));
+            }
+            rect_mute.left()
+        };
+        if !two_lines {
+            let solo = Rect::from_min_max(Pos2::new(right - HEADER_BUTTON, line1.top()), Pos2::new(right, line1.bottom()));
+            right = mute_solo(solo, ui, actions) - 4.0;
+        }
         let name_rect = Rect::from_min_max(Pos2::new(left, line1.top()), Pos2::new(right.max(left + 10.0), line1.bottom()));
         let renaming = self
             .multi_edit
@@ -1522,41 +1576,35 @@ impl WavesPreviewer {
             }
         }
 
-        // The second line only when there is room for it.
-        if inner.height() < HEADER_LINE_H * 2.0 + 4.0 {
+        if !two_lines {
             return;
         }
+        // Fader, its value in dB, the pan knob, Mute, Solo.
         let line2 = Rect::from_min_size(
             Pos2::new(inner.left(), line1.bottom() + 4.0),
             Vec2::new(inner.width(), HEADER_LINE_H),
         );
         let solo = Rect::from_min_max(Pos2::new(line2.right() - HEADER_BUTTON, line2.top()), line2.right_bottom());
-        let mute = solo.translate(Vec2::new(-(HEADER_BUTTON + 2.0), 0.0));
-        let fader = Rect::from_min_max(line2.min, Pos2::new(mute.left() - 6.0, line2.bottom()));
-        if ui
-            .put(mute, egui::Button::selectable(track.mute, "M").small())
-            .on_hover_text("Mute")
-            .clicked()
-        {
-            actions.push(Action::ToggleMute(ti));
-        }
-        if ui
-            .put(solo, egui::Button::selectable(track.solo, "S").small())
-            .on_hover_text("Solo")
-            .clicked()
-        {
-            actions.push(Action::ToggleSolo(ti));
-        }
+        let mute_left = mute_solo(solo, ui, actions);
+        let knob = Rect::from_min_size(
+            Pos2::new(mute_left - 6.0 - HEADER_LINE_H, line2.top()),
+            Vec2::splat(HEADER_LINE_H),
+        );
+        let value = Rect::from_min_max(
+            Pos2::new(knob.left() - 4.0 - VOLUME_VALUE_W, line2.top()),
+            Pos2::new(knob.left() - 4.0, line2.bottom()),
+        );
+        let fader = Rect::from_min_max(line2.min, Pos2::new(value.left() - 4.0, line2.bottom()));
+        let mut volume = track.volume_db;
         ui.scope_builder(egui::UiBuilder::new().max_rect(fader), |ui| {
             ui.spacing_mut().slider_width = fader.width().max(10.0);
-            let mut volume = track.volume_db;
             let slider = ui
                 .add(
                     egui::Slider::new(&mut volume, TRACK_GAIN_MIN_DB..=TRACK_GAIN_MAX_DB)
                         .show_value(false)
                         .trailing_fill(true),
                 )
-                .on_hover_text(format!("{volume:+.1} dB (double-click: 0 dB)"));
+                .on_hover_text(format!("Volume {volume:+.1} dB (double-click: 0 dB)"));
             if slider.drag_started() || (slider.clicked() && !slider.dragged()) {
                 actions.push(Action::Checkpoint);
             }
@@ -1567,6 +1615,64 @@ impl WavesPreviewer {
                 actions.push(Action::SetVolume(ti, volume));
             }
         });
+        // The value itself: drag it, or click and type a level in dB.
+        let mut typed = track.volume_db;
+        let resp = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(value), |ui| {
+                ui.style_mut().override_text_style = Some(egui::TextStyle::Small);
+                ui.add_sized(
+                    value.size(),
+                    egui::DragValue::new(&mut typed)
+                        .range(TRACK_GAIN_MIN_DB..=TRACK_GAIN_MAX_DB)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" dB"),
+                )
+            })
+            .inner
+            .on_hover_text("Volume in dB: drag, or click and type");
+        if resp.drag_started() || resp.gained_focus() {
+            actions.push(Action::Checkpoint);
+        }
+        if resp.changed() {
+            actions.push(Action::SetVolume(ti, typed));
+        }
+
+        let rotates = pan_rotates(out);
+        let pans = track_pans(out, track.output);
+        let (resp, panned) = pan_knob(
+            ui,
+            knob,
+            ui.id().with(("me_pan", &track.id)),
+            track.pan,
+            pans,
+            pan_sweep(rotates),
+        );
+        let resp = if pans {
+            resp.on_hover_text(format!(
+                "Pan {} (double-click: centre)\n{}",
+                pan_text(track.pan, rotates),
+                if rotates {
+                    "Turns the track round the listener, over the speakers of its \
+                     layer (VBAP). The LFE is never turned. Drag right or up to turn \
+                     right; Shift is finer. A Pan lane turns it further from here."
+                } else {
+                    "Balances left against right. Drag right or up to go right; \
+                     Shift is finer. A Pan lane moves it from here."
+                }
+            ))
+        } else {
+            resp.on_hover_text(NO_PAN_HOVER)
+        };
+        if resp.drag_started() {
+            actions.push(Action::Checkpoint);
+        }
+        if resp.double_clicked() {
+            actions.push(Action::Checkpoint);
+            actions.push(Action::SetPan(ti, 0.0));
+        } else if let Some(pan) = panned {
+            actions.push(Action::SetPan(ti, pan));
+        }
     }
 
     /// The strip at the bottom of a header that resizes its row.
@@ -1586,7 +1692,7 @@ impl WavesPreviewer {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
             ui.painter().line_segment(
                 [Pos2::new(grip.left(), grip.center().y), Pos2::new(grip.right(), grip.center().y)],
-                Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                Stroke::new(2.0_f32, ui.visuals().selection.bg_fill),
             );
         }
         if resp.drag_started() {
@@ -1727,7 +1833,7 @@ impl WavesPreviewer {
         let text = visuals.strong_text_color();
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, accent.gamma_multiply(0.08));
-        painter.rect_stroke(rect, 0.0, Stroke::new(1.5, accent), StrokeKind::Inside);
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.5_f32, accent), StrokeKind::Inside);
         let inner = rect.shrink2(Vec2::new(0.0, 3.0));
         let split = !preview.group(rest_kind).0.is_empty();
         let main_band = if split {
@@ -1767,7 +1873,7 @@ impl WavesPreviewer {
         for x in [x0, x1] {
             painter.line_segment(
                 [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-                Stroke::new(2.0, accent),
+                Stroke::new(2.0_f32, accent),
             );
         }
         // The summary sits above the row, on a layer of its own, so a short
@@ -1792,7 +1898,7 @@ impl WavesPreviewer {
         let left = x0.clamp(map.left, (map.right - size.x).max(map.left));
         let pill = Rect::from_min_size(Pos2::new(left, rect.top() - size.y - 2.0), size);
         label_painter.rect_filled(pill, 4.0, visuals.extreme_bg_color);
-        label_painter.rect_stroke(pill, 4.0, Stroke::new(1.0, accent), StrokeKind::Inside);
+        label_painter.rect_stroke(pill, 4.0, Stroke::new(1.0_f32, accent), StrokeKind::Inside);
         label_painter.galley(pill.min + Vec2::new(6.0, 3.0), galley, text);
         self.multi_edit.ui.drop_preview_shown = Some((start, span, count));
 
@@ -1859,7 +1965,7 @@ impl WavesPreviewer {
             painter.rect_stroke(
                 ghost,
                 CLIP_CORNER,
-                Stroke::new(1.5, Color32::WHITE.gamma_multiply(0.7 * opacity)),
+                Stroke::new(1.5_f32, Color32::WHITE.gamma_multiply(0.7 * opacity)),
                 StrokeKind::Inside,
             );
             let room = ghost.shrink2(Vec2::new(5.0, 2.0)).intersect(clip_rect);
@@ -2003,7 +2109,7 @@ impl WavesPreviewer {
                     };
                     painter.line_segment(
                         [Pos2::new(x, top), Pos2::new(x, bottom.max(top + 1.0))],
-                        Stroke::new(1.0, color),
+                        Stroke::new(1.0_f32, color),
                     );
                 }
             }
@@ -2011,7 +2117,7 @@ impl WavesPreviewer {
 
         // Fades as the design has them: a line from the bottom corner up to
         // where the fade ends. Crossfades with a neighbour draw an X.
-        let fade_stroke = Stroke::new(1.2, Color32::WHITE.gamma_multiply(0.8));
+        let fade_stroke = Stroke::new(1.2_f32, Color32::WHITE.gamma_multiply(0.8));
         if clip.fade_in_secs > 0.0 {
             let fx = map.x(clip.start_secs + clip.fade_in_secs);
             painter.line_segment([rect.left_bottom(), Pos2::new(fx, rect.top())], fade_stroke);
@@ -2040,9 +2146,9 @@ impl WavesPreviewer {
             }
         }
         let outline = if selected {
-            Stroke::new(if primary { 2.5 } else { 2.0 }, ui.visuals().selection.stroke.color)
+            Stroke::new(if primary { 2.5_f32 } else { 2.0_f32 }, ui.visuals().selection.stroke.color)
         } else {
-            Stroke::new(1.0, Color32::from_gray(200).gamma_multiply(0.6))
+            Stroke::new(1.0_f32, Color32::from_gray(200).gamma_multiply(0.6))
         };
         painter.rect_stroke(rect, CLIP_CORNER, outline, StrokeKind::Inside);
 
@@ -2092,7 +2198,7 @@ impl WavesPreviewer {
                     let x = map.x(at);
                     painter.line_segment(
                         [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-                        Stroke::new(2.0, CUT_LINE_COLOR),
+                        Stroke::new(2.0_f32, CUT_LINE_COLOR),
                     );
                 }
             }
@@ -2259,7 +2365,7 @@ impl WavesPreviewer {
             painter.rect_stroke(
                 chip.expand(1.0),
                 3.0,
-                Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                Stroke::new(2.0_f32, ui.visuals().selection.stroke.color),
                 StrokeKind::Outside,
             );
         }
@@ -2311,9 +2417,9 @@ impl WavesPreviewer {
         ui.painter().rect_filled(header, 0.0, visuals.faint_bg_color);
         ui.painter().rect_filled(area, 0.0, visuals.extreme_bg_color.gamma_multiply(0.35));
         ui.painter()
-            .line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0, line));
+            .line_segment([row.left_bottom(), row.right_bottom()], Stroke::new(1.0_f32, line));
         ui.painter()
-            .line_segment([header.right_top(), header.right_bottom()], Stroke::new(1.0, line));
+            .line_segment([header.right_top(), header.right_bottom()], Stroke::new(1.0_f32, line));
 
         // Header: the bracket tying the lane to its track, the name, the value
         // at the playhead and the remove button, each in its own place.
@@ -2321,7 +2427,7 @@ impl WavesPreviewer {
         let bracket_x = header.left() + LANE_INDENT * 0.5;
         hp.line_segment(
             [Pos2::new(bracket_x, row.top()), Pos2::new(bracket_x, row.bottom())],
-            Stroke::new(1.0, line),
+            Stroke::new(1.0_f32, line),
         );
         let remove = Rect::from_center_size(
             Pos2::new(header.right() - HEADER_PAD - 8.0, header.center().y),
@@ -2334,12 +2440,15 @@ impl WavesPreviewer {
             FontId::proportional(13.0),
             color,
         );
-        let unheard = lane.param == LaneParam::Pan && track.output.is_mono();
+        let out = doc.output_layout();
+        let unheard = lane.param == LaneParam::Pan && !track_pans(&out, track.output);
         hp.text(
             Pos2::new(remove.left() - 6.0, header.center().y),
             Align2::RIGHT_CENTER,
             if unheard {
                 "mono: no pan".to_string()
+            } else if lane.param == LaneParam::Pan {
+                pan_text(lane.value_at(playhead), pan_rotates(&out))
             } else {
                 lane.param.format_value(lane.value_at(playhead))
             },
@@ -2397,7 +2506,7 @@ impl WavesPreviewer {
             let strong = (value - lane.param.neutral()).abs() < f32::EPSILON;
             painter.line_segment(
                 [Pos2::new(area.left(), y), Pos2::new(area.right(), y)],
-                Stroke::new(1.0, line.gamma_multiply(if strong { 0.9 } else { 0.4 })),
+                Stroke::new(1.0_f32, line.gamma_multiply(if strong { 0.9 } else { 0.4 })),
             );
             let fits = y - LANE_LABEL_H >= area.top() && labelled.iter().all(|other| (other - y).abs() >= LANE_LABEL_H);
             if fits {
@@ -2436,7 +2545,7 @@ impl WavesPreviewer {
             let c = Pos2::new(map.x(point.secs), y_of(point.value));
             let r = if hot { POINT_RADIUS_HOT } else { POINT_RADIUS };
             painter.circle_filled(c, r, color);
-            painter.circle_stroke(c, r, Stroke::new(1.0, Color32::from_black_alpha(200)));
+            painter.circle_stroke(c, r, Stroke::new(1.0_f32, Color32::from_black_alpha(200)));
         }
         if let (Some(pos), true) = (resp.hover_pos(), resp.hovered()) {
             let text = match nearest {
@@ -2499,7 +2608,7 @@ impl WavesPreviewer {
         } else {
             visuals.text_color()
         };
-        ui.painter().circle_stroke(center, 14.0, Stroke::new(1.5, color));
+        ui.painter().circle_stroke(center, 14.0, Stroke::new(1.5_f32, color));
         ui.painter().text(center, Align2::CENTER_CENTER, "+", FontId::proportional(20.0), color);
         let button = button.on_hover_text("Add a track (drop rows here for a new one)");
         egui::Popup::menu(&button).show(|ui| {
@@ -2937,6 +3046,15 @@ impl WavesPreviewer {
                     }
                     self.multi_edit_touched();
                 }
+                Action::SetPan(ti, pan) => {
+                    if let Some(track) = self
+                        .multi_edit_active_doc_mut()
+                        .and_then(|doc| doc.tracks.get_mut(ti))
+                    {
+                        track.pan = pan.clamp(-1.0, 1.0);
+                    }
+                    self.multi_edit_touched();
+                }
                 Action::ToggleMute(ti) => self.multi_edit_toggle_track_flag(ti, true),
                 Action::ToggleSolo(ti) => self.multi_edit_toggle_track_flag(ti, false),
                 Action::ToggleLanes(ti) => {
@@ -3104,6 +3222,20 @@ impl WavesPreviewer {
                 }
             }
         }
+    }
+
+    /// Take every track out of solo, so all of them are heard again.
+    fn multi_edit_clear_solo(&mut self) {
+        if !self.multi_edit_active_doc().is_some_and(|doc| doc.any_solo()) {
+            return;
+        }
+        self.multi_edit_checkpoint();
+        if let Some(doc) = self.multi_edit_active_doc_mut() {
+            for track in &mut doc.tracks {
+                track.solo = false;
+            }
+        }
+        self.multi_edit_touched();
     }
 
     fn multi_edit_toggle_track_flag(&mut self, ti: usize, mute: bool) {

@@ -379,7 +379,8 @@ impl WavesPreviewer {
         {
             return None;
         }
-        let tool = tab.preview_audio_tool?;
+        // A live preview plays the tab itself (see `ToolKind::previews_live`).
+        let tool = tab.preview_audio_tool.filter(|tool| !tool.previews_live())?;
         let overlay = tab.preview_overlay.as_ref()?;
         if overlay.source_tool != tool {
             return None;
@@ -2011,11 +2012,13 @@ impl WavesPreviewer {
     }
 
     pub(super) fn clear_preview_if_any(&mut self, tab_idx: usize) {
+        // A live preview never replaced the tab's audio: playback goes on,
+        // and the engine's live panner is taken away by its sync.
         let had_preview_audio = self
             .tabs
             .get(tab_idx)
             .and_then(|tab| tab.preview_audio_tool)
-            .is_some();
+            .is_some_and(|tool| !tool.previews_live());
         if had_preview_audio {
             self.audio.stop();
             self.preview_restore_audio_for_tab(tab_idx);

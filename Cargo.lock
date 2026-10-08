@@ -3998,6 +3998,7 @@ dependencies = [
  "tiny_http",
  "tokenizers",
  "toml 1.1.4+spec-1.1.0",
+ "truehd",
  "vorbis_rs",
  "vst3",
  "walkdir",
@@ -6884,6 +6885,18 @@ checksum = "1ad61aed86bc3faea4300c7aee358b4c6d0c8d6ccc36524c96e4c92ccf26e77e"
 dependencies = [
  "num-integer",
  "strength_reduce",
+]
+
+[[package]]
+name = "truehd"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3670e5f6df01d8518e225c37ada5c9e41fa5d98fb414ef1eed051e71c885da16"
+dependencies = [
+ "anyhow",
+ "bitstream-io",
+ "log",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

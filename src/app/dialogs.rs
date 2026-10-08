@@ -69,7 +69,7 @@ impl WavesPreviewer {
         #[cfg(not(feature = "kittest"))]
         {
             rfd::FileDialog::new()
-                .add_filter("Media", crate::audio_io::SUPPORTED_EXTS)
+                .add_filter("Media", &crate::audio_io::open_dialog_extensions())
                 .pick_files()
         }
     }
@@ -175,6 +175,22 @@ impl WavesPreviewer {
     }
 
     /// Ask for an HRTF in SOFA format.
+    /// Where to write an ADM BWF export (`spatial_ops`).
+    pub(super) fn pick_adm_export_dialog(&mut self, suggested: &str) -> Option<PathBuf> {
+        #[cfg(feature = "kittest")]
+        {
+            let _ = suggested;
+            return None;
+        }
+        #[cfg(not(feature = "kittest"))]
+        {
+            rfd::FileDialog::new()
+                .add_filter("ADM BWF", &["wav"])
+                .set_file_name(suggested)
+                .save_file()
+        }
+    }
+
     pub(super) fn pick_sofa_dialog(&mut self) -> Option<PathBuf> {
         #[cfg(feature = "kittest")]
         {

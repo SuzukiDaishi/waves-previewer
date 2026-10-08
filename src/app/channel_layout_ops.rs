@@ -214,7 +214,9 @@ impl WavesPreviewer {
             }
             _ => None,
         };
-        let channels = self.audio.source_channels().unwrap_or(0);
+        // What reaches the matrix: an object source's 7.1.4 bed, not its
+        // tracks (the callback lays the bed out itself).
+        let channels = self.audio.rendered_channels().unwrap_or(0);
         let mask = path.and_then(|path| self.channel_mask_for(path));
         let unchanged = out_unchanged
             && self.channel_layout_applied.as_ref().is_some_and(|applied| {
@@ -239,7 +241,23 @@ impl WavesPreviewer {
     /// Which speaker each channel of what is playing feeds, when something
     /// says: a file's layout, or a timeline's output format.
     pub(super) fn playing_source_layout(&self, channels: usize) -> Option<Layout> {
+        // The live panner sends on its own speakers (a mono file panned is
+        // a stereo pair).
+        if let Some(layout) = self
+            .audio
+            .panned_layout()
+            .filter(|layout| layout.len() == channels)
+        {
+            return Some(layout);
+        }
         match &self.playback_session.source {
+            // Object audio reaches the speakers as its 7.1.4 bed.
+            super::PlaybackSourceKind::ListPreview(_) | super::PlaybackSourceKind::EditorTab(_)
+                if channels == crate::spatial::panner::BED_CHANNELS
+                    && self.audio.object_mix_active() =>
+            {
+                crate::audio_channels::standard_layout_vec(channels)
+            }
             super::PlaybackSourceKind::ListPreview(path)
             | super::PlaybackSourceKind::EditorTab(path) => self.channel_layout_for(path, channels),
             super::PlaybackSourceKind::MultiEdit(id) => self

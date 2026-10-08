@@ -179,7 +179,10 @@ impl super::WavesPreviewer {
                 let cached_loading_overview = cached.waveform_minmax;
                 let mut tab = EditorTab::new_base(path.to_path_buf(), name);
                 self.seed_editor_notes_for_tab(&mut tab);
-                tab.loading = deferred_audio_path.is_some();
+                // Either way the samples come back on a worker (from the
+                // disk, or from the cache through `..._from_ready_channels`):
+                // until they land the tab is loading, not an empty file.
+                tab.loading = true;
                 tab.buffer_sample_rate = cached_sr;
                 tab.samples_len_visual = cached_samples_len;
                 tab.loading_waveform_minmax = cached_loading_overview;
@@ -308,6 +311,18 @@ impl super::WavesPreviewer {
         if crate::media_kind::is_video_path(path) && self.meta_for_path(path).is_none() {
             self.queue_header_meta_for_path(&path.to_path_buf(), true);
         }
+        // Likewise whether a WAVE or a TrueHD stream is object audio (and so
+        // read-only, played through the object mix, offered the Spatial
+        // view): that is header metadata too. The ordinary request, as a
+        // list row makes it.
+        let may_be_objects = crate::audio_io::is_truehd_path(path)
+            || path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"));
+        if may_be_objects && self.meta_for_path(path).is_none() {
+            self.queue_meta_for_path(&path.to_path_buf(), true);
+        }
         let decode_failed = self.is_decode_failed_path(path);
         let audio_track_absent = self
             .meta_for_path(path)
@@ -356,7 +371,8 @@ impl super::WavesPreviewer {
             let cached_loading_overview = cached.waveform_minmax;
             let mut tab = EditorTab::new_base(path.to_path_buf(), name);
             self.seed_editor_notes_for_tab(&mut tab);
-            tab.loading = deferred_audio_path.is_some();
+            // As above: restored on a worker, loading until it lands.
+            tab.loading = true;
             tab.buffer_sample_rate = cached_sr;
             tab.samples_len_visual = cached_samples_len;
             tab.loading_waveform_minmax = cached_loading_overview;
@@ -430,6 +446,9 @@ impl super::WavesPreviewer {
         let initial_tool = self.tool_for_new_editor_tab();
         let mut tab = EditorTab::new_base(path.to_path_buf(), name);
         self.seed_editor_notes_for_tab(&mut tab);
+        if self.source_content(path).object_audio {
+            tab.read_only = true;
+        }
         tab.loading = loading;
         tab.audio_track_absent = audio_track_absent;
         tab.audio_track_unsupported = audio_track_unsupported;

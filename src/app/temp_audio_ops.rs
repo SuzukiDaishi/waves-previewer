@@ -83,6 +83,15 @@ impl WavesPreviewer {
                 .iter()
                 .map(|entry| entry.path.clone()),
         );
+        // TrueHD copies in use stay; the rest (other runs') go.
+        let mut truehd_keep: HashSet<PathBuf> = HashSet::new();
+        truehd_keep.extend(self.spatial.truehd_copies.values().cloned());
+        cleanup_cache_dir(
+            &neowaves_temp_cache_dir("truehd"),
+            &truehd_keep,
+            true,
+            TEMP_CACHE_RETENTION,
+        );
         cleanup_cache_dir(
             &neowaves_temp_cache_dir("clipboard"),
             &keep,

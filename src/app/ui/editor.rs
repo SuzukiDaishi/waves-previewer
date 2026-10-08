@@ -3539,8 +3539,18 @@ impl crate::app::WavesPreviewer {
         let editor_scroll_source = self.scroll_source_for(UiSurface::Editor);
         let mini_meter_spectrum_interval_secs =
             self.perf.mini_meter_spectrum_interval().as_secs_f64();
+        // Object audio's samples are read-only (`media_kind`). The list's
+        // metadata can arrive after the tab opened, so this is checked here
+        // as well as on open -- a lookup, not a read.
+        if !self.tabs[tab_idx].read_only && self.source_content(&self.tabs[tab_idx].path).object_audio {
+            self.tabs[tab_idx].read_only = true;
+        }
         if self.tabs[tab_idx].primary_view == EditorPrimaryView::Metadata {
             self.ui_metadata_inspector(ui, ctx, tab_idx);
+            return;
+        }
+        if self.tabs[tab_idx].primary_view == EditorPrimaryView::Spatial {
+            self.ui_spatial_view(ui, ctx, tab_idx);
             return;
         }
         let editor_panel_rect = ui.max_rect();
@@ -3723,6 +3733,7 @@ impl crate::app::WavesPreviewer {
         let mut request_preview_refresh = false;
         let mut requested_channel_view: Option<ChannelView> = None;
         let channel_count = self.tabs[tab_idx].ch_samples.len();
+        let tab_is_object_audio = self.source_content(&self.tabs[tab_idx].path).object_audio;
         ui.horizontal_wrapped(|ui| {
             let tab = &mut self.tabs[tab_idx];
             // Loop mode toggles (kept): Off / OnWhole / Marker
@@ -3759,6 +3770,14 @@ impl crate::app::WavesPreviewer {
                         ui.separator();
                         if ui.selectable_label(false, "Metadata").clicked() {
                             tab.primary_view = EditorPrimaryView::Metadata;
+                        }
+                        if tab_is_object_audio
+                            && ui
+                                .selectable_label(false, "Spatial")
+                                .on_hover_text("Where every bed and object is heard, and when")
+                                .clicked()
+                        {
+                            tab.primary_view = EditorPrimaryView::Spatial;
                         }
                     });
             });
@@ -4271,6 +4290,8 @@ impl crate::app::WavesPreviewer {
         let mut pending_denoise_preview = false;
         let mut pending_denoise_apply = false;
         let mut pending_channel_routing_apply = false;
+        let mut pending_panner_apply = false;
+        let mut pending_panner_overlay = false;
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_play_selection = false;
@@ -4431,10 +4452,34 @@ impl crate::app::WavesPreviewer {
         };
         // Resolved before `self` is borrowed by the body closure below.
         let editor_keys_allowed = self.surface_keys_allowed(UiSurface::Editor);
-        let mini_meter_layout = self
+        // An object-audio tab playing through its object mix is metered as
+        // its 7.1.4 bed: the tab holds no samples of its own, and the bed is
+        // what is heard.
+        let object_bed_meter = self
             .tabs
             .get(tab_idx)
-            .and_then(|tab| self.channel_layout_for(&tab.path, tab.ch_samples.len()));
+            .filter(|tab| {
+                self.audio.object_mix_active()
+                    && matches!(
+                        &self.playback_session.source,
+                        crate::app::PlaybackSourceKind::EditorTab(path) if *path == tab.path
+                    )
+            })
+            .and_then(|_| self.audio.object_bed_recent(crate::audio::OBJECT_BED_TAP_FRAMES));
+        let mini_meter_layout = if object_bed_meter.is_some() {
+            crate::audio_channels::standard_layout_vec(crate::spatial::panner::BED_CHANNELS)
+        } else {
+            self.tabs
+                .get(tab_idx)
+                .and_then(|tab| self.channel_layout_for(&tab.path, tab.ch_samples.len()))
+        };
+        // The Panner's panel: the speakers and where each channel goes.
+        let panner_view = self
+            .tabs
+            .get(tab_idx)
+            .filter(|tab| tab.active_tool == ToolKind::Panner)
+            .map(|_| self.panner_view(tab_idx))
+            .unwrap_or_default();
         // The file the headphone rendering is playing now, if any.
         let hrtf_active_path = match (&self.hrtf_runtime.status, &self.playback_session.source) {
             (
@@ -9264,12 +9309,18 @@ impl crate::app::WavesPreviewer {
                     // converting the playhead to seconds is the whole of it.
                     let video_secs = playhead_display_now as f64
                         / Self::editor_display_sample_rate_for_tab(tab, out_sr).max(1) as f64;
+                    // The object bed's newest frames end at the playhead.
+                    let (meter_audio, meter_pos) = match (preview_audio.as_deref(), object_bed_meter.as_deref()) {
+                        (Some(audio), _) => (Some(audio), pos_audio_now),
+                        (None, Some(bed)) => (Some(bed), bed.len().saturating_sub(1)),
+                        (None, None) => (None, pos_audio_now),
+                    };
                     Self::draw_editor_mini_meter(
                         ui,
                         tab,
                         playhead_display_now,
-                        preview_audio.as_deref(),
-                        pos_audio_now,
+                        meter_audio,
+                        meter_pos,
                         out_sr,
                         playing,
                         video_secs,
@@ -9650,6 +9701,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::SpectralWarp => "Spectral Warp",
                                 ToolKind::SpectralBrush => "Spectral Brush",
                                 ToolKind::ChannelRouting => "Channel Routing",
+                                ToolKind::Panner => "Panner",
                             };
                             // Grouped icon toolbar; wraps in narrow panels so
                             // every tool stays one click away. Selection still
@@ -9684,6 +9736,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::SpectralWarp => "🌀",
                                 ToolKind::SpectralBrush => "🖌",
                                 ToolKind::ChannelRouting => "⇄",
+                                ToolKind::Panner => "◎",
                             };
                             const TOOL_GROUPS: [&[ToolKind]; 4] = [
                                 // Navigate / annotate / basic level edits
@@ -9723,6 +9776,7 @@ impl crate::app::WavesPreviewer {
                                     ToolKind::DeHum,
                                     ToolKind::DeNoise,
                                     ToolKind::ChannelRouting,
+                                    ToolKind::Panner,
                                 ],
                             ];
                             ui.horizontal_wrapped(|ui| {
@@ -9858,6 +9912,7 @@ impl crate::app::WavesPreviewer {
                                     | ToolKind::NoiseGate
                                     | ToolKind::Eq
                                     | ToolKind::Compressor
+                                    | ToolKind::Panner
                             ) {
                                 if let Some(label) = Self::editor_channel_mask_label(tab) {
                                     ui.label(
@@ -13805,6 +13860,157 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                                         }
                                     });
                                 }
+                                ToolKind::Panner => {
+                                    use crate::app::ui::pan_controls::{labelled_knob, pan_field, PAN_KNOB_BALANCE_SWEEP_DEG};
+                                    use crate::panning::{PanMode, PAN_TURN_DEG};
+                                    ui.scope(|ui| {
+                                        let s = ui.style_mut();
+                                        s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                        s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                        let view = &panner_view;
+                                        if view.layout.is_empty() {
+                                            ui.label(RichText::new("Waiting for the audio to load.").weak());
+                                            return;
+                                        }
+                                        let mono = view.mono();
+                                        let mode = tab.tool_state.pan_mode_for(&view.layout);
+                                        // A gesture ended: redraw the green waveform.
+                                        let mut settled = false;
+                                        ui.horizontal(|ui| {
+                                            ui.label("Mode");
+                                            for candidate in [PanMode::Balance, PanMode::Vbap] {
+                                                let mut resp = ui.selectable_label(mode == candidate, candidate.label());
+                                                if candidate == PanMode::Vbap && !mono && !view.three_d {
+                                                    resp = resp.on_hover_text(
+                                                        "This layout has no height speakers: the turn stays on the horizontal ring (2-D VBAP), and pitch and roll do nothing.",
+                                                    );
+                                                }
+                                                if resp.clicked() && mode != candidate {
+                                                    tab.tool_state.pan_mode = Some(candidate);
+                                                    settled = true;
+                                                }
+                                            }
+                                        });
+                                        let caption = if mono {
+                                            "Mono -> stereo: Apply makes the file two channels."
+                                        } else if mode == PanMode::Balance {
+                                            "Turns down the side the pan moves away from. Channels on the centre line and the LFE stay as they are."
+                                        } else {
+                                            "Turns the whole sound field and lays every channel back onto the speakers by VBAP. The LFE never moves, and nothing is panned into it."
+                                        };
+                                        ui.label(RichText::new(caption).weak().small());
+                                        match mode {
+                                            PanMode::Balance => {
+                                                let edit = labelled_knob(
+                                                    ui,
+                                                    ui.id().with("panner_balance"),
+                                                    "Balance",
+                                                    "Drag right or up to go right; Shift is finer. Double-click: centre.",
+                                                    tab.tool_state.pan_balance * 100.0,
+                                                    -100.0..=100.0,
+                                                    100.0,
+                                                    PAN_KNOB_BALANCE_SWEEP_DEG,
+                                                    " %",
+                                                    0,
+                                                    true,
+                                                );
+                                                if let Some(value) = edit.value {
+                                                    tab.tool_state.pan_balance = value / 100.0;
+                                                }
+                                                settled |= edit.finished;
+                                            }
+                                            PanMode::Vbap => {
+                                                let tilt = view.three_d && !mono;
+                                                let knobs: [(&str, &str, f32, std::ops::RangeInclusive<f32>, bool); 3] = [
+                                                    ("Yaw", "Turns the field to the right (drag right or up) or the left. Double-click: front.", tab.tool_state.pan_yaw_deg, -180.0..=180.0, true),
+                                                    ("Pitch", "Lifts the front up (or tips it down). Double-click: level.", tab.tool_state.pan_pitch_deg, -90.0..=90.0, tilt),
+                                                    ("Roll", "Lowers the right side (or the left). Double-click: level.", tab.tool_state.pan_roll_deg, -180.0..=180.0, tilt),
+                                                ];
+                                                let mut turned = [None; 3];
+                                                ui.horizontal_top(|ui| {
+                                                    for (i, (label, hover, value, range, enabled)) in knobs.into_iter().enumerate() {
+                                                        let edit = labelled_knob(
+                                                            ui,
+                                                            ui.id().with(("panner_turn", i)),
+                                                            label,
+                                                            hover,
+                                                            value,
+                                                            range,
+                                                            PAN_TURN_DEG,
+                                                            PAN_TURN_DEG,
+                                                            "\u{b0}",
+                                                            0,
+                                                            enabled,
+                                                        );
+                                                        turned[i] = edit.value;
+                                                        settled |= edit.finished;
+                                                    }
+                                                });
+                                                if let Some(v) = turned[0] {
+                                                    tab.tool_state.pan_yaw_deg = v;
+                                                }
+                                                if let Some(v) = turned[1] {
+                                                    tab.tool_state.pan_pitch_deg = v;
+                                                }
+                                                if let Some(v) = turned[2] {
+                                                    tab.tool_state.pan_roll_deg = v;
+                                                }
+                                                if !tilt {
+                                                    ui.label(
+                                                        RichText::new(if mono {
+                                                            "A mono file turns between the two speakers of the stereo pair it becomes."
+                                                        } else {
+                                                            "No height speakers: pitch and roll have nowhere to go."
+                                                        })
+                                                        .weak()
+                                                        .small(),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        let live = tab.preview_audio_tool == Some(ToolKind::Panner);
+                                        ui.horizontal(|ui| {
+                                            let preview = ui
+                                                .add(egui::Button::selectable(live, "Preview (live)"))
+                                                .on_hover_text(
+                                                    "Play the tab and turn the knobs: the pan is heard as it moves. Nothing is written until Apply.",
+                                                );
+                                            if preview.clicked() {
+                                                if live {
+                                                    need_restore_preview = true;
+                                                } else {
+                                                    tab.preview_audio_tool = Some(ToolKind::Panner);
+                                                    settled = true;
+                                                }
+                                            }
+                                            let neutral = !mono && tab.tool_state.pan_params(&view.layout).is_neutral();
+                                            let can_apply = !neutral && !apply_busy && !tab.loading && !tab.ch_samples.is_empty();
+                                            let apply = ui
+                                                .add_enabled(
+                                                    can_apply,
+                                                    egui::Button::new(if mono { "Apply (to stereo)" } else { "Apply" }),
+                                                )
+                                                .on_disabled_hover_text(if tab.ch_samples.is_empty() {
+                                                    "Only an overview of this file is loaded: the preview works, Apply does not."
+                                                } else {
+                                                    "Nothing to apply: the pan is at the centre."
+                                                });
+                                            if apply.clicked() {
+                                                pending_panner_apply = true;
+                                            }
+                                            if ui.button("Reset").clicked() {
+                                                tab.tool_state = tab.tool_state.without_pan();
+                                                settled = true;
+                                            }
+                                        });
+                                        if mode == PanMode::Vbap {
+                                            pan_field(ui, &view.speakers, &view.sources);
+                                        }
+                                        if settled && tab.preview_audio_tool == Some(ToolKind::Panner) {
+                                            pending_panner_overlay = true;
+                                        }
+                                    });
+                                }
                                 ToolKind::DeNoise => {
                                     ui.scope(|ui| {
                                         let s = ui.style_mut();
@@ -14755,6 +14961,11 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                 }
                 if pending_channel_routing_apply {
                     self.editor_apply_channel_routing(tab_idx);
+                }
+                if pending_panner_apply {
+                    self.editor_apply_panner(tab_idx);
+                } else if pending_panner_overlay {
+                    self.panner_refresh_overlay(tab_idx);
                 }
                 if pending_plugin_scan {
                     self.spawn_plugin_scan();

@@ -472,7 +472,8 @@ impl CliWorkspace {
             | ToolKind::EditorNote
             | ToolKind::PluginFx
             | ToolKind::MusicAnalyze
-            | ToolKind::ChannelRouting => {
+            | ToolKind::ChannelRouting
+            | ToolKind::Panner => {
                 bail!("tool apply is not supported for {:?}", active_tool)
             }
         }

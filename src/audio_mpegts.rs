@@ -7,7 +7,10 @@
 //! patents have expired, so shipping one costs nothing. E-AC-3 is refused (its
 //! patents are younger), as are DTS, TrueHD and the AAC and MPEG audio a
 //! transport stream can also carry: those rows say `<codec> UNSUPPORTED` and
-//! the picture plays on a silent timeline.
+//! the picture plays on a silent timeline. The one exception is TrueHD in a
+//! build with the `truehd` feature: it is never decoded here either, but
+//! read through `TsTrueHdReader` into a decoded copy that plays instead
+//! (`crate::audio_truehd`).
 //!
 //! The decoded samples start at the audio stream's first PTS, and that is the
 //! zero of the row's timeline ([`timeline_zero_pts`]); the picture is placed
@@ -243,6 +246,10 @@ enum Choice<'a> {
     Unsupported(&'static str),
     Ac3(&'a TsStream, Ac3Header),
     Lpcm(&'a TsStream, LpcmHeader),
+    /// TrueHD, with the `truehd` feature: never decoded here, but through a
+    /// decoded copy (`crate::audio_truehd`, `app::spatial_ops`).
+    #[cfg(feature = "truehd")]
+    TrueHd(&'a TsStream),
 }
 
 /// The first audio stream this build decodes, in PMT order.
@@ -264,6 +271,8 @@ fn choose(probe: &TsProbe) -> Choice<'_> {
                     return Choice::Lpcm(stream, header);
                 }
             }
+            #[cfg(feature = "truehd")]
+            StreamKind::TrueHd => return Choice::TrueHd(stream),
             other => {
                 unsupported.get_or_insert(other.label());
             }
@@ -289,6 +298,8 @@ pub fn audio_presence(probe: &TsProbe) -> TsAudioPresence {
         Choice::Absent => TsAudioPresence::Absent,
         Choice::Unsupported(label) => TsAudioPresence::Unsupported(label),
         Choice::Ac3(..) | Choice::Lpcm(..) => TsAudioPresence::Decodable,
+        #[cfg(feature = "truehd")]
+        Choice::TrueHd(..) => TsAudioPresence::Decodable,
     }
 }
 
@@ -297,6 +308,8 @@ pub fn audio_presence(probe: &TsProbe) -> TsAudioPresence {
 pub fn timeline_zero_pts(probe: &TsProbe) -> Option<u64> {
     match choose(probe) {
         Choice::Ac3(stream, _) | Choice::Lpcm(stream, _) => stream.first_pts,
+        #[cfg(feature = "truehd")]
+        Choice::TrueHd(stream) => stream.first_pts,
         Choice::Absent | Choice::Unsupported(_) => probe.first_video()?.first_pts,
     }
 }
@@ -343,6 +356,19 @@ pub fn read_info(
                 header.sample_rate * u32::from(header.bits) * channels as u32,
             )
         }
+        #[cfg(feature = "truehd")]
+        Choice::TrueHd(stream) => {
+            let found = crate::audio_truehd::probe(path)?;
+            (
+                stream,
+                found.sample_rate,
+                found.channels,
+                0,
+                24,
+                SampleValueKind::Int,
+                0,
+            )
+        }
     };
     let duration_secs = stream.span_secs().filter(|secs| *secs > 0.0);
     Ok(AudioInfo {
@@ -356,7 +382,8 @@ pub fn read_info(
         total_frames: duration_secs.map(|secs| (secs * f64::from(sample_rate)).round() as u64),
         created_at,
         modified_at,
-        channel_mask: Some(mask),
+        channel_mask: (mask != 0).then_some(mask),
+        has_adm_chunks: false,
     })
 }
 
@@ -426,6 +453,11 @@ impl TsAudioDecoder {
                 Codec::Lpcm { header },
                 header.sample_rate,
                 MaskOrder::new(header.speakers),
+            ),
+            #[cfg(feature = "truehd")]
+            Choice::TrueHd(_) => anyhow::bail!(
+                "mpeg-ts: TrueHD plays from a decoded copy, not from here: {}",
+                path.display()
             ),
         };
         let mut file =
@@ -1049,5 +1081,90 @@ mod tests {
         assert_eq!(audio_presence(&probe), TsAudioPresence::Absent);
         let err = read_info(&fixture("mts_no_audio.mts"), None, None).expect_err("no audio");
         assert!(format!("{err:#}").contains("no audio stream"));
+    }
+}
+
+/// Whether a transport stream's audio is TrueHD that this build plays (from
+/// a decoded copy). Reads the head of the file: a worker's call.
+#[cfg(feature = "truehd")]
+pub fn is_truehd_stream(path: &Path) -> bool {
+    TsProbe::open_head(path)
+        .ok()
+        .is_some_and(|probe| matches!(choose(&probe), Choice::TrueHd(_)))
+}
+
+/// The TrueHD stream of a transport stream, as the bytes of its access
+/// units: every PES of its PID in order, without the AC-3 frames a Blu-ray
+/// interleaves with them for players that decode only AC-3 (a TrueHD
+/// parser would read those as damage).
+#[cfg(feature = "truehd")]
+pub struct TsTrueHdReader {
+    reader: PacketReader<File>,
+    pid: u16,
+    pes: PesAssembler,
+    pending: Vec<u8>,
+    at: usize,
+    finished: bool,
+}
+
+#[cfg(feature = "truehd")]
+impl TsTrueHdReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        let probe = TsProbe::open_head(path)?;
+        let Choice::TrueHd(stream) = choose(&probe) else {
+            anyhow::bail!("mpeg-ts: no TrueHD audio: {}", path.display());
+        };
+        let pid = stream.pid;
+        let mut file =
+            File::open(path).with_context(|| format!("open mpeg-ts: {}", path.display()))?;
+        file.seek(SeekFrom::Start(probe.first_packet))
+            .with_context(|| format!("seek mpeg-ts: {}", path.display()))?;
+        Ok(Self {
+            reader: PacketReader::new(file, probe.format),
+            pid,
+            pes: PesAssembler::default(),
+            pending: Vec::new(),
+            at: 0,
+            finished: false,
+        })
+    }
+
+    fn next_payload(&mut self) -> std::io::Result<bool> {
+        loop {
+            let pes = match self.reader.next_packet()? {
+                Some(packet) if packet.pid != self.pid => continue,
+                Some(packet) => match self.pes.push(&packet) {
+                    Some(pes) => pes,
+                    None => continue,
+                },
+                None => match self.pes.finish(self.pid) {
+                    Some(pes) => pes,
+                    None => return Ok(false),
+                },
+            };
+            // An AC-3 sync word: the compatibility stream, not ours.
+            if pes.data.starts_with(&[0x0B, 0x77]) {
+                continue;
+            }
+            self.pending = pes.data;
+            self.at = 0;
+            return Ok(true);
+        }
+    }
+}
+
+#[cfg(feature = "truehd")]
+impl std::io::Read for TsTrueHdReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        while self.at >= self.pending.len() {
+            if self.finished || !self.next_payload()? {
+                self.finished = true;
+                return Ok(0);
+            }
+        }
+        let take = out.len().min(self.pending.len() - self.at);
+        out[..take].copy_from_slice(&self.pending[self.at..self.at + take]);
+        self.at += take;
+        Ok(take)
     }
 }

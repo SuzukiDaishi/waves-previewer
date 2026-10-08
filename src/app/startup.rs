@@ -141,6 +141,22 @@ impl WavesPreviewer {
                 true
             };
             if ready {
+                if !self.startup.view_mode_applied && self.startup.cfg.open_spatial {
+                    if let Some(idx) = self.active_tab {
+                        let object = self
+                            .tabs
+                            .get(idx)
+                            .is_some_and(|tab| self.source_content(&tab.path).object_audio);
+                        // The list's metadata says "object audio" a moment
+                        // after the tab opens; wait for it.
+                        if object {
+                            if let Some(tab) = self.tabs.get_mut(idx) {
+                                tab.primary_view = super::types::EditorPrimaryView::Spatial;
+                            }
+                            self.startup.view_mode_applied = true;
+                        }
+                    }
+                }
                 if !self.startup.view_mode_applied {
                     if let Some(mode) = self.startup.cfg.open_view_mode {
                         if let Some(idx) = self.active_tab {

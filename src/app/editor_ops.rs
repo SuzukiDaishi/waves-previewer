@@ -3758,7 +3758,12 @@ impl crate::app::WavesPreviewer {
                     tab.preview_audio_tool = None;
                     tab.preview_overlay = None;
                     tab.declick_scan = None;
+                    let rewired = applied_channels.len() != tab.ch_samples.len();
                     tab.ch_samples = applied_channels;
+                    if rewired {
+                        // The Panner makes a mono file stereo.
+                        Self::editor_reset_per_channel_state(tab);
+                    }
                     // Adopt the worker-built mirror + waveform cache instead
                     // of re-cloning and re-scanning the buffers here.
                     tab.ch_samples_arc = if res.channels_arc.len() == tab.ch_samples.len()

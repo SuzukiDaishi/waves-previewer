@@ -180,6 +180,16 @@ impl WavesPreviewer {
         self.effective_display_meta_for_path(path)
     }
 
+    /// What the list knows of `path`'s content, for `media_kind`'s
+    /// content-aware predicates. A lookup, never a read.
+    pub(super) fn source_content(&self, path: &Path) -> crate::media_kind::SourceContent {
+        crate::media_kind::SourceContent {
+            object_audio: self
+                .meta_for_path(path)
+                .is_some_and(|meta| meta.object_audio.is_some()),
+        }
+    }
+
     /// Whether the Length column renders `h:mm:ss` for every row. See
     /// `list_max_duration_secs` for why this only ever latches on.
     pub(super) fn list_length_uses_hours(&self) -> bool {
@@ -848,7 +858,8 @@ impl WavesPreviewer {
                 .extension()
                 .and_then(|s| s.to_str())
                 .is_some_and(|s| s.eq_ignore_ascii_case("wav"));
-            let exportable = crate::media_kind::source_allows_export(path);
+            let exportable =
+                crate::media_kind::source_allows_export_for(path, self.source_content(path));
             if !(is_wav && on_disk && exportable) {
                 summary.can_convert_bits = false;
             }

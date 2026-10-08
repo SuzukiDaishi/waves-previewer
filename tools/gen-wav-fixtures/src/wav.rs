@@ -151,6 +151,8 @@ pub struct WavSpec {
     /// actually written, for files that claim more or less than they hold.
     pub data_len_override: Option<u32>,
     pub before_fmt: Vec<ExtraChunk>,
+    /// Between `fmt ` and `data`, where BW64 writers put `chna`.
+    pub before_data: Vec<ExtraChunk>,
     pub after_data: Vec<ExtraChunk>,
 }
 
@@ -165,6 +167,7 @@ impl WavSpec {
             block_align_override: None,
             data_len_override: None,
             before_fmt: Vec::new(),
+            before_data: Vec::new(),
             after_data: Vec::new(),
         }
     }
@@ -260,6 +263,9 @@ impl WavSpec {
             push_chunk(&mut body, &chunk.id, &chunk.payload);
         }
         push_chunk(&mut body, b"fmt ", &self.fmt_payload());
+        for chunk in &self.before_data {
+            push_chunk(&mut body, &chunk.id, &chunk.payload);
+        }
 
         body.extend_from_slice(b"data");
         let data_size_field = if self.container.is_64bit() {
@@ -390,5 +396,38 @@ pub fn junk_chunk(len: usize) -> ExtraChunk {
     ExtraChunk {
         id: *b"JUNK",
         payload: vec![0u8; len],
+    }
+}
+
+/// A `chna` chunk: `(1-based track, UID, track ref, pack ref)` per entry,
+/// each text field NUL-padded to its fixed width (12, 14, 11 bytes).
+pub fn chna_chunk(num_tracks: u16, entries: &[(u16, &str, &str, &str)]) -> ExtraChunk {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&num_tracks.to_le_bytes());
+    payload.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    let field = |out: &mut Vec<u8>, value: &str, len: usize| {
+        let bytes = value.as_bytes();
+        assert!(bytes.len() <= len, "{value} is longer than {len} bytes");
+        out.extend_from_slice(bytes);
+        out.extend(std::iter::repeat(0u8).take(len - bytes.len()));
+    };
+    for (track, uid, track_ref, pack_ref) in entries {
+        payload.extend_from_slice(&track.to_le_bytes());
+        field(&mut payload, uid, 12);
+        field(&mut payload, track_ref, 14);
+        field(&mut payload, pack_ref, 11);
+        payload.push(0);
+    }
+    ExtraChunk {
+        id: *b"chna",
+        payload,
+    }
+}
+
+/// An `axml` chunk holding `xml` as written.
+pub fn axml_chunk(xml: &str) -> ExtraChunk {
+    ExtraChunk {
+        id: *b"axml",
+        payload: xml.as_bytes().to_vec(),
     }
 }

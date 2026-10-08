@@ -435,6 +435,9 @@ mod p7_pipeline {
         cfg.open_folder = Some(dir.clone());
         cfg.open_first = false;
         let mut harness = harness_with_startup(cfg);
+        // Tall enough for the first pin row below the tool icons, which wrap
+        // onto more rows as tools are added (the Panner made it one more).
+        harness.set_size(egui::vec2(1280.0, 800.0));
         wait_until(&mut harness, "scan", |h| h.state().files.len() >= 1);
         assert!(harness.state_mut().test_open_tab_for_path(&path));
         wait_for_tab_ready(&mut harness);
@@ -453,8 +456,8 @@ mod p7_pipeline {
             Some(vec![vec![0], vec![1]])
         );
 
-        // The 1280x720 test window only exposes the first pin row, so every
-        // pointer event below is aimed at input 0.
+        // The test window only exposes the first pin row, so every pointer
+        // event below is aimed at input 0.
         let pin = in_pins[0];
         assert!(
             pin.y + 24.0 < harness.ctx.content_rect().bottom(),

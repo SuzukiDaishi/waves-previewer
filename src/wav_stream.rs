@@ -40,6 +40,11 @@ pub struct WavePcmInfo {
     /// The WAVE_FORMAT_EXTENSIBLE channel mask: which speaker each channel
     /// feeds, in bit order. `None` for a plain fmt chunk, or a mask of 0.
     pub channel_mask: Option<u32>,
+    /// Both `chna` and `axml` are present: an ADM BWF, whose tracks are
+    /// objects and beds rather than speaker channels (`crate::adm`). Noted on
+    /// the same walk, so telling a master from a plain WAV costs no extra
+    /// open.
+    pub has_adm_chunks: bool,
 }
 
 /// Returns true when mutating RIFF chunks would require an unsafe/expensive
@@ -84,6 +89,7 @@ pub fn read_wave_pcm_info(path: &Path) -> Result<Option<WavePcmInfo>> {
     let mut block_align = 0u16;
     let mut channel_mask = None;
     let mut data = None;
+    let (mut has_chna, mut has_axml) = (false, false);
     loop {
         let mut header = [0u8; 8];
         match file.read_exact(&mut header) {
@@ -91,9 +97,11 @@ pub fn read_wave_pcm_info(path: &Path) -> Result<Option<WavePcmInfo>> {
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(err) => return Err(err.into()),
         }
-        let declared = u32::from_le_bytes(header[4..8].try_into().unwrap()) as u64;
+        let mut declared = u32::from_le_bytes(header[4..8].try_into().unwrap()) as u64;
         let payload = file.stream_position()?;
         match &header[0..4] {
+            b"chna" => has_chna = true,
+            b"axml" => has_axml = true,
             b"ds64" => {
                 let read_len = declared.min(28) as usize;
                 let mut bytes = vec![0u8; read_len];
@@ -127,7 +135,9 @@ pub fn read_wave_pcm_info(path: &Path) -> Result<Option<WavePcmInfo>> {
                 };
                 let available = file_len.saturating_sub(payload);
                 data = Some((payload, logical_len.min(available)));
-                break;
+                // Keep walking the headers behind the audio, where ADM puts
+                // `axml` -- a seek and 8 bytes per chunk, never the payload.
+                declared = logical_len;
             }
             _ => {}
         }
@@ -135,7 +145,9 @@ pub fn read_wave_pcm_info(path: &Path) -> Result<Option<WavePcmInfo>> {
             .checked_add(declared)
             .and_then(|value| value.checked_add(declared & 1))
             .context("WAVE chunk offset overflow")?;
-        if next > file_len {
+        // No room for another header: stop without a read that can only
+        // fail at the end of the file (a round trip on a share, per row).
+        if next.saturating_add(8) > file_len || (data.is_some() && has_chna && has_axml) {
             break;
         }
         file.seek(SeekFrom::Start(next))?;
@@ -161,12 +173,39 @@ pub fn read_wave_pcm_info(path: &Path) -> Result<Option<WavePcmInfo>> {
         data_len,
         frame_count: data_len / block_align as u64,
         channel_mask,
+        has_adm_chunks: has_chna && has_axml,
     }))
+}
+
+/// How a [`StreamingWaveWriter`] stores its samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamSampleFormat {
+    Float32,
+    /// 24-bit signed PCM: what a TrueHD decode produces, written without
+    /// loss in three quarters of float's space.
+    Pcm24,
+}
+
+impl StreamSampleFormat {
+    fn bytes(self) -> u16 {
+        match self {
+            Self::Float32 => 4,
+            Self::Pcm24 => 3,
+        }
+    }
+
+    fn format_tag(self) -> u16 {
+        match self {
+            Self::Float32 => 3,
+            Self::Pcm24 => 1,
+        }
+    }
 }
 
 pub struct StreamingWaveWriter {
     path: PathBuf,
     writer: BufWriter<File>,
+    format: StreamSampleFormat,
     channels: u16,
     sample_rate: u32,
     frames: u64,
@@ -176,6 +215,15 @@ pub struct StreamingWaveWriter {
 
 impl StreamingWaveWriter {
     pub fn create_float32(path: &Path, channels: u16, sample_rate: u32) -> Result<Self> {
+        Self::create(path, channels, sample_rate, StreamSampleFormat::Float32)
+    }
+
+    /// A 24-bit PCM file, written with [`Self::write_interleaved_i24`].
+    pub fn create_pcm24(path: &Path, channels: u16, sample_rate: u32) -> Result<Self> {
+        Self::create(path, channels, sample_rate, StreamSampleFormat::Pcm24)
+    }
+
+    fn create(path: &Path, channels: u16, sample_rate: u32, format: StreamSampleFormat) -> Result<Self> {
         anyhow::ensure!(channels > 0, "recording channel count must be non-zero");
         anyhow::ensure!(sample_rate > 0, "recording sample rate must be non-zero");
         let file = OpenOptions::new()
@@ -188,6 +236,7 @@ impl StreamingWaveWriter {
         let mut this = Self {
             path: path.to_path_buf(),
             writer: BufWriter::new(file),
+            format,
             channels,
             sample_rate,
             frames: 0,
@@ -225,6 +274,28 @@ impl StreamingWaveWriter {
         Ok(())
     }
 
+    /// Interleaved 24-bit samples (the low 24 bits of each `i32`). Only for
+    /// a writer made with [`Self::create_pcm24`].
+    pub fn write_interleaved_i24(&mut self, samples: &[i32]) -> Result<()> {
+        anyhow::ensure!(
+            self.format == StreamSampleFormat::Pcm24,
+            "24-bit samples written to a float file"
+        );
+        for &sample in samples {
+            let bytes = sample.clamp(-(1 << 23), (1 << 23) - 1).to_le_bytes();
+            self.writer
+                .write_all(&bytes[0..3])
+                .with_context(|| format!("write audio: {}", self.path.display()))?;
+            self.data_bytes = self.data_bytes.saturating_add(3);
+            self.samples_in_frame += 1;
+            if self.samples_in_frame == self.channels {
+                self.samples_in_frame = 0;
+                self.frames = self.frames.saturating_add(1);
+            }
+        }
+        Ok(())
+    }
+
     /// Flush audio and update the size fields so a process/device failure
     /// leaves a playable partial take. This is safe to call while recording.
     pub fn checkpoint(&mut self) -> Result<WaveCheckpoint> {
@@ -249,14 +320,14 @@ impl StreamingWaveWriter {
         self.writer.write_all(&[0u8; DS64_PAYLOAD_LEN as usize])?;
         self.writer.write_all(b"fmt ")?;
         self.writer.write_all(&16u32.to_le_bytes())?;
-        self.writer.write_all(&3u16.to_le_bytes())?; // IEEE float
+        self.writer.write_all(&self.format.format_tag().to_le_bytes())?;
         self.writer.write_all(&self.channels.to_le_bytes())?;
         self.writer.write_all(&self.sample_rate.to_le_bytes())?;
-        let block_align = self.channels.saturating_mul(4);
+        let block_align = self.channels.saturating_mul(self.format.bytes());
         let byte_rate = self.sample_rate.saturating_mul(block_align as u32);
         self.writer.write_all(&byte_rate.to_le_bytes())?;
         self.writer.write_all(&block_align.to_le_bytes())?;
-        self.writer.write_all(&32u16.to_le_bytes())?;
+        self.writer.write_all(&(self.format.bytes() * 8).to_le_bytes())?;
         self.writer.write_all(b"data")?;
         self.writer.write_all(&0u32.to_le_bytes())?;
         debug_assert_eq!(self.writer.stream_position()?, DATA_OFFSET);
@@ -343,6 +414,24 @@ mod tests {
         assert_eq!(final_state.data_bytes, 24);
         let reader = hound::WavReader::open(&path).unwrap();
         assert_eq!(reader.duration(), 3);
+        drop(reader);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_pcm24_file_reads_back() {
+        let path = temp_path("pcm24");
+        let mut writer = StreamingWaveWriter::create_pcm24(&path, 2, 48_000).unwrap();
+        writer
+            .write_interleaved_i24(&[1 << 22, -(1 << 22), 8_388_607, -8_388_608])
+            .unwrap();
+        let state = writer.finalize().unwrap();
+        assert_eq!((state.frames, state.data_bytes), (2, 12));
+        let info = read_wave_pcm_info(&path).unwrap().unwrap();
+        assert_eq!((info.channels, info.bits_per_sample, info.frame_count), (2, 24, 2));
+        let mut reader = hound::WavReader::open(&path).unwrap();
+        let samples: Vec<i32> = reader.samples::<i32>().map(Result::unwrap).collect();
+        assert_eq!(samples, vec![1 << 22, -(1 << 22), 8_388_607, -8_388_608]);
         drop(reader);
         let _ = std::fs::remove_file(path);
     }

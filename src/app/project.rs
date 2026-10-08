@@ -204,6 +204,12 @@ pub struct ProjectList {
     /// conflict choice.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channel_layouts: Vec<ProjectChannelLayout>,
+    /// Spatial edits to object-audio files: per file, only the elements
+    /// someone moved (see `spatial_ops`, `docs/SPATIAL_AUDIO_SPEC.md`). The
+    /// files themselves are never written. No merge rule: two people
+    /// editing at once get the whole-document conflict choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spatial_edits: Vec<ProjectSpatialEdit>,
     #[serde(default)]
     pub format_overrides: Vec<ProjectFormatOverride>,
     #[serde(default)]
@@ -266,6 +272,109 @@ pub struct ProjectSampleRateOverride {
 pub struct ProjectChannelLayout {
     pub path: String,
     pub speakers: String,
+}
+
+/// One file's spatial edits.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProjectSpatialEdit {
+    pub path: String,
+    /// The PCM the edits were made against; a file that no longer has it
+    /// keeps them, marked stale, rather than having them applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::spatial::scene::SourceShape>,
+    pub elements: Vec<ProjectSpatialElement>,
+}
+
+/// The keyframes that replace one element's. `key` is built from the
+/// file's own identifiers (`adm:AO_1002:AC_00031001`), never a counter, so
+/// it means the same element to everyone who opens the session.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProjectSpatialElement {
+    pub key: String,
+    pub keyframes: Vec<ProjectKeyframe>,
+}
+
+/// `crate::spatial::scene::Keyframe`, in the element's own coordinates.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProjectKeyframe {
+    #[serde(rename = "t")]
+    pub secs: f64,
+    #[serde(rename = "ramp", default, skip_serializing_if = "is_zero_f64")]
+    pub ramp_secs: f64,
+    pub pos: [f32; 3],
+    #[serde(default = "unity_gain", skip_serializing_if = "is_unity_gain")]
+    pub gain: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extras: Option<String>,
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
+}
+
+fn unity_gain() -> f32 {
+    1.0
+}
+
+fn is_unity_gain(value: &f32) -> bool {
+    *value == 1.0
+}
+
+impl ProjectSpatialEdit {
+    pub fn from_edits(path: String, edits: &crate::spatial::scene::SceneEdits) -> Self {
+        Self {
+            path,
+            source: edits.shape,
+            elements: edits
+                .elements
+                .iter()
+                .map(|(key, keyframes)| ProjectSpatialElement {
+                    key: key.to_string(),
+                    keyframes: keyframes
+                        .iter()
+                        .map(|key| ProjectKeyframe {
+                            secs: key.secs,
+                            ramp_secs: key.ramp_secs,
+                            pos: key.pos,
+                            gain: key.gain,
+                            extras: key.extras.as_deref().map(str::to_string),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn to_edits(&self) -> crate::spatial::scene::SceneEdits {
+        use crate::spatial::scene::Keyframe;
+        crate::spatial::scene::SceneEdits {
+            shape: self.source,
+            elements: self
+                .elements
+                .iter()
+                .filter_map(|element| {
+                    let mut keyframes: Vec<Keyframe> = element
+                        .keyframes
+                        .iter()
+                        .filter(|key| key.secs.is_finite() && key.pos.iter().all(|v| v.is_finite()))
+                        .map(|key| Keyframe {
+                            secs: key.secs,
+                            ramp_secs: key.ramp_secs.max(0.0),
+                            pos: key.pos,
+                            gain: if key.gain.is_finite() { key.gain } else { 1.0 },
+                            extras: key.extras.as_deref().map(std::sync::Arc::from),
+                        })
+                        .collect();
+                    keyframes.sort_by(|a, b| a.secs.total_cmp(&b.secs));
+                    // Nothing usable left: no edit, so the element keeps the
+                    // file's own movement rather than falling silent.
+                    (!keyframes.is_empty()).then(|| {
+                        (std::sync::Arc::from(element.key.as_str()), std::sync::Arc::from(keyframes))
+                    })
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -811,6 +920,17 @@ pub struct ProjectToolState {
     pub compressor_release_ms: f32,
     #[serde(default)]
     pub compressor_makeup_db: f32,
+    /// The Panner's mode; absent is the default for the file's layout.
+    #[serde(default)]
+    pub pan_mode: Option<crate::panning::PanMode>,
+    #[serde(default)]
+    pub pan_balance: f32,
+    #[serde(default)]
+    pub pan_yaw_deg: f32,
+    #[serde(default)]
+    pub pan_pitch_deg: f32,
+    #[serde(default)]
+    pub pan_roll_deg: f32,
 }
 
 /// The session form of an editor tab's tool settings. One conversion, so
@@ -844,6 +964,11 @@ impl From<&super::types::ToolState> for ProjectToolState {
             compressor_attack_ms: t.compressor_attack_ms,
             compressor_release_ms: t.compressor_release_ms,
             compressor_makeup_db: t.compressor_makeup_db,
+            pan_mode: t.pan_mode,
+            pan_balance: t.pan_balance,
+            pan_yaw_deg: t.pan_yaw_deg,
+            pan_pitch_deg: t.pan_pitch_deg,
+            pan_roll_deg: t.pan_roll_deg,
         }
     }
 }
@@ -1058,6 +1183,13 @@ fn project_source_paths(project: &ProjectFile) -> Vec<&str> {
         project
             .list
             .channel_layouts
+            .iter()
+            .map(|item| item.path.as_str()),
+    );
+    out.extend(
+        project
+            .list
+            .spatial_edits
             .iter()
             .map(|item| item.path.as_str()),
     );
@@ -1360,6 +1492,9 @@ pub(super) fn repair_project_source_paths(
         repair(&mut item.path);
     }
     for item in &mut project.list.channel_layouts {
+        repair(&mut item.path);
+    }
+    for item in &mut project.list.spatial_edits {
         repair(&mut item.path);
     }
     for item in &mut project.list.format_overrides {
@@ -2011,6 +2146,11 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         dehum_harmonics: 8,
         dehum_q: 30.0,
         dehum_depth_db: 40.0,
+        pan_mode: t.pan_mode,
+        pan_balance: t.pan_balance.clamp(-1.0, 1.0),
+        pan_yaw_deg: t.pan_yaw_deg,
+        pan_pitch_deg: t.pan_pitch_deg,
+        pan_roll_deg: t.pan_roll_deg,
     }
 }
 
@@ -2051,6 +2191,7 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "SpectralBrush" => ToolKind::SpectralBrush,
         "PluginFx" => ToolKind::PluginFx,
         "ChannelRouting" => ToolKind::ChannelRouting,
+        "Panner" => ToolKind::Panner,
         _ => ToolKind::LoopEdit,
     }
 }
@@ -2072,6 +2213,7 @@ pub fn project_primary_view_string(view: EditorPrimaryView) -> String {
         EditorPrimaryView::Spec => "spec",
         EditorPrimaryView::Other => "other",
         EditorPrimaryView::Metadata => "metadata",
+        EditorPrimaryView::Spatial => "spatial",
     }
     .to_string()
 }
@@ -2121,6 +2263,7 @@ pub fn primary_view_from_project(
         Some(v) if v == "other" => EditorPrimaryView::Other,
         Some(v) if v == "wave" => EditorPrimaryView::Wave,
         Some(v) if v == "metadata" => EditorPrimaryView::Metadata,
+        Some(v) if v == "spatial" => EditorPrimaryView::Spatial,
         _ => EditorPrimaryView::from_mode(legacy_mode),
     };
     let spec_view = match spec_sub_view.map(|v| v.trim().to_ascii_lowercase()) {
@@ -2197,6 +2340,7 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         thumb: Vec::new(),
         marker_fracs: Vec::new(),
         loop_frac: None,
+        object_audio: None,
         decode_error: Some(format!("Missing: {}", path.display())),
     }
 }
@@ -2535,6 +2679,7 @@ files = []
             sample_rate_overrides: Vec::new(),
             bit_depth_overrides: Vec::new(),
             channel_layouts: Vec::new(),
+            spatial_edits: Vec::new(),
             format_overrides: Vec::new(),
             transcript_languages: Vec::new(),
             statuses: Vec::new(),
@@ -2581,6 +2726,7 @@ files = []
             sample_rate_overrides: Vec::new(),
             bit_depth_overrides: Vec::new(),
             channel_layouts: Vec::new(),
+            spatial_edits: Vec::new(),
             format_overrides: Vec::new(),
             statuses: Vec::new(),
             tags: Vec::new(),
@@ -2698,6 +2844,10 @@ wave = true
     fn tool_kind_parser_supports_pluginfx_and_loudness() {
         assert_eq!(tool_kind_from_str("PluginFx"), ToolKind::PluginFx);
         assert_eq!(tool_kind_from_str("Loudness"), ToolKind::Loudness);
+        assert_eq!(
+            tool_kind_from_str(&format!("{:?}", ToolKind::Panner)),
+            ToolKind::Panner
+        );
     }
 
     #[test]
@@ -3293,5 +3443,53 @@ note = "memo"
     #[test]
     fn deserialize_empty_string_returns_error() {
         assert!(deserialize_project("").is_err());
+    }
+}
+
+#[cfg(test)]
+mod spatial_edit_tests {
+    use super::*;
+    use crate::spatial::scene::{Keyframe, SceneEdits, SourceShape};
+    use std::sync::Arc;
+
+    #[test]
+    fn spatial_edits_round_trip_through_the_session() {
+        let mut edits = SceneEdits {
+            shape: Some(SourceShape {
+                tracks: 4,
+                frames: 24_000,
+                file_sr: 48_000,
+            }),
+            elements: Default::default(),
+        };
+        edits.elements.insert(
+            Arc::from("adm:AO_1002:AC_00031001"),
+            Arc::from(vec![
+                Keyframe {
+                    secs: 0.5,
+                    ramp_secs: 0.25,
+                    pos: [-0.5, 1.0, 0.0],
+                    gain: 0.5,
+                    extras: Some(Arc::from("<width>0.1</width>")),
+                },
+                Keyframe::at(1.0, [0.5, 1.0, 0.25]),
+            ]),
+        );
+        let item = ProjectSpatialEdit::from_edits("master.wav".into(), &edits);
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"t\":0.5"), "{json}");
+        // A unity gain and a zero ramp are left out of the document.
+        assert_eq!(json.matches("\"gain\"").count(), 1, "{json}");
+        assert_eq!(json.matches("\"ramp\"").count(), 1, "{json}");
+        let back: ProjectSpatialEdit = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.to_edits(), edits);
+    }
+
+    #[test]
+    fn a_session_without_spatial_edits_does_not_mention_them() {
+        let list: ProjectList = serde_json::from_str(r#"{"root":null,"files":[]}"#).unwrap();
+        assert!(list.spatial_edits.is_empty());
+        let json = serde_json::to_string(&list).unwrap();
+        assert!(!json.contains("spatial_edits"), "{json}");
     }
 }

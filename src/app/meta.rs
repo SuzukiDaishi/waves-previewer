@@ -443,11 +443,31 @@ fn basic_header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
     if let Some(meta) = no_audio_video_meta(path, false) {
         return Ok(meta);
     }
-    match audio_io::read_audio_info(path) {
+    // A TrueHD stream's header and its object summary come from one read.
+    #[cfg(feature = "truehd")]
+    let truehd = audio_io::is_truehd_source_file(path).then(|| audio_io::read_truehd_info(path));
+    #[cfg(not(feature = "truehd"))]
+    let truehd: Option<anyhow::Result<(audio_io::AudioInfo, crate::spatial::ObjectAudioSummary)>> =
+        None;
+    let (info_result, truehd_summary) = match truehd {
+        Some(Ok((info, summary))) => (Ok(info), Some(std::sync::Arc::new(summary))),
+        Some(Err(err)) => (Err(err), None),
+        None => (audio_io::read_audio_info(path), None),
+    };
+    match info_result {
         Ok(info) => Ok(FileMeta {
             audio_track_absent: false,
             audio_track_unsupported: false,
             unsupported_audio_codec: None,
+            // `chna` only -- the scene itself is read when the file plays.
+            object_audio: if info.has_adm_chunks {
+                crate::adm::probe_summary(path)
+                    .ok()
+                    .flatten()
+                    .map(std::sync::Arc::new)
+            } else {
+                truehd_summary
+            },
             channel_mask: info.channel_mask,
             channels: info.channels,
             sample_rate: info.sample_rate,
@@ -509,6 +529,7 @@ fn basic_header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
                 thumb: Vec::new(),
                 marker_fracs: Vec::new(),
                 loop_frac: None,
+                object_audio: None,
                 decode_error: Some(if track_is_aac {
                     "AAC UNSUPPORTED".to_string()
                 } else {
@@ -605,6 +626,7 @@ fn no_audio_video_meta(path: &PathBuf, allow_video_poster: bool) -> Option<FileM
         thumb: Vec::new(),
         marker_fracs: Vec::new(),
         loop_frac: None,
+        object_audio: None,
         decode_error: None,
     })
 }
@@ -618,6 +640,15 @@ fn decode_full_meta(
         return Some(meta);
     }
     let info = audio_io::read_audio_info(path).ok();
+    if info.as_ref().is_some_and(|info| info.has_adm_chunks) {
+        // A decode queued before the header said "object audio": answer
+        // with the header, as the header stage would have.
+        if let Ok(meta) = basic_header_meta(path) {
+            if meta.object_audio.is_some() {
+                return Some(meta);
+            }
+        }
+    }
     if let Ok((chans, sr, decode_errors)) = audio_io::decode_audio_multi_with_errors(path) {
         // Mono mixdown for RMS/thumbnail
         let len = chans.get(0).map(|c| c.len()).unwrap_or(0);
@@ -746,6 +777,7 @@ fn decode_full_meta(
             thumb,
             marker_fracs,
             loop_frac,
+            object_audio: None,
             decode_error: if decode_errors > 0 {
                 Some(format!("DecodeError x{decode_errors}"))
             } else {
@@ -825,6 +857,7 @@ fn decode_full_meta(
             thumb,
             marker_fracs,
             loop_frac,
+            object_audio: None,
             decode_error: if decode_errors > 0 {
                 Some(format!("DecodeError x{decode_errors} (prefix)"))
             } else {
@@ -979,6 +1012,14 @@ fn run_meta_task(
         });
         if cancel.load(Ordering::Relaxed) {
             let _ = tx.send(MetaUpdate::Cancelled(p));
+            return None;
+        }
+        if meta.object_audio.is_some() {
+            // Object audio: the tracks are beds and objects, not a
+            // programme, so a peak, a waveform or a loudness of them would
+            // describe nothing anyone hears -- and a BW64 master would not
+            // decode anyway. The header is final.
+            let _ = tx.send(MetaUpdate::Full(p.clone(), meta));
             return None;
         }
         enrich_header_meta(&src, &mut meta);

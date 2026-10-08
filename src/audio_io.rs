@@ -129,10 +129,92 @@ pub struct AudioInfo {
     /// Which speaker each channel feeds, as a WAVE channel mask, when the
     /// file says (see `audio_channels::layout_from_mask`).
     pub channel_mask: Option<u32>,
+    /// A WAVE carrying ADM object metadata (`chna` + `axml`); see
+    /// `wav_stream::WavePcmInfo::has_adm_chunks`.
+    pub has_adm_chunks: bool,
 }
 
 pub fn is_supported_extension(ext: &str) -> bool {
-    SUPPORTED_EXTS.iter().any(|e| ext.eq_ignore_ascii_case(e))
+    SUPPORTED_EXTS.iter().any(|e| ext.eq_ignore_ascii_case(e)) || is_truehd_extension(ext)
+}
+
+/// `.thd` / `.mlp`: listed, opened and played only in a build with the
+/// `truehd` feature (`crate::audio_truehd`).
+pub fn is_truehd_extension(ext: &str) -> bool {
+    #[cfg(feature = "truehd")]
+    {
+        crate::audio_truehd::TRUEHD_EXTS
+            .iter()
+            .any(|known| ext.eq_ignore_ascii_case(known))
+    }
+    #[cfg(not(feature = "truehd"))]
+    {
+        let _ = ext;
+        false
+    }
+}
+
+pub fn is_truehd_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(is_truehd_extension)
+}
+
+/// A bare TrueHD stream, or a transport stream whose audio is TrueHD this
+/// build plays. Reads the head of a transport stream: a worker's call.
+pub fn is_truehd_source_file(path: &Path) -> bool {
+    #[cfg(feature = "truehd")]
+    {
+        is_truehd_path(path)
+            || (is_mpegts_path(path) && crate::audio_mpegts::is_truehd_stream(path))
+    }
+    #[cfg(not(feature = "truehd"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Every extension an open dialog offers: [`SUPPORTED_EXTS`], and TrueHD's
+/// where the build reads it.
+pub fn open_dialog_extensions() -> Vec<&'static str> {
+    let exts = SUPPORTED_EXTS.to_vec();
+    #[cfg(feature = "truehd")]
+    let exts = {
+        let mut exts = exts;
+        exts.extend_from_slice(crate::audio_truehd::TRUEHD_EXTS);
+        exts
+    };
+    exts
+}
+
+/// A TrueHD stream's header, and what its list row says about its objects.
+/// Reads the start of the stream (`audio_truehd::probe`).
+#[cfg(feature = "truehd")]
+pub fn read_truehd_info(path: &Path) -> Result<(AudioInfo, crate::spatial::ObjectAudioSummary)> {
+    let metadata = std::fs::metadata(path).ok();
+    let probe = crate::audio_truehd::probe(path)?;
+    let duration_secs = probe
+        .estimated_frames
+        .map(|frames| (frames as f64 / probe.sample_rate.max(1) as f64) as f32);
+    let bit_rate_bps = match (duration_secs, metadata.as_ref().map(|m| m.len())) {
+        (Some(secs), Some(bytes)) if secs > 0.0 => Some(((bytes as f64 * 8.0 / secs as f64) as u64).min(u32::MAX as u64) as u32),
+        _ => None,
+    };
+    let info = AudioInfo {
+        channels: probe.channels as u16,
+        sample_rate: probe.sample_rate,
+        bits_per_sample: 24,
+        sample_value_kind: SampleValueKind::Int,
+        bit_rate_bps,
+        duration_secs,
+        total_frames: probe.estimated_frames,
+        created_at: metadata.as_ref().and_then(|m| m.created().ok()),
+        modified_at: metadata.as_ref().and_then(|m| m.modified().ok()),
+        channel_mask: None,
+        has_adm_chunks: false,
+    };
+    Ok((info, probe.summary()))
 }
 
 /// Whether the app can *write* this extension.
@@ -395,6 +477,7 @@ fn read_audio_info_isobmff(
         created_at,
         modified_at,
         channel_mask: None,
+        has_adm_chunks: false,
     })
 }
 
@@ -446,6 +529,7 @@ fn read_audio_info_wav(
             created_at,
             modified_at,
             channel_mask: info.channel_mask,
+            has_adm_chunks: info.has_adm_chunks,
         });
     }
     let reader =
@@ -486,6 +570,7 @@ fn read_audio_info_wav(
         created_at,
         modified_at,
         channel_mask: None,
+        has_adm_chunks: false,
     })
 }
 
@@ -1322,6 +1407,10 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
     if is_mpegts_path(path) {
         return crate::audio_mpegts::read_info(path, created_at, modified_at);
     }
+    #[cfg(feature = "truehd")]
+    if is_truehd_path(path) {
+        return read_truehd_info(path).map(|(info, _)| info);
+    }
     if ext_hint
         .map(|ext| ext.eq_ignore_ascii_case("wav"))
         .unwrap_or(false)
@@ -1464,6 +1553,7 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
             .channels
             .map(|c| c.bits())
             .filter(|mask| *mask != 0 && mask.count_ones() == u32::from(channels)),
+        has_adm_chunks: false,
     })
 }
 
@@ -1709,6 +1799,12 @@ fn open_decoder(
 /// reach it: the OS decoder took it already, or nothing can decode it. Nor
 /// does it read transport streams, which `audio_mpegts` has already had.
 fn reject_aac_decode(path: &Path) -> Result<()> {
+    if is_truehd_path(path) {
+        anyhow::bail!(
+            "TrueHD plays from a decoded copy, not through symphonia: {}",
+            path.display()
+        );
+    }
     if is_mpegts_path(path) {
         anyhow::bail!(
             "MPEG-TS audio is decoded by audio_mpegts, not symphonia: {}",

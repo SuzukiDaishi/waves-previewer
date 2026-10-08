@@ -35,6 +35,8 @@ impl WavesPreviewer {
                     .map(|item| item.source == MediaSource::File)
                     .unwrap_or(false)
             })
+            // Object audio's samples are read-only (`media_kind`).
+            .filter(|p| !self.source_content(p).object_audio)
             .collect();
         if !selected.is_empty() {
             return selected;
@@ -43,6 +45,12 @@ impl WavesPreviewer {
             .iter()
             .filter_map(|id| self.item_for_id(*id))
             .filter(|item| item.source == MediaSource::File)
+            .filter(|item| {
+                !item
+                    .meta
+                    .as_deref()
+                    .is_some_and(|meta| meta.object_audio.is_some())
+            })
             .map(|item| item.path.clone())
             .collect()
     }

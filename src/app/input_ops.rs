@@ -372,17 +372,22 @@ impl super::WavesPreviewer {
                     // whole tool panel is greyed out and a key must not be the
                     // one way around that.
                     let audio_visible = self.tabs.get(tab_idx).is_some_and(|t| {
-                        t.primary_view != EditorPrimaryView::Metadata && !t.read_only
+                        !matches!(
+                            t.primary_view,
+                            EditorPrimaryView::Metadata | EditorPrimaryView::Spatial
+                        ) && !t.read_only
                     });
                     // Select all is not a destructive edit, so unlike the
                     // block below it applies to a read-only source too. It does
                     // need the waveform to be the thing on screen: in the
                     // Metadata inspector, Ctrl+A belongs to whatever table or
                     // field is in front.
-                    let waveform_visible = self
-                        .tabs
-                        .get(tab_idx)
-                        .is_some_and(|t| t.primary_view != EditorPrimaryView::Metadata);
+                    let waveform_visible = self.tabs.get(tab_idx).is_some_and(|t| {
+                        !matches!(
+                            t.primary_view,
+                            EditorPrimaryView::Metadata | EditorPrimaryView::Spatial
+                        )
+                    });
                     if waveform_visible && self.keymap_consume(ctx, Action::EditorSelectAll) {
                         let selected = self.tabs.get_mut(tab_idx).and_then(|tab| {
                             (tab.samples_len > 0).then(|| {
@@ -887,6 +892,18 @@ impl super::WavesPreviewer {
                     .tabs
                     .get(tab_idx)
                     .is_some_and(|tab| tab.pencil_draft.is_some());
+                let spatial_view = self
+                    .tabs
+                    .get(tab_idx)
+                    .is_some_and(|tab| tab.primary_view == EditorPrimaryView::Spatial);
+                if spatial_view {
+                    // The Spatial view's edits have their own history: the
+                    // tab's audio is read-only, so there is nothing else of
+                    // its to undo.
+                    let _changed = self.spatial_undo(tab_idx, redo);
+                    self.last_undo_scope = UndoScope::Editor;
+                    return true;
+                }
                 if pencil_draft_active {
                     let _changed = if redo {
                         self.editor_pencil_redo_draft(tab_idx)

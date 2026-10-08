@@ -18,8 +18,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
-use crate::audio_channels::{standard_layout_vec, Layout, SpeakerPos};
-use crate::binaural::{BinauralFilters, ChannelRoute, Direction};
+use crate::audio_channels::{
+    standard_layout_vec, ChannelMapMode, ChannelMixMatrix, Layout, SpeakerPos,
+};
+use crate::binaural::{centre_match_gain, BinauralFilters, ChannelRoute, Direction, HrirSource};
 
 use super::loading_ops::{poll_job, JobPoll};
 use super::WavesPreviewer;
@@ -39,6 +41,10 @@ pub(crate) const LFE_GAIN_RANGE_DB: std::ops::RangeInclusive<f32> = -30.0..=10.0
 pub(crate) const TRIM_RANGE_DB: std::ops::RangeInclusive<f32> = -24.0..=12.0;
 /// A speaker's own gain's range, in dB.
 pub(crate) const SPEAKER_GAIN_RANGE_DB: std::ops::RangeInclusive<f32> = -30.0..=12.0;
+/// The most the centre match may move the level, either way, in dB. A real
+/// HRTF needs a few dB; a SOFA file whose front is all but silent must not
+/// turn into a +60 dB boost.
+const CENTRE_MATCH_LIMIT_DB: f32 = 24.0;
 
 /// Which HRTF is in use.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -234,6 +240,12 @@ pub(crate) struct HrtfSettings {
     /// plays straight to the ears, and only 3 or more channels go through
     /// the HRTF).
     pub stereo_too: bool,
+    /// Level the HRTF so a centred sound -- the centre channel, or a mono
+    /// sound in a stereo mix -- is as loud through it as without it (+-0 dB).
+    /// Off, the HRIRs play at the level `sofar` opens them at (the frontal
+    /// HRIR scaled to unit energy), at which the bundled HRTF makes a stereo
+    /// mix's centre about 4.5 dB louder.
+    pub centre_unity: bool,
 }
 
 impl Default for HrtfSettings {
@@ -250,6 +262,7 @@ impl Default for HrtfSettings {
             lfe_lowpass: false,
             trim_db: 0.0,
             stereo_too: true,
+            centre_unity: false,
         }
     }
 }
@@ -420,6 +433,10 @@ impl HrtfSettings {
             "hrtf_stereo_speakers={}\n",
             u8::from(self.stereo_too)
         ));
+        out.push_str(&format!(
+            "hrtf_centre_0db={}\n",
+            u8::from(self.centre_unity)
+        ));
         out
     }
 
@@ -494,6 +511,7 @@ impl HrtfSettings {
                 }
             }
             "stereo_speakers" => self.stereo_too = flag(),
+            "centre_0db" => self.centre_unity = flag(),
             // Written while stereo was off unless asked for: every prefs save
             // stored that default, so it is not anybody's choice to keep.
             "stereo" => {}
@@ -515,6 +533,63 @@ fn speaker_route(placement: SpeakerPlacement) -> ChannelRoute {
 pub(crate) fn default_unlabeled_placement(channels: usize, ch: usize) -> SpeakerPlacement {
     let step = 360.0 / channels.max(1) as f32;
     SpeakerPlacement::at(wrap_azimuth(ch as f32 * step), 0.0)
+}
+
+/// A centred sound in a source of `layout`, per channel, and the level each
+/// ear hears it at without the HRTF. The centre is the centre channel, or
+/// L and R together when there is none -- a mono sound in a stereo mix.
+/// Without the HRTF headphones get the speaker path's fold onto a stereo
+/// pair, so the reference is read off that very matrix: the centre channel
+/// at -3 dB a side, L = R at their own level. `None` for a layout with
+/// neither (channels on no speaker).
+pub(crate) fn centre_reference(layout: &[Option<SpeakerPos>]) -> Option<(Vec<f32>, [f32; 2])> {
+    use SpeakerPos::{Fc, Fl, Fr};
+    let has = |pos: SpeakerPos| layout.contains(&Some(pos));
+    let carriers: &[SpeakerPos] = if has(Fc) {
+        &[Fc]
+    } else if has(Fl) && has(Fr) {
+        &[Fl, Fr]
+    } else {
+        return None;
+    };
+    let centre: Vec<f32> = layout
+        .iter()
+        .map(|pos| match pos {
+            Some(pos) if carriers.contains(pos) => 1.0,
+            _ => 0.0,
+        })
+        .collect();
+    let fold = ChannelMixMatrix::build_with_layouts(
+        layout.len(),
+        Some(layout),
+        2,
+        None,
+        ChannelMapMode::Auto,
+    );
+    let reference = [fold.mix(0, &centre), fold.mix(1, &centre)];
+    Some((centre, reference))
+}
+
+/// Scale every convolved channel of `routes` so the centre of `layout` is
+/// as loud through `source` as without the HRTF. The LFE keeps its own
+/// gain: it never passes an HRIR, so the HRIRs' level says nothing about
+/// it. Returns the gain applied, in dB.
+pub(crate) fn match_centre(
+    routes: &mut [ChannelRoute],
+    source: &dyn HrirSource,
+    layout: &[Option<SpeakerPos>],
+    sample_rate: u32,
+) -> Option<f32> {
+    let (centre, reference) = centre_reference(layout)?;
+    let gain = centre_match_gain(source, routes, &centre, reference, sample_rate)?;
+    let db = (20.0 * gain.log10()).clamp(-CENTRE_MATCH_LIMIT_DB, CENTRE_MATCH_LIMIT_DB);
+    let gain = crate::levels::db_to_amplitude(db);
+    for route in routes.iter_mut() {
+        if let ChannelRoute::Speaker { gain: g, .. } = route {
+            *g *= gain;
+        }
+    }
+    Some(db)
 }
 
 /// A loaded HRTF, resampled to one output rate.
@@ -596,6 +671,8 @@ pub(crate) struct HrtfRuntime {
     pub show_all_positions: bool,
     /// The layout of the source last applied, for the window to draw.
     pub source_layout: Option<Layout>,
+    /// The gain the centre match applied to the filters in place, in dB.
+    pub centre_match_db: Option<f32>,
 }
 
 impl Default for HrtfRuntime {
@@ -611,6 +688,7 @@ impl Default for HrtfRuntime {
             pending_save: false,
             show_all_positions: false,
             source_layout: None,
+            centre_match_db: None,
         }
     }
 }
@@ -780,7 +858,7 @@ impl WavesPreviewer {
             | super::PlaybackSourceKind::EditorTab(path) => Some(path.clone()),
             _ => None,
         };
-        let playing_channels = self.audio.source_channels().unwrap_or(0);
+        let playing_channels = self.audio.rendered_channels().unwrap_or(0);
         if playing_channels > 0 && self.audio.has_audio_source() {
             return Some((playing_path, self.hrtf_source_layout(playing_channels)));
         }
@@ -808,6 +886,7 @@ impl WavesPreviewer {
             self.audio.set_binaural(None);
         }
         self.hrtf_runtime.status = status;
+        self.hrtf_runtime.centre_match_db = None;
     }
 
     /// Give the audio callback the headphone filters for what is playing.
@@ -841,7 +920,8 @@ impl WavesPreviewer {
                 return;
             }
         };
-        let channels = self.audio.source_channels().unwrap_or(0);
+        // An object source is heard as its 7.1.4 bed.
+        let channels = self.audio.rendered_channels().unwrap_or(0);
         if channels == 0 {
             self.uninstall_binaural(HrtfStatus::Bypassed("nothing is playing"));
             return;
@@ -865,8 +945,13 @@ impl WavesPreviewer {
         if self.hrtf_runtime.applied.as_ref() == Some(&applied) {
             return;
         }
-        let routes = self.hrtf.routes(&layout);
+        let mut routes = self.hrtf.routes(&layout);
         let started = std::time::Instant::now();
+        let centre_match_db = if self.hrtf.centre_unity {
+            match_centre(&mut routes, &hrtf.sofa, &layout, sample_rate)
+        } else {
+            None
+        };
         let filters = BinauralFilters::build(
             &hrtf.sofa,
             &routes,
@@ -883,6 +968,7 @@ impl WavesPreviewer {
         self.hrtf_runtime.applied = Some(applied);
         self.hrtf_runtime.source_layout = Some(layout);
         self.hrtf_runtime.status = HrtfStatus::Active { channels };
+        self.hrtf_runtime.centre_match_db = centre_match_db;
     }
 }
 
@@ -985,6 +1071,7 @@ mod tests {
             lfe_lowpass: true,
             trim_db: -4.5,
             stereo_too: false,
+            centre_unity: true,
             ..HrtfSettings::default()
         };
         settings.set_override(Tc, Some(SpeakerPlacement::at(10.0, 80.0)));
@@ -996,6 +1083,54 @@ mod tests {
         }
         assert_eq!(read, settings);
         assert!(!read.load_prefs_line("theme=dark"));
+    }
+
+    #[test]
+    fn the_centre_is_the_centre_channel_or_l_and_r_together() {
+        // Stereo: a mono sound is L = R, heard at its own level either side.
+        let (centre, reference) = centre_reference(&[Some(Fl), Some(Fr)]).unwrap();
+        assert_eq!(centre, vec![1.0, 1.0]);
+        assert_eq!(reference, [1.0, 1.0]);
+        // 5.1: the centre channel alone, folded at -3 dB a side.
+        let (centre, reference) = centre_reference(&standard_layout_vec(6).unwrap()).unwrap();
+        assert_eq!(centre, vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        let half_power = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(reference.iter().all(|v| (v - half_power).abs() < 1e-6), "{reference:?}");
+        // Channels on no speaker have no centre to match.
+        assert_eq!(centre_reference(&[None, None, None]), None);
+    }
+
+    /// Every direction reaches each ear at `0.8`, in one tap.
+    struct Flat;
+
+    impl HrirSource for Flat {
+        fn hrir(&self, _direction: Direction) -> [Vec<f32>; 2] {
+            [vec![0.8], vec![0.8]]
+        }
+    }
+
+    #[test]
+    fn matching_the_centre_scales_the_speakers_and_leaves_the_lfe() {
+        let settings = HrtfSettings::default();
+        let layout: Layout = vec![Some(Fl), Some(Fr), Some(Lfe)];
+        let mut routes = settings.routes(&layout);
+        // L = R reaches each ear at 0.8 + 0.8 = 1.6: 4 dB down brings it to 1.
+        let db = match_centre(&mut routes, &Flat, &layout, 48_000).expect("2.1 has L and R");
+        assert!((db - 20.0 * (1.0f32 / 1.6).log10()).abs() < 0.01, "{db} dB");
+        for route in &routes[..2] {
+            let ChannelRoute::Speaker { gain, .. } = route else {
+                panic!("{route:?}");
+            };
+            assert!((gain - 1.0 / 1.6).abs() < 1e-3, "speaker gain {gain}");
+        }
+        assert_eq!(
+            routes[2],
+            ChannelRoute::BothEars {
+                gain: 1.0,
+                lowpass: false
+            },
+            "the LFE never passes an HRIR"
+        );
     }
 
     #[test]

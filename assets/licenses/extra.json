@@ -291,6 +291,12 @@
       "flag": "notice",
       "note": "MPL-2.0, file-level copyleft, pulled in transitively by the directory-lookup crates. Same shape as Symphonia: unmodified use imposes only the notice requirement."
     },
+    "truehd": {
+      "flag": "notice",
+      "note": "Apache-2.0, from the truehdd project; it calls itself a research implementation, so the version is pinned. Decodes TrueHD streams (.thd / .mlp) including their object presentation, behind the `truehd` cargo feature, which is off by default: TrueHD's lossless coding is old enough that its patents have likely run out, but the object audio it carries is recent, and shipping a decoder for it is a decision for whoever builds the release. The way NeoWaves times object metadata (samples so far plus each payload's sample and evolution offsets, gliding over the first block's ramp) follows truehdd's DAMF writer. \"Dolby\", \"Dolby TrueHD\" and \"Dolby Atmos\" are trademarks, which is why the app says TrueHD and objects.",
+      "topic": "truehd",
+      "feature": "truehd"
+    },
     "oxideav-ac3": {
       "flag": "notice",
       "note": "MIT. Decodes the AC-3 audio of AVCHD and Blu-ray video. AC-3's patents have expired, so decoding it needs no licence from Dolby; \"Dolby\" and \"Dolby Digital\" are trademarks, which is why the app calls the format AC-3. E-AC-3, whose patents are younger, is never decoded.",

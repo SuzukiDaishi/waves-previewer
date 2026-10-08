@@ -39,7 +39,7 @@ use crate::audio_io::{
     read_embedded_artwork, AudioInfo,
 };
 use crate::cli::{
-    BatchCommand, BatchExportArgs, BatchLoudnessApplyArgs, BatchLoudnessCommand,
+    AdmCommand, AdmExportArgs, AdmInspectArgs, BatchCommand, BatchExportArgs, BatchLoudnessApplyArgs, BatchLoudnessCommand,
     BatchLoudnessPlanArgs, CliCommand, CliCursorSnap, CliEffectGraphSpectrumMode,
     CliLoopXfadeShape, CliRoot, CliSpectralViewMode, CliToggle, DebugCommand, DebugScreenshotArgs,
     DebugSummaryArgs, EditorCommand, EditorCursorCommand, EditorCursorGetArgs,
@@ -259,6 +259,7 @@ fn dispatch_cli(command: CliCommand) -> Result<CliCommandOutput> {
     match command {
         CliCommand::Session(cmd) => dispatch_session(cmd),
         CliCommand::Item(cmd) => dispatch_item(cmd),
+        CliCommand::Adm(cmd) => dispatch_adm(cmd),
         CliCommand::List(cmd) => dispatch_list(cmd),
         CliCommand::Batch(cmd) => dispatch_batch(cmd),
         CliCommand::Editor(cmd) => dispatch_editor(cmd),
@@ -298,6 +299,8 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
             ItemMetadataPayloadCommand::Extract(_),
         ))) => "item.metadata.payload.extract",
         CliCommand::Item(ItemCommand::Artwork(_)) => "item.artwork",
+        CliCommand::Adm(AdmCommand::Inspect(_)) => "adm.inspect",
+        CliCommand::Adm(AdmCommand::Export(_)) => "adm.export",
         CliCommand::List(ListCommand::Columns(_)) => "list.columns",
         CliCommand::List(ListCommand::Query(_)) => "list.query",
         CliCommand::List(ListCommand::Sort(_)) => "list.sort",
@@ -535,6 +538,133 @@ fn dispatch_item(command: ItemCommand) -> Result<CliCommandOutput> {
         ItemCommand::Metadata(command) => dispatch_item_metadata(command),
         ItemCommand::Artwork(args) => item_artwork(args),
     }
+}
+
+fn dispatch_adm(command: AdmCommand) -> Result<CliCommandOutput> {
+    match command {
+        AdmCommand::Inspect(args) => adm_inspect(args),
+        AdmCommand::Export(args) => adm_export(args),
+    }
+}
+
+fn adm_export(args: AdmExportArgs) -> Result<CliCommandOutput> {
+    let input = absolute_existing_path(&args.input)?;
+    let scene = crate::adm::load_scene(&input, None, &mut |_| {})?;
+    let mut warnings = scene.diagnostics.clone();
+    let edits = match &args.session {
+        Some(session) => {
+            let session = absolute_existing_path(session)?;
+            let text = std::fs::read_to_string(&session)
+                .with_context(|| format!("read session file: {}", session.display()))?;
+            let mut project = super::project::deserialize_project(&text)
+                .with_context(|| format!("parse session file: {}", session.display()))?;
+            super::project::repair_project_source_paths(&mut project, &session);
+            let base = session.parent().map(Path::to_path_buf).unwrap_or_default();
+            let found = project
+                .list
+                .spatial_edits
+                .iter()
+                .find(|item| super::project::resolve_path(&item.path, &base) == input)
+                .map(|item| item.to_edits());
+            if found.is_none() {
+                warnings.push(format!(
+                    "the session has no spatial edits for {}; writing a copy",
+                    input.display()
+                ));
+            }
+            found
+        }
+        None => None,
+    };
+    if let Some(edits) = &edits {
+        if !edits.fits(&scene) {
+            warnings.push("the session's edits were made for a different version of this file; writing a copy".to_string());
+        }
+    }
+    let output = args.output.clone();
+    crate::adm::export::export_adm(
+        &input,
+        &output,
+        &scene,
+        edits.as_ref(),
+        &std::sync::atomic::AtomicBool::new(false),
+        &mut |_| {},
+    )?;
+    Ok(CliCommandOutput {
+        result: json!({
+            "input": pathbuf_to_string(&input),
+            "output": pathbuf_to_string(&output),
+            "edited_elements": edits.as_ref().filter(|e| e.fits(&scene)).map(|e| e.elements.len()).unwrap_or(0),
+        }),
+        warnings,
+    })
+}
+
+fn adm_inspect(args: AdmInspectArgs) -> Result<CliCommandOutput> {
+    use crate::spatial::scene::{Coords, ElementKind};
+    let path = absolute_existing_path(&args.input)?;
+    let summary = crate::adm::probe_summary(&path)?
+        .ok_or_else(|| anyhow::anyhow!("{}: no ADM metadata (axml + chna)", path.display()))?;
+    let scene = crate::adm::load_scene(&path, None, &mut |_| {})?;
+    let elements: Vec<Value> = scene
+        .elements
+        .iter()
+        .map(|element| {
+            let (kind, speaker) = match &element.kind {
+                ElementKind::Bed { speaker, label } => (
+                    "bed",
+                    json!({ "label": label.as_ref(), "speaker": speaker.map(|s| s.key()) }),
+                ),
+                ElementKind::Object => ("object", Value::Null),
+            };
+            let mut value = json!({
+                "key": element.key.as_ref(),
+                "name": element.name.as_ref(),
+                "group": element.group.as_ref(),
+                "kind": kind,
+                "speaker": speaker,
+                "track": element.track,
+                "coords": match element.coords {
+                    Coords::Cartesian => "cartesian",
+                    Coords::Polar => "polar",
+                },
+                "gain": element.gain,
+                "active": element.active.map(|(start, end)| json!([start, if end.is_finite() { json!(end) } else { Value::Null }])),
+                "keyframe_count": element.keyframes.len(),
+            });
+            if args.keyframes {
+                value["keyframes"] = element
+                    .keyframes
+                    .iter()
+                    .map(|key| {
+                        json!({
+                            "secs": key.secs,
+                            "ramp_secs": key.ramp_secs,
+                            "pos": key.pos,
+                            "gain": key.gain,
+                            "extras": key.extras.as_deref(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+            }
+            value
+        })
+        .collect();
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&path),
+            "summary": summary.label.as_ref(),
+            "tracks": scene.shape.tracks,
+            "frames": scene.shape.frames,
+            "file_sr": scene.shape.file_sr,
+            "programme": scene.programme.as_deref(),
+            "beds": scene.bed_count(),
+            "objects": scene.object_count(),
+            "elements": elements,
+        }),
+        warnings: scene.diagnostics.clone(),
+    })
 }
 
 fn dispatch_item_metadata(command: ItemMetadataCommand) -> Result<CliCommandOutput> {
@@ -3292,6 +3422,7 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
             sample_rate_overrides: Vec::new(),
             bit_depth_overrides: Vec::new(),
             channel_layouts: Vec::new(),
+            spatial_edits: Vec::new(),
             format_overrides: Vec::new(),
             virtual_items: Vec::new(),
             transcript_languages: Vec::new(),
@@ -3658,7 +3789,7 @@ fn resolve_editor_state(source: &EditorSourceArgs) -> Result<EditorTargetState> 
         EditorPrimaryView::Wave => ViewMode::Waveform,
         EditorPrimaryView::Spec => spec.to_mode(),
         EditorPrimaryView::Other => other.to_mode(),
-        EditorPrimaryView::Metadata => ViewMode::Waveform,
+        EditorPrimaryView::Metadata | EditorPrimaryView::Spatial => ViewMode::Waveform,
     };
     let markers = if tab.markers.is_empty() {
         markers_from_file

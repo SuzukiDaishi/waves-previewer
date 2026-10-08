@@ -1,3 +1,4 @@
+pub mod adm;
 pub mod app;
 pub mod audio;
 pub mod audio_asset;
@@ -7,6 +8,8 @@ pub mod audio_io;
 #[cfg(windows)]
 pub mod audio_mf;
 pub mod audio_mpegts;
+#[cfg(feature = "truehd")]
+pub mod audio_truehd;
 pub mod binaural;
 pub mod cli;
 pub mod crash_report;
@@ -21,10 +24,13 @@ pub mod media_kind;
 pub mod metadata;
 pub mod meter;
 pub mod mpegts;
+pub mod object_mix;
+pub mod panning;
 #[cfg(windows)]
 pub(crate) mod mf;
 pub mod plugin;
 pub mod sample_rate;
+pub mod spatial;
 pub mod ui_wake;
 pub mod video;
 pub mod wav_stream;

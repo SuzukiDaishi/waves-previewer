@@ -45,26 +45,47 @@ pub fn route_channels(src: &[Vec<f32>], draft: &ChannelRoutingDraft) -> Vec<Vec<
 impl WavesPreviewer {
     /// Apply the tab's routing matrix as a destructive, undoable edit.
     pub(super) fn editor_apply_channel_routing(&mut self, tab_idx: usize) {
-        let undo_state = {
-            let Some(tab) = self.tabs.get_mut(tab_idx) else {
-                return;
-            };
-            let draft = tab.channel_routing_draft.clone();
-            if draft.is_identity() || tab.ch_samples.is_empty() {
-                return;
-            }
-            let undo_state = Self::capture_undo_state_labeled(tab, "Channel Routing");
-            tab.ch_samples = route_channels(&tab.ch_samples, &draft);
-            tab.dirty = true;
-            Self::editor_reset_per_channel_state(tab);
-            Self::editor_clamp_ranges(tab);
-            undo_state
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
         };
-        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        let draft = tab.channel_routing_draft.clone();
+        if draft.is_identity() || tab.ch_samples.is_empty() {
+            return;
+        }
+        let channels = route_channels(&tab.ch_samples, &draft);
+        self.editor_replace_channels(tab_idx, "Channel Routing", channels, true);
         // The matrix now describes the *old* layout; re-seed it for the new one.
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.channel_routing_draft = ChannelRoutingDraft::identity(tab.ch_samples.len());
         }
+    }
+
+    /// Replace a tab's channels as one destructive, undoable edit labelled
+    /// `label` -- the tail every tool that rewires channels shares (Channel
+    /// Routing, the Panner). `rewired`: the channels are no longer the ones
+    /// they were (a different count, or a different order), so the state
+    /// tied to them is dropped.
+    pub(super) fn editor_replace_channels(
+        &mut self,
+        tab_idx: usize,
+        label: &str,
+        channels: Vec<Vec<f32>>,
+        rewired: bool,
+    ) {
+        let undo_state = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let undo_state = Self::capture_undo_state_labeled(tab, label);
+            tab.ch_samples = channels;
+            tab.dirty = true;
+            if rewired {
+                Self::editor_reset_per_channel_state(tab);
+            }
+            Self::editor_clamp_ranges(tab);
+            undo_state
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
         self.notify_if_tab_over_fs(tab_idx);
     }
 
@@ -76,6 +97,7 @@ impl WavesPreviewer {
         tab.ch_solo.clear();
         tab.channel_view = super::types::ChannelView::mixdown();
         tab.mini_meter.peak_hold_db.clear();
+        tab.channel_routing_draft.reseed_if_stale(tab.ch_samples.len());
     }
 }
 

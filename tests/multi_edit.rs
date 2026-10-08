@@ -578,14 +578,77 @@ fn kittest_render_multi_edit_split_channels() {
     harness.run_steps(4);
     save(&mut harness, "11_split_into_six_tracks.png");
 
-    // Track 01's voice sent to the centre in mono: its Pan lane is not heard.
+    // Track 01's voice sent to the centre in mono. The timeline is 5.1 now,
+    // so its Pan lane turns it round the listener (the header says L180°).
     let chip = harness.get_by_label("St").rect();
     click_at(&mut harness, chip.center());
     harness.run_steps(2);
     save(&mut harness, "12_output_chip_menu.png");
     harness.get_by_label("Mono \u{2192} C").click();
     harness.run_steps(4);
-    save(&mut harness, "13_mono_track_no_pan.png");
+    save(&mut harness, "13_mono_track_pan_turns.png");
+
+    // Knobs turned on two of the split tracks, a fader down, one solo: the
+    // header names the solo.
+    harness.state_mut().test_multi_edit_set_track_mix(1, -6.0, -0.5, false);
+    harness.state_mut().test_multi_edit_set_track_mix(2, 0.0, 0.25, true);
+    harness.run_steps(4);
+    save(&mut harness, "14_pan_knobs_and_solo.png");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_solo_is_named_in_the_header_even_when_its_row_is_too_short_to_show_it() {
+    let dir = temp_dir("solo");
+    let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+    write_tone(&a, 1.0);
+    write_tone(&b, 1.0);
+    let mut harness = list_with(&[a.clone(), b.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_drop(Some(0), 0.0, &[a.clone()]);
+    harness.state_mut().test_multi_edit_drop(None, 2.0, &[b.clone()]);
+    let tracks: Vec<usize> = harness.state().test_multi_edit_clips().iter().map(|c| c.0).collect();
+    assert_eq!(tracks, vec![0, 1], "one clip on each track");
+    // Rows at their lowest: one line, but Mute and Solo stay on it.
+    harness.state_mut().test_multi_edit_set_row_zoom(0.1);
+    harness.state_mut().test_multi_edit_set_track_mix(1, 0.0, 0.0, true);
+    harness.run_steps(3);
+    assert!(harness.query_by_label("SOLO \u{d7}1").is_some(), "the header says a solo is on");
+    wait_for_mix(&mut harness);
+    let first = harness.state().test_multi_edit_mix_peak(0.1, 0.9).unwrap();
+    let second = harness.state().test_multi_edit_mix_peak(2.1, 2.9).unwrap();
+    assert!(first < 1e-6, "the track that is not soloed is silent: {first}");
+    assert!((second - TONE_AMP).abs() < 0.05, "{second}");
+
+    harness.get_by_label("SOLO \u{d7}1").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().test_multi_edit_solos(), vec![false, false]);
+    assert!(harness.query_by_label("SOLO \u{d7}1").is_none());
+    wait_for_mix(&mut harness);
+    let first = harness.state().test_multi_edit_mix_peak(0.1, 0.9).unwrap();
+    assert!((first - TONE_AMP).abs() < 0.05, "both tracks again: {first}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn picking_a_row_in_the_pane_does_not_take_over_a_playing_timeline() {
+    let dir = temp_dir("pane_pick");
+    let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+    write_tone(&a, 2.0);
+    write_tone(&b, 1.0);
+    let mut harness = list_with(&[a.clone(), b.clone()]);
+    harness.state_mut().test_multi_edit_new();
+    harness.state_mut().test_multi_edit_drop(Some(0), 0.0, &[a.clone()]);
+    wait_for_mix(&mut harness);
+    harness.state_mut().test_request_workspace_play_toggle();
+    harness.run_steps(1);
+    assert!(harness.state().test_multi_edit_is_playing());
+    // Picking `b` selects it; it does not swap the timeline's mix for it.
+    assert!(harness.state_mut().test_select_and_load_row(1));
+    harness.run_steps(2);
+    assert!(harness.state().test_multi_edit_is_playing(), "the timeline still plays");
+    harness.state_mut().test_request_workspace_play_toggle();
+    harness.run_steps(1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

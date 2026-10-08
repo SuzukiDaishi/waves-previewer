@@ -1555,6 +1555,9 @@ pub enum EditorPrimaryView {
     Spec,
     Other,
     Metadata,
+    /// Object audio: where every bed and object is heard, and when
+    /// (`ui/spatial_view.rs`). Offered only for object-audio tabs.
+    Spatial,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -1617,7 +1620,7 @@ impl EditorPrimaryView {
             Self::Wave => ViewMode::Waveform,
             Self::Spec => ViewMode::Spectrogram,
             Self::Other => ViewMode::Tempogram,
-            Self::Metadata => ViewMode::Waveform,
+            Self::Metadata | Self::Spatial => ViewMode::Waveform,
         }
     }
 }
@@ -1789,9 +1792,18 @@ pub enum ToolKind {
     SpectralWarp,
     SpectralBrush,
     ChannelRouting,
+    Panner,
 }
 
 impl ToolKind {
+    /// A tool whose preview is applied live by the output callback to the
+    /// tab's own audio (`crate::panning` for the Panner), rather than
+    /// rendered into a buffer that replaces it: no audition buffer to
+    /// install on Play, nothing to restore when the preview ends.
+    pub fn previews_live(self) -> bool {
+        matches!(self, ToolKind::Panner)
+    }
+
     /// Human-readable tool name (inspector header, undo history labels).
     pub fn label(self) -> &'static str {
         match self {
@@ -1823,6 +1835,7 @@ impl ToolKind {
             ToolKind::SpectralWarp => "Spectral Warp",
             ToolKind::SpectralBrush => "Spectral Brush",
             ToolKind::ChannelRouting => "Channel Routing",
+            ToolKind::Panner => "Panner",
         }
     }
 }
@@ -2147,6 +2160,48 @@ impl ToolState {
             compressor_makeup_db: 0.0,
             insert_silence_ms: 1000.0,
             invert_smooth_boundaries: false,
+            pan_mode: None,
+            pan_balance: 0.0,
+            pan_yaw_deg: 0.0,
+            pan_pitch_deg: 0.0,
+            pan_roll_deg: 0.0,
+        }
+    }
+
+    /// The Panner's settings for a file of `layout`, its mode resolved
+    /// (`None` is the default for that layout).
+    pub fn pan_params(&self, layout: &[Option<crate::audio_channels::SpeakerPos>]) -> crate::panning::PanParams {
+        crate::panning::PanParams {
+            mode: self.pan_mode_for(layout),
+            balance: self.pan_balance,
+            rotation: crate::panning::Rotation {
+                yaw: self.pan_yaw_deg,
+                pitch: self.pan_pitch_deg,
+                roll: self.pan_roll_deg,
+            },
+        }
+    }
+
+    /// The Panner's mode for a file of `layout`. A mono file is panned onto
+    /// a stereo pair, so its default is that pair's.
+    pub fn pan_mode_for(&self, layout: &[Option<crate::audio_channels::SpeakerPos>]) -> crate::panning::PanMode {
+        self.pan_mode.unwrap_or_else(|| {
+            if layout.len() <= 1 {
+                crate::panning::PanMode::Balance
+            } else {
+                crate::panning::PanMode::default_for(layout)
+            }
+        })
+    }
+
+    /// The Panner back at the centre, its mode kept.
+    pub fn without_pan(self) -> Self {
+        Self {
+            pan_balance: 0.0,
+            pan_yaw_deg: 0.0,
+            pan_pitch_deg: 0.0,
+            pan_roll_deg: 0.0,
+            ..self
         }
     }
 }
@@ -2194,6 +2249,14 @@ pub struct ToolState {
     /// Short (~2 ms) polarity crossfade at interior range boundaries so a
     /// partial invert doesn't step-discontinue against untouched audio.
     pub invert_smooth_boundaries: bool,
+    /// The Panner (`crate::panning`): its mode (`None`: the default for the
+    /// file's layout), the balance (-1..1), and the turn of the sound field
+    /// in degrees -- yaw right, pitch front up, roll right side down.
+    pub pan_mode: Option<crate::panning::PanMode>,
+    pub pan_balance: f32,
+    pub pan_yaw_deg: f32,
+    pub pan_pitch_deg: f32,
+    pub pan_roll_deg: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3217,6 +3280,8 @@ pub struct EditorTab {
     pub auto_trim_state: Option<AutoTrimState>,
     pub loop_detect_state: Option<LoopDetectState>,
     pub mini_meter: MiniMeterState, // transient bottom meter strip state
+    /// The Spatial view's state (object-audio tabs). See `spatial_ops`.
+    pub spatial: super::spatial_ops::SpatialTabState,
     /// Video preview for a video source; `None` for audio files and for a
     /// video whose container turned out to have no picture in it.
     pub video_panel: Option<VideoPanelState>,
@@ -3530,6 +3595,7 @@ impl EditorTab {
             auto_trim_state: None,
             loop_detect_state: None,
             mini_meter: crate::app::types::MiniMeterState::default(),
+            spatial: Default::default(),
             video_panel: None,
             world_f0_draft: None,
             world_ap_draft: None,
@@ -3559,7 +3625,7 @@ impl EditorTab {
             EditorPrimaryView::Wave => ViewMode::Waveform,
             EditorPrimaryView::Spec => self.spec_sub_view.to_mode(),
             EditorPrimaryView::Other => self.other_sub_view.to_mode(),
-            EditorPrimaryView::Metadata => ViewMode::Waveform,
+            EditorPrimaryView::Metadata | EditorPrimaryView::Spatial => ViewMode::Waveform,
         }
     }
 
@@ -3573,7 +3639,7 @@ impl EditorTab {
             EditorPrimaryView::Other => {
                 self.other_sub_view = EditorOtherSubView::from_mode(mode);
             }
-            EditorPrimaryView::Metadata => {}
+            EditorPrimaryView::Metadata | EditorPrimaryView::Spatial => {}
         }
     }
 }
@@ -3616,6 +3682,12 @@ pub struct FileMeta {
     /// where the OS lends no decoder; E-AC-3, DTS, TrueHD and the rest in a
     /// transport stream.
     pub unsupported_audio_codec: Option<&'static str>,
+    /// Object audio (an ADM BWF; a TrueHD object presentation): its tracks
+    /// are beds and objects to be rendered, not speaker channels. Read from
+    /// the header alone. Such a file's audio is read-only, and it is never
+    /// fully decoded for the list -- there is no programme to measure until
+    /// the scene is rendered. See `docs/SPATIAL_AUDIO_SPEC.md`.
+    pub object_audio: Option<std::sync::Arc<crate::spatial::ObjectAudioSummary>>,
     pub channels: u16,
     /// Which speaker each channel feeds, as a WAVE channel mask, when the
     /// file says. See `app::channel_layout_ops`.
@@ -5824,6 +5896,8 @@ pub struct StartupConfig {
     pub open_files: Vec<PathBuf>,
     pub open_first: bool,
     pub open_view_mode: Option<ViewMode>,
+    /// Open the first tab in the Spatial view (`--open-spatial`).
+    pub open_spatial: bool,
     pub open_waveform_overlay: Option<bool>,
     pub screenshot_path: Option<PathBuf>,
     pub screenshot_delay_frames: u32,
@@ -5860,6 +5934,7 @@ impl Default for StartupConfig {
             open_files: Vec::new(),
             open_first: false,
             open_view_mode: None,
+            open_spatial: false,
             open_waveform_overlay: None,
             screenshot_path: None,
             screenshot_delay_frames: 5,

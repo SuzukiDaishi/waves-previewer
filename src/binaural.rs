@@ -259,6 +259,95 @@ impl BinauralFilters {
     }
 }
 
+/// The band [`programme_gain`] averages over: the audible range.
+const PROGRAMME_BAND_HZ: (f32, f32) = (20.0, 20_000.0);
+/// The spacing of the response [`programme_gain`] reads: fine enough that
+/// the band's lowest octave, 20-40 Hz, has a handful of bins at any rate.
+const PROGRAMME_BIN_HZ: f32 = 4.0;
+
+/// How loud a filter makes programme, as a linear gain: its power response
+/// averaged over [`PROGRAMME_BAND_HZ`] with every octave weighted alike --
+/// the spectrum of pink noise, which music roughly follows. An HRIR's gain
+/// differs by frequency (a few dB down in the bass, up around the ear canal's
+/// resonance), so one number has to pick a weighting; with this one the
+/// level match agrees with a pink-noise A/B by ear.
+pub fn programme_gain(ir: &[f32], sample_rate: u32) -> f32 {
+    let sample_rate = sample_rate.max(1) as f32;
+    let len = ((sample_rate / PROGRAMME_BIN_HZ).ceil() as usize)
+        .max(ir.len())
+        .next_power_of_two();
+    let fft = RealFftPlanner::<f32>::new().plan_fft_forward(len);
+    let mut time = fft.make_input_vec();
+    time[..ir.len()].copy_from_slice(ir);
+    let mut spectrum = fft.make_output_vec();
+    fft.process(&mut time, &mut spectrum)
+        .expect("buffer lengths come from the plan");
+    let bin_hz = sample_rate / len as f32;
+    let top = PROGRAMME_BAND_HZ.1.min(sample_rate / 2.0);
+    let (mut power, mut weight) = (0.0f64, 0.0f64);
+    for (k, bin) in spectrum.iter().enumerate() {
+        let hz = k as f32 * bin_hz;
+        if hz < PROGRAMME_BAND_HZ.0 {
+            continue;
+        }
+        if hz > top {
+            break;
+        }
+        // Equal power per octave: a bin counts as 1/f.
+        let w = 1.0 / f64::from(hz);
+        power += f64::from(bin.norm_sqr()) * w;
+        weight += w;
+    }
+    if weight > 0.0 {
+        (power / weight).sqrt() as f32
+    } else {
+        0.0
+    }
+}
+
+/// The gain that brings a centred sound to the level it has without the
+/// HRTF. `centre` is that sound per source channel (1 on each channel that
+/// carries it), and `reference` the level each ear hears it at without the
+/// HRTF.
+///
+/// The sound is followed through every channel that carries it, so a mono
+/// sound in a stereo mix is the left and right speakers' HRIRs summed in
+/// each ear -- in phase in the bass, which is why it comes out louder than
+/// either speaker alone. Only the directions of `routes` count, not their
+/// gains: those are the user's own balance, kept on top of this. `None` when
+/// no channel of the centre reaches the ears through an HRIR.
+pub fn centre_match_gain(
+    source: &dyn HrirSource,
+    routes: &[ChannelRoute],
+    centre: &[f32],
+    reference: [f32; 2],
+    sample_rate: u32,
+) -> Option<f32> {
+    let mut ears: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
+    for (route, &weight) in routes.iter().zip(centre) {
+        let ChannelRoute::Speaker { direction, .. } = route else {
+            continue;
+        };
+        if weight == 0.0 {
+            continue;
+        }
+        for (ear, ir) in ears.iter_mut().zip(source.hrir(*direction)) {
+            if ear.len() < ir.len() {
+                ear.resize(ir.len(), 0.0);
+            }
+            for (sum, v) in ear.iter_mut().zip(&ir) {
+                *sum += weight * v;
+            }
+        }
+    }
+    let heard: f32 = ears
+        .iter()
+        .map(|ir| programme_gain(ir, sample_rate).powi(2))
+        .sum();
+    let wanted: f32 = reference.iter().map(|v| v * v).sum();
+    (heard > 0.0 && wanted > 0.0).then(|| (wanted / heard).sqrt())
+}
+
 /// The running convolution, owned by the output callback.
 ///
 /// Allocates only when the shape changes (another channel count or HRIR
@@ -750,5 +839,64 @@ mod tests {
         let [high, _] = sofa.hrir(Direction::new(-30.0, 45.0));
         let diff: f32 = front.iter().zip(&high).map(|(a, b)| (a - b).powi(2)).sum();
         assert!(diff > 0.05, "a 45 degree rise changed the HRIR by {diff}");
+    }
+
+    #[test]
+    fn programme_gain_reads_a_plain_gain_as_itself() {
+        // A single tap is the same gain at every frequency.
+        assert!((programme_gain(&[0.5], 48_000) - 0.5).abs() < 1e-4);
+        // A delay changes the phase, never the level.
+        let mut delayed = vec![0.0; 40];
+        delayed.push(0.25);
+        assert!((programme_gain(&delayed, 44_100) - 0.25).abs() < 1e-4);
+        assert_eq!(programme_gain(&[], 48_000), 0.0);
+    }
+
+    #[test]
+    fn a_centre_heard_through_both_speakers_is_matched_to_the_reference() {
+        // Each speaker reaches each ear at 0.5 and in phase, so a sound in
+        // both is 1.0 in either ear: as loud as the reference, gain 1.
+        let speaker = |az: f32| ChannelRoute::Speaker {
+            direction: Direction::new(az, 0.0),
+            gain: 4.0,
+        };
+        let pair = [speaker(-30.0), speaker(30.0)];
+        let flat = Fixed([vec![0.5], vec![0.5]]);
+        let gain = centre_match_gain(&flat, &pair, &[1.0, 1.0], [1.0, 1.0], 48_000)
+            .expect("both speakers carry it");
+        assert!((gain - 1.0).abs() < 1e-3, "gain {gain}");
+        // Hotter HRIRs are brought down by as much, whatever the routes'
+        // own gains (4.0 here) say.
+        let hot = Fixed([vec![1.0], vec![1.0]]);
+        let gain = centre_match_gain(&hot, &pair, &[1.0, 1.0], [1.0, 1.0], 48_000).unwrap();
+        assert!((gain - 0.5).abs() < 1e-3, "gain {gain}");
+        // No channel of the centre reaches the ears through an HRIR.
+        let lfe = [ChannelRoute::BothEars {
+            gain: 1.0,
+            lowpass: false,
+        }];
+        assert_eq!(centre_match_gain(&hot, &lfe, &[1.0], [1.0, 1.0], 48_000), None);
+    }
+
+    /// The bundled HRTF, as `sofar` opens it, makes a stereo mix's centre
+    /// about 4.5 dB louder than the same mix played straight to the ears:
+    /// the two speakers' HRIRs add in phase in the bass, and `sofar` scales
+    /// every HRIR so the frontal one has unit energy (+2.6 dB for this one).
+    /// The match takes that off.
+    #[test]
+    fn the_bundled_hrtf_needs_a_cut_to_keep_a_stereo_centre_level() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/sofas/D1_HRIR_SOFA/D1_48K_24bit_256tap_FIR_SOFA.sofa");
+        let sofa = sofar::reader::OpenOptions::new()
+            .sample_rate(48_000.0)
+            .open(&path)
+            .expect("open the bundled SOFA");
+        let pair = [-30.0f32, 30.0].map(|az| ChannelRoute::Speaker {
+            direction: Direction::new(az, 0.0),
+            gain: 1.0,
+        });
+        let gain = centre_match_gain(&sofa, &pair, &[1.0, 1.0], [1.0, 1.0], 48_000).unwrap();
+        let db = 20.0 * gain.log10();
+        assert!((-5.5..=-3.5).contains(&db), "stereo centre match {db} dB");
     }
 }

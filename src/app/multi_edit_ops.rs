@@ -201,12 +201,18 @@ struct RenderJob {
     rx: mpsc::Receiver<Arc<AudioBuffer>>,
     doc_id: String,
     rev: u64,
+    /// The `out_sr` the mix is made at.
+    sr: u32,
 }
 
 /// The most recent playback mix and which edit it reflects.
 pub(crate) struct MixReady {
     pub doc_id: String,
     pub rev: u64,
+    /// The `out_sr` it was made at. Opening a file in the editor can reopen
+    /// the device at the file's rate, and a mix made for the old rate then
+    /// plays at the wrong speed -- so a mix is only current at its own rate.
+    pub sr: u32,
     pub audio: Arc<AudioBuffer>,
 }
 
@@ -381,6 +387,14 @@ impl MultiEditRuntime {
             Some(SourceSlot::Ready(source)) => Some(source),
             _ => None,
         }
+    }
+
+    /// The playback mix of `doc_id` when it reflects edit `rev` and was made
+    /// at `out_sr`.
+    pub fn current_mix(&self, doc_id: &str, rev: u64, out_sr: u32) -> Option<&MixReady> {
+        self.mix
+            .as_ref()
+            .filter(|mix| mix.doc_id == doc_id && mix.rev == rev && mix.sr == out_sr)
     }
 
     fn doc_sources_loading(&self, doc: &MultiEditDoc) -> bool {
@@ -738,6 +752,30 @@ impl WavesPreviewer {
         at_secs: f64,
         paths: &[PathBuf],
     ) -> usize {
+        // Multi Edits mixes channels; object audio is beds and objects whose
+        // positions live in metadata a timeline clip cannot carry.
+        let objects = paths
+            .iter()
+            .filter(|path| self.source_content(path).object_audio)
+            .count();
+        let kept: Vec<PathBuf>;
+        let paths = if objects > 0 {
+            self.push_toast(
+                ToastSeverity::Info,
+                format!("{objects} object-audio file(s) left out: Multi Edits mixes channels, not objects"),
+            );
+            kept = paths
+                .iter()
+                .filter(|path| !self.source_content(path).object_audio)
+                .cloned()
+                .collect();
+            if kept.is_empty() {
+                return 0;
+            }
+            &kept[..]
+        } else {
+            paths
+        };
         let clips = self.multi_edit_new_clips(paths);
         if clips.is_empty() {
             if !paths.is_empty() {
@@ -1237,6 +1275,7 @@ impl WavesPreviewer {
         let Some(doc) = self.multi_edit_active_doc() else {
             return;
         };
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
         let mut requests = Vec::new();
         let mut missing = Vec::new();
         for source in doc.sources() {
@@ -1246,8 +1285,25 @@ impl WavesPreviewer {
                 Some(SourceSlot::Failed(_)) => false,
                 Some(SourceSlot::NotInList) => self.item_for_path(&source.path).is_some(),
                 Some(SourceSlot::Ready(loaded)) => {
-                    self.multi_edit_source_stamp(&source.path) != Some(loaded.stamp)
-                        && self.item_for_path(&source.path).is_some()
+                    let changed = self.multi_edit_source_stamp(&source.path) != Some(loaded.stamp)
+                        && self.item_for_path(&source.path).is_some();
+                    if !changed && loaded.playback.sample_rate != out_sr {
+                        // The row still sounds the same, but the device
+                        // was reopened at another rate since: resample what
+                        // is already decoded rather than reading it again.
+                        requests.push(SourceRequest {
+                            path: source.path.clone(),
+                            input: SourceInput::Samples {
+                                channels: loaded.native.channels.clone(),
+                                sample_rate: loaded.native.sample_rate,
+                            },
+                            // `native` has the row's gain in it already.
+                            gain_db: 0.0,
+                            stamp: loaded.stamp,
+                        });
+                        continue;
+                    }
+                    changed
                 }
             };
             if !stale {
@@ -1264,7 +1320,6 @@ impl WavesPreviewer {
         if requests.is_empty() {
             return;
         }
-        let out_sr = self.audio.shared.out_sample_rate.max(1);
         let quality = Self::to_wave_resample_quality(self.src_quality);
         let pending: Vec<PathBuf> = requests.iter().map(|r| r.path.clone()).collect();
         for path in &pending {
@@ -1345,11 +1400,8 @@ impl WavesPreviewer {
             return;
         };
         let rev = self.multi_edit.rev(&doc.id);
-        let current = self
-            .multi_edit
-            .mix
-            .as_ref()
-            .is_some_and(|mix| mix.doc_id == doc.id && mix.rev == rev);
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let current = self.multi_edit.current_mix(&doc.id, rev, out_sr).is_some();
         if current || self.multi_edit.doc_sources_loading(doc) {
             return;
         }
@@ -1364,12 +1416,16 @@ impl WavesPreviewer {
         let mut sources = SourceMap::new();
         for source in doc.sources() {
             if let Some(loaded) = self.multi_edit.ready_source(&source.path) {
+                if loaded.playback.sample_rate != out_sr {
+                    // Being resampled for the new device rate; the
+                    // request goes out this frame.
+                    return;
+                }
                 sources.insert(source.path.clone(), loaded.playback.clone());
             }
         }
         let snapshot = doc.clone();
         let doc_id = doc.id.clone();
-        let out_sr = self.audio.shared.out_sample_rate.max(1);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             crate::app::threading::lower_current_thread_priority();
@@ -1385,7 +1441,12 @@ impl WavesPreviewer {
             crate::ui_wake::wake_ui();
         });
         self.multi_edit.edited_at = None;
-        self.multi_edit.render = Some(RenderJob { rx, doc_id, rev });
+        self.multi_edit.render = Some(RenderJob {
+            rx,
+            doc_id,
+            rev,
+            sr: out_sr,
+        });
     }
 
     fn multi_edit_drain_render(&mut self) {
@@ -1409,6 +1470,11 @@ impl WavesPreviewer {
             return;
         };
         let out_sr = self.audio.shared.out_sample_rate.max(1);
+        if job.sr != out_sr {
+            // The device changed rate while this was mixing; the next frame
+            // mixes again at the new one (and plays it, if that was asked).
+            return;
+        }
         if self.multi_edit_playback_is(&job.doc_id) {
             self.audio
                 .set_samples_buffer_keep_time_pos(audio.clone(), out_sr, out_sr);
@@ -1416,6 +1482,7 @@ impl WavesPreviewer {
         self.multi_edit.mix = Some(MixReady {
             doc_id: job.doc_id.clone(),
             rev: job.rev,
+            sr: job.sr,
             audio,
         });
         if self.multi_edit.play_when_ready.as_deref() == Some(job.doc_id.as_str()) {
@@ -1432,21 +1499,38 @@ impl WavesPreviewer {
         self.multi_edit_playback_is(doc_id) && self.audio.shared.playing.load(Ordering::Relaxed)
     }
 
+    /// Whether picking a row in the Multi Edits list pane must leave the
+    /// transport alone: a timeline is playing there. The row is selected
+    /// (to drag, or to see its clips) but not auditioned -- auditioning
+    /// replaces what the engine plays, and the timeline would go on showing
+    /// a moving playhead over one file's sound.
+    pub(super) fn multi_edit_pane_must_not_audition(&self) -> bool {
+        self.workspace_view == WorkspaceView::MultiEdit
+            && matches!(self.playback_session.source, PlaybackSourceKind::MultiEdit(_))
+            && self.audio.shared.playing.load(Ordering::Relaxed)
+    }
+
     fn multi_edit_start_playback(&mut self, doc_id: &str) {
-        let Some(mix) = self
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let Some((mix, sr)) = self
             .multi_edit
             .mix
             .as_ref()
             .filter(|mix| mix.doc_id == doc_id)
-            .map(|mix| mix.audio.clone())
+            .map(|mix| (mix.audio.clone(), mix.sr))
         else {
             return;
         };
+        if sr != out_sr {
+            // Made before the device was reopened at another rate: played
+            // as it is, it would run slow or fast. Mix again, then play.
+            self.multi_edit.play_when_ready = Some(doc_id.to_string());
+            return;
+        }
         if mix.is_empty() {
             self.push_toast(ToastSeverity::Info, "Nothing to play: the timeline is empty");
             return;
         }
-        let out_sr = self.audio.shared.out_sample_rate.max(1);
         let len = mix.len();
         self.audio.stop();
         self.audio.set_loop_enabled(false);
@@ -1478,11 +1562,8 @@ impl WavesPreviewer {
             return;
         }
         let rev = self.multi_edit.rev(&id);
-        let fresh = self
-            .multi_edit
-            .mix
-            .as_ref()
-            .is_some_and(|mix| mix.doc_id == id && mix.rev == rev);
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let fresh = self.multi_edit.current_mix(&id, rev, out_sr).is_some();
         if fresh {
             self.multi_edit_start_playback(&id);
         } else {

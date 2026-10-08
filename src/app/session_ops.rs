@@ -2215,6 +2215,19 @@ impl super::WavesPreviewer {
             })
             .collect();
         channel_layouts.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut spatial_edits: Vec<crate::app::project::ProjectSpatialEdit> = self
+            .spatial
+            .edits
+            .iter()
+            .filter(|(_, edits)| !edits.is_empty())
+            .map(|(path, edits)| {
+                crate::app::project::ProjectSpatialEdit::from_edits(
+                    session_path(path, base_dir, path_mode),
+                    edits,
+                )
+            })
+            .collect();
+        spatial_edits.sort_by(|a, b| a.path.cmp(&b.path));
         let mut bit_depth_overrides: Vec<ProjectBitDepthOverride> = self
             .bit_depth_override
             .iter()
@@ -2423,6 +2436,7 @@ impl super::WavesPreviewer {
             sample_rate_overrides,
             bit_depth_overrides,
             channel_layouts,
+            spatial_edits,
             format_overrides,
             virtual_items,
             transcript_languages,
@@ -2703,6 +2717,7 @@ impl super::WavesPreviewer {
         }
 
         self.multi_edit_note_save_planned();
+        self.spatial.pending_saved_edit_rev = Some(self.spatial.edit_rev);
         let project = ProjectFile {
             version: 2,
             // Carried across saves of the same document; `save_project_as`
@@ -3350,6 +3365,9 @@ impl super::WavesPreviewer {
         comment_free_fingerprint: session_sync::SessionFingerprint,
     ) {
         self.multi_edit_note_saved();
+        if let Some(rev) = self.spatial.pending_saved_edit_rev.take() {
+            self.spatial.saved_edit_rev = rev;
+        }
         self.session_disk_fingerprint = Some(fingerprint);
         self.session_comment_free_fingerprint = Some(comment_free_fingerprint);
         // What was committed, not what we set out to commit: the worker
@@ -5002,6 +5020,19 @@ impl super::WavesPreviewer {
                 item.transcript_document = Some(std::sync::Arc::new(stored.document.clone()));
             }
         }
+        // Spatial edits come with the session; the ones before it go.
+        self.spatial.edits.clear();
+        for item in project.list.spatial_edits.iter() {
+            let edits = item.to_edits();
+            if !edits.is_empty() {
+                self.spatial
+                    .edits
+                    .insert(resolve_path(&item.path, &base_dir), std::sync::Arc::new(edits));
+            }
+        }
+        self.spatial.edit_rev = self.spatial.edit_rev.wrapping_add(1);
+        self.spatial.saved_edit_rev = self.spatial.edit_rev;
+        self.spatial_mix_changed();
         self.channel_layout_overrides.clear();
         for item in project.list.channel_layouts.iter() {
             if let Some(layout) = crate::app::channel_layout_ops::layout_from_string(&item.speakers) {
@@ -5309,6 +5340,9 @@ impl super::WavesPreviewer {
                     .unwrap_or_else(|| Self::display_name_for_path(&tab_path));
                 let mut shell = super::types::EditorTab::new_base(tab_path.clone(), name);
                 self.seed_editor_notes_for_tab(&mut shell);
+                if self.source_content(&tab_path).object_audio {
+                    shell.read_only = true;
+                }
                 shell.loading = false;
                 shell.buffer_sample_rate = tab
                     .buffer_sample_rate

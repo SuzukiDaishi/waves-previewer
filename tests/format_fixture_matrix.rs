@@ -159,6 +159,15 @@ const EXPECTED: &[Expect] = &[
     e("edge_bw64.wav", Some((2, 48_000, 16, 4_800)), Fails, true),
     // Not a WAV at all.
     e("edge_not_a_wav.wav", None, Fails, false),
+
+    // --- ADM BWF ------------------------------------------------------
+    // Object audio. The scene comes from `axml` + `chna` (`tests/adm_scene.rs`);
+    // the PCM is read by the app's own WAVE reader, never by this decoder,
+    // which takes the RIFF one and refuses the BW64 ones like any BW64.
+    e("adm_bw64_objects.wav", Some((4, 48_000, 16, 24_000)), Fails, true),
+    plain("adm_riff_small.wav", 4, 48_000, 16, 24_000),
+    e("adm_axml_truncated.wav", Some((4, 48_000, 16, 24_000)), Fails, true),
+    e("adm_hoa_pack.wav", Some((2, 48_000, 16, 24_000)), Fails, true),
 ];
 
 fn fixture_dir() -> PathBuf {

@@ -323,7 +323,9 @@ mod workflow_bulk_operations {
             assert!(harness.state_mut().test_select_path(path));
 
             for target in export_formats() {
-                assert!(harness.state_mut().test_select_path(path));
+                // As a click: each export selects the file it wrote, and the
+                // next "Save selected" must take this source again.
+                assert!(harness.state_mut().test_click_path(path));
                 harness.state_mut().test_set_export_first_prompt(false);
                 harness
                     .state_mut()

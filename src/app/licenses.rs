@@ -258,6 +258,7 @@ pub fn feature_active(name: &str) -> Option<bool> {
         "mp3_lame" => Some(cfg!(feature = "mp3_lame")),
         "plugin_native_vst3" => Some(cfg!(feature = "plugin_native_vst3")),
         "plugin_native_clap" => Some(cfg!(feature = "plugin_native_clap")),
+        "truehd" => Some(cfg!(feature = "truehd")),
         _ => None,
     }
 }

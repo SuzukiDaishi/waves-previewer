@@ -1251,13 +1251,18 @@ mod tests {
 
         // A path *below* a plain file: not found, and not readable either.
         // The distinction that matters is that it is not reported as a file
-        // that used to be there and has been deleted.
-        let under_a_file = path.join("child.wav");
-        assert_eq!(
-            stat_of(&under_a_file),
-            FileProbe::Unreadable,
-            "an error that is not NotFound must not be read as a deletion"
-        );
+        // that used to be there and has been deleted. Only Unix can tell:
+        // it says ENOTDIR, where Windows says ERROR_PATH_NOT_FOUND -- the
+        // same NotFound as a missing folder, so there it reads as missing.
+        #[cfg(unix)]
+        {
+            let under_a_file = path.join("child.wav");
+            assert_eq!(
+                stat_of(&under_a_file),
+                FileProbe::Unreadable,
+                "an error that is not NotFound must not be read as a deletion"
+            );
+        }
 
         std::fs::remove_file(&path).expect("cleanup");
         assert_eq!(

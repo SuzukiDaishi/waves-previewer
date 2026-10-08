@@ -82,6 +82,60 @@ pub const MAX_MONITOR_GAIN: f32 = 1.9952624;
 /// the output clamp -- and
 /// a low-priority meter thread drains them. Overwrite semantics — a slow
 /// reader just loses the oldest frames.
+/// Frames of the object bed kept for the editor's mini meter: 170 ms at
+/// 48 kHz, more than the longest window any of its panels reads. A power of
+/// two, for the ring's mask.
+pub const OBJECT_BED_TAP_FRAMES: usize = 8192;
+
+/// The object bed's most recent frames. The bed exists only inside the
+/// callback -- the editor tab holds no samples of it -- so the mini meter
+/// reads its levels, spectrum and SURROUND view from here. Twelve relaxed
+/// stores per frame on the audio thread; never a lock.
+pub struct ObjectBedTap {
+    buf: Box<[std::sync::atomic::AtomicU32]>,
+    write_idx: std::sync::atomic::AtomicUsize,
+}
+
+impl ObjectBedTap {
+    fn new() -> Self {
+        Self {
+            buf: (0..OBJECT_BED_TAP_FRAMES * crate::spatial::panner::BED_CHANNELS)
+                .map(|_| std::sync::atomic::AtomicU32::new(0))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            write_idx: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    #[inline]
+    fn push(&self, frame: &[f32]) {
+        use std::sync::atomic::Ordering;
+        const BED: usize = crate::spatial::panner::BED_CHANNELS;
+        let idx = self.write_idx.load(Ordering::Relaxed);
+        let base = (idx & (OBJECT_BED_TAP_FRAMES - 1)) * BED;
+        for (channel, value) in frame.iter().take(BED).enumerate() {
+            self.buf[base + channel].store(value.to_bits(), Ordering::Relaxed);
+        }
+        self.write_idx.store(idx.wrapping_add(1), Ordering::Release);
+    }
+
+    /// The newest `frames` frames, per channel, oldest first.
+    pub fn latest(&self, frames: usize) -> Vec<Vec<f32>> {
+        use std::sync::atomic::Ordering;
+        const BED: usize = crate::spatial::panner::BED_CHANNELS;
+        let end = self.write_idx.load(Ordering::Acquire);
+        let count = frames.min(OBJECT_BED_TAP_FRAMES).min(end);
+        let mut out = vec![Vec::with_capacity(count); BED];
+        for i in end - count..end {
+            let base = (i & (OBJECT_BED_TAP_FRAMES - 1)) * BED;
+            for (channel, lane) in out.iter_mut().enumerate() {
+                lane.push(f32::from_bits(self.buf[base + channel].load(Ordering::Relaxed)));
+            }
+        }
+        out
+    }
+}
+
 pub struct MeterTap {
     buf_l: Box<[std::sync::atomic::AtomicU32]>,
     buf_r: Box<[std::sync::atomic::AtomicU32]>,
@@ -175,6 +229,26 @@ pub struct SharedAudio {
     /// source and feed the device's front pair. Built for one output rate, so
     /// a replacement engine starts without them and the app sends new ones.
     pub binaural: ArcSwapOption<crate::binaural::BinauralFilters>,
+    /// Object audio: installed for the source playing (and only applied to
+    /// a source of its exact shape), the callback pans the source's tracks
+    /// onto a 7.1.4 bed instead of routing them as channels, and the bed is
+    /// what the matrix, the HRTF and the loudness tap see. See
+    /// `crate::object_mix`.
+    pub object_mix: ArcSwapOption<crate::object_mix::ObjectMix>,
+    /// The live panner (the editor's Panner tool while it previews): a
+    /// matrix over the source's channels, applied to every frame before the
+    /// HRTF, the speaker matrix and the loudness tap -- so what is heard,
+    /// measured and later applied are the same pan. Only applied to a source
+    /// of its input channel count, never to object audio; changes slide
+    /// (`crate::panning::PanState`), so a knob turned while playing does not
+    /// click. Kept across a device reopen, like the object mix.
+    pub pan: ArcSwapOption<crate::panning::PanMatrix>,
+    /// The object bed's level per 7.1.4 channel, RMS and peak over the last
+    /// callback block, for the mini meter (the editor holds no bed samples
+    /// to measure).
+    pub object_bed_rms: [AtomicF32; crate::spatial::panner::BED_CHANNELS],
+    pub object_bed_peak: [AtomicF32; crate::spatial::panner::BED_CHANNELS],
+    pub object_bed_tap: ObjectBedTap,
     /// Bumped by the cpal error callback. The app watches it so a device that
     /// disappears mid-playback triggers a reopen instead of silence.
     pub stream_error_seq: std::sync::atomic::AtomicU32,
@@ -550,6 +624,11 @@ impl AudioEngine {
             src_layout: ArcSwapOption::from(None),
             out_layout: ArcSwapOption::from(None),
             binaural: ArcSwapOption::from(None),
+            object_mix: ArcSwapOption::from(None),
+            pan: ArcSwapOption::from(None),
+            object_bed_rms: std::array::from_fn(|_| AtomicF32::new(0.0)),
+            object_bed_peak: std::array::from_fn(|_| AtomicF32::new(0.0)),
+            object_bed_tap: ObjectBedTap::new(),
             stream_error_seq: std::sync::atomic::AtomicU32::new(0),
             loop_enabled: std::sync::atomic::AtomicBool::new(false),
             loop_start: std::sync::atomic::AtomicUsize::new(0),
@@ -610,6 +689,8 @@ impl AudioEngine {
             Ordering::Relaxed,
         );
         shared.src_layout.store(previous.src_layout.load_full());
+        shared.object_mix.store(previous.object_mix.load_full());
+        shared.pan.store(previous.pan.load_full());
         shared.loop_enabled.store(
             previous.loop_enabled.load(Ordering::Relaxed),
             Ordering::Relaxed,
@@ -1016,6 +1097,10 @@ impl AudioEngine {
         // the only thing that runs it, and it must survive from one block to
         // the next.
         let mut binaural = crate::binaural::BinauralState::default();
+        // Likewise the object mix's gains, ramping from block to block, and
+        // the live panner's.
+        let mut object_state = crate::object_mix::ObjectMixState::default();
+        let mut pan_state = crate::panning::PanState::default();
         let stream = device.build_output_stream(
             cfg,
             move |data: &mut [T], _| {
@@ -1029,6 +1114,8 @@ impl AudioEngine {
                     Self::fill_silence::<T>(data, &shared);
                     // Resuming must not play what was ringing when it stopped.
                     binaural.reset();
+                    object_state.reset();
+                    pan_state.reset();
                     return;
                 }
 
@@ -1082,10 +1169,17 @@ impl AudioEngine {
                     pos_f,
                 };
 
+                // An object mix applies only to the source it was built for:
+                // one left behind by the previous file must not pan this one.
+                let object_mix = shared.object_mix.load();
+
                 // The two sources differ only in how a sample is fetched, so
                 // both go through the same renderer.
                 if let Some(samples_arc) = maybe_samples.as_ref() {
                     let samples = samples_arc.as_ref();
+                    let object = object_mix
+                        .as_deref()
+                        .filter(|mix| mix.applies_to(None, samples.channel_count(), samples.len()));
                     Self::render_block::<T, _>(
                         data,
                         channels,
@@ -1094,12 +1188,18 @@ impl AudioEngine {
                         samples.len(),
                         &params,
                         &mut binaural,
+                        object,
+                        &mut object_state,
+                        &mut pan_state,
                         |c, p| Self::sample_at_interp(samples, c, p),
                     );
                     return;
                 }
 
                 if let Some(stream) = maybe_stream.as_ref() {
+                    let object = object_mix.as_deref().filter(|mix| {
+                        mix.applies_to(Some(stream.path()), stream.channel_count(), stream.len())
+                    });
                     Self::render_block::<T, _>(
                         data,
                         channels,
@@ -1108,6 +1208,9 @@ impl AudioEngine {
                         stream.len(),
                         &params,
                         &mut binaural,
+                        object,
+                        &mut object_state,
+                        &mut pan_state,
                         |c, p| stream.sample_at_interp(c, p),
                     );
                     return;
@@ -1122,6 +1225,9 @@ impl AudioEngine {
                         silent_frames,
                         &params,
                         &mut binaural,
+                        None,
+                        &mut object_state,
+                        &mut pan_state,
                         |_c, _p| 0.0,
                     );
                     return;
@@ -1164,6 +1270,9 @@ impl AudioEngine {
         len: usize,
         params: &RenderParams,
         binaural: &mut crate::binaural::BinauralState,
+        object: Option<&crate::object_mix::ObjectMix>,
+        object_state: &mut crate::object_mix::ObjectMixState,
+        pan_state: &mut crate::panning::PanState,
         sample_at: S,
     ) where
         T: cpal::SizedSample + cpal::FromSample<f32>,
@@ -1175,7 +1284,18 @@ impl AudioEngine {
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             Self::fill_silence::<T>(data, shared);
             binaural.reset();
+            object_state.reset();
+            pan_state.reset();
             return;
+        }
+        if object.is_some_and(|mix| mix.pending) {
+            // The scene is still being read. Hold -- silent, the playhead
+            // where it is -- rather than play the raw tracks as channels.
+            Self::fill_silence::<T>(data, shared);
+            return;
+        }
+        if object.is_none() {
+            object_state.reset();
         }
 
         let RenderParams {
@@ -1206,14 +1326,45 @@ impl AudioEngine {
         // Only the source channels the matrix actually reads are interpolated,
         // so a stereo clip on a 7.1.4 device costs two reads per frame.
         let (src_layout, out_layout) = (shared.src_layout.load(), shared.out_layout.load());
+        // The live panner, for a source of its input channel count (never an
+        // object source): its output -- a mono file panned comes out stereo
+        // -- is what reaches the matrix. While it slides back after being
+        // removed, the source's own layout does.
+        let pan_matrix = shared.pan.load_full();
+        let pan_matrix = pan_matrix
+            .as_ref()
+            .filter(|matrix| object.is_none() && matrix.in_channels() == src_channels);
+        let panning = object.is_none() && pan_state.engaged(pan_matrix, src_channels);
+        if !panning {
+            pan_state.reset();
+        }
+        let pan_ramp = crate::sample_rate::frames_for_secs(
+            crate::panning::PAN_RAMP_SECS,
+            shared.out_sample_rate,
+        );
+        let pan_out = pan_matrix.filter(|_| panning);
+        // An object source reaches the matrix as its 7.1.4 bed. That bed is
+        // always routed by speaker: direct mapping on a stereo device would
+        // keep its front pair and drop every surround, height and centre.
+        let (mix_channels, mix_layout, mix_mode) = match (object, pan_out) {
+            (Some(_), _) => (crate::spatial::panner::BED_CHANNELS, None, ChannelMapMode::Auto),
+            (None, Some(matrix)) => (matrix.out_channels(), Some(matrix.out_layout()), map_mode),
+            (None, None) => (
+                src_channels,
+                src_layout.as_deref().map(Vec::as_slice),
+                map_mode,
+            ),
+        };
+        let object_sr = object.map(|mix| f64::from(mix.source.file_sr.max(1)));
         let matrix = ChannelMixMatrix::build_with_layouts(
-            src_channels,
-            src_layout.as_deref().map(Vec::as_slice),
+            mix_channels,
+            mix_layout,
             out_channels,
             out_layout.as_deref().map(Vec::as_slice),
-            map_mode,
+            mix_mode,
         );
         let mut src_frame = [0.0f32; MAX_SOURCE_CHANNELS];
+        let mut pan_frame = [0.0f32; MAX_SOURCE_CHANNELS];
         let is_audible = |c: usize| c >= 64 || (audible_mask >> c) & 1 == 1;
         // Headphone monitoring: with filters installed for this many channels
         // the source reaches the two ears through HRIRs instead of the speaker
@@ -1223,7 +1374,7 @@ impl AudioEngine {
         let binaural_filters = shared
             .binaural
             .load_full()
-            .filter(|filters| filters.channels() == src_channels);
+            .filter(|filters| filters.channels() == mix_channels);
         if binaural_filters.is_none() {
             binaural.reset();
         }
@@ -1292,8 +1443,20 @@ impl AudioEngine {
                     sample_at(src_ch, pos_f)
                 }
             };
-            if binaural_filters.is_some() {
-                // Every channel feeds the ears, whatever the matrix reads.
+            if let (Some(mix), Some(file_sr)) = (object, object_sr) {
+                // Every track the scene uses, panned onto the bed.
+                object_state.mix_frame(
+                    mix,
+                    pos_f / file_sr,
+                    &fetch,
+                    &mut src_frame[..crate::spatial::panner::BED_CHANNELS],
+                );
+                shared
+                    .object_bed_tap
+                    .push(&src_frame[..crate::spatial::panner::BED_CHANNELS]);
+            } else if binaural_filters.is_some() || panning {
+                // Every channel feeds the ears, whatever the matrix reads --
+                // and the panner, which may move any of them anywhere.
                 for src_ch in 0..src_channels.min(MAX_SOURCE_CHANNELS) {
                     src_frame[src_ch] = fetch(src_ch);
                 }
@@ -1302,9 +1465,17 @@ impl AudioEngine {
                     src_frame[src_ch as usize] = fetch(src_ch as usize);
                 }
             }
+            if panning {
+                let ins = src_channels.min(MAX_SOURCE_CHANNELS);
+                let outs = mix_channels.min(MAX_SOURCE_CHANNELS);
+                pan_state.process(pan_matrix, pan_ramp, &src_frame[..ins], &mut pan_frame[..outs]);
+            }
+            // What the HRTF, the matrix and the loudness tap read: the
+            // source, or the source panned.
+            let src_frame = if panning { &pan_frame } else { &src_frame };
             let ear_frame = binaural_filters
                 .as_ref()
-                .map(|filters| binaural.process_frame(filters, &src_frame[..src_channels.min(MAX_SOURCE_CHANNELS)]));
+                .map(|filters| binaural.process_frame(filters, &src_frame[..mix_channels.min(MAX_SOURCE_CHANNELS)]));
 
             let mut tap_frame = [0.0f32; 2];
             for (out_ch, out_sample) in frame.iter_mut().enumerate() {
@@ -1313,7 +1484,7 @@ impl AudioEngine {
                 // the device gets.
                 let mixed = match ear_frame {
                     Some([left, right]) => ears.mix(out_ch, left, right),
-                    None => matrix.mix(out_ch, &src_frame),
+                    None => matrix.mix(out_ch, src_frame),
                 };
                 let out = (mixed * vol * ramp_gain).clamp(-1.0, 1.0);
                 *out_sample = T::from_sample(out);
@@ -1327,7 +1498,7 @@ impl AudioEngine {
                     // clamp are all monitoring, so none of them belong here --
                     // and neither does the binaural path. Nor the LFE, which
                     // the fold now carries but loudness (BS.1770) leaves out.
-                    tap_frame[out_ch] = matrix.mix_loudness(out_ch, &src_frame);
+                    tap_frame[out_ch] = matrix.mix_loudness(out_ch, src_frame);
                 }
                 meter_sum_sq += f64::from(out * out);
                 meter_count = meter_count.saturating_add(1);
@@ -1377,6 +1548,14 @@ impl AudioEngine {
             std::sync::atomic::Ordering::Relaxed,
         );
         Self::store_channel_meters(shared, &ch_sum_sq, &ch_peak, &ch_counts, out_channels);
+        if object.is_some() {
+            if let Some(levels) = object_state.take_meters() {
+                for (channel, (rms, peak)) in levels.iter().enumerate() {
+                    shared.object_bed_rms[channel].store(*rms, std::sync::atomic::Ordering::Relaxed);
+                    shared.object_bed_peak[channel].store(*peak, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
     }
 
     pub fn set_samples(&self, samples: Arc<AudioBuffer>) {
@@ -1616,6 +1795,15 @@ impl AudioEngine {
             .map(|src| src.sample_rate())
     }
 
+    /// The streamed file's (channels, frames, sample rate).
+    pub fn streaming_wav_shape(&self) -> Option<(usize, usize, u32)> {
+        self.shared
+            .streamed_wav
+            .load()
+            .as_ref()
+            .map(|src| (src.channel_count(), src.len(), src.sample_rate()))
+    }
+
     pub fn is_streaming_wav_path(&self, path: &Path) -> bool {
         self.shared
             .streamed_wav
@@ -1848,6 +2036,90 @@ impl AudioEngine {
     /// The headphone filters installed now, if any.
     pub fn binaural_filters(&self) -> Option<Arc<crate::binaural::BinauralFilters>> {
         self.shared.binaural.load_full()
+    }
+
+    /// Install an object mix (`None`: play sources as channels again). It
+    /// applies only to a source of its exact shape; see
+    /// [`SharedAudio::object_mix`].
+    pub fn set_object_mix(&self, mix: Option<Arc<crate::object_mix::ObjectMix>>) {
+        self.shared.object_mix.store(mix);
+    }
+
+    pub fn object_mix(&self) -> Option<Arc<crate::object_mix::ObjectMix>> {
+        self.shared.object_mix.load_full()
+    }
+
+    /// Install the live panner (`None`: take it away; the gains slide back).
+    /// See [`SharedAudio::pan`].
+    pub fn set_pan_matrix(&self, matrix: Option<Arc<crate::panning::PanMatrix>>) {
+        self.shared.pan.store(matrix);
+    }
+
+    pub fn pan_matrix(&self) -> Option<Arc<crate::panning::PanMatrix>> {
+        self.shared.pan.load_full()
+    }
+
+    /// The live panner, when it applies to the source loaded.
+    fn pan_active(&self) -> Option<Arc<crate::panning::PanMatrix>> {
+        let channels = self.source_channels()?;
+        self.pan_matrix()
+            .filter(|matrix| matrix.in_channels() == channels && !self.object_mix_active())
+    }
+
+    /// Whether the installed object mix is the one for the source loaded.
+    pub fn object_mix_active(&self) -> bool {
+        let mix = self.shared.object_mix.load();
+        let Some(mix) = mix.as_deref() else {
+            return false;
+        };
+        if let Some(samples) = self.shared.samples.load().as_ref() {
+            return mix.applies_to(None, samples.channel_count(), samples.len());
+        }
+        self.shared
+            .streamed_wav
+            .load()
+            .as_ref()
+            .is_some_and(|stream| {
+                mix.applies_to(Some(stream.path()), stream.channel_count(), stream.len())
+            })
+    }
+
+    /// How many channels reach the speaker matrix and the HRTF: the source's
+    /// own, the 7.1.4 bed when an object mix plays it, or what the live
+    /// panner makes of them (a mono file panned is stereo).
+    pub fn rendered_channels(&self) -> Option<usize> {
+        let channels = self.source_channels()?;
+        Some(if self.object_mix_active() {
+            crate::spatial::panner::BED_CHANNELS
+        } else if let Some(matrix) = self.pan_active() {
+            matrix.out_channels()
+        } else {
+            channels
+        })
+    }
+
+    /// The speakers of what the live panner sends on, when it applies to the
+    /// source loaded.
+    pub fn panned_layout(&self) -> Option<Vec<Option<crate::audio_channels::SpeakerPos>>> {
+        self.pan_active().map(|matrix| matrix.out_layout().to_vec())
+    }
+
+    /// The object bed's newest `frames` frames, as a 7.1.4 buffer at the
+    /// output's rate, for the mini meter. `None` before any were played.
+    pub fn object_bed_recent(&self, frames: usize) -> Option<Arc<AudioBuffer>> {
+        let channels = self.shared.object_bed_tap.latest(frames);
+        (channels.first().is_some_and(|lane| !lane.is_empty()))
+            .then(|| Arc::new(AudioBuffer::from_channels(channels)))
+    }
+
+    /// The object bed's (RMS, peak) per 7.1.4 channel, from the last block.
+    pub fn object_bed_levels(&self) -> [(f32, f32); crate::spatial::panner::BED_CHANNELS] {
+        std::array::from_fn(|channel| {
+            (
+                self.shared.object_bed_rms[channel].load(std::sync::atomic::Ordering::Relaxed),
+                self.shared.object_bed_peak[channel].load(std::sync::atomic::Ordering::Relaxed),
+            )
+        })
     }
 
     pub fn set_output_layout(&self, layout: Option<Vec<Option<crate::audio_channels::SpeakerPos>>>) {
@@ -2155,6 +2427,9 @@ mod tests {
             FRAMES,
             &params,
             &mut crate::binaural::BinauralState::default(),
+            None,
+            &mut crate::object_mix::ObjectMixState::default(),
+            &mut crate::panning::PanState::default(),
             // A quiet tone, so nothing is lost to the output clamp and the two
             // renders differ only by the gain under test.
             |_ch, pos| (pos as f32 * 0.05).sin() * 0.25,
@@ -2255,11 +2530,100 @@ mod tests {
             frames * 4,
             &params,
             &mut binaural,
+            None,
+            &mut crate::object_mix::ObjectMixState::default(),
+            &mut crate::panning::PanState::default(),
             |ch, _pos| 0.05 * (ch + 1) as f32,
         );
         let (mut left, mut right) = (Vec::new(), Vec::new());
         shared.meter_tap.read_since(cursor, &mut left, &mut right);
         (data, left)
+    }
+
+    /// Blocks of a stereo device through the live panner, its state kept from
+    /// one block to the next as the callback keeps it.
+    fn render_panned(
+        shared: &SharedAudio,
+        state: &mut crate::panning::PanState,
+        src_channels: usize,
+        frames: usize,
+    ) -> Vec<f32> {
+        let params = RenderParams {
+            vol: 1.0,
+            audible_mask: u64::MAX,
+            rate: 1.0,
+            looping: false,
+            loop_start: 0,
+            loop_end: 0,
+            loop_xfade_samples: 0,
+            loop_xfade_shape: 0,
+            map_mode: ChannelMapMode::Auto,
+            pos_f: 0.0,
+        };
+        let mut data = vec![0.0f32; frames * 2];
+        AudioEngine::render_block::<f32, _>(
+            &mut data,
+            2,
+            shared,
+            src_channels,
+            frames * 4,
+            &params,
+            &mut crate::binaural::BinauralState::default(),
+            None,
+            &mut crate::object_mix::ObjectMixState::default(),
+            state,
+            |_ch, _pos| 0.5,
+        );
+        data
+    }
+
+    #[test]
+    fn the_live_panner_moves_its_source_and_leaves_other_shapes_alone() {
+        use crate::audio_channels::SpeakerPos;
+        use crate::panning::{PanMatrix, PanMode, PanParams, Rotation};
+        let shared = AudioEngine::new_shared(2, 48_000);
+        let balance = |balance: f32, layout: &[Option<SpeakerPos>]| {
+            Arc::new(PanMatrix::for_layout(
+                layout,
+                &PanParams {
+                    mode: PanMode::Balance,
+                    balance,
+                    rotation: Rotation::default(),
+                },
+                |_| true,
+            ))
+        };
+        let stereo = [Some(SpeakerPos::Fl), Some(SpeakerPos::Fr)];
+        shared.pan.store(Some(balance(-1.0, &stereo)));
+        let mut state = crate::panning::PanState::default();
+        let data = render_panned(&shared, &mut state, 2, 64);
+        assert!(
+            data.chunks(2).all(|f| (f[0] - 0.5).abs() < 1e-6 && f[1].abs() < 1e-6),
+            "hard left: {:?}",
+            &data[..4]
+        );
+        // Another channel count is not this matrix's source: played as is.
+        let mut other = crate::panning::PanState::default();
+        let data = render_panned(&shared, &mut other, 1, 16);
+        assert!(data.chunks(2).all(|f| f[0] > 0.3 && f[1] > 0.3), "{:?}", &data[..4]);
+        // A mono file panned plays as a stereo pair.
+        shared.pan.store(Some(balance(1.0, &[Some(SpeakerPos::Fc)])));
+        let mut mono = crate::panning::PanState::default();
+        let data = render_panned(&shared, &mut mono, 1, 16);
+        assert!(
+            data.chunks(2).all(|f| f[0].abs() < 1e-6 && (f[1] - 0.5).abs() < 1e-6),
+            "mono to the right: {:?}",
+            &data[..4]
+        );
+        // Taken away: the stereo pan slides back rather than jumping.
+        shared.pan.store(Some(balance(-1.0, &stereo)));
+        let _ = render_panned(&shared, &mut state, 2, 16);
+        shared.pan.store(None);
+        let data = render_panned(&shared, &mut state, 2, 4096);
+        let right: Vec<f32> = data.chunks(2).map(|f| f[1]).collect();
+        let jump = right.windows(2).fold(0.0f32, |m, w| m.max((w[1] - w[0]).abs()));
+        assert!(right[0] < 0.01 && jump < 0.01, "slides: {} then {jump}", right[0]);
+        assert!((right.last().unwrap() - 0.5).abs() < 1e-6, "back to as it was");
     }
 
     #[test]
@@ -2308,6 +2672,9 @@ mod tests {
             FRAMES * 4,
             &params,
             &mut crate::binaural::BinauralState::default(),
+            None,
+            &mut crate::object_mix::ObjectMixState::default(),
+            &mut crate::panning::PanState::default(),
             |ch, _pos| if ch == 3 { 0.5 } else { 0.0 },
         );
         let half_power = std::f32::consts::FRAC_1_SQRT_2;
@@ -2672,6 +3039,9 @@ mod tests {
             96_000,
             &params,
             &mut crate::binaural::BinauralState::default(),
+            None,
+            &mut crate::object_mix::ObjectMixState::default(),
+            &mut crate::panning::PanState::default(),
             |_channel, _position| 0.0,
         );
         assert!(output.iter().all(|sample| *sample == 0.0));
@@ -2841,5 +3211,156 @@ mod tests {
         assert_eq!(l.len(), METER_TAP_CAPACITY);
         assert_eq!(l[0], 500.0, "oldest surviving frame after overwrite");
         assert_eq!(*l.last().unwrap(), (METER_TAP_CAPACITY + 500 - 1) as f32);
+    }
+}
+
+#[cfg(test)]
+mod object_mix_tests {
+    use super::*;
+    use crate::object_mix::{
+        MixElement, MixKey, MixRoute, ObjectMix, ObjectMixSource, ObjectMixState,
+    };
+
+    const FRAMES: usize = 4 * crate::binaural::BINAURAL_PARTITION_FRAMES;
+
+    fn params(map_mode: ChannelMapMode) -> RenderParams {
+        RenderParams {
+            vol: 1.0,
+            audible_mask: u64::MAX,
+            rate: 1.0,
+            looping: false,
+            loop_start: 0,
+            loop_end: 0,
+            loop_xfade_samples: 0,
+            loop_xfade_shape: 0,
+            map_mode,
+            pos_f: 0.0,
+        }
+    }
+
+    /// Two tracks; only track 1 is in the scene, as one object at `cart`.
+    fn one_object(cart: [f32; 3], pending: bool) -> ObjectMix {
+        ObjectMix {
+            source: ObjectMixSource {
+                stream_path: None,
+                tracks: 2,
+                frames: FRAMES * 4,
+                file_sr: 48_000,
+            },
+            pending,
+            elements: vec![MixElement {
+                track: 1,
+                route: MixRoute::Panned,
+                keys: Arc::from(vec![MixKey {
+                    secs: 0.0,
+                    ramp_secs: 0.0,
+                    cart,
+                    gain: 1.0,
+                }]),
+                active: None,
+                gain: 1.0,
+                audible: true,
+            }],
+        }
+    }
+
+    fn render(
+        shared: &SharedAudio,
+        out_channels: usize,
+        mix: &ObjectMix,
+        map_mode: ChannelMapMode,
+        binaural: &mut crate::binaural::BinauralState,
+    ) -> Vec<f32> {
+        let mut data = vec![0.0f32; FRAMES * out_channels];
+        AudioEngine::render_block::<f32, _>(
+            &mut data,
+            out_channels,
+            shared,
+            2,
+            FRAMES * 4,
+            &params(map_mode),
+            binaural,
+            Some(mix),
+            &mut ObjectMixState::default(),
+            &mut crate::panning::PanState::default(),
+            |ch, _pos| if ch == 1 { 0.5 } else { 0.25 },
+        );
+        data
+    }
+
+    #[test]
+    fn an_object_source_plays_as_its_bed() {
+        let shared = AudioEngine::new_shared(12, 48_000);
+        let mix = one_object([-1.0, 1.0, 0.0], false);
+        let data = render(&shared, 12, &mix, ChannelMapMode::Auto, &mut Default::default());
+        for frame in data.chunks(12) {
+            assert!((frame[0] - 0.5).abs() < 1e-6, "front left: {frame:?}");
+            // Track 0 is not in the scene: nothing else sounds.
+            assert!(frame[1..].iter().all(|v| v.abs() < 1e-6), "{frame:?}");
+        }
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        shared.meter_tap.read_since(0, &mut left, &mut right);
+        assert!(left.iter().all(|v| (v - 0.5).abs() < 1e-6), "the tap reads the bed");
+        let fl = shared.object_bed_rms[0].load(std::sync::atomic::Ordering::Relaxed);
+        assert!((fl - 0.5).abs() < 1e-6, "bed meter {fl}");
+    }
+
+    #[test]
+    fn the_bed_is_routed_by_speaker_even_under_direct_mapping() {
+        // Back left on a stereo device: the fold takes it to the left at
+        // -3 dB. Direct mapping would have read bed channel 0 (empty).
+        let shared = AudioEngine::new_shared(2, 48_000);
+        let mix = one_object([-1.0, -1.0, 0.0], false);
+        let data = render(&shared, 2, &mix, ChannelMapMode::Direct, &mut Default::default());
+        let last = &data[data.len() - 2..];
+        assert!(
+            (last[0] - 0.5 * std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6,
+            "{last:?}"
+        );
+        assert!(last[1].abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_pending_mix_holds_the_playhead_in_silence() {
+        let shared = AudioEngine::new_shared(2, 48_000);
+        shared
+            .play_pos_f
+            .store(100.0, std::sync::atomic::Ordering::Relaxed);
+        let mix = one_object([0.0, 1.0, 0.0], true);
+        let data = render(&shared, 2, &mix, ChannelMapMode::Auto, &mut Default::default());
+        assert!(data.iter().all(|v| *v == 0.0));
+        assert_eq!(
+            shared.play_pos_f.load(std::sync::atomic::Ordering::Relaxed),
+            100.0
+        );
+    }
+
+    #[test]
+    fn the_hrtf_hears_the_bed() {
+        use crate::binaural::{ChannelRoute, Direction, HrirSource};
+        /// Left ear for a speaker on the left, right for one on the right.
+        struct Sides;
+        impl HrirSource for Sides {
+            fn hrir(&self, direction: Direction) -> [Vec<f32>; 2] {
+                let left = if direction.azimuth_deg < 0.0 { 1.0 } else { 0.0 };
+                [vec![left], vec![1.0 - left]]
+            }
+        }
+        // Filters for the 12 bed channels: even ones on the left.
+        let routes: Vec<ChannelRoute> = (0..crate::spatial::panner::BED_CHANNELS)
+            .map(|ch| ChannelRoute::Speaker {
+                direction: Direction::new(if ch % 2 == 0 { -90.0 } else { 90.0 }, 0.0),
+                gain: 1.0,
+            })
+            .collect();
+        let shared = AudioEngine::new_shared(2, 48_000);
+        shared.binaural.store(Some(Arc::new(crate::binaural::BinauralFilters::build(
+            &Sides, &routes, 48_000, 1.0,
+        ))));
+        // Front right is bed channel 1: the right ear.
+        let mix = one_object([1.0, 1.0, 0.0], false);
+        let data = render(&shared, 2, &mix, ChannelMapMode::Auto, &mut Default::default());
+        let last = &data[data.len() - 2..];
+        assert!(last[0].abs() < 1e-4 && (last[1] - 0.5).abs() < 1e-4, "{last:?}");
     }
 }

@@ -49,6 +49,18 @@ mod kittest_suite {
                     let Ok(rel) = entry.path().strip_prefix(&src) else {
                         continue;
                     };
+                    // Object-audio masters (`formats/adm_*.wav`) open read-only
+                    // as an overview, never as samples, and sort ahead of every
+                    // other WAV; the cases here pick "the first WAV" and expect
+                    // ordinary channel audio. They have suites of their own
+                    // (`adm_scene`, `format_fixture_matrix`).
+                    let object_audio = rel
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("adm_"));
+                    if object_audio {
+                        continue;
+                    }
                     let out = dst.join(rel);
                     if let Some(parent) = out.parent() {
                         let _ = std::fs::create_dir_all(parent);
@@ -598,6 +610,13 @@ mod kittest_suite {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// A path as the filesystem resolves it. The app keeps recent sessions as
+    /// they were given (lexically: a menu must never stat a share), so a test
+    /// compares both sides resolved.
+    fn canon(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
     fn wait_for_project_path(harness: &mut Harness<'static, WavesPreviewer>, path: &Path) {
@@ -1479,9 +1498,18 @@ mod kittest_suite {
             "a checkbox click must not start a row drag"
         );
 
-        let scroll_hover = list_columns_row_label_center(&harness, "Bitrate");
+        // Over a row near the top: the wheel has to land inside the scroll
+        // area, and a row near the bottom edge (where Bitrate now sits, with
+        // more built-in columns above it) is on the window's margin.
+        let scroll_hover = list_columns_row_label_center(&harness, "File");
         harness.hover_at(scroll_hover);
-        for _ in 0..24 {
+        // Scroll until the metadata rows are on screen: how far that is grows
+        // with every column the window lists, so a fixed count goes stale.
+        let bottom = harness.ctx.content_rect().bottom() - 24.0;
+        for _ in 0..400 {
+            if list_columns_row_label_center(&harness, "Note").y < bottom {
+                break;
+            }
             harness.event(egui::Event::MouseWheel {
                 unit: MouseWheelUnit::Line,
                 delta: egui::vec2(0.0, -5.0),
@@ -1490,6 +1518,10 @@ mod kittest_suite {
             });
             harness.run_steps(1);
         }
+        assert!(
+            list_columns_row_label_center(&harness, "Note").y < bottom,
+            "the metadata rows must be on screen for the drag below"
+        );
         let metadata_start = list_columns_row_label_center(&harness, "UCS Category");
         let note_drop = list_columns_row_label_center(&harness, "Note");
         editor_pointer_drag(&mut harness, metadata_start, note_drop);
@@ -3559,10 +3591,10 @@ mod kittest_suite {
 
         let recents = harness.state().test_recent_session_paths();
         assert_eq!(recents.len(), 4);
-        assert_eq!(recents[0], std::fs::canonicalize(&first).unwrap());
-        assert_eq!(recents[1], std::fs::canonicalize(&second).unwrap());
-        assert_eq!(recents[2], std::fs::canonicalize(&third).unwrap());
-        assert_eq!(recents[3], std::fs::canonicalize(&fourth).unwrap());
+        assert_eq!(canon(&recents[0]), canon(&first));
+        assert_eq!(canon(&recents[1]), canon(&second));
+        assert_eq!(canon(&recents[2]), canon(&third));
+        assert_eq!(canon(&recents[3]), canon(&fourth));
     }
 
     #[test]
@@ -3585,8 +3617,8 @@ mod kittest_suite {
         wait_for_tab_ready(&mut harness);
 
         assert_eq!(
-            harness.state().test_project_path(),
-            Some(std::fs::canonicalize(&sess).unwrap_or(sess.clone()))
+            harness.state().test_project_path().map(|p| canon(&p)),
+            Some(canon(&sess))
         );
     }
 
@@ -3627,7 +3659,7 @@ mod kittest_suite {
             .into_iter()
             .next()
             .expect("recent session");
-        assert_eq!(recent, std::fs::canonicalize(&sess).unwrap_or(sess.clone()));
+        assert_eq!(canon(&recent), canon(&sess));
 
         assert!(harness.state_mut().test_open_session_from(&recent));
         wait_for_tab_ready(&mut harness);

@@ -96,6 +96,19 @@ length; playback resamples to whatever the output device is running at.
 | `edge_rf64` `edge_bw64` | RF64 / BW64 roots with an honest `ds64` | **Header reads, full decode fails** — symphonia wants a literal `RIFF`. Markers and loop points must go to sidecar JSON rather than into the file |
 | `edge_not_a_wav` | Not a WAV at all | Reported as an unreadable file |
 
+## Object audio — `adm_*.wav`
+
+ADM BWF: PCM tracks plus ITU-R BS.2076 metadata (`axml`) and a track table
+(`chna`). Each track carries its own pitch (220, 330, 440, 550 Hz) so what is
+heard where can be told apart. `tests/adm_scene.rs` pins the scenes.
+
+| File | What is in it | Must |
+|---|---|---|
+| `adm_bw64_objects` | BW64, 4 tracks. `chna` between `fmt ` and `data`, `axml` after the audio. Tracks 1–2: a stereo bed pointing at BS.2094 common definitions the file does not write out. Track 3: a Cartesian object sweeping from the front-left corner to the front-right over 0.05–0.45 s, with a `width` and a repeated last block. Track 4: a polar object (its `chna` entry names the channel format directly, `AC_…`) that jumps to M+030, then glides up and behind at −6 dB | List row says `ADM · 2 bed + 2 obj`. Plays through the object mix, never as a plain 4-channel file. The sweep is at the centre of the front wall at 0.25 s |
+| `adm_riff_small` | The same tracks and metadata in a plain RIFF, `axml` ahead of `fmt `, no `audioProgramme` | The same scene: with no programme, every top-level object plays |
+| `adm_axml_truncated` | `adm_bw64_objects` with `axml` cut off inside the polar object's second block | What was complete still plays; the scene reports that the document ended early |
+| `adm_hoa_pack` | BW64, a first-order ambisonic W channel next to one object | The object plays; HOA is counted (`1 obj + 1 other`) and reported as not rendered |
+
 ## The one that is not here
 
 Nothing in this directory is large enough to cross the editor's 256 MiB

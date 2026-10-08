@@ -66,6 +66,13 @@ fn a_loading_waveform_fills_its_canvas_instead_of_stretching_across_it() {
         assert!(Instant::now() < deadline, "scan did not finish");
     }
     assert!(harness.state_mut().test_open_tab_for_path(&path));
+    // The first picture can take a frame or two: the list's thumbnail is no
+    // longer ready by the time the scan is (headers come first, waveforms
+    // after), so the overview may begin with the decode's first emit.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !harness.state().test_active_tab_loading_waveform_ready() && Instant::now() < deadline {
+        harness.run_steps(1);
+    }
 
     // Watch the decode go by. Every sample of it must satisfy the same rule:
     // the drawn part of the overview does not run ahead of the decoded part of

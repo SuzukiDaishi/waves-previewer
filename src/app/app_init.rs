@@ -568,6 +568,8 @@ impl WavesPreviewer {
             output_layout_applied: None,
             hrtf: Default::default(),
             hrtf_runtime: Default::default(),
+            spatial: Default::default(),
+            panner_live: None,
             sample_rate_probe_cache: Default::default(),
             bit_depth_override: HashMap::new(),
             format_override: HashMap::new(),

@@ -263,6 +263,10 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn resolved_audio_file_path(&self, path: &Path) -> Option<PathBuf> {
+        // A TrueHD stream plays from its decoded copy.
+        if let Some(copy) = self.truehd_copy(path) {
+            return Some(copy.clone());
+        }
         self.item_for_path(path)
             .and_then(|item| item.audio_asset.backing.file_path().map(Path::to_path_buf))
             // Existence is deliberately left to the worker that opens the
@@ -2191,6 +2195,11 @@ impl super::WavesPreviewer {
         self.list_play_pending = false;
         self.selected = Some(row_idx);
         self.scroll_to_selected = auto_scroll;
+        if self.multi_edit_pane_must_not_audition() {
+            // Selected, not auditioned: loading the row would swap the
+            // playing timeline's mix for that one file.
+            return;
+        }
         let Some(item_snapshot) = self.item_for_row(row_idx).cloned() else {
             return;
         };
@@ -2277,6 +2286,23 @@ impl super::WavesPreviewer {
             self.audio.stop();
             self.apply_effective_volume();
             self.debug_mark_list_preview_ready(&p_owned);
+            return;
+        }
+        // A TrueHD stream plays only from its decoded copy: ask for it, and
+        // play when it lands, rather than hand the stream to a decoder that
+        // cannot read it.
+        if self.is_truehd_source(&p_owned) {
+            self.cancel_list_preview_job();
+            self.list_preview_pending_path = None;
+            if self.request_truehd_copy(&p_owned, autoplay) {
+                if self.try_activate_list_stream_transport(&p_owned) && autoplay {
+                    self.audio.play();
+                    self.debug_mark_list_play_start(&p_owned);
+                }
+                self.debug_mark_list_preview_ready(&p_owned);
+            } else {
+                self.audio.stop();
+            }
             return;
         }
         if autoplay && self.try_activate_list_stream_transport(&p_owned) {
@@ -2602,6 +2628,7 @@ impl super::WavesPreviewer {
         self.transcript_inflight.remove(&path_buf);
         self.transcript_ai_inflight.remove(&path_buf);
         self.purge_spectro_cache_entry(&path_buf);
+        self.forget_object_scene(&path_buf);
         self.cancel_feature_analysis_for_path(&path_buf);
         self.edited_cache.remove(&path_buf);
         self.lufs_override.remove(&path_buf);
@@ -2660,6 +2687,7 @@ impl super::WavesPreviewer {
             self.transcript_inflight.remove(path);
             self.transcript_ai_inflight.remove(path);
             self.purge_spectro_cache_entry(path);
+            self.forget_object_scene(path);
             self.cancel_feature_analysis_for_path(path);
             self.edited_cache.remove(path);
             self.lufs_override.remove(path);

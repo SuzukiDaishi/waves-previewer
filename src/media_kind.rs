@@ -74,10 +74,46 @@ pub fn source_allows_metadata_write(path: &Path) -> bool {
     !is_video_path(path)
 }
 
+/// What is known of a source's content, for the decisions an extension
+/// cannot make. Filled from the list's metadata, so asking costs a lookup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SourceContent {
+    /// The file is object audio (`FileMeta::object_audio`): its tracks are
+    /// beds and objects whose meaning lives in metadata that names them by
+    /// track and time. Trimming, gain or a format change of the samples
+    /// would leave that metadata describing audio that is no longer there,
+    /// so the samples are read-only and the file is changed only by the
+    /// spatial edits, which are saved in the session (see
+    /// `docs/SPATIAL_AUDIO_SPEC.md`).
+    pub object_audio: bool,
+}
+
+/// [`source_allows_destructive_edit`], knowing the content.
+pub fn source_allows_destructive_edit_for(path: &Path, content: SourceContent) -> bool {
+    source_allows_destructive_edit(path) && !content.object_audio
+}
+
+/// [`source_allows_export`], knowing the content. Object audio leaves only
+/// as an ADM export, never through the plain format conversion.
+pub fn source_allows_export_for(path: &Path, content: SourceContent) -> bool {
+    source_allows_export(path) && !content.object_audio
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn object_audio_is_read_only_whatever_its_extension() {
+        let path = PathBuf::from("master.wav");
+        let plain = SourceContent::default();
+        let objects = SourceContent { object_audio: true };
+        assert!(source_allows_destructive_edit_for(&path, plain));
+        assert!(!source_allows_destructive_edit_for(&path, objects));
+        assert!(!source_allows_export_for(&path, objects));
+        assert!(!source_allows_export_for(&PathBuf::from("clip.mp4"), plain));
+    }
 
     #[test]
     fn video_extensions_are_recognized_case_insensitively() {

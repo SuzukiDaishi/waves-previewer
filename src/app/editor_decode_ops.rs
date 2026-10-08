@@ -8,6 +8,16 @@ const EDITOR_STREAMING_PROGRESS_EMIT_SECS: f32 = 0.25;
 
 impl super::WavesPreviewer {
     pub(super) fn spawn_editor_decode(&mut self, path: PathBuf) {
+        // A TrueHD stream opens from its decoded copy; until that lands the
+        // tab stays loading (`spatial_ops::truehd_copy_ready` comes back).
+        if self.is_truehd_source(&path) {
+            if !self.request_truehd_copy(&path, false) {
+                return;
+            }
+            let copy = self.truehd_copy(&path).cloned().unwrap_or_else(|| path.clone());
+            self.spawn_editor_decode_from_path(path, copy);
+            return;
+        }
         let decode_path = self
             .item_for_path(&path)
             .and_then(|item| item.audio_asset.backing.file_path().map(PathBuf::from))
@@ -43,10 +53,14 @@ impl super::WavesPreviewer {
         let bit_depth = self.bit_depth_override.get(&path).copied();
         let estimated_total_frames = self.estimate_editor_total_frames_cached(&path, out_sr);
         let total_source_frames_hint = self.estimate_editor_total_source_frames_cached(&path);
+        // Object audio never decodes into the tab: its tracks are not the
+        // programme (the object mix renders that as it plays), and a master
+        // can hold a hundred of them. The overview and the stream suffice.
         let paged_asset = self
             .item_for_path(&path)
             .map(|item| item.audio_asset.requires_paged_editor())
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || self.source_content(&path).object_audio;
         let strategy = Self::editor_decode_strategy(&decode_path);
         self.debug_log(format!(
         "editor decode spawn: {} strategy={} out_sr={} preferred_out_sr={:?} target_sr={:?} bits={:?} est_frames={:?}",
@@ -273,7 +287,15 @@ impl super::WavesPreviewer {
                     {
                         return;
                     }
-                    if paged_asset {
+                    // A tab opened before the list's metadata said "object
+                    // audio" (a file opened from the shell) still learns it
+                    // here, from the same header walk.
+                    let object_audio = !paged_asset
+                        && crate::wav_stream::read_wave_pcm_info(&decode_path_for_thread)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|info| info.has_adm_chunks);
+                    if paged_asset || object_audio {
                         let _ = tx.send(EditorDecodeResult {
                             path: path_for_thread,
                             event: EditorDecodeEvent::PagedReady,

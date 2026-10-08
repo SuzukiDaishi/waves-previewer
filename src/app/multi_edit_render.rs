@@ -5,23 +5,31 @@
 //!
 //! One track at a time, in the order the spec gives
 //! (`docs/MULTI_EDITS_SPEC.md`): lay the clips down with their trims and
-//! fades, then Pitch, then Gain with the fader, then Pan, then Mute, and add
-//! the result to the master. Pitch is the one stage that needs the whole
-//! track at once (the shifter carries state across the timeline), which is
-//! why a track is rendered whole rather than in blocks.
+//! fades, then Pitch, then Gain with the fader, then Mute, and add the
+//! result to the master through the track's pan. Pitch is the one stage that
+//! needs the whole track at once (the shifter carries state across the
+//! timeline), which is why a track is rendered whole rather than in blocks.
 //!
 //! The master has one channel per speaker of the timeline's output layout
 //! (stereo unless changed). A stereo track renders two channels and lands on
 //! the output's front pair; a mono track renders one and lands on its own
-//! output channel alone.
+//! output channel alone. The pan balances a stereo track left against right
+//! -- unless the output has three or more speakers to turn around
+//! (`multi_edit::pan_rotates`), where it turns the track round the listener
+//! instead, by VBAP (`crate::panning`, the rules every panner in the app
+//! shares: 3-D over the speakers' triangles when the output has height
+//! speakers). The LFE is never part of that turn.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::multi_edit::{AutomationLane, Clip, LaneParam, MultiEditDoc, Track, TrackOutput};
+use super::multi_edit::{
+    pan_rotates, track_pans, AutomationLane, Clip, LaneParam, MultiEditDoc, Track, TrackOutput,
+};
 use crate::audio_channels::SpeakerPos;
+use crate::panning::{dir_to_vec, pan_gains, Rotation, Speakers, PAN_TURN_DEG};
 
 /// The channels a stereo track renders; a mono track renders one.
 const STEREO: usize = 2;
@@ -320,7 +328,9 @@ fn lane_points_in_frames(lane: &AutomationLane, sr: u32) -> Vec<(usize, f32)> {
 }
 
 /// Everything after the clips are laid down: Pitch, Gain with the fader,
-/// Pan, Mute.
+/// Mute. The pan is applied where the track meets the master
+/// (`mix_track_into`), because on a surround output it decides which
+/// channels the track reaches at all.
 fn apply_track_processing(buf: &mut Vec<Vec<f32>>, track: &Track, sr: u32) {
     if let Some(lane) = track.lane(LaneParam::Pitch).filter(|lane| !lane.is_neutral()) {
         let points = lane_points_in_frames(lane, sr);
@@ -344,18 +354,6 @@ fn apply_track_processing(buf: &mut Vec<Vec<f32>>, track: &Track, sr: u32) {
         }
     }
     let frames = buf.first().map(Vec::len).unwrap_or(0);
-    // A mono track has nowhere to pan to: its Pan lane is not heard.
-    let pan_lane = track
-        .lane(LaneParam::Pan)
-        .filter(|lane| !lane.is_neutral() && buf.len() == STEREO);
-    if let Some(lane) = pan_lane {
-        let mut cursor = LaneCursor::new(lane);
-        for frame in 0..frames {
-            let (gl, gr) = pan_gains(cursor.value(frame as f64 / sr as f64));
-            buf[0][frame] *= gl;
-            buf[1][frame] *= gr;
-        }
-    }
     if let Some(lane) = track.lane(LaneParam::Mute).filter(|lane| !lane.is_neutral()) {
         let step = 1.0 / (MUTE_RAMP_SECS * sr as f64).max(1.0) as f32;
         let mut gain = if lane.value_at(0.0) >= 0.5 { 0.0f32 } else { 1.0 };
@@ -375,21 +373,6 @@ fn apply_track_processing(buf: &mut Vec<Vec<f32>>, track: &Track, sr: u32) {
                 channel[frame] *= gain;
             }
         }
-    }
-}
-
-/// Balance: the centre leaves both sides as they are, and turning towards
-/// one side lowers the other along a quarter cosine, so hard left is the left
-/// channel alone and nothing is ever boosted.
-pub fn pan_gains(pan: f32) -> (f32, f32) {
-    let pan = pan.clamp(-1.0, 1.0);
-    let fall = |amount: f32| (amount * std::f32::consts::FRAC_PI_2).cos();
-    if pan > 0.0 {
-        (fall(pan), 1.0)
-    } else if pan < 0.0 {
-        (1.0, fall(-pan))
-    } else {
-        (1.0, 1.0)
     }
 }
 
@@ -431,26 +414,58 @@ fn add_into(dst: &mut [f32], src: &[f32], gain: f32) {
     }
 }
 
-/// Add one rendered track into the master: a stereo track onto the output's
-/// front pair (its first two channels when it names none; both sides
-/// averaged onto a mono output), a mono track onto its own channel alone.
-fn mix_track_into(
-    master: &mut [Vec<f32>],
+/// How often a moving pan (a Pan lane) is evaluated; the gains in between
+/// are interpolated. A millisecond is far finer than a pan is heard to step,
+/// and keeps the VBAP search out of the per-sample loop.
+const PAN_BLOCK_SECS: f64 = 0.001;
+
+/// Add the gains of the speaker direction of `pos` on `layout`, turned by
+/// `pan`, into `gains`.
+fn add_turned(speakers: &Speakers, layout: &[Option<SpeakerPos>], pos: SpeakerPos, pan: f32, gains: &mut [f32]) {
+    let (azimuth, elevation) = pos.direction(layout);
+    let dir = Rotation::yaw(pan * PAN_TURN_DEG).apply(dir_to_vec(azimuth, elevation));
+    speakers.add_gains(dir, 1.0, gains);
+}
+
+/// Each output channel's gain for channel `ch` of a track rendered for
+/// `output`, at pan `pan` (the knob plus its lane), into `gains` (one per
+/// output channel; cleared first). `turn` is the output's speakers when the
+/// output turns (`multi_edit::pan_rotates`), `None` when it balances.
+fn route_gains(
     layout: &[Option<SpeakerPos>],
+    turn: Option<&Speakers>,
     output: TrackOutput,
-    buf: &[Vec<f32>],
+    ch: usize,
+    pan: f32,
+    gains: &mut [f32],
 ) {
+    gains.iter_mut().for_each(|g| *g = 0.0);
     match output {
         TrackOutput::Channel { index } => {
-            if let (Some(dst), Some(src)) = (master.get_mut(index), buf.first()) {
-                add_into(dst, src, 1.0);
+            let speaker = layout.get(index).copied().flatten();
+            match (turn, speaker) {
+                // Turned round from its own speaker.
+                (Some(speakers), Some(pos)) if pan != 0.0 && !pos.is_lfe() => {
+                    add_turned(speakers, layout, pos, pan, gains);
+                }
+                _ => {
+                    if let Some(slot) = gains.get_mut(index) {
+                        *slot = 1.0;
+                    }
+                }
             }
         }
         TrackOutput::Stereo => {
-            if master.len() == 1 {
-                for src in buf {
-                    add_into(&mut master[0], src, 1.0 / buf.len().max(1) as f32);
-                }
+            if gains.len() == 1 {
+                // Both sides averaged onto a mono output, after the balance.
+                let (gl, gr) = pan_gains(pan);
+                gains[0] = if ch == 0 { gl } else { gr } / STEREO as f32;
+                return;
+            }
+            if let Some(speakers) = turn.filter(|_| pan != 0.0) {
+                // The pair turned round the listener from where it stands.
+                let side = if ch == 0 { SpeakerPos::Fl } else { SpeakerPos::Fr };
+                add_turned(speakers, layout, side, pan, gains);
                 return;
             }
             let find = |pos: SpeakerPos| layout.iter().position(|p| *p == Some(pos));
@@ -458,10 +473,82 @@ fn mix_track_into(
                 (Some(l), Some(r)) => (l, r),
                 _ => (0, 1),
             };
-            for (dst, src) in [left, right].into_iter().zip(buf) {
-                add_into(&mut master[dst], src, 1.0);
+            // A turning output turns; only a balancing one balances.
+            let (gl, gr) = if turn.is_some() { (1.0, 1.0) } else { pan_gains(pan) };
+            let (dst, gain) = if ch == 0 { (left, gl) } else { (right, gr) };
+            if let Some(slot) = gains.get_mut(dst) {
+                *slot = gain;
             }
         }
+    }
+}
+
+/// Add one rendered track into the master through its pan: a stereo track
+/// onto the output's front pair (its first two channels when it names
+/// none; both sides averaged onto a mono output), a mono track onto its own
+/// channel alone -- each then balanced, or turned round the listener when
+/// the output turns. A Pan lane is evaluated every `PAN_BLOCK_SECS` and the
+/// gains slide in between, so a moving pan does not click.
+fn mix_track_into(
+    master: &mut [Vec<f32>],
+    layout: &[Option<SpeakerPos>],
+    turn: Option<&Speakers>,
+    track: &Track,
+    buf: &[Vec<f32>],
+    sr: u32,
+) {
+    let outs = master.len();
+    let width = buf.len();
+    let frames = buf.first().map(Vec::len).unwrap_or(0);
+    let pans = track_pans(layout, track.output);
+    let knob = if pans { track.pan } else { 0.0 };
+    let lane = track
+        .lane(LaneParam::Pan)
+        .filter(|lane| pans && !lane.is_neutral());
+    let Some(lane) = lane else {
+        let mut gains = vec![0.0f32; outs];
+        for (ch, src) in buf.iter().enumerate() {
+            route_gains(layout, turn, track.output, ch, knob, &mut gains);
+            for (dst, &gain) in master.iter_mut().zip(&gains) {
+                if gain != 0.0 {
+                    add_into(dst, src, gain);
+                }
+            }
+        }
+        return;
+    };
+    let block = secs_to_frames(PAN_BLOCK_SECS, sr).max(1);
+    let mut cursor = LaneCursor::new(lane);
+    let mut pan_at = |frame: usize| knob + cursor.value(frame as f64 / sr.max(1) as f64);
+    let mut from = vec![vec![0.0f32; outs]; width];
+    let mut to = vec![vec![0.0f32; outs]; width];
+    let pan = pan_at(0);
+    for (ch, gains) in from.iter_mut().enumerate() {
+        route_gains(layout, turn, track.output, ch, pan, gains);
+    }
+    let mut start = 0;
+    while start < frames {
+        let end = (start + block).min(frames);
+        let pan = pan_at(end);
+        for (ch, gains) in to.iter_mut().enumerate() {
+            route_gains(layout, turn, track.output, ch, pan, gains);
+        }
+        let len = (end - start) as f32;
+        for (ch, src) in buf.iter().enumerate() {
+            let src = &src[start..end];
+            for (out, dst) in master.iter_mut().enumerate() {
+                let (g0, g1) = (from[ch][out], to[ch][out]);
+                if g0 == 0.0 && g1 == 0.0 {
+                    continue;
+                }
+                let step = (g1 - g0) / len;
+                for (i, (d, s)) in dst[start..end].iter_mut().zip(src).enumerate() {
+                    *d += *s * (g0 + step * i as f32);
+                }
+            }
+        }
+        std::mem::swap(&mut from, &mut to);
+        start = end;
     }
 }
 
@@ -479,11 +566,12 @@ pub fn render_timeline(
     let sr = sr.max(1);
     let frames = secs_to_frames(doc.end_secs(), sr);
     let layout = doc.output_layout();
+    let turn = pan_rotates(&layout).then(|| Speakers::of(&layout));
     let mut master = vec![vec![0.0f32; frames]; layout.len().max(1)];
     let tracks = doc.tracks.len().max(1);
     for (idx, track) in doc.tracks.iter().enumerate() {
         let buf = render_track(doc, track, sources, sr, frames, cancel)?;
-        mix_track_into(&mut master, &layout, track.output, &buf);
+        mix_track_into(&mut master, &layout, turn.as_ref(), track, &buf, sr);
         progress((idx + 1) as f32 / tracks as f32);
     }
     Some(master)
@@ -736,20 +824,123 @@ mod tests {
     }
 
     #[test]
-    fn a_mono_track_ignores_pan_but_not_mute() {
+    fn a_mono_track_on_a_stereo_output_ignores_pan_but_not_mute() {
         let mut doc = doc_with(&[("a", 1.0)]);
-        doc.set_output_layout(&layout("FL,FR,FC"));
-        doc.tracks[0].output = TrackOutput::Channel { index: 2 };
+        doc.tracks[0].output = TrackOutput::Channel { index: 1 };
+        doc.tracks[0].pan = -1.0;
         doc.ensure_lane(0, LaneParam::Pan);
         doc.tracks[0].lanes[0].insert_point(0.0, -1.0);
         let mut sources = SourceMap::new();
         sources.insert("a".into(), source(vec![vec![0.5; SR as usize]]));
         let mix = render(&doc, &sources);
-        assert!((mix[2][100] - 0.5).abs() < 1e-6, "hard left means nothing on one channel");
+        assert!((mix[1][100] - 0.5).abs() < 1e-6, "hard left means nothing on one channel");
+        assert_eq!(peak(&mix[0]), 0.0);
         let mute = doc.ensure_lane(0, LaneParam::Mute).expect("lane");
         doc.tracks[0].lanes[mute].insert_point(0.0, 1.0);
         let mix = render(&doc, &sources);
-        assert_eq!(peak(&mix[2][1000..]), 0.0);
+        assert_eq!(peak(&mix[1][1000..]), 0.0);
+    }
+
+    /// One mono track playing a steady 0.5 on `output` of `layout`, panned
+    /// by the knob.
+    fn panned(layout_text: &str, output: TrackOutput, pan: f32) -> Vec<Vec<f32>> {
+        let mut doc = doc_with(&[("a", 0.1)]);
+        doc.set_output_layout(&layout(layout_text));
+        doc.tracks[0].output = output;
+        doc.tracks[0].pan = pan;
+        let mut sources = SourceMap::new();
+        sources.insert("a".into(), source(vec![vec![0.5; SR as usize / 10]]));
+        render(&doc, &sources)
+    }
+
+    const SEVEN_ONE: &str = "FL,FR,FC,LFE,BL,BR,SL,SR";
+
+    #[test]
+    fn the_pan_knob_balances_a_stereo_output() {
+        let mix = panned("FL,FR", TrackOutput::Stereo, -1.0);
+        assert!((mix[0][10] - 0.5).abs() < 1e-6);
+        assert_eq!(peak(&mix[1]), 0.0);
+        // 2.1 has two speakers to turn around: it balances too.
+        let mix = panned("FL,FR,LFE", TrackOutput::Stereo, 1.0);
+        assert_eq!(peak(&mix[0]), 0.0);
+        assert!((mix[1][10] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_quarter_turn_takes_the_centre_to_the_right_side_speaker() {
+        // 7.1: the sides are at +-90 degrees.
+        let mix = panned(SEVEN_ONE, TrackOutput::Channel { index: 2 }, 0.5);
+        for (ch, channel) in mix.iter().enumerate() {
+            let want = if ch == 7 { 0.5 } else { 0.0 };
+            assert!((channel[10] - want).abs() < 1e-5, "channel {ch}: {}", channel[10]);
+        }
+        let mix = panned(SEVEN_ONE, TrackOutput::Channel { index: 2 }, -0.5);
+        assert!((mix[6][10] - 0.5).abs() < 1e-5, "a quarter turn left: SL");
+    }
+
+    #[test]
+    fn a_turn_keeps_the_level_and_never_reaches_the_lfe() {
+        let layout = layout(SEVEN_ONE);
+        assert!(pan_rotates(&layout), "7.1 turns");
+        let speakers = Speakers::of(&layout);
+        let mut gains = vec![0.0; layout.len()];
+        for step in -20..=20 {
+            let pan = step as f32 / 20.0;
+            for ch in 0..2 {
+                route_gains(&layout, Some(&speakers), TrackOutput::Stereo, ch, pan, &mut gains);
+                let power: f32 = gains.iter().map(|g| g * g).sum();
+                assert!((power - 1.0).abs() < 1e-4, "pan {pan} side {ch}: {gains:?}");
+                assert_eq!(gains[3], 0.0, "pan {pan}: the LFE");
+            }
+        }
+        // A stereo pair turned half way round faces the back, sides swapped.
+        let mix = panned(SEVEN_ONE, TrackOutput::Stereo, 1.0);
+        assert_eq!(peak(&mix[0]) + peak(&mix[1]) + peak(&mix[2]) + peak(&mix[3]), 0.0);
+        assert!(peak(&mix[4]) > 0.0 && peak(&mix[5]) > 0.0);
+    }
+
+    #[test]
+    fn the_lfe_is_not_turned() {
+        let mix = panned(SEVEN_ONE, TrackOutput::Channel { index: 3 }, 0.5);
+        for (ch, channel) in mix.iter().enumerate() {
+            let want = if ch == 3 { 0.5 } else { 0.0 };
+            assert!((channel[10] - want).abs() < 1e-6, "channel {ch}");
+        }
+    }
+
+    #[test]
+    fn the_height_layer_turns_on_its_own_ring() {
+        // 7.1.4: Ltf at -45 turned a quarter right is at +45, Rtf.
+        let mix = panned(
+            "FL,FR,FC,LFE,BL,BR,SL,SR,TFL,TFR,TBL,TBR",
+            TrackOutput::Channel { index: 8 },
+            0.5,
+        );
+        assert!((mix[9][10] - 0.5).abs() < 1e-5, "{}", mix[9][10]);
+        assert_eq!(mix[..8].iter().map(|c| peak(c)).sum::<f32>(), 0.0, "nothing at ear level");
+    }
+
+    #[test]
+    fn a_pan_lane_turns_smoothly_from_the_knob() {
+        let mut doc = doc_with(&[("a", 1.0)]);
+        doc.set_output_layout(&layout(SEVEN_ONE));
+        doc.tracks[0].output = TrackOutput::Channel { index: 2 };
+        doc.tracks[0].pan = 0.25;
+        doc.ensure_lane(0, LaneParam::Pan);
+        doc.tracks[0].lanes[0].insert_point(0.0, -0.25);
+        doc.tracks[0].lanes[0].insert_point(1.0, 0.25);
+        let mut sources = SourceMap::new();
+        sources.insert("a".into(), source(vec![vec![0.5; SR as usize]]));
+        let mix = render(&doc, &sources);
+        // The lane moves the knob: it starts dead centre, ends at the side.
+        assert!((mix[2][10] - 0.5).abs() < 1e-4, "{}", mix[2][10]);
+        let last = SR as usize - 1;
+        assert!(mix[7][last] > 0.49, "{}", mix[7][last]);
+        assert_eq!(peak(&mix[3]), 0.0, "the LFE");
+        for (ch, channel) in mix.iter().enumerate() {
+            let jump = channel.windows(2).fold(0.0f32, |m, w| m.max((w[1] - w[0]).abs()));
+            assert!(jump < 1e-3, "channel {ch} steps by {jump}");
+        }
     }
 
     /// Two clips on one track, overlapping.

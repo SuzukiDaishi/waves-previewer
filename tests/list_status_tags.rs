@@ -232,6 +232,8 @@ mod list_status_tags {
     }
 
     /// A `.nwsess` from before statuses existed: no palette, no assignments.
+    /// The paths go in TOML *literal* strings: a basic string would read the
+    /// `\U` of `C:\Users` as an escape, and the strict parser rejects the file.
     fn write_legacy_session(path: &Path, audio: &Path) {
         std::fs::write(
             path,
@@ -239,12 +241,12 @@ mod list_status_tags {
                 r#"version = 2
 name = "legacy"
 path_mode = "absolute"
-base_dir = "{dir}"
+base_dir = '{dir}'
 active_tab = 0
 tabs = []
 
 [list]
-files = ["{audio}"]
+files = ['{audio}']
 
 [app]
 theme = "dark"

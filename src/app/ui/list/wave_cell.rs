@@ -331,6 +331,8 @@ impl crate::app::WavesPreviewer {
         let status: Option<(std::borrow::Cow<'_, str>, bool)> = if meta.audio_track_unsupported {
             let codec = meta.unsupported_audio_codec.unwrap_or("AAC");
             Some((format!("{codec} UNSUPPORTED").into(), false))
+        } else if let Some(objects) = meta.object_audio.as_ref() {
+            Some((objects.label.as_ref().into(), false))
         } else {
             meta.decode_error
                 .as_deref()

@@ -2419,6 +2419,70 @@ impl super::WavesPreviewer {
         true
     }
 
+    /// Test-only: the active tab's Panner settings, as its knobs set them.
+    /// `mode`: "Balance", "Vbap", or `None` for the layout's default.
+    pub fn test_set_panner(&mut self, mode: Option<&str>, balance: f32, yaw: f32, pitch: f32, roll: f32) -> bool {
+        let Some(tab) = self.active_tab.and_then(|idx| self.tabs.get_mut(idx)) else {
+            return false;
+        };
+        tab.tool_state.pan_mode = match mode {
+            Some("Balance") => Some(crate::panning::PanMode::Balance),
+            Some("Vbap") => Some(crate::panning::PanMode::Vbap),
+            _ => None,
+        };
+        tab.tool_state.pan_balance = balance;
+        tab.tool_state.pan_yaw_deg = yaw;
+        tab.tool_state.pan_pitch_deg = pitch;
+        tab.tool_state.pan_roll_deg = roll;
+        true
+    }
+
+    /// Test-only: the Panner's "Preview (live)" button.
+    pub fn test_set_panner_preview(&mut self, on: bool) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        if on {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                tab.preview_audio_tool = Some(ToolKind::Panner);
+            }
+            self.panner_refresh_overlay(tab_idx);
+        } else {
+            self.clear_preview_if_any(tab_idx);
+        }
+        true
+    }
+
+    pub fn test_apply_panner(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_apply_panner(tab_idx);
+        true
+    }
+
+    /// Test-only: the engine's live panner as (input, output) channels.
+    pub fn test_engine_pan(&self) -> Option<(usize, usize)> {
+        self.audio
+            .pan_matrix()
+            .map(|matrix| (matrix.in_channels(), matrix.out_channels()))
+    }
+
+    /// Test-only: how much of `input` the engine's live panner sends to
+    /// `output`.
+    pub fn test_engine_pan_gain(&self, input: usize, output: usize) -> Option<f32> {
+        self.audio.pan_matrix().map(|matrix| matrix.gain(input, output))
+    }
+
+    /// Test-only: whether the active tab shows a green waveform from the
+    /// Panner.
+    pub fn test_panner_overlay_present(&self) -> bool {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .and_then(|tab| tab.preview_overlay.as_ref())
+            .is_some_and(|overlay| overlay.source_tool == ToolKind::Panner)
+    }
+
     pub fn test_tab_channel_samples(&self) -> Option<Vec<Vec<f32>>> {
         let tab_idx = self.active_tab?;
         self.tabs.get(tab_idx).map(|tab| tab.ch_samples.clone())
@@ -3298,6 +3362,7 @@ impl super::WavesPreviewer {
             thumb: Vec::new(),
             marker_fracs: Vec::new(),
             loop_frac: None,
+            object_audio: None,
             decode_error: None,
         });
         meta.marker_fracs = marker_fracs;
@@ -3476,6 +3541,19 @@ impl super::WavesPreviewer {
         let Some(row) = self.row_for_path(path) else {
             return false;
         };
+        self.select_and_load(row, true);
+        true
+    }
+
+    /// Test-only: select a row as a plain click does -- the highlighted set
+    /// too, which "Save selected" acts on. `test_select_path` moves only the
+    /// loaded row, so a set left from before (an export selects its new
+    /// file) would still be what a save takes.
+    pub fn test_click_path(&mut self, path: &Path) -> bool {
+        let Some(row) = self.row_for_path(path) else {
+            return false;
+        };
+        self.update_selection_on_click(row, egui::Modifiers::NONE);
         self.select_and_load(row, true);
         true
     }
@@ -5525,10 +5603,9 @@ impl super::WavesPreviewer {
     pub fn test_multi_edit_mix_frames(&self) -> Option<usize> {
         let id = self.multi_edit.active.as_deref()?;
         let rev = self.multi_edit.rev(id);
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
         self.multi_edit
-            .mix
-            .as_ref()
-            .filter(|mix| mix.doc_id == id && mix.rev == rev)
+            .current_mix(id, rev, out_sr)
             .map(|mix| mix.audio.len())
     }
 
@@ -5551,11 +5628,8 @@ impl super::WavesPreviewer {
     pub fn test_multi_edit_mix_channel_peaks(&self) -> Option<Vec<f32>> {
         let id = self.multi_edit.active.as_deref()?;
         let rev = self.multi_edit.rev(id);
-        let mix = self
-            .multi_edit
-            .mix
-            .as_ref()
-            .filter(|mix| mix.doc_id == id && mix.rev == rev)?;
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let mix = self.multi_edit.current_mix(id, rev, out_sr)?;
         Some(
             mix.audio
                 .channels
@@ -5821,6 +5895,26 @@ impl super::WavesPreviewer {
         if let Some(doc) = self.multi_edit_active_doc_mut() {
             doc.view.track_zoom = zoom;
         }
+    }
+
+    /// Test-only: a track's fader, pan knob and solo.
+    pub fn test_multi_edit_set_track_mix(&mut self, track: usize, volume_db: f32, pan: f32, solo: bool) {
+        if let Some(t) = self
+            .multi_edit_active_doc_mut()
+            .and_then(|doc| doc.tracks.get_mut(track))
+        {
+            t.volume_db = volume_db;
+            t.pan = pan;
+            t.solo = solo;
+        }
+        self.multi_edit_touched();
+    }
+
+    /// Test-only: which tracks of the active timeline are soloed.
+    pub fn test_multi_edit_solos(&self) -> Vec<bool> {
+        self.multi_edit_active_doc()
+            .map(|doc| doc.tracks.iter().map(|t| t.solo).collect())
+            .unwrap_or_default()
     }
 
     pub fn test_multi_edit_playhead(&self) -> f64 {

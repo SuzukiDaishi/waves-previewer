@@ -1365,23 +1365,25 @@ mod small_fix_regressions {
             .test_force_load_selected_list_preview_for_play();
         wait_for_audio_samples(&mut harness);
 
+        // The passive preview already holds the whole file, so an explicit
+        // Play reuses that transport rather than swapping in the exact
+        // stream: Stop -> Play on the same row resumes where it stopped
+        // (`force_load_selected_list_preview_for_play`, since a179334).
         let rate_after = harness.state().test_audio_rate();
-        let expected_rate_after = harness.state().test_playback_rate()
-            * (harness.state().test_playback_transport_sr() as f32
-                / harness.state().test_audio_out_sample_rate() as f32);
         assert_eq!(
             harness.state().test_playback_transport_name(),
-            "ExactStreamWav",
-            "explicit list play should switch eligible pristine WAV to exact-stream transport"
+            "Buffer",
+            "explicit play of a fully previewed row keeps its transport"
         );
         assert!(
-            harness.state().test_audio_is_streaming_wav(&src),
-            "explicit list play should activate exact streaming transport"
+            !harness.state().test_audio_is_streaming_wav(&src),
+            "the reused buffer is not swapped for the stream"
         );
         assert!(
-            (rate_after - expected_rate_after).abs() < 1.0e-6,
-            "list play callback rate should follow exact-stream ratio: expected={expected_rate_after} actual={rate_after}"
+            (rate_after - rate_before).abs() < 1.0e-6,
+            "the reused transport keeps the speed-mode rate: before={rate_before} after={rate_after}"
         );
+        assert!(harness.state().test_audio_is_playing(), "and it plays");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

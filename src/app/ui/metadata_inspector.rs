@@ -77,6 +77,7 @@ impl crate::app::WavesPreviewer {
 
         let mut leave_metadata = None;
         let mut refresh = false;
+        let tab_is_object_audio = self.source_content(&self.tabs[tab_idx].path).object_audio;
         ui.horizontal_wrapped(|ui| {
             ui.label("View:");
             egui::ComboBox::from_id_salt(("metadata_primary_view", self.tabs[tab_idx].tab_id))
@@ -96,6 +97,9 @@ impl crate::app::WavesPreviewer {
                         leave_metadata = Some(EditorPrimaryView::Other);
                     }
                     let _ = ui.selectable_label(true, "Metadata");
+                    if tab_is_object_audio && ui.selectable_label(false, "Spatial").clicked() {
+                        leave_metadata = Some(EditorPrimaryView::Spatial);
+                    }
                 });
             ui.separator();
             ui.selectable_value(

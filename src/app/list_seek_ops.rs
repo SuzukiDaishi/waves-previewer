@@ -256,6 +256,19 @@ impl WavesPreviewer {
         })
     }
 
+    /// Play again after a seek that held the transport. In Speed mode that
+    /// is the transport as it is. In Pitch or Stretch the transport may
+    /// still hold the dry buffer -- a full decode that landed while the play
+    /// waited re-marks the source, which drops the processed render in
+    /// flight -- so the processed buffer is asked for and plays when it
+    /// lands, rather than the file being played unprocessed.
+    fn resume_list_play(&mut self) {
+        if self.playback_mode_needs_fx_buffer() && !self.spawn_playback_fx_render(true) {
+            return;
+        }
+        self.audio.play_declicked(LIST_TRANSPORT_FADE_IN_MS);
+    }
+
     pub(crate) fn clear_list_seek_pending(&mut self) {
         self.list_seek_pending = None;
     }
@@ -451,7 +464,7 @@ impl WavesPreviewer {
                 self.clear_list_seek_pending();
                 self.playback_seek_to_source_time(self.mode, target);
                 if gesture.resume_playing {
-                    self.audio.play_declicked(LIST_TRANSPORT_FADE_IN_MS);
+                    self.resume_list_play();
                 }
             }
             ListSeekOutcome::SeekNow(target) | ListSeekOutcome::WaitForDecode(target) => {
@@ -541,7 +554,7 @@ impl WavesPreviewer {
             self.clear_list_seek_pending();
             self.playback_seek_to_source_time(self.mode, pending.source_time_sec);
             if pending.resume_playing {
-                self.audio.play_declicked(LIST_TRANSPORT_FADE_IN_MS);
+                self.resume_list_play();
             }
             return;
         }
@@ -552,7 +565,7 @@ impl WavesPreviewer {
             self.clear_list_seek_pending();
             self.playback_seek_to_source_time(self.mode, decoded.max(0.0));
             if pending.resume_playing {
-                self.audio.play_declicked(LIST_TRANSPORT_FADE_IN_MS);
+                self.resume_list_play();
             }
         }
     }

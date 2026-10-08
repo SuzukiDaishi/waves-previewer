@@ -532,6 +532,7 @@ impl crate::app::WavesPreviewer {
         }
         self.cancel_meta_for_path(path);
         self.purge_spectro_cache_entry(path);
+        self.forget_object_scene(path);
         self.cancel_feature_analysis_for_path(path);
         self.evict_list_preview_cache_path(path);
         self.lufs_override.remove(path);

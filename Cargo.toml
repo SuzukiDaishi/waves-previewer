@@ -78,6 +78,11 @@ oxideav-ac3 = "0.0.11"
 # The packet/decoder types oxideav-ac3 speaks; already in the graph through
 # both oxideav crates.
 oxideav-core = "0.1"
+# TrueHD (and its object presentation) for `.thd` / `.mlp` streams and the
+# TrueHD track of a Blu-ray `.m2ts`, behind the `truehd` feature -- see the
+# note there. Pure Rust, Apache-2.0, from the truehdd project; it describes
+# itself as a research implementation, so the version is pinned exactly.
+truehd = { version = "=0.7.2", optional = true }
 # SOFA (HRTF) files for headphone monitoring of multichannel material: a pure
 # Rust port of libmysofa's reader, its HRIR interpolation and resampling to
 # the output rate. Its own renderer (the `dsp` feature) is left out: one
@@ -107,6 +112,13 @@ plugin_native_clap = ["clack-host", "clack-extensions"]
 # and the first-frame thumbnail go away (on Windows, Media Foundation still
 # supplies both). Off by default -- see the note on `default` above.
 video = ["openh264"]
+# TrueHD decoding, object presentation included (`src/audio_truehd.rs`). Off by
+# default for the same reason as `video`: TrueHD's own lossless coding is old
+# enough that its patents have likely run out, but the object audio carried in
+# it is recent, and shipping a decoder for it is a decision for whoever builds
+# the release, not a default. Without it a `.thd` is not listed and the TrueHD
+# track of a `.m2ts` says `TrueHD UNSUPPORTED`, as before.
+truehd = ["dep:truehd"]
 # No AAC codec is in the graph, and none is a feature away: Symphonia's AAC
 # decoder and the Fraunhofer FDK encoder are both absent. AAC decoding is
 # borrowed from the operating system instead (Media Foundation on Windows, via

@@ -215,6 +215,9 @@ struct GuiArgs {
     open_first: bool,
     #[arg(long = "open-view-mode", value_enum)]
     open_view_mode: Option<CliViewMode>,
+    /// Open the first tab in the Spatial view (object-audio files only).
+    #[arg(long = "open-spatial", action = ArgAction::SetTrue)]
+    open_spatial: bool,
     #[arg(long = "waveform-overlay", value_enum)]
     open_waveform_overlay: Option<CliToggle>,
     #[arg(long = "screenshot", value_name = "PNG")]
@@ -300,6 +303,7 @@ impl GuiArgs {
         cfg.open_files = self.open_file;
         cfg.open_first = self.open_first;
         cfg.open_view_mode = self.open_view_mode.map(|mode| mode.into());
+        cfg.open_spatial = self.open_spatial;
         cfg.open_waveform_overlay = self.open_waveform_overlay.map(|flag| flag.into_bool());
         cfg.screenshot_path = self.screenshot_path;
         cfg.screenshot_delay_frames = self.screenshot_delay_frames;
@@ -382,6 +386,8 @@ pub enum CliCommand {
     #[command(subcommand)]
     Item(ItemCommand),
     #[command(subcommand)]
+    Adm(AdmCommand),
+    #[command(subcommand)]
     List(ListCommand),
     #[command(subcommand)]
     Batch(BatchCommand),
@@ -429,6 +435,38 @@ pub struct SessionNewArgs {
 pub struct SessionInspectArgs {
     #[arg(long, value_name = "SESSION")]
     pub session: PathBuf,
+}
+
+/// Object audio in an ADM BWF (see `docs/SPATIAL_AUDIO_SPEC.md`).
+#[derive(Debug, Subcommand)]
+pub enum AdmCommand {
+    /// The scene a file carries: programme, beds and objects with their
+    /// tracks and keyframes, and anything that could not be read.
+    Inspect(AdmInspectArgs),
+    /// Write a new ADM BWF: the audio copied unchanged, with a session's
+    /// spatial edits for the file in its metadata. The input is not touched.
+    Export(AdmExportArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AdmExportArgs {
+    #[arg(long, value_name = "WAV")]
+    pub input: PathBuf,
+    #[arg(long, value_name = "WAV")]
+    pub output: PathBuf,
+    /// The session whose spatial edits for the input are written. Without
+    /// one the export is a copy of the input.
+    #[arg(long, value_name = "SESSION")]
+    pub session: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct AdmInspectArgs {
+    #[arg(long, value_name = "WAV")]
+    pub input: PathBuf,
+    /// List every keyframe, not only how many there are.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub keyframes: bool,
 }
 
 #[derive(Debug, Subcommand)]

@@ -34,6 +34,8 @@ mod cli_ops;
 mod cli_workspace;
 mod channel_layout_ops;
 mod hrtf_ops;
+mod spatial_ops;
+mod panner_ops;
 mod clipboard_ops;
 mod comment_ops;
 pub mod comments;
@@ -1328,6 +1330,12 @@ pub struct WavesPreviewer {
     /// Headphone monitoring through an HRTF (prefs). See `hrtf_ops`.
     hrtf: hrtf_ops::HrtfSettings,
     hrtf_runtime: hrtf_ops::HrtfRuntime,
+    /// Object audio: scenes read, the mix handed to the engine, spatial
+    /// edits. See `spatial_ops`.
+    spatial: spatial_ops::SpatialRuntime,
+    /// What the engine's live panner (the Panner tool's preview) was built
+    /// from; see `panner_ops::sync_playback_pan`.
+    panner_live: Option<panner_ops::AppliedPan>,
     sample_rate_probe_cache: rustc_hash::FxHashMap<PathBuf, u32>,
     bit_depth_override: HashMap<PathBuf, crate::wave::WavBitDepth>,
     format_override: HashMap<PathBuf, String>,
@@ -1780,9 +1788,18 @@ impl WavesPreviewer {
     }
 
     pub(super) fn sync_channel_masks_to_engine(&self) {
+        // The tab's channel Mute / Solo belong to the tab's audio. Playing a
+        // Multi Edits timeline (or another file) while the editor is in
+        // front must not lose that audio's channels to them.
+        let tab_is_heard = |path: &std::path::Path| match &self.playback_session.source {
+            PlaybackSourceKind::EditorTab(p) | PlaybackSourceKind::ListPreview(p) => p == path,
+            PlaybackSourceKind::None | PlaybackSourceKind::ToolPreview => true,
+            PlaybackSourceKind::EffectGraph | PlaybackSourceKind::MultiEdit(_) => false,
+        };
         let (mute, solo) = if self.is_editor_workspace_active() {
             self.active_tab
                 .and_then(|idx| self.tabs.get(idx))
+                .filter(|tab| tab_is_heard(&tab.path))
                 .map(|tab| {
                     let mut mute = 0u64;
                     let mut solo = 0u64;
@@ -2327,6 +2344,7 @@ impl WavesPreviewer {
             thumb,
             marker_fracs: Vec::new(),
             loop_frac: None,
+            object_audio: None,
             decode_error: None,
         }
     }

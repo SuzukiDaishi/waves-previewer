@@ -160,6 +160,7 @@ fn build_fixtures() -> Vec<Fixture> {
     bit_depths(&mut f);
     sample_rates(&mut f);
     header_edge_cases(&mut f);
+    adm_masters(&mut f);
     f
 }
 
@@ -478,6 +479,197 @@ fn header_edge_cases(f: &mut Vec<Fixture>) {
         "edge_not_a_wav.wav",
         b"this is not a wav file at all\n".to_vec(),
     );
+}
+
+// ---------------------------------------------------------------------------
+// F. ADM BWF: object audio in a WAVE
+// ---------------------------------------------------------------------------
+
+/// The ADM XML around a list of top-level elements: programme, contents,
+/// objects, packs, channels, streams, tracks.
+fn adm_document(body: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <ebuCoreMain xmlns=\"urn:ebu:metadata-schema:ebuCore_2016\" \
+         xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n\
+         <coreMetadata><format><audioFormatExtended version=\"ITU-R_BS.2076-2\">\n\
+         {body}\
+         </audioFormatExtended></format></coreMetadata></ebuCoreMain>\n"
+    )
+}
+
+/// The main fixture's XML. Two bed channels that point at BS.2094 common
+/// definitions the file does not write out, one Cartesian object that
+/// sweeps from the front-left corner to the front-right over 0.05..0.45 s
+/// (with a `width` the app keeps but does not render, and a last block that
+/// repeats the one before it), and one polar object that jumps, then glides
+/// up and behind over 0.1 s at -6 dB.
+const ADM_OBJECTS_XML: &str = r#"<audioProgramme audioProgrammeID="APR_1001" audioProgrammeName="Fixture">
+<audioContentIDRef>ACO_1001</audioContentIDRef>
+</audioProgramme>
+<audioContent audioContentID="ACO_1001" audioContentName="Main">
+<audioObjectIDRef>AO_1001</audioObjectIDRef>
+<audioObjectIDRef>AO_1002</audioObjectIDRef>
+<audioObjectIDRef>AO_1003</audioObjectIDRef>
+</audioContent>
+<audioObject audioObjectID="AO_1001" audioObjectName="Bed">
+<audioPackFormatIDRef>AP_00010002</audioPackFormatIDRef>
+<audioTrackUIDRef>ATU_00000001</audioTrackUIDRef>
+<audioTrackUIDRef>ATU_00000002</audioTrackUIDRef>
+</audioObject>
+<audioObject audioObjectID="AO_1002" audioObjectName="Sweep" start="00:00:00.00000" duration="00:00:00.50000">
+<audioPackFormatIDRef>AP_00031001</audioPackFormatIDRef>
+<audioTrackUIDRef>ATU_00000003</audioTrackUIDRef>
+</audioObject>
+<audioObject audioObjectID="AO_1003" audioObjectName="Jump &amp; glide">
+<audioPackFormatIDRef>AP_00031002</audioPackFormatIDRef>
+<audioTrackUIDRef>ATU_00000004</audioTrackUIDRef>
+</audioObject>
+<audioPackFormat audioPackFormatID="AP_00031001" audioPackFormatName="Sweep" typeLabel="0003" typeDefinition="Objects">
+<audioChannelFormatIDRef>AC_00031001</audioChannelFormatIDRef>
+</audioPackFormat>
+<audioPackFormat audioPackFormatID="AP_00031002" audioPackFormatName="Jump" typeLabel="0003" typeDefinition="Objects">
+<audioChannelFormatIDRef>AC_00031002</audioChannelFormatIDRef>
+</audioPackFormat>
+<audioChannelFormat audioChannelFormatID="AC_00031001" audioChannelFormatName="Sweep" typeLabel="0003" typeDefinition="Objects">
+<audioBlockFormat audioBlockFormatID="AB_00031001_00000001" rtime="00:00:00.00000" duration="00:00:00.05000">
+<cartesian>1</cartesian>
+<position coordinate="X">-1.0</position>
+<position coordinate="Y">1.0</position>
+<position coordinate="Z">0.0</position>
+<width>0.1</width>
+</audioBlockFormat>
+<audioBlockFormat audioBlockFormatID="AB_00031001_00000002" rtime="00:00:00.05000" duration="00:00:00.40000">
+<cartesian>1</cartesian>
+<position coordinate="X">1.0</position>
+<position coordinate="Y">1.0</position>
+<position coordinate="Z">0.0</position>
+<width>0.1</width>
+</audioBlockFormat>
+<audioBlockFormat audioBlockFormatID="AB_00031001_00000003" rtime="00:00:00.45000" duration="00:00:00.05000">
+<cartesian>1</cartesian>
+<position coordinate="X">1.0</position>
+<position coordinate="Y">1.0</position>
+<position coordinate="Z">0.0</position>
+<width>0.1</width>
+</audioBlockFormat>
+</audioChannelFormat>
+<audioChannelFormat audioChannelFormatID="AC_00031002" audioChannelFormatName="Jump" typeLabel="0003" typeDefinition="Objects">
+<audioBlockFormat audioBlockFormatID="AB_00031002_00000001" rtime="00:00:00.00000" duration="00:00:00.25000">
+<position coordinate="azimuth">30.0</position>
+<position coordinate="elevation">0.0</position>
+<position coordinate="distance">1.0</position>
+<jumpPosition>1</jumpPosition>
+</audioBlockFormat>
+<audioBlockFormat audioBlockFormatID="AB_00031002_00000002" rtime="00:00:00.25000" duration="00:00:00.25000">
+<position coordinate="azimuth">-110.0</position>
+<position coordinate="elevation">30.0</position>
+<position coordinate="distance">1.0</position>
+<gain gainUnit="dB">-6.0206</gain>
+<jumpPosition interpolationLength="0.1">1</jumpPosition>
+</audioBlockFormat>
+</audioChannelFormat>
+<audioStreamFormat audioStreamFormatID="AS_00031001" audioStreamFormatName="PCM_Sweep" formatLabel="0001" formatDefinition="PCM">
+<audioChannelFormatIDRef>AC_00031001</audioChannelFormatIDRef>
+<audioTrackFormatIDRef>AT_00031001_01</audioTrackFormatIDRef>
+</audioStreamFormat>
+<audioTrackFormat audioTrackFormatID="AT_00031001_01" audioTrackFormatName="PCM_Sweep" formatLabel="0001" formatDefinition="PCM">
+<audioStreamFormatIDRef>AS_00031001</audioStreamFormatIDRef>
+</audioTrackFormat>
+"#;
+
+/// `chna` for the four-track fixtures. Track 4 names its channel format
+/// directly (an `AC_` reference, BS.2076-2) instead of a track format.
+fn adm_four_track_chna() -> wav::ExtraChunk {
+    wav::chna_chunk(
+        4,
+        &[
+            (1, "ATU_00000001", "AT_00010001_01", "AP_00010002"),
+            (2, "ATU_00000002", "AT_00010002_01", "AP_00010002"),
+            (3, "ATU_00000003", "AT_00031001_01", "AP_00031001"),
+            (4, "ATU_00000004", "AC_00031002", "AP_00031002"),
+        ],
+    )
+}
+
+fn adm_masters(f: &mut Vec<Fixture>) {
+    let n = frames(SR, 0.5);
+    // One pitch per track, so which track is heard where can be told apart.
+    let tracks = |count: usize| -> Vec<Vec<f32>> {
+        (0..count)
+            .map(|track| signal::tone(220.0 * (track as f32 + 2.0) / 2.0, 0.5, SR, n))
+            .collect()
+    };
+
+    // BW64, `chna` between `fmt ` and `data`, `axml` after the audio -- where
+    // masters put them.
+    let mut objects = WavSpec::new(4, SR, Encoding::PcmI16)
+        .extensible()
+        .container(Container::Bw64);
+    objects.before_data.push(adm_four_track_chna());
+    objects
+        .after_data
+        .push(wav::axml_chunk(&adm_document(ADM_OBJECTS_XML)));
+    push(f, "adm_bw64_objects.wav", objects.render(&tracks(4)));
+
+    // The same metadata in a plain RIFF, `axml` ahead of `fmt `, and no
+    // programme: every top-level object plays.
+    let no_programme = ADM_OBJECTS_XML
+        .split_once("<audioObject ")
+        .map(|(_, rest)| format!("<audioObject {rest}"))
+        .expect("the document has objects");
+    let mut riff = WavSpec::new(4, SR, Encoding::PcmI16).extensible();
+    riff.before_fmt
+        .push(wav::axml_chunk(&adm_document(&no_programme)));
+    riff.before_data.push(adm_four_track_chna());
+    push(f, "adm_riff_small.wav", riff.render(&tracks(4)));
+
+    // `axml` cut off in the middle of the second object's channel: what was
+    // complete still plays, and the scene says the document ended early.
+    let full = adm_document(ADM_OBJECTS_XML);
+    let cut = full
+        .find("AB_00031002_00000002")
+        .expect("the second jump block is in the document");
+    let mut truncated = WavSpec::new(4, SR, Encoding::PcmI16)
+        .extensible()
+        .container(Container::Bw64);
+    truncated.before_data.push(adm_four_track_chna());
+    truncated.after_data.push(wav::axml_chunk(&full[..cut]));
+    push(f, "adm_axml_truncated.wav", truncated.render(&tracks(4)));
+
+    // A first-order ambisonic W channel next to one object. HOA is listed
+    // and counted but not rendered.
+    let hoa_xml = r#"<audioObject audioObjectID="AO_1001" audioObjectName="Ambience">
+<audioPackFormatIDRef>AP_00041001</audioPackFormatIDRef>
+<audioTrackUIDRef>ATU_00000001</audioTrackUIDRef>
+</audioObject>
+<audioObject audioObjectID="AO_1002" audioObjectName="Voice">
+<audioPackFormatIDRef>AP_00031001</audioPackFormatIDRef>
+<audioTrackUIDRef>ATU_00000002</audioTrackUIDRef>
+</audioObject>
+<audioChannelFormat audioChannelFormatID="AC_00041001" audioChannelFormatName="W" typeLabel="0004" typeDefinition="HOA">
+<audioBlockFormat audioBlockFormatID="AB_00041001_00000001"><order>0</order><degree>0</degree></audioBlockFormat>
+</audioChannelFormat>
+<audioChannelFormat audioChannelFormatID="AC_00031001" audioChannelFormatName="Voice" typeLabel="0003" typeDefinition="Objects">
+<audioBlockFormat audioBlockFormatID="AB_00031001_00000001">
+<cartesian>1</cartesian>
+<position coordinate="X">0.0</position>
+<position coordinate="Y">1.0</position>
+</audioBlockFormat>
+</audioChannelFormat>
+"#;
+    let mut hoa = WavSpec::new(2, SR, Encoding::PcmI16)
+        .extensible()
+        .container(Container::Bw64);
+    hoa.before_data.push(wav::chna_chunk(
+        2,
+        &[
+            (1, "ATU_00000001", "AC_00041001", "AP_00041001"),
+            (2, "ATU_00000002", "AC_00031001", "AP_00031001"),
+        ],
+    ));
+    hoa.after_data.push(wav::axml_chunk(&adm_document(hoa_xml)));
+    push(f, "adm_hoa_pack.wav", hoa.render(&tracks(2)));
 }
 
 // ---------------------------------------------------------------------------

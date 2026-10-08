@@ -496,6 +496,12 @@ pub struct Track {
     pub name: String,
     #[serde(default)]
     pub volume_db: f32,
+    /// The pan knob, -1 (left) to +1 (right). On an output with three or
+    /// more speakers to turn around it is a turn instead, of up to half a
+    /// circle each way (`pan_rotates`). A Pan lane moves it from here, as
+    /// the Gain lane moves the fader.
+    #[serde(default)]
+    pub pan: f32,
     #[serde(default)]
     pub mute: bool,
     #[serde(default)]
@@ -519,6 +525,26 @@ pub struct Track {
 impl Track {
     pub fn lane(&self, param: LaneParam) -> Option<&AutomationLane> {
         self.lanes.iter().find(|lane| lane.param == param)
+    }
+}
+
+/// Whether a pan on an output of `layout` turns the sound around the
+/// listener (VBAP) rather than balancing left against right -- the shared
+/// rule, `panning::PanMode::default_for`. 2.1 therefore balances, like stereo.
+pub fn pan_rotates(layout: &[Option<SpeakerPos>]) -> bool {
+    crate::panning::PanMode::default_for(layout) == crate::panning::PanMode::Vbap
+}
+
+/// Whether a track sent to `output` on `layout` is heard to pan. A stereo
+/// track always is. A mono track only when the pan turns -- it then moves
+/// round from its own speaker -- and never from the LFE or from a channel
+/// no speaker is named for.
+pub fn track_pans(layout: &[Option<SpeakerPos>], output: TrackOutput) -> bool {
+    match output {
+        TrackOutput::Stereo => true,
+        TrackOutput::Channel { index } => {
+            pan_rotates(layout) && matches!(layout.get(index), Some(Some(pos)) if !pos.is_lfe())
+        }
     }
 }
 
@@ -675,8 +701,9 @@ impl MultiEditDoc {
     /// channel. A stereo output takes the source's layout first: it could
     /// not keep a surround source's channels apart. A channel the output has
     /// no place for plays as a stereo track. The new tracks copy the
-    /// original's fader, mute, solo and lanes -- all but Pan, which a mono
-    /// track has no use for. Returns the new clips' ids, in channel order.
+    /// original's fader, mute, solo and lanes, and its pan (knob and lane)
+    /// where the new track is heard to pan (`track_pans`). Returns the new
+    /// clips' ids, in channel order.
     pub fn split_clip_by_channel(&mut self, clip_id: &str, source_layout: &[Option<SpeakerPos>]) -> Vec<String> {
         let channels = source_layout.len();
         if self.split_by_channel_refusal(clip_id, channels).is_some() {
@@ -707,18 +734,21 @@ impl MultiEditDoc {
             clip.follows = None;
             clip.channel = Some(ch as u16);
             ids.push(clip.id.clone());
+            let output = index.map_or(TrackOutput::Stereo, |index| TrackOutput::Channel { index });
+            let pans = track_pans(&out, output);
             new_tracks.push(Track {
                 id: new_id(),
                 kind: TrackKind::Audio,
                 name: format!("{} \u{b7} {label}", parent.name),
                 volume_db: parent.volume_db,
+                pan: if pans { parent.pan } else { 0.0 },
                 mute: parent.mute,
                 solo: parent.solo,
                 clips: vec![clip],
                 lanes: parent
                     .lanes
                     .iter()
-                    .filter(|lane| lane.param != LaneParam::Pan)
+                    .filter(|lane| pans || lane.param != LaneParam::Pan)
                     .map(|lane| AutomationLane {
                         id: new_id(),
                         ..lane.clone()
@@ -727,7 +757,7 @@ impl MultiEditDoc {
                 height: parent.height,
                 lanes_collapsed: parent.lanes_collapsed,
                 show_video: true,
-                output: index.map_or(TrackOutput::Stereo, |index| TrackOutput::Channel { index }),
+                output,
             });
         }
         // Nothing may wait on a clip that is gone.
@@ -787,6 +817,7 @@ impl MultiEditDoc {
             kind,
             name,
             volume_db: 0.0,
+            pan: 0.0,
             mute: false,
             solo: false,
             clips: Vec::new(),
@@ -1300,6 +1331,7 @@ mod tests {
         let (mut doc, id) = doc_with_clip(4.0);
         doc.tracks[0].name = "Music".into();
         doc.tracks[0].volume_db = -3.0;
+        doc.tracks[0].pan = 0.25;
         doc.ensure_lane(0, LaneParam::Gain);
         doc.ensure_lane(0, LaneParam::Pan);
         doc.set_fade_in(&id, 0.5);
@@ -1313,11 +1345,18 @@ mod tests {
         for (ch, track) in doc.tracks[1..].iter().enumerate() {
             assert_eq!(track.output, TrackOutput::Channel { index: ch });
             assert_eq!(track.volume_db, -3.0);
+            // 5.1 turns a pan: every speaker keeps it but the LFE.
+            let lfe = ch == 3;
             assert_eq!(
                 track.lanes.iter().map(|lane| lane.param).collect::<Vec<_>>(),
-                vec![LaneParam::Gain],
-                "every lane but Pan"
+                if lfe {
+                    vec![LaneParam::Gain]
+                } else {
+                    vec![LaneParam::Gain, LaneParam::Pan]
+                },
+                "channel {ch}"
             );
+            assert_eq!(track.pan, if lfe { 0.0 } else { 0.25 }, "channel {ch}");
             assert_ne!(track.lanes[0].id, doc.tracks[0].lanes[0].id);
             let clip = &track.clips[0];
             assert_eq!(clip.channel, Some(ch as u16));

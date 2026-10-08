@@ -64,8 +64,9 @@ impl WavesPreviewer {
         }
         // Both destinations of a list gain change are writes: an open tab takes
         // it as a destructive edit, and a closed one banks it as a pending gain
-        // that a later save would apply. A video source can do neither.
-        if !crate::media_kind::source_allows_destructive_edit(path) {
+        // that a later save would apply. A video source can do neither, and
+        // nor can object audio, whose metadata names its samples.
+        if !crate::media_kind::source_allows_destructive_edit_for(path, self.source_content(path)) {
             return false;
         }
         if let Some(tab_idx) = self.gain_target_tab_idx(path) {

@@ -51,7 +51,7 @@ pub(super) fn draw_surround(
     font: &FontId,
     label_col: Color32,
 ) {
-    let guide = Stroke::new(1.0, Color32::from_rgb(34, 39, 48));
+    let guide = Stroke::new(1.0_f32, Color32::from_rgb(34, 39, 48));
     let side_w = 8.0;
     // Room either side for the gauges, and round the ring for the names.
     let area = Rect::from_min_max(
@@ -64,7 +64,7 @@ pub(super) fn draw_surround(
     painter.circle_stroke(
         center,
         radius * HEIGHT_RING,
-        Stroke::new(1.0, Color32::from_rgb(28, 32, 40)),
+        Stroke::new(1.0_f32, Color32::from_rgb(28, 32, 40)),
     );
     // The listener, facing up the panel.
     painter.add(egui::Shape::convex_polygon(
@@ -113,14 +113,14 @@ pub(super) fn draw_surround(
         let fill = crate::app::helpers::lerp_color(base, lit, norm);
         painter.circle_filled(at, 2.5 + 4.5 * norm, fill);
         if peak >= 0.999 {
-            painter.circle_stroke(at, 8.0, Stroke::new(1.5, Color32::from_rgb(240, 100, 100)));
+            painter.circle_stroke(at, 8.0, Stroke::new(1.5_f32, Color32::from_rgb(240, 100, 100)));
         } else if let Some(hold) = state.peak_hold_db.get(c) {
             let hold_norm = ((hold - DOT_FLOOR_DB) / -DOT_FLOOR_DB).clamp(0.0, 1.0);
             if hold_norm > norm + 0.02 {
                 painter.circle_stroke(
                     at,
                     2.5 + 4.5 * hold_norm,
-                    Stroke::new(1.0, Color32::from_rgb(255, 196, 72)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(255, 196, 72)),
                 );
             }
         }
@@ -165,7 +165,7 @@ pub(super) fn draw_surround(
         painter.line_segment(
             [pair[0], pair[1]],
             Stroke::new(
-                1.5,
+                1.5_f32,
                 Color32::from_rgb(96, 220, 200).gamma_multiply(alpha * 0.8),
             ),
         );
@@ -173,7 +173,7 @@ pub(super) fn draw_surround(
     if let Some([x, y, _]) = vector {
         let at = center + Vec2::new(x * radius, -y * radius);
         painter.circle_filled(at, 4.0, Color32::from_rgb(96, 220, 200));
-        painter.circle_stroke(at, 4.0, Stroke::new(1.0, Color32::from_rgb(10, 40, 36)));
+        painter.circle_stroke(at, 4.0, Stroke::new(1.0_f32, Color32::from_rgb(10, 40, 36)));
     }
 
     // Overhead share (right) and LFE (left), as thin gauges.

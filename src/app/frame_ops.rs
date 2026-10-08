@@ -54,6 +54,8 @@ impl WavesPreviewer {
             // A timeline lives only in the session; one never saved into it
             // is lost on quit.
             || self.multi_edit_any_dirty()
+            // So do spatial edits.
+            || self.spatial_edits_unsaved()
     }
 
     fn run_frame_quit_prompt(&mut self, ctx: &egui::Context) {
@@ -862,6 +864,11 @@ impl WavesPreviewer {
         self.ui_status_tags_window(ctx);
         self.ui_shortcuts_window(ctx);
         self.ui_channel_layout_window(ctx);
+        // The object mix first: it decides how many channels the layout and
+        // the HRTF below see (the 7.1.4 bed, not the file's tracks).
+        self.drain_object_scene_jobs();
+        self.sync_object_mix();
+        self.sync_playback_pan();
         self.sync_playback_channel_layout();
         self.ui_hrtf_window(ctx);
         self.sync_binaural();
