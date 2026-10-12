@@ -855,7 +855,7 @@ impl crate::app::WavesPreviewer {
         if tab.loading || !Self::editor_spectral_warp_ready(tab) {
             return;
         }
-        let undo = Some(Self::capture_undo_state(tab));
+        let undo = Some(Self::capture_undo_state_labeled(tab, "Spectral Warp"));
         let channels = tab.ch_samples.clone();
         let sr = tab.buffer_sample_rate.max(1);
         let points = tab.spectral_warp_points.clone();
@@ -992,7 +992,7 @@ impl crate::app::WavesPreviewer {
         if tab.loading || !Self::editor_spectral_brush_ready(tab) {
             return;
         }
-        let undo = Some(Self::capture_undo_state(tab));
+        let undo = Some(Self::capture_undo_state_labeled(tab, "Spectral Brush"));
         let channels = tab.ch_samples.clone();
         let sr = tab.buffer_sample_rate.max(1);
         let stamps = tab.spectral_brush_stamps.clone();
@@ -1205,7 +1205,7 @@ impl crate::app::WavesPreviewer {
         if tab.loading || !Self::editor_denoise_ready(tab) {
             return;
         }
-        let undo = Some(Self::capture_undo_state(tab));
+        let undo = Some(Self::capture_undo_state_labeled(tab, "De-noise"));
         let channels = tab.ch_samples.clone();
         let profile = tab.noise_profile.clone().unwrap();
         let reduction_db = tab.tool_state.denoise_reduction_db.max(0.0);
