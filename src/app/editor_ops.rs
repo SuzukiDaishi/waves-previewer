@@ -576,6 +576,16 @@ impl crate::app::WavesPreviewer {
         pos: usize,
         insert: Vec<Vec<f32>>,
     ) -> bool {
+        self.editor_insert_channels_at_labeled(tab_idx, pos, insert, "Paste Insert")
+    }
+
+    pub(super) fn editor_insert_channels_at_labeled(
+        &mut self,
+        tab_idx: usize,
+        pos: usize,
+        insert: Vec<Vec<f32>>,
+        label: &str,
+    ) -> bool {
         let (_channels, undo_state) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return false;
@@ -588,7 +598,7 @@ impl crate::app::WavesPreviewer {
                 return false;
             }
             let pos = pos.min(tab.samples_len);
-            let undo_state = Self::capture_undo_state_labeled(tab, "Paste Insert");
+            let undo_state = Self::capture_undo_state_labeled(tab, label);
             for (ch, ins) in tab.ch_samples.iter_mut().zip(insert.iter()) {
                 ch.splice(pos..pos, ins.iter().copied());
             }
@@ -659,7 +669,12 @@ impl crate::app::WavesPreviewer {
             return false;
         }
         let channels = tab.ch_samples.len().max(1);
-        self.editor_insert_channels_at(tab_idx, pos, vec![vec![0.0f32; n]; channels])
+        self.editor_insert_channels_at_labeled(
+            tab_idx,
+            pos,
+            vec![vec![0.0f32; n]; channels],
+            "Insert Silence",
+        )
     }
 
     /// Silence-insert target: selection start when a selection exists,
@@ -1764,7 +1779,7 @@ impl crate::app::WavesPreviewer {
             depth_db: tab.tool_state.dehum_depth_db.clamp(3.0, 80.0),
         };
         let range = Self::editor_selected_range(tab);
-        let undo = Some(Self::capture_undo_state(tab));
+        let undo = Some(Self::capture_undo_state_labeled(tab, "De-hum"));
         let apply_tab_id = tab.tab_id;
         if matches!(&self.playback_session.source,
             crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
@@ -3067,7 +3082,7 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let undo_state = Self::capture_undo_state_labeled(tab, "Fade");
-            let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+            let sr = tab.buffer_sample_rate.max(1) as f32;
             let nin = ((in_ms / 1000.0) * sr) as usize;
             let nout = ((out_ms / 1000.0) * sr) as usize;
             let mask = Self::editor_channel_mask(tab);
@@ -3508,8 +3523,10 @@ impl crate::app::WavesPreviewer {
             self.audio.stop();
         }
         let ch = tab.ch_samples.clone();
+        // The tab's samples are at their own rate, which is not the device's
+        // whenever another tab reopened the output at a different one.
         let buffer_sr = tab.buffer_sample_rate.max(1);
-        let sr = self.audio.shared.out_sample_rate;
+        let sr = buffer_sr;
         let (tx, rx) = mpsc::channel::<EditorApplyResult>();
         std::thread::spawn(move || {
             let mut out: Vec<Vec<f32>> = Vec::with_capacity(ch.len());
@@ -3678,6 +3695,23 @@ impl crate::app::WavesPreviewer {
         false
     }
 
+    /// Whether the tab's history must not move right now: an apply on it is
+    /// still running (its result would land over whatever Undo restores), or
+    /// Revert to Saved is still decoding the file. Toasts when it refuses.
+    pub(super) fn editor_history_locked_toast(&mut self, tab_idx: usize) -> bool {
+        let reverting = self.tabs.get(tab_idx).is_some_and(|tab| {
+            self.editor_clear_edit_pending.as_deref() == Some(tab.path.as_path())
+        });
+        if self.editor_apply_busy_for_tab(tab_idx) || reverting {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Info,
+                "This tab is still processing an edit — wait for it or cancel it from the topbar",
+            );
+            return true;
+        }
+        false
+    }
+
     /// Cancel the pending heavy apply only when it targets `tab_idx`'s tab.
     /// Other tabs' jobs keep running (undo/clear in one tab must not kill a
     /// job started from another).
@@ -3773,7 +3807,8 @@ impl crate::app::WavesPreviewer {
                     } else {
                         std::sync::Arc::new(tab.ch_samples.clone())
                     };
-                    tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
+                    // The worker processed at the tab's rate and resampled
+                    // nothing, so `buffer_sample_rate` stays as it was.
                     tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
                     if res.waveform_minmax.is_empty() && tab.samples_len > 0 {
                         let (waveform_minmax, waveform_pyramid) =

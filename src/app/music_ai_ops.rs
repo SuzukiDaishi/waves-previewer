@@ -578,7 +578,7 @@ impl crate::app::WavesPreviewer {
                     Some("preview audio is not ready".to_string());
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Music Stem Mix");
             let channels = overlay.channels.clone();
             let samples_len = channels
                 .iter()
@@ -587,7 +587,7 @@ impl crate::app::WavesPreviewer {
                 .unwrap_or(tab.samples_len);
             tab.ch_samples = channels.clone();
             tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
-            tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
+            // The stem mix is built at the tab's own rate; the samples stay there.
             tab.samples_len = samples_len;
             let (waveform_minmax, waveform_pyramid) =
                 Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);

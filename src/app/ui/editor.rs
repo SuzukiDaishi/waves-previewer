@@ -6820,7 +6820,7 @@ impl crate::app::WavesPreviewer {
                                     Self::normalized_loop_range(tab.loop_region)
                                 {
                                     if pending_edit_undo.is_none() {
-                                        pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                        pending_edit_undo = Some(Self::capture_undo_state_labeled(tab, "Loop Edge"));
                                     }
                                     let samp = Self::loop_edge_snap_sample(
                                         tab,
@@ -10264,7 +10264,7 @@ impl crate::app::WavesPreviewer {
                                             ui.label("Length");
                                             let resp_x = ui.add(egui::DragValue::new(&mut x_ms).range(0.0..=5000.0).speed(5.0).fixed_decimals(1));
                                             if (resp_x.gained_focus() || resp_x.drag_started()) && pending_edit_undo.is_none() {
-                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                pending_edit_undo = Some(Self::capture_undo_state_labeled(tab, "Loop Crossfade"));
                                             }
                                             if resp_x.changed() {
                                                 let samp = ((x_ms / 1000.0) * sr).round().clamp(0.0, tab.samples_len as f32) as usize;
@@ -10303,7 +10303,7 @@ impl crate::app::WavesPreviewer {
                                             };
                                             if shp != tab.loop_xfade_shape {
                                                 if pending_edit_undo.is_none() {
-                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                    pending_edit_undo = Some(Self::capture_undo_state_labeled(tab, "Loop Crossfade"));
                                                 }
                                                 tab.loop_xfade_shape = shp;
                                                 apply_pending_loop = true;
@@ -10323,7 +10323,7 @@ impl crate::app::WavesPreviewer {
                                             if set_resp.clicked()
                                             {
                                                 if pending_edit_undo.is_none() {
-                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                    pending_edit_undo = Some(Self::capture_undo_state_labeled(tab, "Set Loop"));
                                                 }
                                                 if let Some((a0, b0)) = tab.selection {
                                                     let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
@@ -10337,7 +10337,7 @@ impl crate::app::WavesPreviewer {
                                             }
                                             if ui.button("Clear").clicked() {
                                                 if pending_edit_undo.is_none() {
-                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                    pending_edit_undo = Some(Self::capture_undo_state_labeled(tab, "Clear Loop"));
                                                 }
                                                 do_set_loop_from = Some((0,0));
                                             }
@@ -10371,7 +10371,7 @@ impl crate::app::WavesPreviewer {
                                                 .clicked()
                                             {
                                                 if pending_edit_undo.is_none() {
-                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                    pending_edit_undo = Some(Self::capture_undo_state_labeled(tab, "Loop Unwrap Preview"));
                                                 }
                                                 do_preview_unwrap = Some(repeat);
                                                 stop_playback = true;
@@ -10640,7 +10640,7 @@ impl crate::app::WavesPreviewer {
                                         ui.horizontal_wrapped(|ui| {
                                             if ui.button("Add at Playhead").clicked() {
                                                 if pending_edit_undo.is_none() {
-                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                    pending_edit_undo = Some(Self::capture_undo_state_labeled(tab, "Add Marker"));
                                                 }
                                                 let pos = playhead_display_now;
                                                 let label = Self::next_marker_label(&tab.markers);
@@ -10666,7 +10666,7 @@ impl crate::app::WavesPreviewer {
                                                 .clicked()
                                             {
                                                 if pending_edit_undo.is_none() {
-                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                    pending_edit_undo = Some(Self::capture_undo_state_labeled(tab, "Clear Markers"));
                                                 }
                                                 tab.markers.clear();
                                                 Self::update_markers_dirty(tab);
@@ -10787,7 +10787,7 @@ impl crate::app::WavesPreviewer {
                                             }
                                             if dirty {
                                                 if pending_edit_undo.is_none() {
-                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                    pending_edit_undo = Some(Self::capture_undo_state_labeled(tab, "Edit Marker"));
                                                 }
                                                 tab.markers = markers_local;
                                                 Self::update_markers_dirty(tab);
@@ -12440,7 +12440,7 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                                                 {
                                                     if pending_edit_undo.is_none() {
                                                         pending_edit_undo =
-                                                            Some(Self::capture_undo_state(tab));
+                                                            Some(Self::capture_undo_state_labeled(tab, "Music Markers"));
                                                     }
                                                     pending_music_apply_markers = true;
                                                 }
@@ -15223,31 +15223,12 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                 self.spawn_heavy_overlay_from_path(path, tool, p, range);
             }
         }
+        // The buttons go through the same dispatcher as Ctrl+Z / Ctrl+Y.
         if request_undo {
-            let pencil_draft_active = self
-                .tabs
-                .get(tab_idx)
-                .is_some_and(|tab| tab.pencil_draft.is_some());
-            if pencil_draft_active {
-                self.editor_pencil_undo_draft(tab_idx);
-            } else {
-                self.clear_preview_if_any(tab_idx);
-                self.cancel_editor_apply_for_tab(tab_idx);
-                self.undo_in_tab(tab_idx);
-            }
+            self.trigger_undo_redo(false);
         }
         if request_redo {
-            let pencil_draft_active = self
-                .tabs
-                .get(tab_idx)
-                .is_some_and(|tab| tab.pencil_draft.is_some());
-            if pencil_draft_active {
-                self.editor_pencil_redo_draft(tab_idx);
-            } else {
-                self.clear_preview_if_any(tab_idx);
-                self.cancel_editor_apply_for_tab(tab_idx);
-                self.redo_in_tab(tab_idx);
-            }
+            self.trigger_undo_redo(true);
         }
         if request_clear_edit {
             self.clear_preview_if_any(tab_idx);
@@ -15416,7 +15397,7 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
                         || tab.loop_region_applied != tab.loop_region
                         || tab.loop_xfade_samples > 0;
                     if will_change {
-                        undo_state = Some(Self::capture_undo_state(tab));
+                        undo_state = Some(Self::capture_undo_state_labeled(tab, "Loop Region"));
                     }
                     tab.loop_region_committed = tab.loop_region;
                     tab.loop_region_applied = tab.loop_region_committed;
@@ -15485,7 +15466,7 @@ item per selected range, named \"<name> (trim).<ext>\". Same as {virtual_keys}.{
             let mut undo_state = None;
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 if tab.markers != tab.markers_committed {
-                    undo_state = Some(Self::capture_undo_state(tab));
+                    undo_state = Some(Self::capture_undo_state_labeled(tab, "Markers"));
                 }
                 tab.markers_committed = tab.markers.clone();
                 tab.markers_applied = tab.markers_committed.clone();

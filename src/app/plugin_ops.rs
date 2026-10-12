@@ -1353,7 +1353,8 @@ impl crate::app::WavesPreviewer {
             }
             return;
         }
-        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        // The plugin processes the tab's samples at their own rate.
+        let buffer_sr = tab.buffer_sample_rate.max(1);
         let channels = tab.ch_samples.clone();
         if channels.is_empty() {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
@@ -1421,7 +1422,7 @@ impl crate::app::WavesPreviewer {
         };
         if let Err(err) = crate::wave::export_channels_audio_with_depth(
             &channels,
-            out_sr,
+            buffer_sr,
             &input_path,
             Some(crate::wave::WavBitDepth::Float32),
         ) {
@@ -1445,7 +1446,7 @@ impl crate::app::WavesPreviewer {
                 slots: chain_slots.clone(),
                 input_audio_path: input_path_text.clone(),
                 output_audio_path: output_path_text.clone(),
-                sample_rate: out_sr,
+                sample_rate: buffer_sr,
                 max_block_size: crate::plugin::OFFLINE_MAX_BLOCK_SIZE,
                 chain_bypass,
             };
@@ -1490,7 +1491,7 @@ impl crate::app::WavesPreviewer {
                         .request(&WorkerRequest::ChainSessionOpen {
                             session_id,
                             slots: chain_slots.clone(),
-                            sample_rate: out_sr,
+                            sample_rate: buffer_sr,
                             channels: channels.len().max(1) as u16,
                             max_block_size: crate::plugin::OFFLINE_MAX_BLOCK_SIZE,
                             render_ahead_ms,
@@ -2402,7 +2403,7 @@ impl crate::app::WavesPreviewer {
                             tab.preview_overlay = None;
                             tab.ch_samples = result.channels;
                             tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
-                            tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
+                            // The chain ran at the tab's rate; the samples stay there.
                             tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
                             let (waveform_minmax, waveform_pyramid) =
                                 Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);

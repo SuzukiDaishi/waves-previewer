@@ -4589,6 +4589,28 @@ mod kittest_suite {
     }
 
     #[test]
+    fn async_apply_keeps_the_tab_rate_when_the_device_runs_at_another() {
+        // Opening a second file can reopen the device at its rate, so a tab's
+        // samples are routinely at a rate the device is not. An apply must
+        // leave the tab at its own rate, or playback runs at the wrong speed.
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let out_sr = harness.state().test_out_sample_rate();
+        let other = if out_sr == 96_000 { 48_000 } else { 96_000 };
+        assert!(harness
+            .state_mut()
+            .test_set_active_tab_buffer_sample_rate(other));
+        assert!(harness.state_mut().test_apply_pitch_shift(2.0));
+        wait_for_editor_apply(&mut harness);
+        assert!(harness.state().test_tab_dirty());
+        assert_eq!(
+            harness.state().test_active_tab_buffer_sample_rate(),
+            Some(other)
+        );
+    }
+
+    #[test]
     fn editor_time_stretch_apply() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
@@ -6054,16 +6076,27 @@ mod kittest_suite {
             "undo should restore vertical view state: zoom={undo_zoom} center={undo_center}"
         );
 
+        assert_eq!(harness.state().test_editor_history_depths(), (0, 1));
+
         harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
         harness.run_steps(3);
+        // Ctrl+Shift+Z is a redo, not a second undo: the reverse comes back.
+        assert_eq!(
+            harness.state().test_editor_history_depths(),
+            (1, 0),
+            "Ctrl+Shift+Z should redo the reverse"
+        );
+        assert!(harness.state().test_tab_dirty());
+        // The redo entry was captured when Undo was pressed, so redo brings
+        // back the view as it was at that moment (zoom 1.0, centred).
         let redo_zoom = harness.state().test_tab_vertical_zoom().expect("redo zoom");
         let redo_center = harness
             .state()
             .test_tab_vertical_view_center()
             .expect("redo center");
         assert!(
-            (redo_zoom - 4.0).abs() < 0.02 && (redo_center - 0.26).abs() < 0.02,
-            "redo should restore the post-apply vertical view state: zoom={redo_zoom} center={redo_center}"
+            (redo_zoom - 1.0).abs() < 0.02 && redo_center.abs() < 0.02,
+            "redo should restore the view from when Undo was pressed: zoom={redo_zoom} center={redo_center}"
         );
     }
 
@@ -6451,6 +6484,11 @@ mod kittest_suite {
 
         harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
         harness.run_steps(3);
+        assert_eq!(
+            harness.state().test_editor_history_depths(),
+            (1, 0),
+            "Ctrl+Shift+Z should redo, not undo again"
+        );
         assert!(
             harness.state().test_active_tab_waveform_pyramid_ready(),
             "redo should keep waveform cache renderable"

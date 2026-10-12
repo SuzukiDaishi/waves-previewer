@@ -3255,6 +3255,14 @@ impl super::WavesPreviewer {
         self.tabs.get(tab_idx).map(|t| t.dirty).unwrap_or(false)
     }
 
+    /// (undo entries, redo entries) of the active tab's edit history.
+    pub fn test_editor_history_depths(&self) -> (usize, usize) {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .map(|t| (t.undo_stack.len(), t.redo_stack.len()))
+            .unwrap_or((0, 0))
+    }
+
     pub fn test_marker_dirty(&self) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -3902,6 +3910,16 @@ impl super::WavesPreviewer {
         };
         tab.buffer_sample_rate = sample_rate.max(1);
         true
+    }
+
+    pub fn test_active_tab_buffer_sample_rate(&self) -> Option<u32> {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .map(|tab| tab.buffer_sample_rate)
+    }
+
+    pub fn test_out_sample_rate(&self) -> u32 {
+        self.audio.shared.out_sample_rate
     }
 
     pub fn test_force_active_tab_exact_stream_transport(&mut self, sample_rate: u32) -> bool {

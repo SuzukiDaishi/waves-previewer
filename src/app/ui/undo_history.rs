@@ -83,8 +83,10 @@ impl crate::app::WavesPreviewer {
         let Some(tab_idx) = self.active_tab else {
             return 0;
         };
+        if steps == 0 || self.editor_history_locked_toast(tab_idx) {
+            return 0;
+        }
         self.clear_preview_if_any(tab_idx);
-        self.cancel_editor_apply_for_tab(tab_idx);
         let mut done = 0;
         for _ in 0..steps {
             let ok = if redo {

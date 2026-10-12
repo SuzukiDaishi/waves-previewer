@@ -5108,7 +5108,7 @@ impl WavesPreviewer {
                 tab.markers_applied = remap_markers(&tab.markers_applied, old_len, new_len);
                 tab.ch_samples = channels.clone();
                 tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
-                tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
+                tab.buffer_sample_rate = final_sample_rate.max(1);
                 tab.samples_len = new_len;
                 tab.waveform_minmax = rough_waveform.clone();
                 tab.waveform_pyramid = None;
@@ -5267,7 +5267,7 @@ impl WavesPreviewer {
             }
         };
         cached.ch_samples = channels;
-        cached.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
+        cached.buffer_sample_rate = final_sample_rate.max(1);
         cached.samples_len = new_len;
         cached.waveform_minmax = rough_waveform;
         cached.waveform_pyramid = None;

@@ -159,6 +159,9 @@ pub use self::types::{
 
 const LIVE_PREVIEW_SAMPLE_LIMIT: usize = 2_000_000;
 const UNDO_STACK_LIMIT: usize = 20;
+/// What one undo snapshot costs besides its audio (view, markers, labels);
+/// a snapshot whose buffer is shared with another counts only this much.
+const UNDO_STATE_OVERHEAD_BYTES: usize = 256;
 const MAX_EDITOR_TABS: usize = 12;
 const SPECTRO_TILE_FRAMES: usize = 64;
 const SPECTRO_DRAIN_MAX_PER_FRAME: usize = 8;
@@ -3186,7 +3189,7 @@ impl WavesPreviewer {
     fn estimate_state_bytes(tab: &EditorTab) -> usize {
         let sample_bytes =
             tab.ch_samples.iter().map(|c| c.len()).sum::<usize>() * std::mem::size_of::<f32>();
-        sample_bytes.saturating_add(256)
+        sample_bytes.saturating_add(UNDO_STATE_OVERHEAD_BYTES)
     }
 
     fn capture_undo_state(tab: &EditorTab) -> EditorUndoState {
@@ -3256,20 +3259,40 @@ impl WavesPreviewer {
         }
     }
 
+    /// What a stack of snapshots really holds. Snapshots taken without an
+    /// audio change between them (marker, loop and selection edits) share
+    /// one buffer through the same `Arc`; counting each at full size made a
+    /// few loop drags evict the audio history.
+    pub(super) fn undo_stack_bytes(stack: &[EditorUndoState]) -> usize {
+        let mut seen: Vec<*const Vec<Vec<f32>>> = Vec::with_capacity(stack.len());
+        stack
+            .iter()
+            .map(|state| {
+                let ptr = Arc::as_ptr(&state.ch_samples);
+                if seen.contains(&ptr) {
+                    UNDO_STATE_OVERHEAD_BYTES
+                } else {
+                    seen.push(ptr);
+                    state.approx_bytes
+                }
+            })
+            .fold(0usize, usize::saturating_add)
+    }
+
     fn push_state_to_stack(
         stack: &mut Vec<EditorUndoState>,
         bytes: &mut usize,
         state: EditorUndoState,
         max_bytes: usize,
     ) {
-        *bytes = bytes.saturating_add(state.approx_bytes);
         stack.push(state);
-        while stack.len() > UNDO_STACK_LIMIT || *bytes > max_bytes {
-            if stack.is_empty() {
-                break;
-            }
-            let removed = stack.remove(0);
-            *bytes = bytes.saturating_sub(removed.approx_bytes);
+        *bytes = Self::undo_stack_bytes(stack);
+        // The entry just pushed always stays: evicting it would make the
+        // edit that was just made silently impossible to undo, which is
+        // what happened to any clip larger than the byte budget.
+        while stack.len() > UNDO_STACK_LIMIT || (*bytes > max_bytes && stack.len() > 1) {
+            stack.remove(0);
+            *bytes = Self::undo_stack_bytes(stack);
         }
     }
 
@@ -3280,12 +3303,16 @@ impl WavesPreviewer {
                 .saturating_add(tab.redo_bytes)
         });
         while total > limit {
+            // Every tab keeps its most recent undo step; redo steps and older
+            // undo steps are fair game, largest first.
             let Some((tab_index, from_undo, _)) = self
                 .tabs
                 .iter()
                 .enumerate()
                 .filter_map(|(index, tab)| {
-                    let undo = tab.undo_stack.first().map(|state| state.approx_bytes);
+                    let undo = (tab.undo_stack.len() > 1)
+                        .then(|| tab.undo_stack.first().map(|state| state.approx_bytes))
+                        .flatten();
                     let redo = tab.redo_stack.first().map(|state| state.approx_bytes);
                     match (undo, redo) {
                         (Some(left), Some(right)) if left >= right => Some((index, true, left)),
@@ -3300,16 +3327,20 @@ impl WavesPreviewer {
                 break;
             };
             let tab = &mut self.tabs[tab_index];
-            let removed = if from_undo {
-                let state = tab.undo_stack.remove(0);
-                tab.undo_bytes = tab.undo_bytes.saturating_sub(state.approx_bytes);
-                state.approx_bytes
+            let before = tab.undo_bytes.saturating_add(tab.redo_bytes);
+            if from_undo {
+                tab.undo_stack.remove(0);
+                tab.undo_bytes = Self::undo_stack_bytes(&tab.undo_stack);
             } else {
-                let state = tab.redo_stack.remove(0);
-                tab.redo_bytes = tab.redo_bytes.saturating_sub(state.approx_bytes);
-                state.approx_bytes
-            };
-            total = total.saturating_sub(removed);
+                tab.redo_stack.remove(0);
+                tab.redo_bytes = Self::undo_stack_bytes(&tab.redo_stack);
+            }
+            let after = tab.undo_bytes.saturating_add(tab.redo_bytes);
+            total = total.saturating_sub(before.saturating_sub(after));
+            if before == after {
+                // A shared buffer freed nothing; the overhead still went.
+                total = total.saturating_sub(UNDO_STATE_OVERHEAD_BYTES);
+            }
         }
     }
 
@@ -3318,9 +3349,7 @@ impl WavesPreviewer {
         bytes: &mut usize,
     ) -> Option<EditorUndoState> {
         let state = stack.pop();
-        if let Some(st) = &state {
-            *bytes = bytes.saturating_sub(st.approx_bytes);
-        }
+        *bytes = Self::undo_stack_bytes(stack);
         state
     }
 
@@ -3356,6 +3385,10 @@ impl WavesPreviewer {
     }
 
     fn restore_state_in_tab(&mut self, tab_idx: usize, state: EditorUndoState) -> bool {
+        // An overview-only tab streams its audio and its snapshots carry no
+        // buffer; restoring one must leave the stream alone.
+        let snapshot_has_audio = state.samples_len > 0 && !state.ch_samples.is_empty();
+        let mut restored_audio = false;
         {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return false;
@@ -3366,17 +3399,23 @@ impl WavesPreviewer {
             tab.pencil_draft = None;
             tab.pencil_last_point = None;
             tab.pencil_stroke_channels.clear();
-            // Share the snapshot with the worker mirror (free), then take
-            // one owned copy for the mutable tab buffers.
-            tab.ch_samples = (*state.ch_samples).clone();
-            tab.ch_samples_arc = state.ch_samples;
-            tab.samples_len = state.samples_len;
-            tab.samples_len_visual = state.samples_len_visual;
+            if snapshot_has_audio || !tab.paged_asset {
+                // Share the snapshot with the worker mirror (free), then take
+                // one owned copy for the mutable tab buffers.
+                tab.ch_samples = (*state.ch_samples).clone();
+                tab.ch_samples_arc = state.ch_samples;
+                tab.samples_len = state.samples_len;
+                tab.samples_len_visual = state.samples_len_visual;
+                tab.buffer_sample_rate = state.buffer_sample_rate.max(1);
+                tab.waveform_minmax = state.waveform_minmax;
+                tab.waveform_pyramid = state.waveform_pyramid;
+                if snapshot_has_audio {
+                    tab.paged_asset = false;
+                }
+                restored_audio = true;
+            }
             tab.loading = false;
             tab.loading_waveform_minmax.clear();
-            tab.buffer_sample_rate = state.buffer_sample_rate.max(1);
-            tab.waveform_minmax = state.waveform_minmax;
-            tab.waveform_pyramid = state.waveform_pyramid;
             tab.view_offset = state.view_offset;
             tab.view_offset_exact = state.view_offset as f64;
             tab.vertical_zoom = state.vertical_zoom;
@@ -3428,7 +3467,7 @@ impl WavesPreviewer {
             (
                 tab.path.clone(),
                 tab.buffer_sample_rate.max(1),
-                tab.ch_samples.clone(),
+                tab.ch_samples_arc.clone(),
             )
         }) else {
             return false;
@@ -3438,14 +3477,33 @@ impl WavesPreviewer {
                 item.editor_notes = notes;
             }
         }
-        self.audio.stop();
-        self.audio.set_samples_channels(channels);
-        self.playback_mark_buffer_source(
-            PlaybackSourceKind::EditorTab(path.clone()),
-            buffer_sample_rate,
-        );
-        if let Some(tab) = self.tabs.get(tab_idx) {
-            self.apply_loop_mode_for_tab(tab);
+        if restored_audio {
+            // A waveform rebuild still in flight was made from the buffer
+            // being replaced; its result must not land over the restored one.
+            self.editor_wave_cache_generation.remove(&path);
+            self.advance_asset_revision_for_path(&path);
+        }
+        // Re-target the engine only when this tab is what is heard or shown,
+        // as an apply does: undoing in a background tab must not stop a list
+        // preview that is playing.
+        let adopt_audio = restored_audio
+            && (matches!(
+                &self.playback_session.source,
+                PlaybackSourceKind::EditorTab(p) if *p == path
+            ) || (self.active_tab == Some(tab_idx)
+                && (self.is_editor_workspace_active()
+                    || matches!(&self.playback_session.source, PlaybackSourceKind::ToolPreview))));
+        if adopt_audio {
+            self.audio.stop();
+            self.audio.set_samples_shared_channels(channels);
+            self.playback_mark_buffer_source(
+                PlaybackSourceKind::EditorTab(path.clone()),
+                buffer_sample_rate,
+            );
+            self.on_audio_length_changed(tab_idx);
+            if let Some(tab) = self.tabs.get(tab_idx) {
+                self.apply_loop_mode_for_tab(tab);
+            }
         }
         // The restored audio invalidates any analysis of the pre-undo
         // buffers (spectrogram, tempogram/chromagram/WORLD); drop them so
@@ -3566,5 +3624,62 @@ impl eframe::App for WavesPreviewer {
         let frame_started = std::time::Instant::now();
         self.run_frame_ui(ui, frame_started);
         self.flush_pending_external_drag(frame);
+    }
+}
+
+#[cfg(test)]
+mod undo_budget_tests {
+    use super::{EditorTab, WavesPreviewer, UNDO_STATE_OVERHEAD_BYTES};
+
+    fn tab_with_samples(frames: usize) -> EditorTab {
+        let mut tab = EditorTab::new_base(std::path::PathBuf::from("/u.wav"), "u.wav".into());
+        tab.ch_samples = vec![vec![0.25f32; frames]; 2];
+        tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
+        tab.samples_len = frames;
+        tab
+    }
+
+    #[test]
+    fn snapshots_sharing_a_buffer_count_it_once() {
+        let tab = tab_with_samples(1000);
+        let a = WavesPreviewer::capture_undo_state(&tab);
+        let b = WavesPreviewer::capture_undo_state(&tab);
+        assert!(std::sync::Arc::ptr_eq(&a.ch_samples, &b.ch_samples));
+        let one = a.approx_bytes;
+        assert_eq!(
+            WavesPreviewer::undo_stack_bytes(&[a, b]),
+            one + UNDO_STATE_OVERHEAD_BYTES
+        );
+    }
+
+    #[test]
+    fn a_snapshot_over_the_budget_is_still_kept() {
+        let tab = tab_with_samples(10_000);
+        let mut stack = Vec::new();
+        let mut bytes = 0;
+        let state = WavesPreviewer::capture_undo_state(&tab);
+        WavesPreviewer::push_state_to_stack(&mut stack, &mut bytes, state, 16);
+        assert_eq!(stack.len(), 1, "the edit just made must stay undoable");
+        assert!(bytes > 16);
+    }
+
+    #[test]
+    fn over_budget_evicts_the_oldest_but_never_the_newest() {
+        let mut stack = Vec::new();
+        let mut bytes = 0;
+        let first = tab_with_samples(10_000);
+        let second = tab_with_samples(10_000);
+        let budget = WavesPreviewer::capture_undo_state(&first).approx_bytes + 64;
+        WavesPreviewer::push_state_to_stack(
+            &mut stack,
+            &mut bytes,
+            WavesPreviewer::capture_undo_state(&first),
+            budget,
+        );
+        let newest = WavesPreviewer::capture_undo_state(&second);
+        let newest_ptr = std::sync::Arc::as_ptr(&newest.ch_samples);
+        WavesPreviewer::push_state_to_stack(&mut stack, &mut bytes, newest, budget);
+        assert_eq!(stack.len(), 1);
+        assert_eq!(std::sync::Arc::as_ptr(&stack[0].ch_samples), newest_ptr);
     }
 }

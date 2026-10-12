@@ -829,13 +829,16 @@ impl super::WavesPreviewer {
         if combo_down && self.undo_z_was_down {
             return;
         }
-        let undo = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
+        // Shift+Ctrl+Z first: egui's logical match ignores an extra Shift, so
+        // a plain Ctrl+Z check that ran first would consume the redo chord
+        // as an undo.
         let redo_z = ctx.input_mut(|i| {
             i.consume_key(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
                 egui::Key::Z,
             )
         });
+        let undo = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
         let redo_y = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y));
         let redo = redo_z || redo_y;
         self.undo_z_was_down = cmd_down && (z_down || y_down);
@@ -916,16 +919,33 @@ impl super::WavesPreviewer {
                     // editor history when the local stack reaches an end.
                     return true;
                 }
-                self.clear_preview_if_any(tab_idx);
-                self.cancel_editor_apply_for_tab(tab_idx);
-                let changed = if redo {
-                    self.redo_in_tab(tab_idx)
-                } else {
-                    self.undo_in_tab(tab_idx)
-                };
-                if changed {
+                let has_step = self.tabs.get(tab_idx).is_some_and(|tab| {
+                    if redo {
+                        !tab.redo_stack.is_empty()
+                    } else {
+                        !tab.undo_stack.is_empty()
+                    }
+                });
+                // An apply (or a revert) still running on this tab would land
+                // on top of whatever Undo restores; refuse rather than quietly
+                // cancel it. Nothing is touched when there is nothing to undo.
+                if (has_step || self.is_editor_workspace_active())
+                    && self.editor_history_locked_toast(tab_idx)
+                {
                     self.last_undo_scope = UndoScope::Editor;
-                    handled = true;
+                    return true;
+                }
+                if has_step {
+                    self.clear_preview_if_any(tab_idx);
+                    let changed = if redo {
+                        self.redo_in_tab(tab_idx)
+                    } else {
+                        self.undo_in_tab(tab_idx)
+                    };
+                    if changed {
+                        self.last_undo_scope = UndoScope::Editor;
+                        handled = true;
+                    }
                 }
             }
         }
