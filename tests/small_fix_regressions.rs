@@ -1152,7 +1152,7 @@ mod small_fix_regressions {
     }
 
     #[test]
-    fn long_timestretch_preview_stages_overview_then_full() {
+    fn long_timestretch_preview_draws_an_overview_with_its_audio() {
         let dir = make_temp_dir("long_stretch_preview_stage");
         let src = dir.join("long_stretch.wav");
         write_wav_32_float(&src, 48_000, 42.5);
@@ -1161,34 +1161,42 @@ mod small_fix_regressions {
         wait_for_scan(&mut harness);
         assert!(harness.state_mut().test_open_tab_for_path(&src));
         wait_for_tab_ready(&mut harness);
+        let source_len = harness.state().test_tab_samples_len();
 
         assert!(harness
             .state_mut()
             .test_set_active_tool(ToolKind::TimeStretch));
         assert!(harness.state_mut().test_set_tool_stretch_rate(1.30));
         assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
-        wait_for_preview_overlay_tool(&mut harness, ToolKind::TimeStretch);
-
-        assert!(harness.state().test_preview_overlay_is_overview_only());
         assert!(
             harness.state().test_preview_busy_for_active_tab(),
-            "staged long preview should remain busy until full overlay and audio are ready"
+            "the render is in flight until its audio and waveform land together"
         );
 
+        // One result: the audio, and for a long clip an overview waveform
+        // rather than a clip-sized full-sample overlay.
         wait_for_preview_tool(&mut harness, ToolKind::TimeStretch, true);
         wait_for_preview_idle(&mut harness);
-
         assert_eq!(
             harness.state().test_preview_audio_tool(),
             Some(ToolKind::TimeStretch)
         );
-        assert!(harness.state().test_preview_overlay_is_full_sample());
+        assert!(harness.state().test_preview_overlay_is_overview_only());
+        let preview_len = harness
+            .state()
+            .test_tool_preview_channels()
+            .map(|channels| channels[0].len())
+            .expect("the rendered preview");
+        assert_ne!(
+            preview_len, source_len,
+            "the stretched audio is what is heard"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn long_pitchshift_preview_stages_overview_then_full() {
+    fn long_pitchshift_preview_draws_an_overview_with_its_audio() {
         let dir = make_temp_dir("long_pitch_preview_stage");
         let src = dir.join("long_pitch.wav");
         write_wav_32_float(&src, 48_000, 42.5);
@@ -1197,28 +1205,33 @@ mod small_fix_regressions {
         wait_for_scan(&mut harness);
         assert!(harness.state_mut().test_open_tab_for_path(&src));
         wait_for_tab_ready(&mut harness);
+        let source_len = harness.state().test_tab_samples_len();
 
         assert!(harness
             .state_mut()
             .test_set_active_tool(ToolKind::PitchShift));
         assert!(harness.state_mut().test_set_tool_pitch_semitones(3.0));
         assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
-        wait_for_preview_overlay_tool(&mut harness, ToolKind::PitchShift);
-
-        assert!(harness.state().test_preview_overlay_is_overview_only());
         assert!(
             harness.state().test_preview_busy_for_active_tab(),
-            "staged long preview should remain busy until full overlay and audio are ready"
+            "the render is in flight until its audio and waveform land together"
         );
 
+        // One result: the audio, and for a long clip an overview waveform
+        // rather than a clip-sized full-sample overlay.
         wait_for_preview_tool(&mut harness, ToolKind::PitchShift, true);
         wait_for_preview_idle(&mut harness);
-
         assert_eq!(
             harness.state().test_preview_audio_tool(),
             Some(ToolKind::PitchShift)
         );
-        assert!(harness.state().test_preview_overlay_is_full_sample());
+        assert!(harness.state().test_preview_overlay_is_overview_only());
+        let preview_len = harness
+            .state()
+            .test_tool_preview_channels()
+            .map(|channels| channels[0].len())
+            .expect("the rendered preview");
+        assert_eq!(preview_len, source_len, "a pitch shift keeps the length");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

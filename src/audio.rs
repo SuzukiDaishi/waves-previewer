@@ -1629,8 +1629,23 @@ impl AudioEngine {
             .play_pos_f
             .load(std::sync::atomic::Ordering::Relaxed);
         let new_len = samples.len();
-        let (new_pos, new_pos_f) =
-            Self::remap_pos_for_new_source(old_pos_f, from_sr, to_sr, new_len);
+        let (_, new_pos_f) = Self::remap_pos_for_new_source(old_pos_f, from_sr, to_sr, new_len);
+        self.set_samples_buffer_at(samples, new_pos_f, 0.0);
+    }
+
+    /// Replace the buffer and put the playhead at `pos_f` frames into it.
+    /// With `fade_ms > 0` and playback running, the output fades back in
+    /// over that long: the two signals meet at the swap, and without the
+    /// fade the jump between them clicks. Used when an editor tool's
+    /// preview is swapped in (or out) under a running playhead.
+    pub fn set_samples_buffer_at(&self, samples: Arc<AudioBuffer>, pos_f: f64, fade_ms: f32) {
+        let new_len = samples.len();
+        let new_pos_f = if pos_f.is_finite() && pos_f >= 0.0 {
+            pos_f.min(new_len.saturating_sub(1) as f64)
+        } else {
+            0.0
+        };
+        let new_pos = new_pos_f.floor() as usize;
         self.shared
             .silent_frames
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -1659,6 +1674,9 @@ impl AudioEngine {
             self.shared
                 .loop_end
                 .store(new_len, std::sync::atomic::Ordering::Relaxed);
+        }
+        if fade_ms > 0.0 && self.shared.playing.load(std::sync::atomic::Ordering::Relaxed) {
+            self.start_output_ramp(0.0, 1.0, fade_ms);
         }
     }
 

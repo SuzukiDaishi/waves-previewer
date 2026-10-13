@@ -338,14 +338,16 @@ impl super::WavesPreviewer {
             let (waveform_minmax, waveform_pyramid) =
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&channels, out_len);
             let channels_arc = std::sync::Arc::new(channels.clone());
-            let _ = tx.send(EditorApplyResult {
+            let _ = tx.send(Ok(EditorApplyResult {
                 channels,
                 channels_arc,
                 waveform_minmax,
                 waveform_pyramid,
                 lufs_override: None,
                 selection_after: None,
-            });
+                time_map: crate::app::tool_render::TimeMap::Identity,
+                markers_after: None,
+            }));
         });
         self.editor_apply_state = Some(EditorApplyState {
             msg: match (fine_reanalysis, formant_active) {

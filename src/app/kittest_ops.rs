@@ -447,7 +447,7 @@ impl super::WavesPreviewer {
         let tab_id = tab.tab_id;
         let source_len = tab.samples_len;
         let source_sample_rate = tab.buffer_sample_rate.max(1);
-        let (tx, rx) = std::sync::mpsc::channel::<EditorApplyResult>();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<EditorApplyResult, Option<String>>>();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(2));
             drop(tx);
@@ -1751,6 +1751,148 @@ impl super::WavesPreviewer {
         self.list_art_window_error = None;
     }
 
+    /// Switch the active tab's tool the way the Inspector does.
+    pub fn test_switch_tool(&mut self, tool: ToolKind) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_select_tool(tab_idx, tool);
+        self.tabs.get(tab_idx).is_some_and(|tab| tab.active_tool == tool)
+    }
+
+    /// Change the active tool's settings as one Inspector gesture would.
+    pub fn test_change_tool_setting(
+        &mut self,
+        change: impl FnOnce(&mut crate::app::types::ToolState),
+    ) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let before = crate::app::tool_session::DraftSnapshot::capture(tab);
+        change(&mut tab.tool_state);
+        self.note_tool_draft_change(tab_idx, before);
+        true
+    }
+
+    /// The Inspector footer's Apply.
+    pub fn test_inspector_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.apply_active_tool(tab_idx)
+    }
+
+    /// The Inspector footer's Discard (Esc).
+    pub fn test_inspector_discard(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.discard_tool_draft(tab_idx)
+    }
+
+    /// The samples of the preview the engine holds for the active tab.
+    pub fn test_tool_preview_channels(&self) -> Option<Vec<Vec<f32>>> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        tab.tool_session
+            .preview
+            .as_ref()
+            .map(|preview| (*preview.channels).clone())
+    }
+
+    /// Whether the active tab's tool session is previewing.
+    pub fn test_tool_session_previewing(&self) -> bool {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .is_some_and(|tab| {
+                tab.tool_session.phase == crate::app::tool_session::SessionPhase::Previewing
+            })
+    }
+
+    /// How many Spectral Brush stamps the active tab holds.
+    pub fn test_spectral_brush_stamp_count(&self) -> usize {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .map_or(0, |tab| tab.spectral_brush_stamps.len())
+    }
+
+    /// (draft undo, draft redo) depths of the active tab's tool session.
+    pub fn test_tool_draft_depths(&self) -> (usize, usize) {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .map(|tab| {
+                (
+                    tab.tool_session.draft_undo.len(),
+                    tab.tool_session.draft_redo.len(),
+                )
+            })
+            .unwrap_or((0, 0))
+    }
+
+    /// The active tab's tool settings.
+    pub fn test_tool_state(&self) -> Option<crate::app::types::ToolState> {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .map(|tab| tab.tool_state)
+    }
+
+    /// As a successful overwrite save leaves the active tab.
+    pub fn test_mark_active_tab_saved(&mut self) -> bool {
+        let Some(tab) = self.active_tab.and_then(|idx| self.tabs.get(idx)) else {
+            return false;
+        };
+        let (path, markers, loop_region) =
+            (tab.path.clone(), tab.markers.clone(), tab.loop_region);
+        self.mark_edit_saved_for_path(&path, &markers, loop_region);
+        true
+    }
+
+    /// Edit > Revert to Saved, confirmed.
+    pub fn test_revert_active_tab_to_saved(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.clear_edit_in_tab(tab_idx);
+        true
+    }
+
+    /// Whether Revert to Saved is still reading the file.
+    pub fn test_revert_pending(&self) -> bool {
+        self.editor_clear_edit_pending.is_some()
+    }
+
+    /// One marker / loop gesture: the edits `steps` makes, frame by frame,
+    /// then the gesture's end.
+    pub fn test_annotation_gesture(
+        &mut self,
+        label: &str,
+        steps: &[Option<(usize, usize)>],
+    ) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        for region in steps {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            Self::annotation_begin(tab, label);
+            tab.loop_region = *region;
+            Self::editor_sync_annotation_layers(tab);
+        }
+        self.editor_settle_annotation_gesture(tab_idx);
+        true
+    }
+
+    /// The undo-history labels of the active tab, oldest first.
+    pub fn test_editor_undo_labels(&self) -> Vec<String> {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .map(|tab| tab.undo_stack.iter().map(|s| s.label.clone()).collect())
+            .unwrap_or_default()
+    }
+
     pub fn test_set_active_tool(&mut self, tool: ToolKind) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -1823,6 +1965,12 @@ impl super::WavesPreviewer {
             return false;
         };
         self.current_tab_preview_busy(tab_idx)
+    }
+
+    /// The active tab's tool settings, to set several at once.
+    pub fn test_tool_state_mut(&mut self) -> Option<&mut crate::app::types::ToolState> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get_mut(tab_idx).map(|tab| &mut tab.tool_state)
     }
 
     pub fn test_refresh_tool_preview_active_tab(&mut self) -> bool {
@@ -2845,6 +2993,28 @@ impl super::WavesPreviewer {
         true
     }
 
+    /// Show the analysis result's markers (the Music Analyze checkboxes);
+    /// returns how many are shown.
+    pub fn test_show_music_markers(&mut self) -> usize {
+        let Some(tab_idx) = self.active_tab else {
+            return 0;
+        };
+        self.rebuild_music_provisional_markers_for_tab(tab_idx);
+        self.tabs[tab_idx]
+            .music_analysis_draft
+            .provisional_markers
+            .len()
+    }
+
+    /// Music Analyze's "Add as markers".
+    pub fn test_add_music_markers(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.apply_music_markers_with_undo(tab_idx);
+        true
+    }
+
     pub fn test_set_mock_music_model_status(&mut self, analysis_ready: bool, demucs_ready: bool) {
         let mock_dir = PathBuf::from(r"C:\mock\music-analyze-model");
         self.music_ai_model_dir = analysis_ready.then_some(mock_dir.clone());
@@ -3325,7 +3495,6 @@ impl super::WavesPreviewer {
                     .unwrap_or(0);
                 Self::normalized_loop_range(t.loop_region)
                     != Self::normalized_loop_range(t.loop_region_applied)
-                    || t.pending_loop_unwrap.is_some()
                     || effective_cf > 0
             })
             .unwrap_or(false)

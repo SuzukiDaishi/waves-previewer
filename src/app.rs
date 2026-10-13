@@ -8,19 +8,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 // use walkdir::WalkDir; // unused here (used in logic.rs)
 
-enum HeavyPreviewAudio {
-    Mono(Vec<f32>),
-    Channels(Vec<Vec<f32>>),
-}
-
-type HeavyPreviewMessage = (std::path::PathBuf, ToolKind, HeavyPreviewAudio, u64);
-type HeavyOverlayMessage = (
-    std::path::PathBuf,
-    ToolKind,
-    crate::app::types::PreviewOverlay,
-    u64,
-    bool,
-);
 
 mod app_init;
 mod audio_ops;
@@ -49,6 +36,8 @@ mod duplicate_ops;
 mod editor_decode_ops;
 mod editor_features;
 mod editor_ops;
+mod editor_tool;
+mod inspector_ops;
 mod editor_viewport;
 mod effect_graph_ops;
 pub(crate) mod ui_timing;
@@ -118,6 +107,10 @@ mod sort_filter_jobs;
 pub(crate) mod list_filter;
 pub(crate) mod text_match;
 mod spectral_ops;
+mod tool_apply_ops;
+mod tool_preview_ops;
+mod tool_render;
+mod tool_session;
 mod spectrogram;
 mod spectrogram_jobs;
 mod startup;
@@ -556,6 +549,9 @@ pub struct WavesPreviewer {
     topbar_output_meter_rect: Option<egui::Rect>,
     topbar_search_rect: Option<egui::Rect>,
     editor_inspector_rect: Option<egui::Rect>,
+    /// The tool each Inspector palette category opens with: the last one
+    /// used there.
+    inspector_last_tool: std::collections::HashMap<editor_tool::ToolCategory, ToolKind>,
     pub tabs: Vec<EditorTab>,
     waveform_scratch: WaveformScratch,
     pub active_tab: Option<usize>,
@@ -955,9 +951,6 @@ pub struct WavesPreviewer {
     /// Without a floor here, a file that correctly starts on a zero sample
     /// would always report NG.
     blank_min_ms: f32,
-    // Spectral selection edit (RX-style): edge fade lengths for mute/play.
-    spectral_edit_time_fade_ms: f32,
-    spectral_edit_freq_fade_hz: f32,
     // Active "play selection" one-shot: (tab_idx, selection end in display samples)
     editor_play_selection_state: Option<(usize, usize)>,
     invert_wave_zoom_wheel: bool,
@@ -1061,6 +1054,11 @@ pub struct WavesPreviewer {
     // A Clear Edit reset reuses the editor decode worker. This marks the
     // result so adoption clears edit history instead of behaving like open.
     editor_clear_edit_pending: Option<PathBuf>,
+    /// What the tab held before Revert to Saved started re-reading the file:
+    /// pushed as the "Revert to Saved" undo step when the read lands.
+    editor_revert_undo: Option<(PathBuf, EditorUndoState)>,
+    /// The tab whose Revert to Saved is waiting for confirmation.
+    revert_confirm_tab: Option<u64>,
     editor_decode_job_id: u64,
     // cached edited audio when tabs are closed (kept until save)
     edited_cache: HashMap<PathBuf, CachedEdit>,
@@ -1365,17 +1363,9 @@ pub struct WavesPreviewer {
     pending_editor_playback_handoff: Option<PendingEditorPlaybackHandoff>,
     pending_preview_autoplay: Option<PendingPreviewAutoplay>,
     // Heavy preview worker for Pitch/Stretch (mono) with path/generation guard
-    heavy_preview_rx: Option<std::sync::mpsc::Receiver<HeavyPreviewMessage>>,
-    heavy_preview_gen_counter: u64,
-    heavy_preview_expected_gen: u64,
-    heavy_preview_expected_path: Option<PathBuf>,
-    heavy_preview_expected_tool: Option<ToolKind>,
+    /// The editor's tool preview: at most one render in flight.
+    tool_preview: tool_preview_ops::ToolPreviewEngine,
     // Heavy overlay worker (per-channel preview for Pitch/Stretch) with generation guard
-    heavy_overlay_rx: Option<std::sync::mpsc::Receiver<HeavyOverlayMessage>>,
-    overlay_gen_counter: u64,
-    overlay_expected_gen: u64,
-    overlay_expected_path: Option<PathBuf>,
-    overlay_expected_tool: Option<ToolKind>,
 
     // startup automation/screenshot
     startup: StartupState,
@@ -2014,9 +2004,6 @@ impl WavesPreviewer {
             out_sr,
             Self::to_wave_resample_quality(self.src_quality),
         )
-    }
-    fn editor_mixdown_mono(tab: &EditorTab) -> Vec<f32> {
-        Self::mixdown_channels(&tab.ch_samples, tab.samples_len)
     }
     // editor operations moved to editor_ops.rs
     fn effective_loop_xfade_samples(
@@ -3247,7 +3234,7 @@ impl WavesPreviewer {
             active_tool: tab.active_tool,
             plugin_fx_draft: tab.plugin_fx_draft.clone(),
             show_waveform_overlay: tab.show_waveform_overlay,
-            dirty: tab.dirty,
+            audio_rev: tab.audio_rev,
             approx_bytes,
             markers: tab.markers.clone(),
             regions: tab.regions.clone(),
@@ -3457,7 +3444,7 @@ impl WavesPreviewer {
             tab.last_amplitude_viewport_rect = None;
             tab.last_amplitude_nav_click_at = 0.0;
             tab.last_amplitude_nav_click_pos = None;
-            tab.dirty = state.dirty;
+            tab.restore_audio_rev(state.audio_rev);
             Self::editor_clamp_ranges(tab);
             Self::invalidate_editor_viewport_cache(tab);
             Self::update_markers_dirty(tab);

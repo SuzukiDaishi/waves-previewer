@@ -537,11 +537,17 @@ impl super::WavesPreviewer {
                     if self.keymap_consume(ctx, Action::EditorViewPageForward) {
                         self.editor_view_page(tab_idx, true);
                     }
-                    let has_preview = self
-                        .tabs
-                        .get(tab_idx)
-                        .map(|t| t.preview_audio_tool.is_some() || t.preview_overlay.is_some())
-                        .unwrap_or(false);
+                    let has_preview = self.tabs.get(tab_idx).is_some_and(|t| {
+                        t.preview_audio_tool.is_some()
+                            || t.preview_overlay.is_some()
+                            || t.tool_session.preview.is_some()
+                            || t.tool_session.phase
+                                == super::tool_session::SessionPhase::Previewing
+                            || t.tool_session.has_draft_history(false)
+                    });
+                    if self.keymap_consume(ctx, Action::EditorApplyTool) {
+                        self.apply_active_tool(tab_idx);
+                    }
                     if has_preview && self.keymap_consume(ctx, Action::EditorCancelPreview) {
                         let pencil_draft = self
                             .tabs
@@ -549,7 +555,7 @@ impl super::WavesPreviewer {
                             .is_some_and(|tab| tab.pencil_draft.is_some());
                         if pencil_draft {
                             self.editor_pencil_cancel_draft(tab_idx);
-                        } else {
+                        } else if !self.discard_tool_draft(tab_idx) {
                             self.clear_preview_if_any(tab_idx);
                         }
                     }
@@ -638,7 +644,7 @@ impl super::WavesPreviewer {
         self.begin_trim_virtual_job(tab_idx, (s, e))
     }
 
-    fn add_applied_marker_at_playhead(&mut self, tab_idx: usize) {
+    pub(super) fn add_applied_marker_at_playhead(&mut self, tab_idx: usize) {
         let pos_audio = self
             .audio
             .shared
@@ -699,7 +705,6 @@ impl super::WavesPreviewer {
             .map(|tab| {
                 tab.loop_region_committed != Some(current)
                     || tab.loop_region_applied != Some(current)
-                    || tab.pending_loop_unwrap.is_some()
             })
             .unwrap_or(false);
         if !should_apply {
@@ -708,15 +713,13 @@ impl super::WavesPreviewer {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             let will_change = tab.loop_region_committed != Some(current)
                 || tab.loop_region_applied != Some(current)
-                || tab.loop_mode != LoopMode::Marker
-                || tab.pending_loop_unwrap.is_some();
+                || tab.loop_mode != LoopMode::Marker;
             if will_change {
                 undo_state = Some(Self::capture_undo_state_labeled(tab, "Apply Loop"));
             }
             tab.loop_region_committed = Some(current);
             tab.loop_region_applied = Some(current);
             tab.loop_mode = LoopMode::Marker;
-            tab.pending_loop_unwrap = None;
             Self::update_loop_markers_dirty(tab);
         }
         if let Some(state) = undo_state {
@@ -856,141 +859,153 @@ impl super::WavesPreviewer {
         self.undo_z_was_down = combo_down;
     }
 
-    /// Scope-aware undo/redo dispatch shared by the Ctrl+Z/Y hotkeys and
-    /// the Edit menu: effect graph when active, then the last-used scope,
-    /// then the active editor tab, then the list, then overwrite-export.
-    pub(super) fn trigger_undo_redo(&mut self, redo: bool) -> bool {
-        let mut handled = false;
-        // A timeline in front owns Ctrl+Z, as the effect graph does.
+    /// Which history Ctrl+Z / Ctrl+Y, the Edit menu and the History window
+    /// act on: the workspace in front. It used to be "wherever the last
+    /// action happened", so after a list edit Ctrl+Z in the editor undid the
+    /// hidden list, and in the List view it undid a hidden editor tab.
+    pub(super) fn undo_target(&self) -> UndoTarget {
         if self.is_multi_edit_workspace_active() {
-            let handled = if redo {
-                self.multi_edit_redo()
-            } else {
-                self.multi_edit_undo()
-            };
-            if handled || self.last_undo_scope == UndoScope::MultiEdit {
-                return handled;
+            UndoTarget::MultiEdit
+        } else if self.is_effect_graph_workspace_active() {
+            UndoTarget::EffectGraph
+        } else if self.is_editor_workspace_active() {
+            match self.active_tab {
+                Some(idx) if idx < self.tabs.len() => UndoTarget::Editor(idx),
+                _ => UndoTarget::List,
             }
+        } else {
+            UndoTarget::List
         }
-        let prefer_graph = self.is_effect_graph_workspace_active()
-            || self.last_undo_scope == UndoScope::EffectGraph;
-        if prefer_graph {
-            handled = if redo {
-                self.effect_graph_redo()
-            } else {
-                self.effect_graph_undo()
-            };
-        }
-        let prefer_list = self.last_undo_scope == UndoScope::List;
-        if !handled && prefer_list {
-            handled = if redo {
-                self.list_redo()
-            } else {
-                self.list_undo()
-            };
-        }
-        if !handled {
-            if let Some(tab_idx) = self.active_tab {
-                let pencil_draft_active = self
-                    .tabs
-                    .get(tab_idx)
-                    .is_some_and(|tab| tab.pencil_draft.is_some());
-                let spatial_view = self
-                    .tabs
-                    .get(tab_idx)
-                    .is_some_and(|tab| tab.primary_view == EditorPrimaryView::Spatial);
-                if spatial_view {
-                    // The Spatial view's edits have their own history: the
-                    // tab's audio is read-only, so there is nothing else of
-                    // its to undo.
-                    let _changed = self.spatial_undo(tab_idx, redo);
-                    self.last_undo_scope = UndoScope::Editor;
-                    return true;
-                }
-                if pencil_draft_active {
-                    let _changed = if redo {
-                        self.editor_pencil_redo_draft(tab_idx)
-                    } else {
-                        self.editor_pencil_undo_draft(tab_idx)
-                    };
-                    self.last_undo_scope = UndoScope::Editor;
-                    // While a Pencil draft exists, Ctrl+Z/Y belongs only to
-                    // its stroke history. Do not leak through to committed
-                    // editor history when the local stack reaches an end.
-                    return true;
-                }
-                let has_step = self.tabs.get(tab_idx).is_some_and(|tab| {
-                    if redo {
-                        !tab.redo_stack.is_empty()
-                    } else {
-                        !tab.undo_stack.is_empty()
-                    }
-                });
-                // An apply (or a revert) still running on this tab would land
-                // on top of whatever Undo restores; refuse rather than quietly
-                // cancel it. Nothing is touched when there is nothing to undo.
-                if (has_step || self.is_editor_workspace_active())
-                    && self.editor_history_locked_toast(tab_idx)
-                {
-                    self.last_undo_scope = UndoScope::Editor;
-                    return true;
-                }
-                if has_step {
-                    self.clear_preview_if_any(tab_idx);
-                    let changed = if redo {
-                        self.redo_in_tab(tab_idx)
-                    } else {
-                        self.undo_in_tab(tab_idx)
-                    };
-                    if changed {
-                        self.last_undo_scope = UndoScope::Editor;
-                        handled = true;
-                    }
-                }
-            }
-        }
-        if !handled {
-            handled = if redo {
-                self.list_redo()
-            } else {
-                self.list_undo()
-            };
-        }
-        if !handled && !redo {
-            handled = self.undo_last_overwrite_export();
-        }
-        handled
     }
 
-    /// Whether any undo (or redo) scope currently has something to apply —
-    /// drives the Edit menu enabled state without mutating anything.
-    pub(super) fn undo_redo_available(&self, redo: bool) -> bool {
-        let graph = if redo {
-            !self.effect_graph.redo_stack.is_empty()
-        } else {
-            !self.effect_graph.undo_stack.is_empty()
-        };
-        let editor = self
-            .active_tab
-            .and_then(|idx| self.tabs.get(idx))
-            .map(|tab| {
+    /// Undo/redo dispatch shared by the Ctrl+Z/Y hotkeys, the Edit menu and
+    /// the editor toolbar.
+    pub(super) fn trigger_undo_redo(&mut self, redo: bool) -> bool {
+        match self.undo_target() {
+            UndoTarget::MultiEdit => {
                 if redo {
-                    !tab.redo_stack.is_empty()
+                    self.multi_edit_redo()
                 } else {
-                    !tab.undo_stack.is_empty()
+                    self.multi_edit_undo()
                 }
-            })
-            .unwrap_or(false);
-        let list = if redo {
-            !self.list_redo_stack.is_empty()
-        } else {
-            !self.list_undo_stack.is_empty()
-        };
-        // Ctrl+Z's final fallback restores overwrite-export backups; the
-        // Edit menu must not gray Undo out while that path would fire.
-        let overwrite_export = !redo && !self.overwrite_undo_stack.is_empty();
-        graph || editor || list || overwrite_export
+            }
+            UndoTarget::EffectGraph => {
+                if redo {
+                    self.effect_graph_redo()
+                } else {
+                    self.effect_graph_undo()
+                }
+            }
+            UndoTarget::Editor(tab_idx) => self.editor_undo_redo(tab_idx, redo),
+            UndoTarget::List => {
+                let handled = if redo {
+                    self.list_redo()
+                } else {
+                    self.list_undo()
+                };
+                // The last resort restores a file an export overwrote.
+                handled || (!redo && self.undo_last_overwrite_export())
+            }
+        }
     }
+
+    /// Ctrl+Z / Ctrl+Y in the editor. The Spatial view and a Pencil draft
+    /// have histories of their own; the tab's history moves only when
+    /// nothing is still being written into the tab.
+    fn editor_undo_redo(&mut self, tab_idx: usize, redo: bool) -> bool {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        if tab.primary_view == EditorPrimaryView::Spatial {
+            // The tab's audio is read-only there, so the Spatial view's own
+            // edits are all there is to undo.
+            let _changed = self.spatial_undo(tab_idx, redo);
+            self.last_undo_scope = UndoScope::Editor;
+            return true;
+        }
+        if tab.pencil_draft.is_some() {
+            let _changed = if redo {
+                self.editor_pencil_redo_draft(tab_idx)
+            } else {
+                self.editor_pencil_undo_draft(tab_idx)
+            };
+            self.last_undo_scope = UndoScope::Editor;
+            // While a Pencil draft exists, Ctrl+Z/Y belongs only to its
+            // stroke history. Do not leak through to committed editor history
+            // when the local stack reaches an end.
+            return true;
+        }
+        // While a tool's settings are being adjusted, Ctrl+Z walks them back
+        // one gesture at a time; once there is nothing left to walk back (or
+        // after Apply), it undoes committed edits.
+        if self.tool_draft_undo_redo(tab_idx, redo) {
+            self.last_undo_scope = UndoScope::Editor;
+            return true;
+        }
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let has_step = if redo {
+            !tab.redo_stack.is_empty()
+        } else {
+            !tab.undo_stack.is_empty()
+        };
+        // An apply (or a revert) still running on this tab would land on top
+        // of whatever Undo restores; refuse rather than quietly cancel it.
+        if self.editor_history_locked_toast(tab_idx) {
+            return true;
+        }
+        if !has_step {
+            return false;
+        }
+        self.clear_preview_if_any(tab_idx);
+        let changed = if redo {
+            self.redo_in_tab(tab_idx)
+        } else {
+            self.undo_in_tab(tab_idx)
+        };
+        if changed {
+            self.last_undo_scope = UndoScope::Editor;
+        }
+        changed
+    }
+
+    /// Whether Undo (or Redo) would do anything in the workspace in front --
+    /// the Edit menu's enabled state, decided by the same rules as the
+    /// dispatch above.
+    pub(super) fn undo_redo_available(&self, redo: bool) -> bool {
+        let pick = |undo: bool, redo_side: bool| if redo { redo_side } else { undo };
+        match self.undo_target() {
+            UndoTarget::MultiEdit => self.multi_edit_history_available(redo),
+            UndoTarget::EffectGraph => pick(
+                !self.effect_graph.undo_stack.is_empty(),
+                !self.effect_graph.redo_stack.is_empty(),
+            ),
+            UndoTarget::Editor(tab_idx) => self.tabs.get(tab_idx).is_some_and(|tab| {
+                if tab.primary_view == EditorPrimaryView::Spatial {
+                    pick(!tab.spatial.undo.is_empty(), !tab.spatial.redo.is_empty())
+                } else if let Some(draft) = tab.pencil_draft.as_ref() {
+                    pick(!draft.undo.is_empty(), !draft.redo.is_empty())
+                } else {
+                    tab.tool_session.has_draft_history(redo)
+                        || pick(!tab.undo_stack.is_empty(), !tab.redo_stack.is_empty())
+                }
+            }),
+            UndoTarget::List => pick(
+                !self.list_undo_stack.is_empty() || !self.overwrite_undo_stack.is_empty(),
+                !self.list_redo_stack.is_empty(),
+            ),
+        }
+    }
+}
+
+/// The history an undo acts on. See `undo_target`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UndoTarget {
+    MultiEdit,
+    EffectGraph,
+    Editor(usize),
+    List,
 }
 
 #[cfg(test)]

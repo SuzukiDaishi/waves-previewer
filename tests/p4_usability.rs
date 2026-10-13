@@ -193,8 +193,39 @@ mod p4_usability {
             harness.state().test_active_tool(),
             Some(neowaves::app::ToolKind::LoopEdit)
         );
-        // Click the Trim scissors icon in the new toolbar.
-        harness.get_by_label("✂").click();
+        // The palette: the Edit category (the one below the Inspector heading;
+        // the top bar has an Edit menu too), then its Trim button.
+        let heading = harness.get_by_label("Inspector").rect();
+        let edit = harness
+            .query_all_by_label("Edit")
+            .filter(|node| node.rect().min.y > heading.max.y)
+            .min_by(|a, b| a.rect().min.y.total_cmp(&b.rect().min.y))
+            .expect("the Edit category")
+            .rect()
+            .center();
+        harness.hover_at(edit);
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos: edit,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_active_tool(),
+            Some(neowaves::app::ToolKind::Trim),
+            "a category opens on its first tool"
+        );
+        harness.get_by_label("◀ Reverse").click();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_active_tool(),
+            Some(neowaves::app::ToolKind::Reverse)
+        );
+        harness.get_by_label("✂ Trim").click();
         harness.run_steps(2);
         assert_eq!(
             harness.state().test_active_tool(),

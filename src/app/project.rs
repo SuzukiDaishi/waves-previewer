@@ -931,6 +931,109 @@ pub struct ProjectToolState {
     pub pan_pitch_deg: f32,
     #[serde(default)]
     pub pan_roll_deg: f32,
+    #[serde(default = "default_tool_brush_cut_db")]
+    pub brush_cut_db: f32,
+    #[serde(default = "default_tool_brush_time_radius_ms")]
+    pub brush_time_radius_ms: f32,
+    #[serde(default = "default_tool_brush_freq_radius_hz")]
+    pub brush_freq_radius_hz: f32,
+    #[serde(default = "default_tool_declick_sensitivity")]
+    pub declick_sensitivity: f32,
+    #[serde(default = "default_tool_declip_sensitivity")]
+    pub declip_sensitivity: f32,
+    #[serde(default = "default_tool_dehum_hz")]
+    pub dehum_hz: f32,
+    #[serde(default = "default_tool_dehum_harmonics")]
+    pub dehum_harmonics: u32,
+    #[serde(default = "default_tool_dehum_q")]
+    pub dehum_q: f32,
+    #[serde(default = "default_tool_dehum_depth_db")]
+    pub dehum_depth_db: f32,
+    #[serde(default = "default_tool_denoise_reduction_db")]
+    pub denoise_reduction_db: f32,
+    #[serde(default = "default_tool_denoise_strength")]
+    pub denoise_strength: f32,
+    #[serde(default = "default_tool_insert_silence_ms")]
+    pub insert_silence_ms: f32,
+    #[serde(default = "default_tool_invert_smooth_boundaries")]
+    pub invert_smooth_boundaries: bool,
+    #[serde(default = "default_tool_trim_mode")]
+    pub trim_mode: u8,
+    #[serde(default = "default_tool_loop_apply_unroll")]
+    pub loop_apply_unroll: bool,
+    #[serde(default = "default_tool_spectral_time_fade_ms")]
+    pub spectral_time_fade_ms: f32,
+    #[serde(default = "default_tool_spectral_freq_fade_hz")]
+    pub spectral_freq_fade_hz: f32,
+}
+
+// Settings later sessions added: an older session takes the defaults.
+fn default_tool_brush_cut_db() -> f32 {
+    ToolState::default_values().brush_cut_db
+}
+
+fn default_tool_brush_time_radius_ms() -> f32 {
+    ToolState::default_values().brush_time_radius_ms
+}
+
+fn default_tool_brush_freq_radius_hz() -> f32 {
+    ToolState::default_values().brush_freq_radius_hz
+}
+
+fn default_tool_declick_sensitivity() -> f32 {
+    ToolState::default_values().declick_sensitivity
+}
+
+fn default_tool_declip_sensitivity() -> f32 {
+    ToolState::default_values().declip_sensitivity
+}
+
+fn default_tool_dehum_hz() -> f32 {
+    ToolState::default_values().dehum_hz
+}
+
+fn default_tool_dehum_harmonics() -> u32 {
+    ToolState::default_values().dehum_harmonics
+}
+
+fn default_tool_dehum_q() -> f32 {
+    ToolState::default_values().dehum_q
+}
+
+fn default_tool_dehum_depth_db() -> f32 {
+    ToolState::default_values().dehum_depth_db
+}
+
+fn default_tool_denoise_reduction_db() -> f32 {
+    ToolState::default_values().denoise_reduction_db
+}
+
+fn default_tool_denoise_strength() -> f32 {
+    ToolState::default_values().denoise_strength
+}
+
+fn default_tool_insert_silence_ms() -> f32 {
+    ToolState::default_values().insert_silence_ms
+}
+
+fn default_tool_invert_smooth_boundaries() -> bool {
+    ToolState::default_values().invert_smooth_boundaries
+}
+
+fn default_tool_trim_mode() -> u8 {
+    ToolState::default_values().trim_mode
+}
+
+fn default_tool_loop_apply_unroll() -> bool {
+    ToolState::default_values().loop_apply_unroll
+}
+
+fn default_tool_spectral_time_fade_ms() -> f32 {
+    ToolState::default_values().spectral_time_fade_ms
+}
+
+fn default_tool_spectral_freq_fade_hz() -> f32 {
+    ToolState::default_values().spectral_freq_fade_hz
 }
 
 /// The session form of an editor tab's tool settings. One conversion, so
@@ -969,6 +1072,23 @@ impl From<&super::types::ToolState> for ProjectToolState {
             pan_yaw_deg: t.pan_yaw_deg,
             pan_pitch_deg: t.pan_pitch_deg,
             pan_roll_deg: t.pan_roll_deg,
+            brush_cut_db: t.brush_cut_db,
+            brush_time_radius_ms: t.brush_time_radius_ms,
+            brush_freq_radius_hz: t.brush_freq_radius_hz,
+            declick_sensitivity: t.declick_sensitivity,
+            declip_sensitivity: t.declip_sensitivity,
+            dehum_hz: t.dehum_hz,
+            dehum_harmonics: t.dehum_harmonics,
+            dehum_q: t.dehum_q,
+            dehum_depth_db: t.dehum_depth_db,
+            denoise_reduction_db: t.denoise_reduction_db,
+            denoise_strength: t.denoise_strength,
+            insert_silence_ms: t.insert_silence_ms,
+            invert_smooth_boundaries: t.invert_smooth_boundaries,
+            trim_mode: t.trim_mode,
+            loop_apply_unroll: t.loop_apply_unroll,
+            spectral_time_fade_ms: t.spectral_time_fade_ms,
+            spectral_freq_fade_hz: t.spectral_freq_fade_hz,
         }
     }
 }
@@ -2116,13 +2236,6 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         } else {
             ToolState::default_values().warp_freq_radius_hz
         },
-        // Brush/de-click params are session-transient; projects load defaults.
-        brush_cut_db: 24.0,
-        brush_time_radius_ms: 60.0,
-        brush_freq_radius_hz: 200.0,
-        declick_sensitivity: 0.5,
-        denoise_reduction_db: 12.0,
-        denoise_strength: 2.0,
         loop_repeat: t.loop_repeat.max(2),
         noise_gate_threshold_db: t.noise_gate_threshold_db,
         noise_gate_attack_ms: t.noise_gate_attack_ms,
@@ -2139,18 +2252,29 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         compressor_attack_ms: t.compressor_attack_ms,
         compressor_release_ms: t.compressor_release_ms,
         compressor_makeup_db: t.compressor_makeup_db,
-        insert_silence_ms: 1000.0,
-        invert_smooth_boundaries: false,
-        declip_sensitivity: 0.5,
-        dehum_hz: 50.0,
-        dehum_harmonics: 8,
-        dehum_q: 30.0,
-        dehum_depth_db: 40.0,
         pan_mode: t.pan_mode,
         pan_balance: t.pan_balance.clamp(-1.0, 1.0),
         pan_yaw_deg: t.pan_yaw_deg,
         pan_pitch_deg: t.pan_pitch_deg,
         pan_roll_deg: t.pan_roll_deg,
+        brush_cut_db: t.brush_cut_db,
+        brush_time_radius_ms: t.brush_time_radius_ms,
+        brush_freq_radius_hz: t.brush_freq_radius_hz,
+        declick_sensitivity: t.declick_sensitivity,
+        declip_sensitivity: t.declip_sensitivity,
+        dehum_hz: t.dehum_hz,
+        dehum_harmonics: t.dehum_harmonics,
+        dehum_q: t.dehum_q,
+        dehum_depth_db: t.dehum_depth_db,
+        denoise_reduction_db: t.denoise_reduction_db,
+        denoise_strength: t.denoise_strength,
+        insert_silence_ms: t.insert_silence_ms,
+        invert_smooth_boundaries: t.invert_smooth_boundaries,
+        trim_mode: t.trim_mode,
+        loop_apply_unroll: t.loop_apply_unroll,
+        spectral_time_fade_ms: t.spectral_time_fade_ms,
+        spectral_freq_fade_hz: t.spectral_freq_fade_hz,
+        ..ToolState::default_values()
     }
 }
 
@@ -2167,33 +2291,14 @@ pub fn project_channel_view_to_channel_view(p: &ProjectChannelView) -> ChannelVi
 }
 
 pub fn tool_kind_from_str(s: &str) -> ToolKind {
-    match s {
-        "Markers" => ToolKind::Markers,
-        "EditorNote" => ToolKind::EditorNote,
-        "Trim" => ToolKind::Trim,
-        "Fade" => ToolKind::Fade,
-        "PitchShift" => ToolKind::PitchShift,
-        "TimeStretch" => ToolKind::TimeStretch,
-        "Speed" => ToolKind::Speed,
-        "SpectralWarp" => ToolKind::SpectralWarp,
-        "Gain" => ToolKind::Gain,
-        "Normalize" => ToolKind::Normalize,
-        "Loudness" => ToolKind::Loudness,
-        "Reverse" => ToolKind::Reverse,
-        "InvertPolarity" => ToolKind::InvertPolarity,
-        "DcOffset" => ToolKind::DcOffset,
-        "InsertSilence" => ToolKind::InsertSilence,
-        "Pencil" => ToolKind::Pencil,
-        "DeClick" => ToolKind::DeClick,
-        "DeClip" => ToolKind::DeClip,
-        "DeHum" => ToolKind::DeHum,
-        "DeNoise" => ToolKind::DeNoise,
-        "SpectralBrush" => ToolKind::SpectralBrush,
-        "PluginFx" => ToolKind::PluginFx,
-        "ChannelRouting" => ToolKind::ChannelRouting,
-        "Panner" => ToolKind::Panner,
-        _ => ToolKind::LoopEdit,
-    }
+    // Every tool by its `Debug` name, which is what sessions store. Driven by
+    // `ToolKind::ALL` so a tool added later cannot be forgotten here (NoiseGate,
+    // EQ, Compressor and Music Analyze once were, and came back as Loop Edit).
+    ToolKind::ALL
+        .iter()
+        .copied()
+        .find(|tool| format!("{tool:?}") == s)
+        .unwrap_or(ToolKind::LoopEdit)
 }
 
 pub fn view_mode_from_str(s: &str) -> ViewMode {
@@ -2203,6 +2308,7 @@ pub fn view_mode_from_str(s: &str) -> ViewMode {
         "Mel" => ViewMode::Mel,
         "Tempogram" => ViewMode::Tempogram,
         "Chromagram" => ViewMode::Chromagram,
+        "World" => ViewMode::World,
         _ => ViewMode::Waveform,
     }
 }
@@ -2415,8 +2521,7 @@ impl super::WavesPreviewer {
         // reused by the next session. Worker threads may still finish, but
         // their generation-bound results can no longer be installed into the
         // newly opened project.
-        self.clear_heavy_preview_state();
-        self.clear_heavy_overlay_state();
+        self.cancel_heavy_preview();
         self.tabs.clear();
         self.active_tab = None;
         self.workspace_view = super::types::WorkspaceView::List;

@@ -1,6 +1,50 @@
 use egui::RichText;
 
 impl crate::app::WavesPreviewer {
+    /// "Revert to Saved?" -- asked once, because it throws away every audio
+    /// edit in the tab (Ctrl+Z still brings them back).
+    pub(crate) fn ui_revert_to_saved_dialog(&mut self, ctx: &egui::Context) {
+        let Some(tab_id) = self.revert_confirm_tab else {
+            return;
+        };
+        let Some(tab_idx) = self.tabs.iter().position(|t| t.tab_id == tab_id) else {
+            self.revert_confirm_tab = None;
+            return;
+        };
+        let name = self.tabs[tab_idx].display_name.clone();
+        let mut decision: Option<bool> = None;
+        egui::Window::new("Revert to Saved")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!("Read \"{name}\" from disk again?"));
+                ui.label(
+                    RichText::new("Every audio edit made in this tab is discarded. Markers and the loop stay. Ctrl+Z brings the edits back.")
+                        .weak()
+                        .small(),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Revert").clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        decision = Some(false);
+                    }
+                });
+            });
+        match decision {
+            Some(true) => {
+                self.revert_confirm_tab = None;
+                if !self.editor_history_locked_toast(tab_idx) {
+                    self.clear_edit_in_tab(tab_idx);
+                }
+            }
+            Some(false) => self.revert_confirm_tab = None,
+            None => {}
+        }
+    }
+
     /// Edit-history panel for the active editor tab: chronological list of
     /// undoable operations, the current state, and redoable operations.
     /// Clicking a row walks the existing undo/redo paths the right number

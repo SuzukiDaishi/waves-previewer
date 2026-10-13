@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use egui::{Align, Color32, RichText};
 
-use crate::app::types::{EffectGraphRunMode, ToolKind};
+use crate::app::types::EffectGraphRunMode;
 use crate::app::WavesPreviewer;
 
 // Fixed widths of the top-bar meter group's parts. They live here rather than
@@ -544,19 +544,16 @@ impl WavesPreviewer {
                 cancel: Some(TopbarActivityCancel::EffectGraph),
             });
         }
-        if self.heavy_preview_expected_tool.is_some()
-            || self.heavy_preview_rx.is_some()
-            || self.heavy_overlay_rx.is_some()
+        // Only a render worth noticing: the quick ones finish before the eye
+        // registers a label.
+        if let Some(job) = self
+            .tool_preview
+            .job
+            .as_ref()
+            .filter(|job| job.started.elapsed() >= crate::app::ui_timing::BUSY_INDICATOR_DELAY)
         {
-            let label = match self.heavy_preview_expected_tool {
-                Some(ToolKind::PitchShift) => "Previewing PitchShift",
-                Some(ToolKind::TimeStretch) => "Previewing TimeStretch",
-                Some(ToolKind::Speed) => "Previewing Speed",
-                Some(ToolKind::SpectralWarp) => "Previewing Spectral Warp",
-                _ => "Previewing",
-            };
             items.push(TopbarActivityItem {
-                label: label.to_string(),
+                label: format!("Previewing {}", job.key.tool.label()),
                 progress: None,
                 show_percentage: false,
                 cancel: Some(TopbarActivityCancel::HeavyPreview),

@@ -511,30 +511,15 @@ impl crate::app::WavesPreviewer {
         });
         provisional.dedup_by(|a, b| a.sample == b.sample && a.label == b.label);
 
-        tab.music_analysis_draft.provisional_markers = provisional.clone();
-
-        let mut merged: Vec<MarkerEntry> = tab
-            .markers_committed
-            .iter()
-            .filter(|m| !is_ai_marker_label(m.label.as_str()))
-            .cloned()
-            .collect();
-        merged.extend(provisional);
-        merged.sort_by(|a, b| match a.sample.cmp(&b.sample) {
-            std::cmp::Ordering::Equal => a.label.cmp(&b.label),
-            other => other,
-        });
-        merged.dedup_by(|a, b| a.sample == b.sample && a.label == b.label);
-
-        tab.markers = merged;
-        Self::update_markers_dirty(tab);
+        // Shown over the waveform only. Kept out of `tab.markers`, which are
+        // committed as they are edited: there, any marker edit made while
+        // they were on screen would have written them into the file.
+        tab.music_analysis_draft.provisional_markers = provisional;
     }
 
     pub(super) fn discard_music_provisional_markers(&mut self, tab_idx: usize) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.music_analysis_draft.provisional_markers.clear();
-            tab.markers = tab.markers_committed.clone();
-            Self::update_markers_dirty(tab);
         }
     }
 
@@ -542,8 +527,9 @@ impl crate::app::WavesPreviewer {
         let Some(tab) = self.tabs.get_mut(tab_idx) else {
             return;
         };
+        // The shown markers replace the ones an earlier analysis added.
         let mut merged: Vec<MarkerEntry> = tab
-            .markers_committed
+            .markers
             .iter()
             .filter(|m| !is_ai_marker_label(m.label.as_str()))
             .cloned()
@@ -594,7 +580,7 @@ impl crate::app::WavesPreviewer {
             tab.waveform_minmax = waveform_minmax;
             tab.waveform_pyramid = waveform_pyramid;
             Self::invalidate_editor_viewport_cache(tab);
-            tab.dirty = true;
+            tab.mark_audio_changed();
             tab.music_analysis_draft.preview_active = false;
             tab.music_analysis_draft.preview_error = None;
             tab.preview_audio_tool = None;

@@ -1795,7 +1795,7 @@ impl super::WavesPreviewer {
         tab.last_amplitude_nav_click_at = 0.0;
         tab.last_amplitude_nav_click_pos = None;
         Self::invalidate_editor_viewport_cache(tab);
-        tab.dirty = false;
+        tab.mark_audio_clean();
         tab.ops.clear();
         tab.selection = None;
         tab.freq_selection = None;
@@ -1836,7 +1836,6 @@ impl super::WavesPreviewer {
         tab.preview_overlay = None;
         tab.plugin_fx_draft = crate::app::types::PluginFxDraft::default();
         tab.plugin_fx_chain = crate::app::types::PluginFxChainDraft::default();
-        tab.pending_loop_unwrap = None;
         tab.undo_stack.clear();
         tab.undo_bytes = 0;
         tab.redo_stack.clear();
@@ -1868,7 +1867,7 @@ impl super::WavesPreviewer {
             tab.paged_asset = true;
             tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
             Self::reset_tab_defaults(tab);
-            tab.dirty = false;
+            tab.mark_audio_clean();
         }
         let deferred = self.deferred_session_tab_audio.entry(path).or_default();
         deferred.edited_path = Some(source_path);
@@ -2087,7 +2086,7 @@ impl super::WavesPreviewer {
         saved_loop_region: Option<(usize, usize)>,
     ) {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.path.as_path() == path) {
-            tab.dirty = false;
+            tab.mark_audio_saved();
             tab.markers = saved_markers.to_vec();
             tab.markers_committed = saved_markers.to_vec();
             tab.markers_saved = saved_markers.to_vec();

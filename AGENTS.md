@@ -22,6 +22,7 @@ Repository Layout
   - `SOUND_LIST_IMPORT_PLAN.md`: CSV/Excel import design and performance notes.
   - `SPATIAL_AUDIO_SPEC.md`: object audio -- ADM BWF and TrueHD read into a scene of beds and objects, played through the 7.1.4 object mix, the editor's Spatial view, spatial edits in the session, and the ADM BWF export.
   - `MULTI_EDITS_SPEC.md`: the Multi Edits workspace -- what the list pane shares with the List, the timeline's gestures, how a mix is made, and what a session stores.
+  - `INSPECTOR_SPEC.md`: the editor's Inspector -- tool specs, the one render shared by preview and Apply, the auto-preview state machine, and the undo rules (draft history first, one undo step per gesture, `audio_rev` for the unsaved mark, Revert to Saved as an undoable step).
   - `CLIPBOARD_HOTKEY_ISSUE_20260201.md`: clipboard hotkey investigation log.
 - `icons/`: App icon sources/exports.
 - `installer/`: Installer assets/scripts (packaging).
@@ -44,6 +45,12 @@ Repository Layout
     - `loading_ops.rs`: the modal busy overlay and `poll_job`/`JobPoll`, the three-way channel poll every job drain uses so a dead worker cannot become a job that never ends. The overlay blocks all input, so it also owns the two escapes from that: it steps aside for the quit prompt, and after `BUSY_OVERLAY_STALL_SECS` it offers to stop waiting on a job that is alive but wedged.
     - `tab_ops.rs`: open/activate tab helpers.
     - `editor_decode_ops.rs`: background editor decode spawn/drain helpers.
+    - `editor_tool.rs`: every editor tool as rules (`ToolKind::spec`): name, icon, Inspector category, target rule (selection / whole / insert point), preview kind (Rendered / Live / Draft / Own / None), and whether it honours the channel view or changes the length. Read a tool's facts from here, never re-spell them in a panel.
+    - `tool_render.rs`: one pure function per tool from samples to samples (`ToolOp`, `render`), at the buffer's own rate, every channel. The preview and Apply both call it -- what was heard is what is written. Its `TimeMap` says how positions moved, so markers, notes and the playhead follow length changes.
+    - `tool_apply_ops.rs`: the op a tab's settings describe, its target and channel mask, and the one commit (`editor_commit_render`) every apply goes through. Apply commits a preview whose `PreviewKey` matches instead of rendering again.
+    - `tool_session.rs`: the tool being adjusted on a tab -- its draft (captured from the tab's own fields by `DraftSnapshot`), the draft's undo history (one step per gesture), and its preview. Rules only.
+    - `tool_preview_ops.rs`: the auto-preview engine: renders on a worker once settings rest (`TOOL_PREVIEW_DEBOUNCE`), one job at a time, newest wins, and swaps the result in under the running playhead (mapped through the `TimeMap`, with a short fade). Spawning is deferrable; installing is not.
+    - `inspector_ops.rs`: what the Inspector asks for (`InspectorAction`, `ToolCommand`), carried out: tool switching, Apply, Discard, reset, tool buttons, and the marker / loop gesture undo (`annotation_begin` / `editor_settle_annotation_gesture`). `ui/inspector/` is the pane: `mod.rs` (palette, header, target bar, footer), `widgets.rs`, `tools/*.rs` (settings only), `views.rs` (Tempogram / Chromagram / World).
     - `logic.rs`: per-frame update logic.
     - `types.rs`: shared app state and enums.
     - `project.rs`: session (nwsess) serialization helpers (legacy naming).

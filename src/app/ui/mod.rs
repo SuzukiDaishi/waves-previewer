@@ -10,6 +10,7 @@ pub(super) mod export_settings;
 pub(super) mod external;
 pub(super) mod harmonics;
 pub(super) mod inspection;
+pub(super) mod inspector;
 pub(super) mod keymap_settings;
 pub(super) mod licenses;
 pub(super) mod list;

@@ -110,6 +110,7 @@ pub enum Action {
     EditorViewPageBack,
     EditorViewPageForward,
     EditorCancelPreview,
+    EditorApplyTool,
 }
 
 /// Modifier sets used by the table (const-friendly subset of `egui::Modifiers`).
@@ -671,7 +672,17 @@ pub const KEYMAP: &[KeyBinding] = &[
         detail: "",
         chord: Some((Mods::None, Key::Escape)),
         keys_label: "",
-        desc: "Discard the pending tool preview",
+        desc: "Discard the tool's adjustments and its preview",
+        dispatch: Dispatch::Table,
+    },
+    KeyBinding {
+        action: Action::EditorApplyTool,
+        context: KeyContext::Editor,
+        category: KeyCategory::Editing,
+        detail: "Writes what the preview plays. Ctrl+Z undoes it.",
+        chord: Some((Mods::Command, Key::Enter)),
+        keys_label: "",
+        desc: "Apply the active tool's settings",
         dispatch: Dispatch::Table,
     },
     KeyBinding {

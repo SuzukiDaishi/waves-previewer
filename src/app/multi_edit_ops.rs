@@ -682,6 +682,21 @@ impl WavesPreviewer {
         true
     }
 
+    /// Whether the open timeline has a step to undo (or redo).
+    pub(super) fn multi_edit_history_available(&self, redo: bool) -> bool {
+        self.multi_edit
+            .active
+            .as_ref()
+            .and_then(|id| self.multi_edit.undo.get(id))
+            .is_some_and(|stacks| {
+                if redo {
+                    !stacks.1.is_empty()
+                } else {
+                    !stacks.0.is_empty()
+                }
+            })
+    }
+
     pub(super) fn multi_edit_undo(&mut self) -> bool {
         self.multi_edit_restore(false)
     }

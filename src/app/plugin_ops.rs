@@ -2410,7 +2410,7 @@ impl crate::app::WavesPreviewer {
                             tab.waveform_minmax = waveform_minmax;
                             tab.waveform_pyramid = waveform_pyramid;
                             Self::invalidate_editor_viewport_cache(tab);
-                            tab.dirty = true;
+                            tab.mark_audio_changed();
                             Self::editor_clamp_ranges(tab);
                             tab.plugin_fx_draft.state_blob = result.state_blob;
                             tab.plugin_fx_draft.backend = Some(result.backend);

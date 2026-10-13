@@ -274,7 +274,36 @@ impl crate::app::WavesPreviewer {
                     self.restore_list_selection_snapshot(&action.after);
                 }
             }
+            ListUndoActionKind::EditorTabGain { tab_id } => {
+                let Some(tab_idx) = self.tabs.iter().position(|t| t.tab_id == *tab_id) else {
+                    return;
+                };
+                let on_top = self.tabs.get(tab_idx).is_some_and(|tab| {
+                    let stack = if undo { &tab.undo_stack } else { &tab.redo_stack };
+                    stack.last().is_some_and(|state| state.label == "Gain")
+                });
+                if !on_top || self.editor_history_locked_toast(tab_idx) {
+                    return;
+                }
+                self.clear_preview_if_any(tab_idx);
+                if undo {
+                    self.undo_in_tab(tab_idx);
+                } else {
+                    self.redo_in_tab(tab_idx);
+                }
+            }
         }
+    }
+
+    /// Record, in the list's history, a list gain change that became an
+    /// editor tab's "Gain" edit, so Ctrl+Z in the List view can take it back.
+    pub(super) fn record_list_editor_tab_gain(&mut self, tab_id: u64) {
+        let snapshot = self.capture_list_selection_snapshot();
+        self.push_list_undo_action(ListUndoAction {
+            kind: ListUndoActionKind::EditorTabGain { tab_id },
+            before: snapshot.clone(),
+            after: snapshot,
+        });
     }
 
     pub(super) fn remove_paths_from_list_with_undo(&mut self, paths: &[PathBuf]) {

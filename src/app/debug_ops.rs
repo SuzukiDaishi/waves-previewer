@@ -891,15 +891,18 @@ impl WavesPreviewer {
         }
         self.editor_decode_state = None;
         self.editor_clear_edit_pending = None;
+        self.editor_revert_undo = None;
     }
 
     pub(super) fn cancel_editor_apply(&mut self) {
         self.editor_apply_state = None;
     }
 
+    /// Stop the tool preview render in flight (the topbar's cancel).
     pub(super) fn cancel_heavy_preview(&mut self) {
-        self.clear_heavy_preview_state();
-        self.clear_heavy_overlay_state();
+        if let Some(job) = self.tool_preview.job.take() {
+            job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     pub(super) fn default_debug_summary_path(&mut self) -> PathBuf {
@@ -1715,16 +1718,12 @@ impl WavesPreviewer {
             }
             DebugAction::PreviewTimeStretch(rate) => {
                 if let Some(tab_idx) = self.active_tab {
-                    let mono = {
-                        let tab = &mut self.tabs[tab_idx];
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.active_tool = ToolKind::TimeStretch;
                         tab.tool_state.stretch_rate = rate;
-                        tab.preview_audio_tool = Some(ToolKind::TimeStretch);
-                        tab.preview_overlay = None;
-                        Self::editor_mixdown_mono(tab)
-                    };
-                    self.spawn_heavy_preview_owned(mono, ToolKind::TimeStretch, rate, None);
-                    self.spawn_heavy_overlay_for_tab(tab_idx, ToolKind::TimeStretch, rate, None);
+                    }
+                    self.reset_tool_session(tab_idx);
+                    self.tool_preview_request_now(tab_idx);
                     self.debug_log("auto: preview time stretch");
                 } else {
                     self.debug_log("auto: preview time stretch skipped (no tab)");
@@ -1732,16 +1731,12 @@ impl WavesPreviewer {
             }
             DebugAction::PreviewPitchShift(semi) => {
                 if let Some(tab_idx) = self.active_tab {
-                    let mono = {
-                        let tab = &mut self.tabs[tab_idx];
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.active_tool = ToolKind::PitchShift;
                         tab.tool_state.pitch_semitones = semi;
-                        tab.preview_audio_tool = Some(ToolKind::PitchShift);
-                        tab.preview_overlay = None;
-                        Self::editor_mixdown_mono(tab)
-                    };
-                    self.spawn_heavy_preview_owned(mono, ToolKind::PitchShift, semi, None);
-                    self.spawn_heavy_overlay_for_tab(tab_idx, ToolKind::PitchShift, semi, None);
+                    }
+                    self.reset_tool_session(tab_idx);
+                    self.tool_preview_request_now(tab_idx);
                     self.debug_log("auto: preview pitch shift");
                 } else {
                     self.debug_log("auto: preview pitch shift skipped (no tab)");

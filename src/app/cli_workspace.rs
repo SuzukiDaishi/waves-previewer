@@ -377,6 +377,12 @@ impl CliWorkspace {
             ToolKind::Pencil => {
                 anyhow::bail!("Pencil is interactive-only (draw on the waveform in the editor)")
             }
+            ToolKind::SpectralMute | ToolKind::Heal => {
+                anyhow::bail!(
+                    "{:?} is interactive-only (it works on a selection made in the editor)",
+                    active_tool
+                )
+            }
             ToolKind::DeClick => {
                 let sens = self
                     .app
@@ -687,7 +693,7 @@ impl CliWorkspace {
         tab.fade_out_range = snapshot.fade_out_range;
         tab.fade_in_shape = snapshot.fade_in_shape;
         tab.fade_out_shape = snapshot.fade_out_shape;
-        tab.dirty = snapshot.dirty;
+        tab.set_audio_dirty(snapshot.dirty);
         tab.markers = snapshot.markers;
         tab.markers_committed = snapshot.markers_committed;
         tab.markers_applied = snapshot.markers_applied;

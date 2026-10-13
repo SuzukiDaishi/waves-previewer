@@ -1023,9 +1023,10 @@ impl super::WavesPreviewer {
             self.cancel_editor_playback_handoff_for_path(&path);
             if self.editor_clear_edit_pending.as_ref() == Some(&path) {
                 self.editor_clear_edit_pending = None;
+                self.editor_revert_undo = None;
                 self.push_toast(
                     crate::app::types::ToastSeverity::Error,
-                    format!("Clear Edit failed: {err}"),
+                    format!("Revert to Saved failed: {err}"),
                 );
             } else {
                 // Every other editor decode failure used to reach the debug log
@@ -1119,14 +1120,17 @@ impl super::WavesPreviewer {
             }
         }
         if let Some((idx, path)) = clear_edit_completed {
-            // Clear Edit is a hard reset: unlike other destructive edits, it
-            // cannot leave an undo point back to the discarded edited audio.
+            // The file is what the tab holds now; the edited audio it replaced
+            // is one undo step back.
             if let Some(tab) = self.tabs.get_mut(idx) {
-                tab.dirty = false;
-                tab.undo_stack.clear();
-                tab.undo_bytes = 0;
-                tab.redo_stack.clear();
-                tab.redo_bytes = 0;
+                tab.mark_audio_clean();
+            }
+            if let Some((_, state)) = self
+                .editor_revert_undo
+                .take()
+                .filter(|(revert_path, _)| *revert_path == path)
+            {
+                self.push_editor_undo_state(idx, state, true);
             }
             self.edited_cache.remove(&path);
             self.cancel_spectrogram_for_path(&path);

@@ -1071,6 +1071,13 @@ pub enum ListUndoActionKind {
         before: Vec<ListUndoItem>,
         after: Vec<ListUndoItem>,
     },
+    /// A list gain change made in the List view that landed in an open
+    /// editor tab as a "Gain" edit. Undoing it from the list steps that
+    /// tab's history -- but only while that edit is still the one on top,
+    /// so a stale entry never undoes something else.
+    EditorTabGain {
+        tab_id: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -1762,7 +1769,7 @@ impl Default for SpectrogramConfig {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ToolKind {
     LoopEdit,
     Markers,
@@ -1793,6 +1800,54 @@ pub enum ToolKind {
     SpectralBrush,
     ChannelRouting,
     Panner,
+    SpectralMute,
+    Heal,
+}
+
+static NEXT_AUDIO_REV: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A revision no tab has held before.
+pub fn next_audio_rev() -> u64 {
+    NEXT_AUDIO_REV.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+impl EditorTab {
+    /// The buffer now differs from every version before it.
+    pub fn mark_audio_changed(&mut self) {
+        self.audio_rev = next_audio_rev();
+        self.dirty = self.audio_rev != self.saved_audio_rev;
+    }
+
+    /// What the buffer holds now is what is on disk.
+    pub fn mark_audio_saved(&mut self) {
+        self.saved_audio_rev = self.audio_rev;
+        self.dirty = false;
+    }
+
+    /// The buffer was reloaded from disk: a fresh revision that is also the
+    /// saved one.
+    pub fn mark_audio_clean(&mut self) {
+        let rev = next_audio_rev();
+        self.audio_rev = rev;
+        self.saved_audio_rev = rev;
+        self.dirty = false;
+    }
+
+    /// Adopt a dirty flag from somewhere that only kept the flag (a cached
+    /// edit, a session, a CLI snapshot).
+    pub fn set_audio_dirty(&mut self, dirty: bool) {
+        if dirty {
+            self.mark_audio_changed();
+        } else {
+            self.mark_audio_clean();
+        }
+    }
+
+    /// Move to a revision from history (undo / redo).
+    pub fn restore_audio_rev(&mut self, rev: u64) {
+        self.audio_rev = rev;
+        self.dirty = self.audio_rev != self.saved_audio_rev;
+    }
 }
 
 impl ToolKind {
@@ -1806,37 +1861,7 @@ impl ToolKind {
 
     /// Human-readable tool name (inspector header, undo history labels).
     pub fn label(self) -> &'static str {
-        match self {
-            ToolKind::LoopEdit => "Loop Edit",
-            ToolKind::Markers => "Markers",
-            ToolKind::EditorNote => "Editor Note",
-            ToolKind::Trim => "Trim",
-            ToolKind::Fade => "Edge Fade",
-            ToolKind::Gain => "Gain",
-            ToolKind::Normalize => "Normalize",
-            ToolKind::PitchShift => "Pitch Shift",
-            ToolKind::TimeStretch => "Time Stretch",
-            ToolKind::Speed => "Speed",
-            ToolKind::Loudness => "LoudNorm",
-            ToolKind::NoiseGate => "Noise Gate",
-            ToolKind::Eq => "EQ",
-            ToolKind::Compressor => "Compressor",
-            ToolKind::MusicAnalyze => "Music Analyze",
-            ToolKind::PluginFx => "Plugin FX",
-            ToolKind::Reverse => "Reverse",
-            ToolKind::InvertPolarity => "Invert Polarity",
-            ToolKind::DcOffset => "DC Offset",
-            ToolKind::InsertSilence => "Insert Silence",
-            ToolKind::Pencil => "Pencil",
-            ToolKind::DeClick => "De-click",
-            ToolKind::DeClip => "De-clip",
-            ToolKind::DeHum => "De-hum",
-            ToolKind::DeNoise => "De-noise",
-            ToolKind::SpectralWarp => "Spectral Warp",
-            ToolKind::SpectralBrush => "Spectral Brush",
-            ToolKind::ChannelRouting => "Channel Routing",
-            ToolKind::Panner => "Panner",
-        }
+        self.spec().label
     }
 }
 
@@ -2159,6 +2184,10 @@ impl ToolState {
             compressor_release_ms: crate::wave::CompressorParams::default().release_ms,
             compressor_makeup_db: 0.0,
             insert_silence_ms: 1000.0,
+            trim_mode: 2,
+            loop_apply_unroll: false,
+            spectral_time_fade_ms: crate::app::spectral_ops::SPECTRAL_TIME_FADE_MS_DEFAULT,
+            spectral_freq_fade_hz: crate::app::spectral_ops::SPECTRAL_FREQ_FADE_HZ_DEFAULT,
             invert_smooth_boundaries: false,
             pan_mode: None,
             pan_balance: 0.0,
@@ -2206,7 +2235,7 @@ impl ToolState {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ToolState {
     pub fade_in_ms: f32,
     pub fade_out_ms: f32,
@@ -2246,6 +2275,17 @@ pub struct ToolState {
     pub compressor_release_ms: f32,
     pub compressor_makeup_db: f32,
     pub insert_silence_ms: f32,
+    /// What the Trim tool's Apply does with the selection: 0 cut it out,
+    /// 1 mute it, 2 keep only it.
+    pub trim_mode: u8,
+    /// The Loop tool's Apply writes the loop out `loop_repeat` times
+    /// (`true`) or bakes the seam crossfade (`false`).
+    pub loop_apply_unroll: bool,
+    /// Spectral Mute, Heal, Play Selection and spectral copy / paste: how
+    /// long an edit fades in at the selection's time edges, and how wide the
+    /// transition is at a frequency band's edges.
+    pub spectral_time_fade_ms: f32,
+    pub spectral_freq_fade_hz: f32,
     /// Short (~2 ms) polarity crossfade at interior range boundaries so a
     /// partial invert doesn't step-discontinue against untouched audio.
     pub invert_smooth_boundaries: bool,
@@ -3128,6 +3168,13 @@ pub struct EditorTab {
     pub viewport_render_fine: Option<EditorViewportRenderCache>, // transient fine viewport
     pub viewport_render_last: Option<EditorViewportRenderCache>, // transient stale fallback
     pub dirty: bool,                      // unsaved edits exist
+    /// Which version of the audio the buffer holds, and which version was
+    /// last saved. `dirty` is derived from the two: an undo after a save
+    /// brings back a revision that differs from the saved one, so the tab is
+    /// unsaved again even though `dirty` used to be restored as `false`.
+    /// Revisions come from one process-wide counter and never repeat.
+    pub audio_rev: u64,
+    pub saved_audio_rev: u64,
     #[allow(dead_code)]
     pub ops: Vec<EditOp>, // non-destructive operations (skeleton)
     // --- Editing state (MVP) ---
@@ -3270,7 +3317,6 @@ pub struct EditorTab {
     pub plugin_fx_draft: PluginFxDraft,
     pub plugin_fx_chain: PluginFxChainDraft,
     pub channel_routing_draft: ChannelRoutingDraft,
-    pub pending_loop_unwrap: Option<u32>,
     pub undo_stack: Vec<EditorUndoState>,
     pub undo_bytes: usize,
     pub redo_stack: Vec<EditorUndoState>,
@@ -3313,6 +3359,11 @@ pub struct EditorTab {
     pub noise_profile: Option<NoiseProfile>,
     // --- Plugin FX auto-preview debounce (transient) ---
     pub plugin_fx_param_dirty_at: Option<std::time::Instant>,
+    /// The tool being adjusted: its draft history and its preview.
+    pub tool_session: super::tool_session::ToolSession,
+    /// The undo snapshot of a marker / loop gesture in progress, pushed once
+    /// when the gesture ends (one drag is one undo step, not one per frame).
+    pub annotation_undo: Option<Box<EditorUndoState>>,
 }
 
 /// Per-bin average noise magnitudes learned from a selection, used by the
@@ -3494,6 +3545,8 @@ impl EditorTab {
             viewport_render_fine: None,
             viewport_render_last: None,
             dirty: false,
+            audio_rev: 0,
+            saved_audio_rev: 0,
             ops: Vec::new(),
             selection: None,
             extra_selections: vec![],
@@ -3586,7 +3639,6 @@ impl EditorTab {
             plugin_fx_draft: crate::app::types::PluginFxDraft::default(),
             plugin_fx_chain: crate::app::types::PluginFxChainDraft::default(),
             channel_routing_draft: crate::app::types::ChannelRoutingDraft::default(),
-            pending_loop_unwrap: None,
             undo_stack: Vec::new(),
             undo_bytes: 0,
             redo_stack: Vec::new(),
@@ -3617,6 +3669,8 @@ impl EditorTab {
             declick_scan: None,
             noise_profile: None,
             plugin_fx_param_dirty_at: None,
+            tool_session: Default::default(),
+            annotation_undo: None,
         }
     }
 
@@ -4198,7 +4252,9 @@ pub struct EditorApplyViewportRestore {
 
 pub struct EditorApplyState {
     pub msg: String,
-    pub rx: std::sync::mpsc::Receiver<EditorApplyResult>,
+    /// `Err(None)`: the op turned out to change nothing; `Err(Some(why))`:
+    /// it could not run.
+    pub rx: std::sync::mpsc::Receiver<Result<EditorApplyResult, Option<String>>>,
     /// Target tab identity; resolved back to an index on completion so a
     /// result is discarded (not misapplied) if the tab was closed meanwhile.
     pub tab_id: u64,
@@ -4222,6 +4278,10 @@ pub struct EditorApplyResult {
     /// Selection to restore after adoption (range-limited applies keep the
     /// selection over the processed span, whose length may have changed).
     pub selection_after: Option<(usize, usize)>,
+    /// How positions moved; markers, regions, loop points and notes follow.
+    pub time_map: crate::app::tool_render::TimeMap,
+    /// Markers that replace the tab's (a loop unroll writes its own).
+    pub markers_after: Option<Vec<crate::markers::MarkerEntry>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4366,7 +4426,8 @@ pub struct EditorUndoState {
     pub active_tool: ToolKind,
     pub plugin_fx_draft: PluginFxDraft,
     pub show_waveform_overlay: bool,
-    pub dirty: bool,
+    /// The tab's `audio_rev` when the snapshot was taken.
+    pub audio_rev: u64,
     pub approx_bytes: usize,
     pub markers: Vec<MarkerEntry>,
     pub regions: Vec<crate::markers::RegionEntry>,

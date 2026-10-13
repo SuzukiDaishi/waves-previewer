@@ -516,7 +516,7 @@ mod tests {
             tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
             tab.samples_len = 4;
             tab.buffer_sample_rate = 48_000;
-            tab.dirty = true;
+            tab.mark_audio_changed();
             app.save_project_as_blocking(session.clone())
                 .expect("save session");
         }
@@ -620,7 +620,7 @@ mod tests {
             tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
             tab.samples_len = 4;
             tab.buffer_sample_rate = 48_000;
-            tab.dirty = true;
+            tab.mark_audio_changed();
         }
         author.cache_dirty_tab_at(0);
         author.tabs.clear();
@@ -1240,7 +1240,7 @@ mod tests {
             tab.ch_samples = vec![channels.clone()];
             tab.ch_samples_arc = std::sync::Arc::new(vec![channels]);
             tab.buffer_sample_rate = 48_000;
-            tab.dirty = true;
+            tab.mark_audio_changed();
             app.save_project_as_blocking_forced(session.clone(), true)
                 .expect("save with a dirty tab");
             let stored =
@@ -1286,7 +1286,7 @@ mod tests {
             tab.ch_samples = vec![vec![0.5; 64]];
             tab.ch_samples_arc = std::sync::Arc::new(vec![vec![0.5; 64]]);
             tab.buffer_sample_rate = 48_000;
-            tab.dirty = true;
+            tab.mark_audio_changed();
         }
         app.save_project_as_blocking(session.clone())
             .expect("first save");
@@ -2615,12 +2615,14 @@ impl super::WavesPreviewer {
             }
             if let Some(overlay) = tab.preview_overlay.as_ref() {
                 if overlay.is_full_sample() {
+                    // A preview is rendered at the tab's own rate, like its
+                    // edited audio.
                     sidecar_jobs.push(SessionSidecarJob {
                         slot: SidecarSlot::TabPreview(idx),
                         source: SessionSidecarSource::Channels(std::sync::Arc::new(
                             overlay.channels.clone(),
                         )),
-                        sample_rate: self.audio.shared.out_sample_rate,
+                        sample_rate: tab.buffer_sample_rate.max(1),
                         label: "preview audio",
                     });
                     preview_tool = Some(format!("{:?}", overlay.source_tool));
@@ -5440,9 +5442,27 @@ impl super::WavesPreviewer {
                     t.last_amplitude_nav_click_at = 0.0;
                     t.last_amplitude_nav_click_pos = None;
                     Self::invalidate_editor_viewport_cache(t);
-                    t.dirty = tab.dirty;
+                    t.set_audio_dirty(tab.dirty);
                     t.preview_audio_tool = tab.preview_audio.as_ref().and(preview_tool);
                     t.preview_overlay = preview_overlay;
+                    if t.preview_overlay.is_some() {
+                        // A saved preview is a picture of the settings it was
+                        // rendered from. The engine renders it again from
+                        // those settings once the audio is in -- that render
+                        // is what Apply commits. One that needed something a
+                        // session does not keep (a noise profile, strokes, a
+                        // plugin's state, stems) went with it.
+                        let tool = t.active_tool;
+                        let renderable = preview_tool == Some(tool)
+                            && tool.spec().preview == super::editor_tool::PreviewKind::Rendered
+                            && Self::tool_op_for_tab(t, tool).is_some();
+                        if renderable {
+                            t.tool_session.phase = super::tool_session::SessionPhase::Previewing;
+                        } else {
+                            t.preview_overlay = None;
+                            t.preview_audio_tool = None;
+                        }
+                    }
                     if t.samples_len > 0 {
                         Self::editor_clamp_ranges(t);
                     }

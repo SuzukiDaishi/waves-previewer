@@ -49,6 +49,20 @@ impl WavesPreviewer {
                 self.trigger_undo_redo(true);
                 ui.close();
             }
+            let revert_tab = self
+                .active_tab
+                .filter(|_| self.is_editor_workspace_active())
+                .and_then(|idx| self.tabs.get(idx))
+                .filter(|tab| tab.dirty && !tab.read_only)
+                .map(|tab| tab.tab_id);
+            if ui
+                .add_enabled(revert_tab.is_some(), egui::Button::new("Revert to Saved..."))
+                .on_hover_text("Read the file again, discarding this tab's audio edits (undoable)")
+                .clicked()
+            {
+                self.revert_confirm_tab = revert_tab;
+                ui.close();
+            }
             ui.separator();
             if ui
                 .button("History...")

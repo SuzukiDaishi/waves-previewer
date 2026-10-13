@@ -1348,6 +1348,26 @@ mod kittest_suite {
             .unwrap_or_else(|| panic!("rightmost control '{label}' not found"))
     }
 
+    /// A palette category in the Inspector: the first control with this
+    /// label below the Inspector heading ("Edit" is also the top bar's menu).
+    fn click_inspector_category(harness: &mut Harness<'static, WavesPreviewer>, label: &str) {
+        let heading = first_label_rect(harness, "Inspector");
+        let center = harness
+            .query_all_by_label(label)
+            .filter(|node| node.rect().min.y > heading.max.y && node.rect().min.x >= heading.min.x - 8.0)
+            .min_by(|a, b| {
+                a.rect()
+                    .min
+                    .y
+                    .partial_cmp(&b.rect().min.y)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or_else(|| panic!("Inspector category '{label}' not found"))
+            .rect()
+            .center();
+        editor_primary_click_at_pos(harness, center);
+    }
+
     fn first_label_rect(harness: &Harness<'static, WavesPreviewer>, label: &str) -> egui::Rect {
         harness
             .query_all_by_label(label)
@@ -2690,13 +2710,29 @@ mod kittest_suite {
         wait_for_scan(&mut harness);
         wait_for_tab(&mut harness);
 
-        // The tool picker is an icon toolbar; the Loop Edit icon is its anchor.
-        let tool_nodes: Vec<_> = harness.query_all_by_label("🔁").collect();
-        assert!(!tool_nodes.is_empty(), "Inspector tool toolbar not found");
-
-        assert!(harness.state_mut().test_set_active_tool(ToolKind::Reverse));
-        harness.run_steps(1);
+        // The palette: a row of categories, then the named tools of the
+        // category the active tool belongs to.
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        harness.run_steps(2);
+        harness.get_by_label("◀ Reverse").click();
+        harness.run_steps(2);
         assert_eq!(harness.state().test_active_tool(), Some(ToolKind::Reverse));
+
+        // A category opens on its first tool the first time...
+        click_inspector_category(&mut harness, "Level");
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_active_tool(), Some(ToolKind::Gain));
+        harness.get_by_label("⬆ Normalize").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_active_tool(), Some(ToolKind::Normalize));
+
+        // ...and on the tool last used in it afterwards.
+        click_inspector_category(&mut harness, "Edit");
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_active_tool(), Some(ToolKind::Reverse));
+        click_inspector_category(&mut harness, "Level");
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_active_tool(), Some(ToolKind::Normalize));
     }
 
     #[test]
@@ -2762,16 +2798,13 @@ mod kittest_suite {
         harness.run_steps(3);
         #[cfg(feature = "kittest_render")]
         render_ui_stability_png(&mut harness, "inspector_controls_idle.png");
-        let inspector = first_label_rect(&harness, "Inspector");
-        let undo = first_label_rect(&harness, "Undo");
-        let range_before = first_label_rect(&harness, "Range: -");
-        let tool_before = first_label_rect(&harness, "🔁");
-        let preview_before = first_label_rect(&harness, "Preview");
-        let apply_before = first_label_rect(&harness, "Apply");
-        assert!(
-            undo.top() - inspector.bottom() < 40.0,
-            "idle inspector should not reserve an empty activity slot: inspector={inspector:?} undo={undo:?}"
-        );
+        // What the Inspector is doing is said in the footer's status line,
+        // never in a slot that opens above the controls and pushes them down.
+        let anchors = ["Target", "⬆ Normalize", "Preview", "Apply"];
+        let before: Vec<egui::Rect> = anchors
+            .iter()
+            .map(|label| first_label_rect(&harness, label))
+            .collect();
 
         assert!(harness
             .state_mut()
@@ -2779,49 +2812,23 @@ mod kittest_suite {
         harness.run_steps(3);
         #[cfg(feature = "kittest_render")]
         render_ui_stability_png(&mut harness, "inspector_controls_processing.png");
+        for (label, rect) in anchors.iter().zip(&before) {
+            assert_rect_nearly_same(
+                *rect,
+                first_label_rect(&harness, label),
+                &format!("{label} during processing"),
+            );
+        }
 
-        assert_rect_nearly_same(
-            range_before,
-            first_label_rect(&harness, "Range: -"),
-            "range row during processing",
-        );
-        assert_rect_nearly_same(
-            tool_before,
-            first_label_rect(&harness, "🔁"),
-            "tool picker during processing",
-        );
-        assert_rect_nearly_same(
-            preview_before,
-            first_label_rect(&harness, "Preview"),
-            "Preview button during processing",
-        );
-        assert_rect_nearly_same(
-            apply_before,
-            first_label_rect(&harness, "Apply"),
-            "Apply button during processing",
-        );
         harness.state_mut().test_clear_mock_processing();
         harness.run_steps(3);
-        assert_rect_nearly_same(
-            range_before,
-            first_label_rect(&harness, "Range: -"),
-            "range row after processing",
-        );
-        assert_rect_nearly_same(
-            tool_before,
-            first_label_rect(&harness, "🔁"),
-            "tool picker after processing",
-        );
-        assert_rect_nearly_same(
-            preview_before,
-            first_label_rect(&harness, "Preview"),
-            "Preview button after processing",
-        );
-        assert_rect_nearly_same(
-            apply_before,
-            first_label_rect(&harness, "Apply"),
-            "Apply button after processing",
-        );
+        for (label, rect) in anchors.iter().zip(&before) {
+            assert_rect_nearly_same(
+                *rect,
+                first_label_rect(&harness, label),
+                &format!("{label} after processing"),
+            );
+        }
     }
 
     #[test]
@@ -2866,7 +2873,7 @@ mod kittest_suite {
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
         harness.run_steps(3);
-        let before = first_label_rect(&harness, "Seam Check");
+        let before = first_label_rect(&harness, "Seam check");
 
         assert!(harness
             .state_mut()
@@ -2875,7 +2882,7 @@ mod kittest_suite {
 
         assert_rect_nearly_same(
             before,
-            first_label_rect(&harness, "Seam Check"),
+            first_label_rect(&harness, "Seam check"),
             "loop inspector row",
         );
         assert!(harness.state_mut().test_clear_mock_loop_detect());
@@ -3162,10 +3169,6 @@ mod kittest_suite {
         }
 
         assert!(harness.state_mut().test_set_loop_region_frac(0.55, 0.75));
-        {
-            let tab = &mut harness.state_mut().tabs[tab_idx];
-            tab.pending_loop_unwrap = Some(3);
-        }
         let editing = harness
             .state()
             .test_loop_region()
@@ -3179,7 +3182,6 @@ mod kittest_suite {
         assert_eq!(tab.loop_region_applied, Some(editing));
         assert_eq!(tab.loop_region_committed, Some(editing));
         assert_eq!(tab.loop_mode, neowaves::LoopMode::Marker);
-        assert_eq!(tab.pending_loop_unwrap, None);
         assert!(tab.loop_markers_dirty);
     }
 
@@ -3981,14 +3983,14 @@ mod kittest_suite {
         let tab_idx = harness.state().active_tab.unwrap();
         assert!(!harness.state().tabs[tab_idx].world_f0_focus);
         harness
-            .get_by_label("F0 zoom (50 Hz - 1.1 kHz axis)")
+            .get_by_label("F0 zoom (50 Hz – 1.1 kHz)")
             .click();
         harness.run_steps(2);
         assert!(
             harness.state().tabs[tab_idx].world_f0_focus,
             "F0 zoom checkbox should toggle the focus flag"
         );
-        harness.get_by_label("Edit F0 on canvas").click();
+        harness.get_by_label("Edit F0 on the canvas").click();
         harness.run_steps(2);
         assert!(
             harness.state().tabs[tab_idx]
@@ -4406,24 +4408,33 @@ mod kittest_suite {
     }
 
     #[test]
-    fn marker_inspector_is_apply_only_without_preview() {
+    fn marker_inspector_commits_edits_without_preview_or_apply() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_set_active_tool(ToolKind::Markers));
         harness.run_steps(3);
 
+        // A marker is metadata: an edit takes effect at once and is one undo
+        // step, so there is nothing to preview and nothing left to apply.
         assert!(
             harness.query_all_by_label("Preview").next().is_none(),
             "Markers are metadata edits and must not expose Preview"
         );
         assert!(
-            harness.query_all_by_label("Apply").next().is_some(),
-            "Markers must retain Apply"
+            harness.query_all_by_label("Apply").next().is_none(),
+            "Marker edits are committed as they are made"
         );
 
+        let markers_before = harness.state().test_marker_count();
+        let (undo_before, _) = harness.state().test_editor_history_depths();
+        harness.get_by_label("Add at playhead").click();
+        harness.run_steps(3);
+        assert_eq!(harness.state().test_marker_count(), markers_before + 1);
+        assert_eq!(harness.state().test_editor_history_depths().0, undo_before + 1);
+
         #[cfg(feature = "kittest_render")]
-        render_ui_stability_png(&mut harness, "markers_apply_only.png");
+        render_ui_stability_png(&mut harness, "markers_immediate.png");
     }
 
     #[test]
@@ -4695,7 +4706,7 @@ mod kittest_suite {
 
         assert!(harness.state().test_loop_region().is_some());
         assert!(!harness
-            .query_all_by_label("Seam Check")
+            .query_all_by_label("Seam check")
             .collect::<Vec<_>>()
             .is_empty());
         assert!(!harness
@@ -6559,24 +6570,13 @@ mod kittest_suite {
         assert!(harness.state_mut().test_set_selection_frac(0.20, 0.60));
         harness.run_steps(2);
 
-        harness.get_by_label("Preview").click();
-        harness.run_steps(2);
-        assert_eq!(
-            harness.state().tabs[tab_idx].preview_audio_tool,
-            Some(ToolKind::Trim),
-            "trim preview should be armed after Set"
-        );
-
+        // Trim has nothing to preview: the selection is what it takes.
+        assert!(harness.query_all_by_label("Preview").next().is_none());
         harness.get_by_label("Add Trim As Virtual").click();
         harness.run_steps(1);
         assert!(
             harness.state().test_virtual_trim_active(),
             "Add Trim As Virtual should start asynchronously"
-        );
-        assert_eq!(
-            harness.state().tabs[tab_idx].trim_range,
-            None,
-            "Add Trim As Virtual should clear consumed trim range"
         );
         wait_for_virtual_trim_done(&mut harness);
         assert_eq!(
@@ -6592,7 +6592,7 @@ mod kittest_suite {
         assert_eq!(
             harness.state().tabs[tab_idx].preview_audio_tool,
             None,
-            "trim preview should be cleared after creating virtual item"
+            "adding a virtual item must not leave a preview behind"
         );
 
         harness.key_press(Key::Space);
@@ -6601,11 +6601,14 @@ mod kittest_suite {
             harness.state().test_audio_is_playing(),
             "space should start playback in editor"
         );
+        // The source plays whole, from a buffer or streamed from the file,
+        // never the trimmed copy.
         assert_eq!(
-            audio_buffer_len(harness.state()),
+            harness.state().test_audio_source_len(),
             source_len,
             "editor playback should use visible source waveform after Add Trim As Virtual"
         );
+        assert!(harness.state().test_playback_source_is_editor_path(&source_path));
         assert_eq!(
             harness.state().test_playing_path().cloned(),
             Some(source_path),
@@ -6873,8 +6876,10 @@ mod kittest_suite {
             .cloned()
             .expect("virtual item should be selected");
 
+        // Checked as the open returns, before a frame: the worker that hands
+        // the samples back has little to do for a short clip and can land
+        // within the very next frame.
         assert!(harness.state_mut().test_open_tab_for_path(&virtual_path));
-        harness.run_steps(1);
         let tab_idx = harness.state().active_tab.expect("virtual tab");
         assert_eq!(harness.state().tabs[tab_idx].path, virtual_path);
         assert!(
@@ -6886,6 +6891,7 @@ mod kittest_suite {
             0,
             "virtual tab should not synchronously clone audio into the editor"
         );
+        harness.run_steps(1);
 
         wait_for_tab_ready(&mut harness);
         let tab_idx = harness.state().active_tab.expect("virtual tab ready");
@@ -7495,6 +7501,14 @@ mod kittest_suite {
             ToolKind::DeHum,
         ] {
             assert!(harness.state_mut().test_set_active_tool(tool));
+            if tool == ToolKind::Eq {
+                // A flat EQ changes nothing, so there is nothing to preview.
+                harness
+                    .state_mut()
+                    .test_tool_state_mut()
+                    .expect("tool state")
+                    .eq_mid_gain_db = 6.0;
+            }
             assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
             wait_for_preview_tool(&mut harness, tool, true);
             assert_eq!(
@@ -7890,7 +7904,7 @@ mod kittest_suite {
         harness.get_by_label("Analyze model: ready");
         harness.get_by_label("Auto Demucs: missing");
         harness.get_by_label("Repair Model Files...");
-        harness.get_by_label("Input unavailable: stems not found and auto-Demucs is unavailable");
+        harness.get_by_label("Input unavailable: no stems and no auto-Demucs");
     }
 
     #[test]
@@ -7906,10 +7920,10 @@ mod kittest_suite {
             .test_set_music_analysis_result_mock(true));
         harness.run_steps(3);
 
-        harness.get_by_label("Beat Click");
-        harness.get_by_label("DownBeat Accent");
-        harness.get_by_label("Section Cue");
-        harness.get_by_label("Apply writes the current stem mix and enabled cue sounds.");
+        harness.get_by_label("Beat click");
+        harness.get_by_label("Downbeat accent");
+        harness.get_by_label("Section cue");
+        harness.get_by_label("Stem mix (the footer previews and applies it)");
     }
 
     #[test]
@@ -8339,7 +8353,7 @@ mod kittest_suite {
         harness.run_steps(4);
         assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
         harness.run_steps(2);
-        let loop_before = first_label_rect(&harness, "Seam Check");
+        let loop_before = first_label_rect(&harness, "Seam check");
         assert!(harness
             .state_mut()
             .test_set_mock_loop_detect_running(0.42, "Scoring loop candidates... 42%"));
@@ -8348,7 +8362,7 @@ mod kittest_suite {
         render_ui_stability_png(&mut harness, "processing_loop_detect.png");
         assert_rect_nearly_same(
             loop_before,
-            first_label_rect(&harness, "Seam Check"),
+            first_label_rect(&harness, "Seam check"),
             "loop detect inspector",
         );
         assert!(harness.state_mut().test_clear_mock_loop_detect());

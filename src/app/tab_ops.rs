@@ -126,9 +126,12 @@ impl super::WavesPreviewer {
         }
     }
 
+    /// A new tab opens on the tool of the tab the user was working in (the
+    /// active one, not merely the last in the strip).
     fn tool_for_new_editor_tab(&self) -> crate::app::types::ToolKind {
-        self.tabs
-            .last()
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .or_else(|| self.tabs.last())
             .map(|tab| tab.active_tool)
             .unwrap_or(crate::app::types::ToolKind::LoopEdit)
     }
@@ -186,7 +189,7 @@ impl super::WavesPreviewer {
                 tab.buffer_sample_rate = cached_sr;
                 tab.samples_len_visual = cached_samples_len;
                 tab.loading_waveform_minmax = cached_loading_overview;
-                tab.dirty = cached.dirty;
+                tab.set_audio_dirty(cached.dirty);
                 tab.markers = cached.markers;
                 tab.regions = cached.regions;
                 tab.markers_committed = cached.markers_committed;
@@ -376,7 +379,7 @@ impl super::WavesPreviewer {
             tab.buffer_sample_rate = cached_sr;
             tab.samples_len_visual = cached_samples_len;
             tab.loading_waveform_minmax = cached_loading_overview;
-            tab.dirty = cached.dirty;
+            tab.set_audio_dirty(cached.dirty);
             tab.markers = cached.markers;
             tab.regions = cached.regions;
             tab.markers_committed = cached.markers_committed;

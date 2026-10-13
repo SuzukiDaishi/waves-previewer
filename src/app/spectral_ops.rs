@@ -605,9 +605,13 @@ pub(crate) fn denoise_channel(
 
 /// Frames of spectral context averaged on each side of a healed region.
 const HEAL_CONTEXT_FRAMES: usize = 4;
-/// Selections longer than this are refused by the Heal button (the whole
-/// region is STFT-buffered in memory twice).
+/// Selections longer than this are refused by Heal (the whole region is
+/// STFT-buffered in memory twice).
 pub(crate) const HEAL_MAX_SELECTION_SECS: f32 = 120.0;
+/// The edge fades a spectral edit starts with: 8 ms is long enough not to
+/// click at a time edge, 80 Hz wide enough not to ring at a band edge.
+pub(crate) const SPECTRAL_TIME_FADE_MS_DEFAULT: f32 = 8.0;
+pub(crate) const SPECTRAL_FREQ_FADE_HZ_DEFAULT: f32 = 80.0;
 
 /// RX-style inpaint of `[s, e)` from its spectral context: per-bin
 /// magnitudes interpolate linearly in time between the averages of
@@ -617,6 +621,41 @@ pub(crate) const HEAL_MAX_SELECTION_SECS: f32 = 120.0;
 /// is replaced (raised-cosine edges of `freq_fade_hz`); the time edges
 /// crossfade over `time_fade_ms`. Samples outside `[s, e)` are returned
 /// bit-identical. Degenerate or context-free selections return the input.
+/// Mute `[s, e)` of one channel. With a frequency band this is an RX-style
+/// spectral mute: the band is removed by an STFT band-stop (run with an FFT
+/// of context either side) with raised-cosine frequency transitions.
+/// Without one it is a full-band mute. Either way the result is crossfaded
+/// against the original over `time_fade` samples at the range's edges.
+pub(crate) fn spectral_mute_channel_range(
+    ch: &mut [f32],
+    sr: u32,
+    s: usize,
+    e: usize,
+    band: Option<(f32, f32)>,
+    time_fade: usize,
+    freq_fade_hz: f32,
+) {
+    let e = e.min(ch.len());
+    let s = s.min(e);
+    let sel_len = e - s;
+    if sel_len == 0 {
+        return;
+    }
+    let fade_n = time_fade.min(sel_len / 2);
+    let filtered: Vec<f32> = if let Some((lo, hi)) = band {
+        let seg_s = s.saturating_sub(SPECTRAL_FFT_SIZE);
+        let seg_e = (e + SPECTRAL_FFT_SIZE).min(ch.len());
+        let processed = stft_apply_band_gain(&ch[seg_s..seg_e], sr, lo, hi, freq_fade_hz, false);
+        processed[(s - seg_s)..(s - seg_s + sel_len)].to_vec()
+    } else {
+        vec![0.0f32; sel_len]
+    };
+    for i in 0..sel_len {
+        let w = selection_edge_weight(i, sel_len, fade_n);
+        ch[s + i] = ch[s + i] * (1.0 - w) + filtered[i] * w;
+    }
+}
+
 pub(crate) fn heal_channel_range(
     ch: &[f32],
     sr: u32,
@@ -774,136 +813,11 @@ impl crate::app::WavesPreviewer {
     /// channel and a green per-channel overlay through the heavy-overlay
     /// channel (both drained by the existing pollers).
     pub(super) fn spawn_spectral_warp_preview_for_tab(&mut self, tab_idx: usize) {
-        use std::sync::mpsc;
-        let Some(tab) = self.tabs.get(tab_idx) else {
-            return;
-        };
-        if tab.loading || !Self::editor_spectral_warp_ready(tab) {
-            return;
-        }
-        let path = tab.path.clone();
-        let channels = tab.ch_samples.clone();
-        let samples_len = tab.samples_len;
-        let sr = tab.buffer_sample_rate.max(1);
-        let points = tab.spectral_warp_points.clone();
-        let time_radius_ms = tab.tool_state.warp_time_radius_ms.max(1.0);
-        let freq_radius_hz = tab.tool_state.warp_freq_radius_hz.max(1.0);
-
-        self.audio.stop();
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.preview_audio_tool = Some(crate::app::types::ToolKind::SpectralWarp);
-        }
-        self.clear_heavy_preview_state();
-        self.clear_heavy_overlay_state();
-        self.heavy_preview_gen_counter = self.heavy_preview_gen_counter.wrapping_add(1);
-        let preview_gen = self.heavy_preview_gen_counter;
-        self.heavy_preview_expected_gen = preview_gen;
-        self.heavy_preview_expected_path = Some(path.clone());
-        self.heavy_preview_expected_tool = Some(crate::app::types::ToolKind::SpectralWarp);
-        self.overlay_gen_counter = self.overlay_gen_counter.wrapping_add(1);
-        let overlay_gen = self.overlay_gen_counter;
-        self.overlay_expected_gen = overlay_gen;
-        self.overlay_expected_path = Some(path.clone());
-        self.overlay_expected_tool = Some(crate::app::types::ToolKind::SpectralWarp);
-
-        let (preview_tx, preview_rx) = mpsc::channel::<super::HeavyPreviewMessage>();
-        let (overlay_tx, overlay_rx) = mpsc::channel::<super::HeavyOverlayMessage>();
-        std::thread::spawn(move || {
-            let processed: Vec<Vec<f32>> = channels
-                .iter()
-                .map(|ch| warp_channel_with_points(ch, sr, &points, time_radius_ms, freq_radius_hz))
-                .collect();
-            let mono = crate::app::WavesPreviewer::mixdown_channels(&processed, samples_len);
-            let timeline_len = processed.get(0).map(Vec::len).unwrap_or(samples_len).max(1);
-            let overlay = crate::app::WavesPreviewer::preview_overlay_from_channels(
-                processed,
-                crate::app::types::ToolKind::SpectralWarp,
-                timeline_len,
-            );
-            let _ = overlay_tx.send((
-                path.clone(),
-                crate::app::types::ToolKind::SpectralWarp,
-                overlay,
-                overlay_gen,
-                true,
-            ));
-            if !mono.is_empty() {
-                let _ = preview_tx.send((
-                    path,
-                    crate::app::types::ToolKind::SpectralWarp,
-                    super::HeavyPreviewAudio::Mono(mono),
-                    preview_gen,
-                ));
-            }
-        });
-        self.heavy_preview_rx = Some(preview_rx);
-        self.heavy_overlay_rx = Some(overlay_rx);
+        // Previewed by the engine with the same render Apply uses -- every
+        // channel, not a mono mixdown.
+        self.tool_preview_request_now(tab_idx);
     }
 
-    /// Destructively apply the current spectral-warp points on a worker
-    /// thread through the shared apply pipeline (busy overlay + undo).
-    /// The points are consumed: they describe an edit relative to the
-    /// pre-warp audio, so they are cleared once the job is queued.
-    pub(super) fn spawn_spectral_warp_apply_for_tab(&mut self, tab_idx: usize) {
-        use std::sync::mpsc;
-        if self.editor_apply_slot_busy_toast() {
-            return;
-        }
-        let Some(tab) = self.tabs.get(tab_idx) else {
-            return;
-        };
-        if tab.loading || !Self::editor_spectral_warp_ready(tab) {
-            return;
-        }
-        let undo = Some(Self::capture_undo_state_labeled(tab, "Spectral Warp"));
-        let channels = tab.ch_samples.clone();
-        let sr = tab.buffer_sample_rate.max(1);
-        let points = tab.spectral_warp_points.clone();
-        let time_radius_ms = tab.tool_state.warp_time_radius_ms.max(1.0);
-        let freq_radius_hz = tab.tool_state.warp_freq_radius_hz.max(1.0);
-        let apply_tab_id = tab.tab_id;
-        if matches!(&self.playback_session.source,
-            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
-        {
-            self.audio.stop();
-        }
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.spectral_warp_points.clear();
-            tab.spectral_warp_drag = None;
-            tab.preview_audio_tool = None;
-            tab.preview_overlay = None;
-        }
-        let (tx, rx) = mpsc::channel::<crate::app::types::EditorApplyResult>();
-        std::thread::spawn(move || {
-            let out: Vec<Vec<f32>> = channels
-                .iter()
-                .map(|ch| warp_channel_with_points(ch, sr, &points, time_radius_ms, freq_radius_hz))
-                .collect();
-            let len = out.get(0).map(Vec::len).unwrap_or(0);
-            let (waveform_minmax, waveform_pyramid) =
-                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
-            let channels_arc = std::sync::Arc::new(out.clone());
-            let _ = tx.send(crate::app::types::EditorApplyResult {
-                channels: out,
-                channels_arc,
-                waveform_minmax,
-                waveform_pyramid,
-                lufs_override: None,
-                selection_after: None,
-            });
-        });
-        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
-            msg: "Applying Spectral Warp...".to_string(),
-            rx,
-            tab_id: apply_tab_id,
-            undo,
-            tool: crate::app::types::ToolKind::SpectralWarp,
-            source_range: None,
-            source_len: 0,
-            source_sample_rate: 1,
-            viewport_restore: None,
-        });
-    }
 
     /// True when the tab has at least one spectral-brush stamp that would
     /// actually attenuate content.
@@ -914,131 +828,11 @@ impl crate::app::WavesPreviewer {
     /// Render the current spectral-brush stamps into a non-destructive
     /// preview on a worker thread (same channels as the warp preview).
     pub(super) fn spawn_spectral_brush_preview_for_tab(&mut self, tab_idx: usize) {
-        use std::sync::mpsc;
-        let Some(tab) = self.tabs.get(tab_idx) else {
-            return;
-        };
-        if tab.loading || !Self::editor_spectral_brush_ready(tab) {
-            return;
-        }
-        let path = tab.path.clone();
-        let channels = tab.ch_samples.clone();
-        let samples_len = tab.samples_len;
-        let sr = tab.buffer_sample_rate.max(1);
-        let stamps = tab.spectral_brush_stamps.clone();
-
-        self.audio.stop();
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.preview_audio_tool = Some(crate::app::types::ToolKind::SpectralBrush);
-        }
-        self.clear_heavy_preview_state();
-        self.clear_heavy_overlay_state();
-        self.heavy_preview_gen_counter = self.heavy_preview_gen_counter.wrapping_add(1);
-        let preview_gen = self.heavy_preview_gen_counter;
-        self.heavy_preview_expected_gen = preview_gen;
-        self.heavy_preview_expected_path = Some(path.clone());
-        self.heavy_preview_expected_tool = Some(crate::app::types::ToolKind::SpectralBrush);
-        self.overlay_gen_counter = self.overlay_gen_counter.wrapping_add(1);
-        let overlay_gen = self.overlay_gen_counter;
-        self.overlay_expected_gen = overlay_gen;
-        self.overlay_expected_path = Some(path.clone());
-        self.overlay_expected_tool = Some(crate::app::types::ToolKind::SpectralBrush);
-
-        let (preview_tx, preview_rx) = mpsc::channel::<super::HeavyPreviewMessage>();
-        let (overlay_tx, overlay_rx) = mpsc::channel::<super::HeavyOverlayMessage>();
-        std::thread::spawn(move || {
-            let processed: Vec<Vec<f32>> = channels
-                .iter()
-                .map(|ch| brush_channel_with_stamps(ch, sr, &stamps))
-                .collect();
-            let mono = crate::app::WavesPreviewer::mixdown_channels(&processed, samples_len);
-            let timeline_len = processed.get(0).map(Vec::len).unwrap_or(samples_len).max(1);
-            let overlay = crate::app::WavesPreviewer::preview_overlay_from_channels(
-                processed,
-                crate::app::types::ToolKind::SpectralBrush,
-                timeline_len,
-            );
-            let _ = overlay_tx.send((
-                path.clone(),
-                crate::app::types::ToolKind::SpectralBrush,
-                overlay,
-                overlay_gen,
-                true,
-            ));
-            if !mono.is_empty() {
-                let _ = preview_tx.send((
-                    path,
-                    crate::app::types::ToolKind::SpectralBrush,
-                    super::HeavyPreviewAudio::Mono(mono),
-                    preview_gen,
-                ));
-            }
-        });
-        self.heavy_preview_rx = Some(preview_rx);
-        self.heavy_overlay_rx = Some(overlay_rx);
+        // Previewed by the engine with the same render Apply uses -- every
+        // channel, not a mono mixdown.
+        self.tool_preview_request_now(tab_idx);
     }
 
-    /// Destructively apply the current spectral-brush stamps on a worker
-    /// thread through the shared apply pipeline (busy overlay + undo).
-    /// The stamps are consumed once the job is queued.
-    pub(super) fn spawn_spectral_brush_apply_for_tab(&mut self, tab_idx: usize) {
-        use std::sync::mpsc;
-        if self.editor_apply_slot_busy_toast() {
-            return;
-        }
-        let Some(tab) = self.tabs.get(tab_idx) else {
-            return;
-        };
-        if tab.loading || !Self::editor_spectral_brush_ready(tab) {
-            return;
-        }
-        let undo = Some(Self::capture_undo_state_labeled(tab, "Spectral Brush"));
-        let channels = tab.ch_samples.clone();
-        let sr = tab.buffer_sample_rate.max(1);
-        let stamps = tab.spectral_brush_stamps.clone();
-        let apply_tab_id = tab.tab_id;
-        if matches!(&self.playback_session.source,
-            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
-        {
-            self.audio.stop();
-        }
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.spectral_brush_stamps.clear();
-            tab.spectral_brush_last = None;
-            tab.preview_audio_tool = None;
-            tab.preview_overlay = None;
-        }
-        let (tx, rx) = mpsc::channel::<crate::app::types::EditorApplyResult>();
-        std::thread::spawn(move || {
-            let out: Vec<Vec<f32>> = channels
-                .iter()
-                .map(|ch| brush_channel_with_stamps(ch, sr, &stamps))
-                .collect();
-            let len = out.get(0).map(Vec::len).unwrap_or(0);
-            let (waveform_minmax, waveform_pyramid) =
-                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
-            let channels_arc = std::sync::Arc::new(out.clone());
-            let _ = tx.send(crate::app::types::EditorApplyResult {
-                channels: out,
-                channels_arc,
-                waveform_minmax,
-                waveform_pyramid,
-                lufs_override: None,
-                selection_after: None,
-            });
-        });
-        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
-            msg: "Applying Spectral Brush...".to_string(),
-            rx,
-            tab_id: apply_tab_id,
-            undo,
-            tool: crate::app::types::ToolKind::SpectralBrush,
-            source_range: None,
-            source_len: 0,
-            source_sample_rate: 1,
-            viewport_restore: None,
-        });
-    }
 
     /// Learn a noise profile from the current selection (synchronous; the
     /// selection is capped at 60 s which the STFT sweeps in well under a
@@ -1096,165 +890,8 @@ impl crate::app::WavesPreviewer {
             .unwrap_or(false)
     }
 
-    fn denoise_processed_channels(
-        channels: &[Vec<f32>],
-        profile: &crate::app::types::NoiseProfile,
-        reduction_db: f32,
-        strength: f32,
-        range: Option<(usize, usize)>,
-    ) -> Vec<Vec<f32>> {
-        channels
-            .iter()
-            .enumerate()
-            .map(|(ci, ch)| {
-                let mags = profile
-                    .mag_per_channel
-                    .get(ci)
-                    .or_else(|| profile.mag_per_channel.first());
-                match mags {
-                    Some(mags) => denoise_channel(ch, mags, reduction_db, strength, range),
-                    None => ch.clone(),
-                }
-            })
-            .collect()
-    }
 
-    /// Render the de-noise into a non-destructive preview on a worker
-    /// thread (same channels as the warp/brush previews).
-    pub(super) fn spawn_denoise_preview_for_tab(&mut self, tab_idx: usize) {
-        use std::sync::mpsc;
-        let Some(tab) = self.tabs.get(tab_idx) else {
-            return;
-        };
-        if tab.loading || !Self::editor_denoise_ready(tab) {
-            return;
-        }
-        let path = tab.path.clone();
-        let channels = tab.ch_samples.clone();
-        let samples_len = tab.samples_len;
-        let profile = tab.noise_profile.clone().unwrap();
-        let reduction_db = tab.tool_state.denoise_reduction_db.max(0.0);
-        let strength = tab.tool_state.denoise_strength.clamp(1.0, 4.0);
-        let range = Self::editor_valid_selection(tab);
 
-        self.audio.stop();
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.preview_audio_tool = Some(crate::app::types::ToolKind::DeNoise);
-        }
-        self.clear_heavy_preview_state();
-        self.clear_heavy_overlay_state();
-        self.heavy_preview_gen_counter = self.heavy_preview_gen_counter.wrapping_add(1);
-        let preview_gen = self.heavy_preview_gen_counter;
-        self.heavy_preview_expected_gen = preview_gen;
-        self.heavy_preview_expected_path = Some(path.clone());
-        self.heavy_preview_expected_tool = Some(crate::app::types::ToolKind::DeNoise);
-        self.overlay_gen_counter = self.overlay_gen_counter.wrapping_add(1);
-        let overlay_gen = self.overlay_gen_counter;
-        self.overlay_expected_gen = overlay_gen;
-        self.overlay_expected_path = Some(path.clone());
-        self.overlay_expected_tool = Some(crate::app::types::ToolKind::DeNoise);
-
-        let (preview_tx, preview_rx) = mpsc::channel::<super::HeavyPreviewMessage>();
-        let (overlay_tx, overlay_rx) = mpsc::channel::<super::HeavyOverlayMessage>();
-        std::thread::spawn(move || {
-            let processed = Self::denoise_processed_channels(
-                &channels,
-                &profile,
-                reduction_db,
-                strength,
-                range,
-            );
-            let mono = crate::app::WavesPreviewer::mixdown_channels(&processed, samples_len);
-            let timeline_len = processed.get(0).map(Vec::len).unwrap_or(samples_len).max(1);
-            let overlay = crate::app::WavesPreviewer::preview_overlay_from_channels(
-                processed,
-                crate::app::types::ToolKind::DeNoise,
-                timeline_len,
-            );
-            let _ = overlay_tx.send((
-                path.clone(),
-                crate::app::types::ToolKind::DeNoise,
-                overlay,
-                overlay_gen,
-                true,
-            ));
-            if !mono.is_empty() {
-                let _ = preview_tx.send((
-                    path,
-                    crate::app::types::ToolKind::DeNoise,
-                    super::HeavyPreviewAudio::Mono(mono),
-                    preview_gen,
-                ));
-            }
-        });
-        self.heavy_preview_rx = Some(preview_rx);
-        self.heavy_overlay_rx = Some(overlay_rx);
-    }
-
-    /// Destructively apply the de-noise on a worker thread through the
-    /// shared apply pipeline (busy overlay + undo). The learned profile is
-    /// kept so the user can iterate.
-    pub(super) fn spawn_denoise_apply_for_tab(&mut self, tab_idx: usize) {
-        use std::sync::mpsc;
-        if self.editor_apply_slot_busy_toast() {
-            return;
-        }
-        let Some(tab) = self.tabs.get(tab_idx) else {
-            return;
-        };
-        if tab.loading || !Self::editor_denoise_ready(tab) {
-            return;
-        }
-        let undo = Some(Self::capture_undo_state_labeled(tab, "De-noise"));
-        let channels = tab.ch_samples.clone();
-        let profile = tab.noise_profile.clone().unwrap();
-        let reduction_db = tab.tool_state.denoise_reduction_db.max(0.0);
-        let strength = tab.tool_state.denoise_strength.clamp(1.0, 4.0);
-        let range = Self::editor_valid_selection(tab);
-        let apply_tab_id = tab.tab_id;
-        if matches!(&self.playback_session.source,
-            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
-        {
-            self.audio.stop();
-        }
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.preview_audio_tool = None;
-            tab.preview_overlay = None;
-        }
-        let (tx, rx) = mpsc::channel::<crate::app::types::EditorApplyResult>();
-        std::thread::spawn(move || {
-            let out = Self::denoise_processed_channels(
-                &channels,
-                &profile,
-                reduction_db,
-                strength,
-                range,
-            );
-            let len = out.get(0).map(Vec::len).unwrap_or(0);
-            let (waveform_minmax, waveform_pyramid) =
-                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
-            let channels_arc = std::sync::Arc::new(out.clone());
-            let _ = tx.send(crate::app::types::EditorApplyResult {
-                channels: out,
-                channels_arc,
-                waveform_minmax,
-                waveform_pyramid,
-                lufs_override: None,
-                selection_after: None,
-            });
-        });
-        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
-            msg: "Applying De-noise...".to_string(),
-            rx,
-            tab_id: apply_tab_id,
-            undo,
-            tool: crate::app::types::ToolKind::DeNoise,
-            source_range: None,
-            source_len: 0,
-            source_sample_rate: 1,
-            viewport_restore: None,
-        });
-    }
 
     #[cfg(feature = "kittest")]
     pub fn test_denoise_learn(&mut self) -> bool {
@@ -1268,95 +905,46 @@ impl crate::app::WavesPreviewer {
             .unwrap_or(false)
     }
 
+    /// What the Inspector's Apply does for `tool`, on the apply worker
+    /// whatever the clip's length, without making `tool` the active one.
     #[cfg(feature = "kittest")]
-    pub fn test_denoise_apply(&mut self) -> bool {
-        let Some(tab_idx) = self.active_tab else {
-            return false;
-        };
-        self.spawn_denoise_apply_for_tab(tab_idx);
-        self.editor_apply_state.is_some()
-    }
-
-    /// Heal (inpaint) the current selection from its spectral context on a
-    /// worker thread through the shared apply pipeline (busy overlay +
-    /// undo). With a frequency band selected only that band is rebuilt.
-    pub(super) fn spawn_spectral_heal_apply_for_tab(&mut self, tab_idx: usize) {
-        use std::sync::mpsc;
-        if self.editor_apply_slot_busy_toast() {
-            return;
-        }
-        let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
-        let freq_fade_hz = self.spectral_edit_freq_fade_hz.max(0.0);
+    fn test_spawn_tool_apply(&mut self, tab_idx: usize, tool: crate::app::types::ToolKind) {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
         if tab.loading {
             return;
         }
-        let Some((s, e)) = Self::editor_valid_selection(tab) else {
+        let Some(op) = Self::tool_op_for_tab(tab, tool) else {
             return;
         };
-        let sr = tab.buffer_sample_rate.max(1);
-        if (e - s) as f32 / sr as f32 > HEAL_MAX_SELECTION_SECS {
-            self.push_toast(
-                crate::app::types::ToastSeverity::Warning,
-                format!(
-                    "Heal: selection is longer than {HEAL_MAX_SELECTION_SECS:.0} s — select a shorter range"
-                ),
-            );
+        let target = self.tool_target_for_tab(tab_idx, tool);
+        let Some(req) = self.tool_request_for_tab(tab_idx, op, target) else {
             return;
+        };
+        if self.spawn_editor_apply_op(tab_idx, req, None) {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                Self::spend_tool_strokes(tab, tool);
+            }
         }
-        let band = tab.freq_selection;
-        let undo = Some(Self::capture_undo_state_labeled(tab, "Heal Selection"));
-        let channels = tab.ch_samples.clone();
-        let apply_tab_id = tab.tab_id;
-        if matches!(&self.playback_session.source,
-            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
-        {
-            self.audio.stop();
-        }
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.preview_audio_tool = None;
-            tab.preview_overlay = None;
-        }
-        let (tx, rx) = mpsc::channel::<crate::app::types::EditorApplyResult>();
-        std::thread::spawn(move || {
-            let out: Vec<Vec<f32>> = channels
-                .iter()
-                .map(|ch| heal_channel_range(ch, sr, s, e, band, freq_fade_hz, time_fade_ms))
-                .collect();
-            let len = out.get(0).map(Vec::len).unwrap_or(0);
-            let (waveform_minmax, waveform_pyramid) =
-                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
-            let channels_arc = std::sync::Arc::new(out.clone());
-            let _ = tx.send(crate::app::types::EditorApplyResult {
-                channels: out,
-                channels_arc,
-                waveform_minmax,
-                waveform_pyramid,
-                lufs_override: None,
-                selection_after: None,
-            });
-        });
-        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
-            msg: "Healing selection...".to_string(),
-            rx,
-            tab_id: apply_tab_id,
-            undo,
-            tool: crate::app::types::ToolKind::SpectralBrush,
-            source_range: None,
-            source_len: 0,
-            source_sample_rate: 1,
-            viewport_restore: None,
-        });
     }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_denoise_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.test_spawn_tool_apply(tab_idx, crate::app::types::ToolKind::DeNoise);
+        self.editor_apply_state.is_some()
+    }
+
 
     #[cfg(feature = "kittest")]
     pub fn test_spectral_heal_apply(&mut self) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
         };
-        self.spawn_spectral_heal_apply_for_tab(tab_idx);
+        self.test_spawn_tool_apply(tab_idx, crate::app::types::ToolKind::Heal);
         self.editor_apply_state.is_some()
     }
 
@@ -1388,57 +976,20 @@ impl crate::app::WavesPreviewer {
         let Some(tab_idx) = self.active_tab else {
             return false;
         };
-        self.spawn_spectral_brush_apply_for_tab(tab_idx);
+        self.test_spawn_tool_apply(tab_idx, crate::app::types::ToolKind::SpectralBrush);
         self.editor_apply_state.is_some()
     }
 
-    /// Destructively mute the current selection. With a frequency band
-    /// selected this is an RX-style spectral mute: the band is removed via
-    /// an STFT band-stop with raised-cosine frequency transitions, and the
-    /// result is crossfaded against the original at the selection's time
-    /// edges. Without a band it is a full-band mute with the same
-    /// click-free time fades.
-    pub(super) fn editor_apply_spectral_mute_selection(&mut self, tab_idx: usize) {
-        let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
-        let freq_fade_hz = self.spectral_edit_freq_fade_hz.max(0.0);
-        let undo_state = {
-            let Some(tab) = self.tabs.get_mut(tab_idx) else {
-                return;
-            };
-            if tab.loading {
-                return;
-            }
-            let Some((s, e)) = Self::editor_valid_selection(tab) else {
-                return;
-            };
-            let band = tab.freq_selection;
-            let sr = tab.buffer_sample_rate.max(1);
-            let undo_state = Self::capture_undo_state_labeled(tab, "Spectral Mute");
-            let sel_len = e - s;
-            let fade_n = ((time_fade_ms / 1000.0) * sr as f32).round() as usize;
-            let fade_n = fade_n.min(sel_len / 2);
-            for ch in tab.ch_samples.iter_mut() {
-                // Band-stop the selection (with STFT context margins) or
-                // fall back to silence for a full-band mute.
-                let filtered: Vec<f32> = if let Some((lo, hi)) = band {
-                    let seg_s = s.saturating_sub(SPECTRAL_FFT_SIZE);
-                    let seg_e = (e + SPECTRAL_FFT_SIZE).min(ch.len());
-                    let processed =
-                        stft_apply_band_gain(&ch[seg_s..seg_e], sr, lo, hi, freq_fade_hz, false);
-                    processed[(s - seg_s)..(s - seg_s + sel_len)].to_vec()
-                } else {
-                    vec![0.0f32; sel_len]
-                };
-                for i in 0..sel_len {
-                    let w = selection_edge_weight(i, sel_len, fade_n);
-                    ch[s + i] = ch[s + i] * (1.0 - w) + filtered[i] * w;
-                }
-            }
-            tab.dirty = true;
-            Self::editor_clamp_ranges(tab);
-            undo_state
-        };
-        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+
+    /// The tab's spectral edge fades: (time in ms, band edge in Hz).
+    pub(super) fn spectral_fades(&self, tab_idx: usize) -> (f32, f32) {
+        let defaults = (SPECTRAL_TIME_FADE_MS_DEFAULT, SPECTRAL_FREQ_FADE_HZ_DEFAULT);
+        self.tabs.get(tab_idx).map_or(defaults, |tab| {
+            (
+                tab.tool_state.spectral_time_fade_ms.max(0.0),
+                tab.tool_state.spectral_freq_fade_hz.max(0.0),
+            )
+        })
     }
 
     /// Play only the current selection: everything outside the selected
@@ -1446,8 +997,8 @@ impl crate::app::WavesPreviewer {
     /// audio is band-passed (RX-style "play selection"). The editor's
     /// buffer is restored automatically when playback stops.
     pub(super) fn editor_play_selection(&mut self, tab_idx: usize) {
-        let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
-        let freq_fade_hz = self.spectral_edit_freq_fade_hz.max(0.0);
+        let time_fade_ms = self.spectral_fades(tab_idx).0;
+        let freq_fade_hz = self.spectral_fades(tab_idx).1;
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
@@ -2071,7 +1622,7 @@ impl crate::app::WavesPreviewer {
     /// into the spectral clipboard. Returns false when there is nothing to
     /// copy (no time or frequency selection).
     pub(super) fn editor_spectral_copy(&mut self, tab_idx: usize) -> bool {
-        let freq_fade = self.spectral_edit_freq_fade_hz.max(0.0);
+        let freq_fade = self.spectral_fades(tab_idx).1;
         let Some(tab) = self.tabs.get(tab_idx) else {
             return false;
         };
@@ -2126,8 +1677,8 @@ impl crate::app::WavesPreviewer {
             );
             return false;
         };
-        let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
-        let freq_fade = self.spectral_edit_freq_fade_hz.max(0.0);
+        let time_fade_ms = self.spectral_fades(tab_idx).0;
+        let freq_fade = self.spectral_fades(tab_idx).1;
         let pos = self.editor_insert_position(tab_idx);
         {
             let Some(tab) = self.tabs.get(tab_idx) else {
@@ -2208,7 +1759,7 @@ impl crate::app::WavesPreviewer {
                     ch[p..end].copy_from_slice(&out);
                 }
             }
-            tab.dirty = true;
+            tab.mark_audio_changed();
             Self::editor_clamp_ranges(tab);
             (undo_state, true)
         };
@@ -2366,7 +1917,7 @@ impl crate::app::WavesPreviewer {
         let Some(action) = self.harmonic_action else {
             return false;
         };
-        let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
+        let time_fade_ms = self.spectral_fades(tab_idx).0;
         let undo_state = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return false;
@@ -2413,7 +1964,7 @@ impl crate::app::WavesPreviewer {
                     ch[s + i] = ch[s + i] * (1.0 - w) + filtered[i] * w;
                 }
             }
-            tab.dirty = true;
+            tab.mark_audio_changed();
             Self::editor_clamp_ranges(tab);
             undo_state
         };

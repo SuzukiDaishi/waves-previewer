@@ -282,7 +282,14 @@ impl WavesPreviewer {
         }
         trace_stage!("startup actions", self.run_startup_actions(ctx));
         trace_stage!("debug automation", self.debug_tick(ctx));
-        trace_stage!("heavy preview results", self.drain_heavy_preview_results());
+        // Not deferred: a finished tool preview is what the user is listening
+        // for. Starting the next render is only a request, so that one waits
+        // its turn behind the frame budget.
+        trace_stage!("tool preview results", self.drain_tool_preview_jobs());
+        deferrable!(trace_stage!(
+            "tool preview requests",
+            self.tick_tool_preview_spawn(ctx)
+        ));
         trace_stage!("list preview results", self.drain_list_preview_results());
         // Not behind `deferrable!`: the user is synchronously waiting to hear
         // the seek they just asked for, and this returns immediately when
@@ -297,7 +304,6 @@ impl WavesPreviewer {
             self.drain_list_preview_prefetch_results()
         );
         trace_stage!("editor decode results", self.drain_editor_decode());
-        trace_stage!("overlay results", self.drain_heavy_overlay_results());
         deferrable!(trace_stage!("auto trim results", {
             self.drain_auto_trim_results();
             self.poll_auto_trim_live_rerun();
@@ -875,6 +881,7 @@ impl WavesPreviewer {
         self.ui_keymap_window(ctx);
         self.ui_licenses_window(ctx);
         self.ui_undo_history_window(ctx);
+        self.ui_revert_to_saved_dialog(ctx);
         self.ui_regions_window(ctx);
         self.ui_comments_window(ctx);
         self.ui_harmonic_window(ctx);
@@ -1355,8 +1362,7 @@ impl WavesPreviewer {
             || self.playback_fx_state.is_some()
             || self.list_preview_rx.is_some()
             || self.list_preview_pending_path.is_some()
-            || self.heavy_preview_rx.is_some()
-            || self.heavy_overlay_rx.is_some()
+            || self.tool_preview.job.is_some()
             || self.music_preview_state.is_some()
             || self.editor_apply_state.is_some()
             || self.plugin_process_state.is_some();

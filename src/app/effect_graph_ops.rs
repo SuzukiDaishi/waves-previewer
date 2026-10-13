@@ -5113,7 +5113,7 @@ impl WavesPreviewer {
                 tab.waveform_minmax = rough_waveform.clone();
                 tab.waveform_pyramid = None;
                 Self::invalidate_editor_viewport_cache(tab);
-                tab.dirty = true;
+                tab.mark_audio_changed();
                 tab.preview_overlay = None;
                 tab.preview_audio_tool = None;
             }

@@ -301,7 +301,7 @@ impl WavesPreviewer {
         {
             self.audio.stop();
         }
-        let (tx, rx) = std::sync::mpsc::channel::<EditorApplyResult>();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<EditorApplyResult, Option<String>>>();
         std::thread::spawn(move || {
             crate::app::threading::lower_current_thread_priority();
             let out = matrix.apply_offline(&channels);
@@ -309,14 +309,16 @@ impl WavesPreviewer {
             let (waveform_minmax, waveform_pyramid) =
                 WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = Arc::new(out.clone());
-            let _ = tx.send(EditorApplyResult {
+            let _ = tx.send(Ok(EditorApplyResult {
                 channels: out,
                 channels_arc,
                 waveform_minmax,
                 waveform_pyramid,
                 lufs_override: None,
                 selection_after: None,
-            });
+                time_map: crate::app::tool_render::TimeMap::Identity,
+                markers_after: None,
+            }));
             crate::ui_wake::wake_ui();
         });
         self.editor_apply_state = Some(crate::app::types::EditorApplyState {

@@ -78,7 +78,7 @@ impl WavesPreviewer {
             };
             let undo_state = Self::capture_undo_state_labeled(tab, label);
             tab.ch_samples = channels;
-            tab.dirty = true;
+            tab.mark_audio_changed();
             if rewired {
                 Self::editor_reset_per_channel_state(tab);
             }

@@ -84,6 +84,13 @@ impl WavesPreviewer {
                     delta_db.clamp(-24.0, 24.0),
                     false,
                 );
+                // Made from the List view, it must be undoable from there too:
+                // Ctrl+Z follows the workspace in front.
+                if self.is_list_workspace_active() {
+                    if let Some(tab_id) = self.tabs.get(tab_idx).map(|tab| tab.tab_id) {
+                        self.record_list_editor_tab_gain(tab_id);
+                    }
+                }
                 self.schedule_lufs_for_path(path.to_path_buf());
                 return true;
             }
@@ -123,7 +130,7 @@ impl WavesPreviewer {
                     *v *= gain;
                 }
             }
-            tab.dirty = true;
+            tab.mark_audio_changed();
             Self::editor_clamp_ranges(tab);
             undo_state
         };
