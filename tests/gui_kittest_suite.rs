@@ -7507,7 +7507,9 @@ mod kittest_suite {
                     .state_mut()
                     .test_tool_state_mut()
                     .expect("tool state")
-                    .eq_mid_gain_db = 6.0;
+                    .eq
+                    .bands[1]
+                    .gain_db = 6.0;
             }
             assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
             wait_for_preview_tool(&mut harness, tool, true);

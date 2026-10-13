@@ -100,14 +100,19 @@ pub struct PreviewKey {
     pub mask_bits: u64,
 }
 
+/// A channel mask as bits (`u64::MAX`: every channel), for keys.
+pub fn mask_bits(mask: Option<&[bool]>) -> u64 {
+    mask.map_or(u64::MAX, |m| {
+        m.iter().enumerate().fold(
+            0u64,
+            |bits, (i, on)| if *on { bits | (1 << (i % 64)) } else { bits },
+        )
+    })
+}
+
 impl PreviewKey {
     pub fn new(tab: &EditorTab, op: &ToolOp, target: RenderTarget, mask: Option<&[bool]>) -> Self {
-        let mask_bits = mask.map_or(u64::MAX, |m| {
-            m.iter().enumerate().fold(
-                0u64,
-                |bits, (i, on)| if *on { bits | (1 << (i % 64)) } else { bits },
-            )
-        });
+        let mask_bits = mask_bits(mask);
         Self {
             tab_id: tab.tab_id,
             audio_rev: tab.audio_rev,
@@ -139,6 +144,63 @@ impl ToolPreviewResult {
     }
 }
 
+/// Which picture of the source a tool draws behind its controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AnalysisKind {
+    /// The average spectrum (the EQ).
+    Spectrum,
+    /// The level over time (the dynamics tools).
+    Levels,
+}
+
+impl AnalysisKind {
+    pub fn for_tool(tool: ToolKind) -> Option<Self> {
+        match tool {
+            ToolKind::Eq => Some(AnalysisKind::Spectrum),
+            ToolKind::Compressor | ToolKind::Limiter | ToolKind::NoiseGate => {
+                Some(AnalysisKind::Levels)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// What a source analysis was measured from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnalysisKey {
+    pub tab_id: u64,
+    pub audio_rev: u64,
+    pub kind: AnalysisKind,
+    pub target: RenderTarget,
+    pub mask_bits: u64,
+}
+
+/// The source measured over the tool's target before any edit: what the
+/// EQ draws as "before", what the dynamics tools draw before a render.
+#[derive(Clone, Debug)]
+pub struct SourceAnalysis {
+    pub key: AnalysisKey,
+    pub spectrum: Option<Vec<f32>>,
+    pub levels: Option<crate::dynamics::DynamicsTrace>,
+}
+
+/// What a tool panel shows while its tab plays. Display state only.
+#[derive(Clone, Debug, Default)]
+pub struct LiveMeters {
+    pub playing: bool,
+    /// The heard audio's spectrum, smoothed (the EQ's live analyzer).
+    pub spectrum_db: Vec<f32>,
+    pub spectrum_at: f64,
+    /// Peak in (the source), out (what is heard) and the gain change at the
+    /// playhead, in dB.
+    pub in_db: f32,
+    pub out_db: f32,
+    pub gain_db: f32,
+    pub at: f64,
+    /// The playhead, in source samples.
+    pub source_pos: Option<usize>,
+}
+
 /// The tool session of one tab.
 #[derive(Clone, Debug, Default)]
 pub struct ToolSession {
@@ -162,6 +224,9 @@ pub struct ToolSession {
     pub manual: bool,
     /// The last render failed; why, for the footer.
     pub error: Option<String>,
+    /// The source over the target, measured when the tool opened.
+    pub source_analysis: Option<std::sync::Arc<SourceAnalysis>>,
+    pub live: LiveMeters,
 }
 
 impl ToolSession {

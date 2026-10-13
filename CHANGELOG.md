@@ -4,6 +4,38 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### EQ / Compressor / Limiter / Gate を作り込んだ（エディタの Inspector）
+
+- **EQ は最大 8 バンドのパラメトリック EQ になった**。
+  - 形は Bell / Low Shelf / High Shelf / Low Cut・High Cut（12〜48 dB/oct）/ Notch。
+  - バンドごとに Stereo / Mid / Side を選べる。
+  - 出力ゲインがある。
+  - 操作:
+    - グラフをダブルクリックでバンドを追加
+    - ハンドルをドラッグ（Shift で微調整）
+    - ホイールで Q（Cut は傾き）
+    - Alt+クリックでバイパス
+    - 右クリックで形・傾き・チャンネル・削除
+  - カーブの背面に、対象範囲のスペクトル（処理前は灰、処理後は青）と再生中のスペクトル（シアン）を表示する。
+- **Compressor**:
+  - ソフトニー、ルックアヘッド、ミックス（パラレル）、レンジ、Peak / RMS、ステレオリンク、サイドチェインのハイパス、オートメイクアップを加えた。
+  - 出力を ±1 でクリップしなくなった。
+- **Limiter を追加した**。ルックアヘッドのブリックウォールで、true peak（サンプル間のピーク）にも対応し、チャンネルをリンクできる。
+- **Gate**: ヒステリシス、ホールド、レンジ（閉じたときの減衰量）、ルックアヘッド、キーフィルタ（HPF / LPF）、Peak / RMS、ステレオリンクを加えた。
+- **音声を見ながら調整できる**:
+  - 転送曲線に入力レベルの分布を重ね、再生中は現在のレベルを点で示す。
+  - レベルとゲインリダクションの時間変化のグラフを付けた。クリックでその位置へ移動し、しきい値の線はドラッグで動かせる。
+  - In / GR / Out メーターを付けた。
+  - 波形の上にも、しきい値の線とゲインリダクションの帯を表示する。Gate では閉じた区間を網掛けにする。
+  - どの表示も、プレビューと同じ計算から作る。表示と Apply の結果は一致する。
+- **プリセット**:
+  - EQ: Low Cut / De-mud / Presence / Wider air
+  - Comp: Vocal / Bus glue / Peak control / Parallel
+  - Limiter: −1 / −2 dBTP / Loud
+  - Gate: Dialog / Drums / Silence the gaps
+  - プリセットの適用は下書き 1 手で、Ctrl+Z で戻せる。
+- 古いセッションの 3 バンド EQ / Compressor / Gate の設定は、そのまま読み込める。Effect Graph のノードの動作は変わらない。
+
 ## 0.20261013.0 - 2026-10-13
 
 ### エディタの Inspector を作り直した（docs/INSPECTOR_SPEC.md）

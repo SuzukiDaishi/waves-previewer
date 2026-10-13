@@ -79,7 +79,12 @@ impl ToolCategory {
             ToolCategory::TimePitch => {
                 &[ToolKind::PitchShift, ToolKind::TimeStretch, ToolKind::Speed]
             }
-            ToolCategory::Dynamics => &[ToolKind::Eq, ToolKind::Compressor, ToolKind::NoiseGate],
+            ToolCategory::Dynamics => &[
+                ToolKind::Eq,
+                ToolKind::Compressor,
+                ToolKind::Limiter,
+                ToolKind::NoiseGate,
+            ],
             ToolCategory::Repair => &[
                 ToolKind::DeClick,
                 ToolKind::DeClip,
@@ -212,7 +217,7 @@ impl ToolSpec {
 
 impl ToolKind {
     /// Every tool, in palette order (Spectral last).
-    pub const ALL: [ToolKind; 31] = [
+    pub const ALL: [ToolKind; 32] = [
         ToolKind::Trim,
         ToolKind::Fade,
         ToolKind::InsertSilence,
@@ -228,6 +233,7 @@ impl ToolKind {
         ToolKind::Speed,
         ToolKind::Eq,
         ToolKind::Compressor,
+        ToolKind::Limiter,
         ToolKind::NoiseGate,
         ToolKind::DeClick,
         ToolKind::DeClip,
@@ -380,8 +386,8 @@ impl ToolKind {
                 "EQ",
                 "📊",
                 C::Dynamics,
-                "Three-band equalizer",
-                "Drag the handles on the response curve; scroll over the middle one to change its Q.",
+                "Parametric EQ: up to eight bands, on stereo, mid or side",
+                "Double-click the graph to add a band. Drag a handle for frequency and gain (Shift: fine), scroll on it for Q, Alt+click to bypass it, right-click for its shape, mode and Delete.",
                 T::SelectionOrWhole,
                 P::Rendered,
             ),
@@ -390,16 +396,26 @@ impl ToolKind {
                 "⬇",
                 C::Dynamics,
                 "Reduce the dynamic range",
-                "Drag the knee sideways for the threshold and the top point up or down for the ratio.",
+                "Drag the knee for the threshold, the top point for the ratio, the knee's edge for its width. The lower graph is the gain reduction over the target; click it to go there.",
                 T::SelectionOrWhole,
                 P::Rendered,
             ),
+            ToolKind::Limiter => spec(
+                "Limiter",
+                "⏏",
+                C::Dynamics,
+                "Hold the peaks under a ceiling",
+                "Drag the ceiling line on the level graph. Input gain pushes the audio into it; True peak also catches the peaks between samples.",
+                T::SelectionOrWhole,
+                P::Rendered,
+            )
+            .heavy(),
             ToolKind::NoiseGate => spec(
                 "Noise Gate",
                 "🔇",
                 C::Dynamics,
-                "Silence what falls below a threshold",
-                "Drag the threshold handle on the graph.",
+                "Turn down what falls below a threshold",
+                "Drag the open threshold on either graph. Audio below the close line (shaded) is turned down to the floor (Range).",
                 T::SelectionOrWhole,
                 P::Rendered,
             ),

@@ -8,6 +8,7 @@
 //! tool is previewed, applied and undone through the same footer, by the
 //! rules in `editor_tool.rs` and `tool_session.rs`.
 
+mod plots;
 mod tools;
 mod views;
 pub(in crate::app) mod widgets;

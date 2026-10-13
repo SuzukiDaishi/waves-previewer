@@ -1097,6 +1097,18 @@ impl WavesPreviewer {
             wait_frames: delay,
             action: DebugAction::ScreenshotAuto,
         });
+        // The EQ and dynamics tools with their graphs over the audio: a
+        // render and a source analysis each, so a longer wait.
+        for tool in [ToolKind::Eq, ToolKind::Compressor, ToolKind::Limiter, ToolKind::NoiseGate] {
+            steps.push_back(DebugStep {
+                wait_frames: delay,
+                action: DebugAction::ShowcaseTool(tool),
+            });
+            steps.push_back(DebugStep {
+                wait_frames: delay.saturating_mul(3),
+                action: DebugAction::ScreenshotAuto,
+            });
+        }
         steps.push_back(DebugStep {
             wait_frames: delay,
             action: DebugAction::SetSelection {
@@ -1444,6 +1456,56 @@ impl WavesPreviewer {
             DebugAction::ScreenshotPath(path) => {
                 self.request_screenshot(ctx, path, false);
                 self.debug_log("auto: screenshot path");
+            }
+            DebugAction::ShowcaseTool(tool) => {
+                if let Some(tab_idx) = self.active_tab {
+                    self.editor_select_tool(tab_idx, tool);
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        use crate::eq::{CutSlope, EqBand, EqChannelMode, EqKind};
+                        let st = &mut tab.tool_state;
+                        match tool {
+                            ToolKind::Eq => {
+                                st.eq.bands[0].gain_db = -4.0;
+                                st.eq.bands[1] = EqBand {
+                                    enabled: true,
+                                    freq_hz: 2_500.0,
+                                    gain_db: 5.0,
+                                    q: 1.4,
+                                    ..EqBand::default()
+                                };
+                                st.eq.bands[2].gain_db = 3.0;
+                                st.eq.bands[3] = EqBand {
+                                    enabled: true,
+                                    kind: EqKind::LowCut,
+                                    freq_hz: 60.0,
+                                    slope: CutSlope::Db24,
+                                    ..EqBand::default()
+                                };
+                                st.eq.bands[4] = EqBand {
+                                    enabled: true,
+                                    freq_hz: 400.0,
+                                    gain_db: -3.0,
+                                    mode: EqChannelMode::Side,
+                                    ..EqBand::default()
+                                };
+                            }
+                            ToolKind::Compressor => {
+                                st.compressor.threshold_db = -30.0;
+                                st.compressor.ratio = 4.0;
+                                st.compressor.knee_db = 8.0;
+                            }
+                            ToolKind::Limiter => st.limiter.input_gain_db = 9.0,
+                            ToolKind::NoiseGate => {
+                                st.gate.threshold_db = -24.0;
+                                st.gate.range_db = -40.0;
+                                st.gate.hysteresis_db = 4.0;
+                            }
+                            _ => {}
+                        }
+                        self.debug_log(format!("auto: showcase {tool:?}"));
+                    }
+                    self.tool_preview_request_now(tab_idx);
+                }
             }
             DebugAction::SetActiveTool(tool) => {
                 if let Some(tab_idx) = self.active_tab {

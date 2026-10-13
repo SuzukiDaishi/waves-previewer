@@ -108,6 +108,7 @@ pub(crate) mod list_filter;
 pub(crate) mod text_match;
 mod spectral_ops;
 mod tool_apply_ops;
+mod tool_presets;
 mod tool_preview_ops;
 mod tool_render;
 mod tool_session;

@@ -81,27 +81,10 @@ impl WavesPreviewer {
             ToolKind::Speed => ToolOp::Speed {
                 rate: st.speed_rate,
             },
-            ToolKind::NoiseGate => ToolOp::NoiseGate(crate::wave::NoiseGateParams {
-                threshold_db: st.noise_gate_threshold_db,
-                attack_ms: st.noise_gate_attack_ms,
-                release_ms: st.noise_gate_release_ms,
-            }),
-            ToolKind::Eq => ToolOp::Eq(crate::wave::ThreeBandEqParams {
-                low_shelf_freq_hz: st.eq_low_shelf_freq_hz,
-                low_shelf_gain_db: st.eq_low_shelf_gain_db,
-                mid_freq_hz: st.eq_mid_freq_hz,
-                mid_gain_db: st.eq_mid_gain_db,
-                mid_q: st.eq_mid_q,
-                high_shelf_freq_hz: st.eq_high_shelf_freq_hz,
-                high_shelf_gain_db: st.eq_high_shelf_gain_db,
-            }),
-            ToolKind::Compressor => ToolOp::Compressor(crate::wave::CompressorParams {
-                threshold_db: st.compressor_threshold_db,
-                ratio: st.compressor_ratio,
-                attack_ms: st.compressor_attack_ms,
-                release_ms: st.compressor_release_ms,
-                makeup_db: st.compressor_makeup_db,
-            }),
+            ToolKind::NoiseGate => ToolOp::NoiseGate(st.gate),
+            ToolKind::Eq => ToolOp::Eq(st.eq),
+            ToolKind::Compressor => ToolOp::Compressor(st.compressor),
+            ToolKind::Limiter => ToolOp::Limiter(st.limiter),
             ToolKind::DeClick => ToolOp::DeClick {
                 sensitivity: st.declick_sensitivity,
             },
@@ -275,6 +258,7 @@ impl WavesPreviewer {
             time_map,
             markers_after,
             lufs_override,
+            analysis: _,
         } = out;
         let Some((path, old_len, buffer_sr)) = self.tabs.get_mut(tab_idx).map(|tab| {
             let old_len = tab.samples_len;

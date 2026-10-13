@@ -13,6 +13,8 @@ pub mod audio_truehd;
 pub mod binaural;
 pub mod cli;
 pub mod crash_report;
+pub mod dynamics;
+pub mod eq;
 pub mod flac_meta;
 pub mod ipc;
 #[cfg(feature = "mp3_lame")]

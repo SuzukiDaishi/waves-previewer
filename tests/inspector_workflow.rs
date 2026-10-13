@@ -479,3 +479,127 @@ fn a_saved_preview_is_rendered_again_when_the_session_opens() {
     });
     assert_eq!(harness.state().test_tab_channel_samples().unwrap(), preview);
 }
+
+#[test]
+fn the_eq_draws_the_source_and_its_render_and_applies_what_it_drew() {
+    let (mut harness, _) = open_editor("eq_rich");
+    assert!(harness.state_mut().test_switch_tool(ToolKind::Eq));
+    wait_until(&mut harness, "the source's spectrum", |h| {
+        h.state().test_source_analysis() == Some((true, false))
+    });
+    let before = harness.state().test_tab_channel_samples().unwrap();
+    assert!(harness.state_mut().test_change_tool_setting(|st| {
+        st.eq.bands[3] = neowaves::eq::EqBand {
+            enabled: true,
+            kind: neowaves::eq::EqKind::LowCut,
+            freq_hz: 400.0,
+            slope: neowaves::eq::CutSlope::Db48,
+            ..Default::default()
+        };
+    }));
+    wait_for_preview(&mut harness);
+    let (columns, _) = harness.state().test_preview_analysis().expect("the render's spectrum");
+    assert!(columns > 0);
+    let preview = harness.state().test_tool_preview_channels().unwrap();
+    assert!(harness.state_mut().test_inspector_apply());
+    wait_until(&mut harness, "apply", |h| !h.state().test_editor_apply_busy());
+    let after = harness.state().test_tab_channel_samples().unwrap();
+    assert_eq!(after, preview, "the committed samples are the previewed ones");
+    // The 220 / 330 Hz tones sit well under a 48 dB/oct cut at 400 Hz.
+    let tail = after[0].len() / 2;
+    let slice_peak = |v: &[f32]| v.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    assert!(slice_peak(&after[0][tail..]) < slice_peak(&before[0][tail..]) * 0.5);
+}
+
+#[test]
+fn the_limiter_keeps_what_it_applies_under_its_ceiling() {
+    let (mut harness, _) = open_editor("limiter");
+    assert!(harness.state_mut().test_switch_tool(ToolKind::Limiter));
+    assert!(harness
+        .state_mut()
+        .test_change_tool_setting(|st| st.limiter.input_gain_db = 12.0));
+    wait_for_preview(&mut harness);
+    let (_, reduction) = harness.state().test_preview_analysis().expect("a trace");
+    assert!(reduction > 1.0, "{reduction}");
+    assert!(harness.state_mut().test_inspector_apply());
+    wait_until(&mut harness, "apply", |h| !h.state().test_editor_apply_busy());
+    let ceiling = 10f32.powf(-1.0 / 20.0);
+    let after = harness.state().test_tab_channel_samples().unwrap();
+    assert!(peak(&after) <= ceiling + 1e-6, "{}", peak(&after));
+    assert!(peak(&after) > ceiling * 0.9, "pushed up to the ceiling");
+}
+
+#[test]
+fn the_compressor_shows_its_reduction_on_the_waveform_and_the_meters() {
+    let (mut harness, _) = open_editor("comp_rich");
+    assert!(harness.state_mut().test_switch_tool(ToolKind::Compressor));
+    wait_until(&mut harness, "the source's level", |h| {
+        h.state().test_source_analysis() == Some((false, true))
+    });
+    assert_eq!(harness.state().test_dynamics_overlay(), Some(false), "lines, no render yet");
+    assert!(harness.state_mut().test_change_tool_setting(|st| {
+        st.compressor.threshold_db = -36.0;
+        st.compressor.ratio = 6.0;
+    }));
+    wait_for_preview(&mut harness);
+    let (_, reduction) = harness.state().test_preview_analysis().expect("a trace");
+    assert!(reduction > 6.0, "{reduction}");
+    assert_eq!(harness.state().test_dynamics_overlay(), Some(true));
+
+    let len = harness.state().test_tab_samples_len();
+    harness.state_mut().test_audio_seek_to_sample(len / 2);
+    harness.state_mut().test_request_workspace_play_toggle();
+    wait_until(&mut harness, "playing", |h| h.state().test_audio_is_playing());
+    wait_until(&mut harness, "live meters", |h| {
+        h.state().test_tool_live_meters().is_some_and(|m| m.0 && m.3 < -3.0)
+    });
+    let (_, in_db, _, gain_db, _) = harness.state().test_tool_live_meters().unwrap();
+    assert!(in_db > -20.0, "the source at the playhead: {in_db}");
+    assert!(gain_db < -3.0, "the reduction at the playhead: {gain_db}");
+}
+
+#[test]
+fn a_preset_is_one_draft_step() {
+    let (mut harness, _) = open_editor("preset");
+    assert!(harness.state_mut().test_switch_tool(ToolKind::NoiseGate));
+    let default_gate = harness.state().test_tool_state().unwrap().gate;
+    assert!(harness.state_mut().test_apply_preset(0));
+    let dialog = harness.state().test_tool_state().unwrap().gate;
+    assert_ne!(dialog, default_gate);
+    assert_eq!(dialog.range_db, -24.0);
+    assert_eq!(harness.state().test_tool_draft_depths(), (1, 0));
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    harness.run_steps(2);
+    assert_eq!(harness.state().test_tool_state().unwrap().gate, default_gate);
+}
+
+#[test]
+fn eq_and_dynamics_settings_survive_a_session() {
+    let (mut harness, path) = open_editor("dyn_session");
+    assert!(harness.state_mut().test_switch_tool(ToolKind::Limiter));
+    assert!(harness.state_mut().test_change_tool_setting(|st| {
+        st.compressor.knee_db = 9.0;
+        st.compressor.detection = neowaves::dynamics::Detection::Rms;
+        st.limiter.ceiling_db = -2.0;
+        st.limiter.true_peak = false;
+        st.gate.hold_ms = 77.0;
+        st.eq.bands[4] = neowaves::eq::EqBand {
+            enabled: true,
+            kind: neowaves::eq::EqKind::HighShelf,
+            freq_hz: 9_000.0,
+            gain_db: 2.5,
+            mode: neowaves::eq::EqChannelMode::Side,
+            ..Default::default()
+        };
+    }));
+    let saved = harness.state().test_tool_state().unwrap();
+    let session = path.with_extension("nwsess");
+    assert!(harness.state_mut().test_save_session_to(&session));
+    assert!(harness.state_mut().test_open_session_from(&session));
+    wait_until(&mut harness, "tab back", |h| h.state().test_tool_state().is_some());
+    let back = harness.state().test_tool_state().unwrap();
+    assert_eq!(back.eq, saved.eq);
+    assert_eq!(back.compressor, saved.compressor);
+    assert_eq!(back.limiter, saved.limiter);
+    assert_eq!(back.gate, saved.gate);
+}

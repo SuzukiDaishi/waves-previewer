@@ -82,6 +82,8 @@ pub(in crate::app) enum ToolCommand {
     AddMarkerAtPlayhead,
     /// Move the playhead to a display sample.
     Seek(usize),
+    /// Apply the active tool's built-in preset `n` (`tool_presets`).
+    Preset(usize),
 }
 
 impl WavesPreviewer {
@@ -136,6 +138,14 @@ impl WavesPreviewer {
 
     fn apply_tool_command(&mut self, tab_idx: usize, command: ToolCommand) {
         match command {
+            ToolCommand::Preset(index) => {
+                let tool = self.tabs[tab_idx].active_tool;
+                if let Some(preset) = super::tool_presets::presets(tool).get(index) {
+                    let before = DraftSnapshot::capture(&self.tabs[tab_idx]);
+                    (preset.apply)(&mut self.tabs[tab_idx].tool_state);
+                    self.note_tool_draft_change(tab_idx, before);
+                }
+            }
             ToolCommand::DeclickScan => self.editor_declick_scan(tab_idx),
             ToolCommand::DeclipScan => self.editor_declip_scan(tab_idx),
             ToolCommand::ClearScan => {
@@ -636,27 +646,10 @@ impl WavesPreviewer {
             }
             ToolKind::TimeStretch => st.stretch_rate = d.stretch_rate,
             ToolKind::Speed => st.speed_rate = d.speed_rate,
-            ToolKind::NoiseGate => {
-                st.noise_gate_threshold_db = d.noise_gate_threshold_db;
-                st.noise_gate_attack_ms = d.noise_gate_attack_ms;
-                st.noise_gate_release_ms = d.noise_gate_release_ms;
-            }
-            ToolKind::Eq => {
-                st.eq_low_shelf_freq_hz = d.eq_low_shelf_freq_hz;
-                st.eq_low_shelf_gain_db = d.eq_low_shelf_gain_db;
-                st.eq_mid_freq_hz = d.eq_mid_freq_hz;
-                st.eq_mid_gain_db = d.eq_mid_gain_db;
-                st.eq_mid_q = d.eq_mid_q;
-                st.eq_high_shelf_freq_hz = d.eq_high_shelf_freq_hz;
-                st.eq_high_shelf_gain_db = d.eq_high_shelf_gain_db;
-            }
-            ToolKind::Compressor => {
-                st.compressor_threshold_db = d.compressor_threshold_db;
-                st.compressor_ratio = d.compressor_ratio;
-                st.compressor_attack_ms = d.compressor_attack_ms;
-                st.compressor_release_ms = d.compressor_release_ms;
-                st.compressor_makeup_db = d.compressor_makeup_db;
-            }
+            ToolKind::NoiseGate => st.gate = d.gate,
+            ToolKind::Eq => st.eq = d.eq,
+            ToolKind::Compressor => st.compressor = d.compressor,
+            ToolKind::Limiter => st.limiter = d.limiter,
             ToolKind::DeClick => st.declick_sensitivity = d.declick_sensitivity,
             ToolKind::DeClip => st.declip_sensitivity = d.declip_sensitivity,
             ToolKind::DeHum => {

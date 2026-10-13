@@ -137,6 +137,37 @@ Session states (per tab, `ToolSession::phase`):
 - **Tool switch** drops the preview at the same place; playback goes on.
 - Spawning is behind `deferrable!`; installing a finished preview is not.
 
+## EQ and dynamics
+
+The EQ, Compressor, Limiter and Noise Gate run on `crate::eq` and
+`crate::dynamics` (not the Effect Graph's `wave::` versions, which stay as
+they were so a saved graph keeps rendering the same).
+
+- **One computation, three pictures.** A render of these tools carries a
+  `RenderAnalysis` beside its samples: the EQ's average spectrum of the
+  processed target, or the dynamics tools' `DynamicsTrace` (input peak and
+  gain change per hop). The Inspector draws it, the waveform draws it
+  (`render/dynamics_overlay.rs`), and the live meters read it at the
+  playhead -- so what is shown is what Apply writes.
+- **Before anything renders** the engine measures the source over the
+  target on a worker (`SourceAnalysis`, keyed by tab, audio revision, target
+  and channel mask): the EQ's "before" spectrum, the dynamics tools' level
+  over time.
+- **Live.** While the tab plays, the panel reads a window of what is heard
+  around the playhead each frame it draws (spectrum at the mini meter's
+  cadence; in / out peaks; gain from the trace). Nothing is computed when it
+  is not playing.
+- **Ranges.** A selection is processed with its own pre-roll -- a few
+  release times for the dynamics tools, eight periods of the lowest corner
+  for the EQ -- so the envelope or the filter has settled at the first kept
+  sample; the edges are spliced as every range edit is.
+- **Mid / side** bands need the stereo pair in scope; on anything else a Mid
+  band works on every channel and a Side band does nothing (the panel says so).
+- **Sessions** store the settings as `eq_parametric`, `compressor_settings`,
+  `limiter_settings` and `gate_settings`; a session without them is read from
+  the old flat fields (three bands, the hard-knee per-channel compressor, the
+  gate that shut to silence), which are still written for older builds.
+
 ## Undo / Redo
 
 Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z act on **the workspace in front**

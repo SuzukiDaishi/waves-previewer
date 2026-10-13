@@ -19,7 +19,11 @@ use std::time::{Duration, Instant};
 use super::editor_tool::PreviewKind;
 use super::loading_ops::{poll_job, JobPoll};
 use super::tool_render::{self, RenderError, ToolRenderOutput, ToolRenderRequest};
-use super::tool_session::{PreviewKey, SessionPhase, ToolPreviewResult, ToolSession};
+use super::tool_render::RenderTarget;
+use super::tool_session::{
+    mask_bits, AnalysisKey, AnalysisKind, PreviewKey, SessionPhase, SourceAnalysis,
+    ToolPreviewResult, ToolSession,
+};
 use super::types::PreviewOverlay;
 use super::{PlaybackSourceKind, WavesPreviewer, LIVE_PREVIEW_SAMPLE_LIMIT};
 
@@ -47,12 +51,27 @@ pub(super) struct ToolPreviewJob {
     pub started: Instant,
 }
 
-/// The engine's state: at most one render in flight.
+/// A source analysis on its way back from the worker.
+pub(super) struct SourceAnalysisJob {
+    pub key: AnalysisKey,
+    pub rx: mpsc::Receiver<SourceAnalysis>,
+    pub cancel: Arc<AtomicBool>,
+}
+
+/// The engine's state: at most one render and one analysis in flight.
 #[derive(Default)]
 pub(super) struct ToolPreviewEngine {
     pub job: Option<ToolPreviewJob>,
     pub last_spawn: Option<Instant>,
+    pub analysis_job: Option<SourceAnalysisJob>,
 }
+
+/// How long the live meters integrate a peak over.
+const LIVE_LEVEL_WINDOW_SECS: f64 = 0.05;
+/// How fast a live meter falls once the level drops, dB per second.
+const LIVE_FALL_DB_PER_SEC: f32 = 24.0;
+/// The floor of the live meters, dBFS.
+const LIVE_FLOOR_DB: f32 = -90.0;
 
 impl WavesPreviewer {
     /// Whether the active tool of `tab_idx` is previewed by rendering, in
@@ -283,9 +302,225 @@ impl WavesPreviewer {
         }
     }
 
+    /// What the active tool would measure of its source now, if it draws one.
+    fn source_analysis_target(
+        &self,
+        tab_idx: usize,
+    ) -> Option<(AnalysisKey, Arc<Vec<Vec<f32>>>, (usize, usize), Option<Vec<bool>>, u32)> {
+        let tab = self.tabs.get(tab_idx)?;
+        if tab.loading || tab.samples_len == 0 || tab.ch_samples.is_empty() {
+            return None;
+        }
+        let tool = tab.active_tool;
+        let kind = AnalysisKind::for_tool(tool)?;
+        let target = self.tool_target_for_tab(tab_idx, tool);
+        let range = match target {
+            RenderTarget::Whole => (0, tab.samples_len),
+            RenderTarget::Range(a, b) => (a.min(b), a.max(b).min(tab.samples_len)),
+            RenderTarget::InsertAt(_) => return None,
+        };
+        let mask = Self::tool_channel_mask(tab, tool);
+        let key = AnalysisKey {
+            tab_id: tab.tab_id,
+            audio_rev: tab.audio_rev,
+            kind,
+            target,
+            mask_bits: mask_bits(mask.as_deref()),
+        };
+        Some((key, tab.ch_samples_arc.clone(), range, mask, tab.buffer_sample_rate.max(1)))
+    }
+
+    /// Measure the active tool's source when its target changed. Deferrable.
+    pub(super) fn tick_source_analysis(&mut self) {
+        if !self.is_editor_workspace_active() {
+            return;
+        }
+        let Some(tab_idx) = self.active_tab else {
+            return;
+        };
+        let Some((key, channels, (s, e), mask, sr)) = self.source_analysis_target(tab_idx) else {
+            return;
+        };
+        let held = self.tabs[tab_idx]
+            .tool_session
+            .source_analysis
+            .as_ref()
+            .is_some_and(|a| a.key == key);
+        let running = self
+            .tool_preview
+            .analysis_job
+            .as_ref()
+            .is_some_and(|job| job.key == key);
+        if held || running {
+            return;
+        }
+        if let Some(old) = self.tool_preview.analysis_job.take() {
+            old.cancel.store(true, Ordering::Relaxed);
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            crate::app::threading::lower_current_thread_priority();
+            let scope: Vec<&[f32]> = channels
+                .iter()
+                .enumerate()
+                .filter(|(ci, _)| mask.as_ref().map_or(true, |m| m.get(*ci).copied().unwrap_or(true)))
+                .map(|(_, c)| c.as_slice())
+                .collect();
+            if worker_cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let analysis = match key.kind {
+                AnalysisKind::Spectrum => SourceAnalysis {
+                    key,
+                    spectrum: Some(crate::app::render::mini_meter::average_spectrum(&scope, s, e, sr)),
+                    levels: None,
+                },
+                AnalysisKind::Levels => {
+                    let ranged: Vec<&[f32]> = scope.iter().map(|c| &c[s.min(c.len())..e.min(c.len())]).collect();
+                    let mut levels = crate::dynamics::level_trace(&ranged, sr);
+                    levels.start = s;
+                    SourceAnalysis {
+                        key,
+                        spectrum: None,
+                        levels: Some(levels),
+                    }
+                }
+            };
+            let _ = tx.send(analysis);
+            crate::ui_wake::wake_ui();
+        });
+        self.tool_preview.analysis_job = Some(SourceAnalysisJob { key, rx, cancel });
+    }
+
+    /// Take a finished source analysis. Cheap; every frame.
+    pub(super) fn drain_source_analysis(&mut self) {
+        let Some(job) = self.tool_preview.analysis_job.as_ref() else {
+            return;
+        };
+        match poll_job(&job.rx) {
+            JobPoll::Waiting => {}
+            JobPoll::Gone => {
+                self.tool_preview.analysis_job = None;
+                self.debug_log("tool source analysis stopped without a result".to_string());
+            }
+            JobPoll::Ready(analysis) => {
+                self.tool_preview.analysis_job = None;
+                let Some(tab_idx) = self.tabs.iter().position(|t| t.tab_id == analysis.key.tab_id) else {
+                    return;
+                };
+                let wanted = self
+                    .source_analysis_target(tab_idx)
+                    .is_some_and(|(key, ..)| key == analysis.key);
+                if wanted {
+                    self.tabs[tab_idx].tool_session.source_analysis = Some(Arc::new(analysis));
+                }
+            }
+        }
+    }
+
+    /// Refresh what the tool panel shows while the tab plays: the heard
+    /// spectrum (EQ), and in / out / gain at the playhead (dynamics). Reads
+    /// a window of samples around the playhead; called by the panel.
+    pub(super) fn update_tool_live_meters(&mut self, tab_idx: usize, now: f64) {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let tool = tab.active_tool;
+        let Some(kind) = AnalysisKind::for_tool(tool) else {
+            return;
+        };
+        let playing = self.playback_is_playing_now() && self.tool_preview_tab_is_audible(tab_idx);
+        let dt = (now - tab.tool_session.live.at).clamp(0.0, 0.25) as f32;
+        if !playing {
+            let live = &mut self.tabs[tab_idx].tool_session.live;
+            live.playing = false;
+            live.at = now;
+            live.source_pos = None;
+            let fall = LIVE_FALL_DB_PER_SEC * 4.0 * dt;
+            live.in_db = (live.in_db - fall).max(LIVE_FLOOR_DB);
+            live.out_db = (live.out_db - fall).max(LIVE_FLOOR_DB);
+            live.gain_db = (live.gain_db + fall).min(0.0);
+            live.spectrum_db.clear();
+            return;
+        }
+        let previewing = matches!(self.playback_session.source, PlaybackSourceKind::ToolPreview);
+        let source_pos = self.tool_preview_source_pos(tab_idx).max(0.0) as usize;
+        let sr = tab.buffer_sample_rate.max(1);
+        let level_n = crate::sample_rate::frames_for_secs(LIVE_LEVEL_WINDOW_SECS, sr).max(1);
+        let peak_before = |chans: &[Vec<f32>], end: usize, n: usize| -> f32 {
+            let start = end.saturating_sub(n);
+            chans
+                .iter()
+                .flat_map(|c| c[start.min(c.len())..end.min(c.len())].iter())
+                .fold(0.0f32, |m, v| m.max(v.abs()))
+        };
+        // What is heard: the preview buffer while it plays, else the tab.
+        let engine_audio = previewing.then(|| self.audio.shared.samples.load_full()).flatten();
+        let heard_pos = if previewing {
+            self.audio.shared.play_pos.load(Ordering::Relaxed)
+        } else {
+            source_pos
+        };
+        let heard: &[Vec<f32>] = match engine_audio.as_deref() {
+            Some(audio) => audio.channels.as_slice(),
+            None => tab.ch_samples.as_slice(),
+        };
+        let to_db = |amp: f32| if amp > 0.0 { (20.0 * amp.log10()).max(LIVE_FLOOR_DB) } else { LIVE_FLOOR_DB };
+        let in_db = to_db(peak_before(&tab.ch_samples, source_pos, level_n));
+        let out_db = to_db(peak_before(heard, heard_pos, level_n));
+        let gain_db = tab
+            .tool_session
+            .preview
+            .as_ref()
+            .and_then(|p| match p.output.analysis.as_deref() {
+                Some(super::tool_render::RenderAnalysis::Dynamics(trace)) if !tab.tool_session.ab_original => {
+                    trace.gain_db_at(source_pos)
+                }
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        let mut spectrum = None;
+        let interval = self.perf.mini_meter_spectrum_interval().as_secs_f64();
+        if kind == AnalysisKind::Spectrum && now - tab.tool_session.live.spectrum_at >= interval {
+            use crate::app::render::mini_meter;
+            let n = mini_meter::spectrum_history_len(sr);
+            let end = heard_pos.min(heard.first().map_or(0, Vec::len));
+            let start = end.saturating_sub(n);
+            let inv = 1.0 / heard.len().max(1) as f32;
+            let mono: Vec<f32> = (start..end)
+                .map(|i| heard.iter().map(|c| c.get(i).copied().unwrap_or(0.0)).sum::<f32>() * inv)
+                .collect();
+            let mut columns = Vec::new();
+            mini_meter::spectrum_columns_in(
+                &mono,
+                sr,
+                mini_meter::ANALYZER_COLUMNS,
+                crate::sample_rate::AUDIBLE_LOW_HZ,
+                crate::sample_rate::AUDIBLE_HIGH_HZ,
+                &mut columns,
+            );
+            spectrum = Some(columns);
+        }
+        let live = &mut self.tabs[tab_idx].tool_session.live;
+        let fall = LIVE_FALL_DB_PER_SEC * dt;
+        live.playing = true;
+        live.at = now;
+        live.source_pos = Some(source_pos);
+        live.in_db = in_db.max(live.in_db - fall);
+        live.out_db = out_db.max(live.out_db - fall);
+        live.gain_db = gain_db;
+        if let Some(columns) = spectrum {
+            let since = (now - live.spectrum_at).clamp(0.0, 0.25) as f32;
+            crate::app::render::mini_meter::smooth_spectrum_db(&mut live.spectrum_db, &columns, since);
+            live.spectrum_at = now;
+        }
+    }
+
     /// Whether `tab_idx` is what the engine is playing (its own audio or its
     /// preview).
-    fn tool_preview_tab_is_audible(&self, tab_idx: usize) -> bool {
+    pub(super) fn tool_preview_tab_is_audible(&self, tab_idx: usize) -> bool {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return false;
         };
@@ -297,7 +532,7 @@ impl WavesPreviewer {
     }
 
     /// The engine's position, in samples of the tab's own buffer.
-    fn tool_preview_source_pos(&self, tab_idx: usize) -> f64 {
+    pub(super) fn tool_preview_source_pos(&self, tab_idx: usize) -> f64 {
         let pos_f = self.audio.shared.play_pos_f.load(Ordering::Relaxed);
         let Some(tab) = self.tabs.get(tab_idx) else {
             return pos_f;

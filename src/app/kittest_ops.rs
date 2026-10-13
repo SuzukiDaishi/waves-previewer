@@ -1811,6 +1811,51 @@ impl super::WavesPreviewer {
             })
     }
 
+    /// Whether the waveform shows a dynamics tool's lines, and whether it
+    /// shows the gain its render takes.
+    pub fn test_dynamics_overlay(&self) -> Option<bool> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        crate::app::render::dynamics_overlay::DynamicsOverlay::for_tab(tab).map(|o| o.has_gain())
+    }
+
+    /// The active tab's tool session's live meters (playing, in, out, gain).
+    pub fn test_tool_live_meters(&self) -> Option<(bool, f32, f32, f32, usize)> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        let live = &tab.tool_session.live;
+        Some((live.playing, live.in_db, live.out_db, live.gain_db, live.spectrum_db.len()))
+    }
+
+    /// Whether the active tab holds a source analysis, and of what kind.
+    pub fn test_source_analysis(&self) -> Option<(bool, bool)> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        let a = tab.tool_session.source_analysis.as_ref()?;
+        Some((a.spectrum.is_some(), a.levels.is_some()))
+    }
+
+    /// The analysis attached to the active tab's preview: (spectrum columns,
+    /// dynamics max reduction in dB).
+    pub fn test_preview_analysis(&self) -> Option<(usize, f32)> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        match tab.tool_session.preview.as_ref()?.output.analysis.as_deref()? {
+            crate::app::tool_render::RenderAnalysis::Spectrum(s) => Some((s.len(), 0.0)),
+            crate::app::tool_render::RenderAnalysis::Dynamics(t) => Some((0, t.max_reduction_db())),
+        }
+    }
+
+    /// The Inspector's Preset menu: the active tool's preset `index`.
+    pub fn test_apply_preset(&mut self, index: usize) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.apply_inspector_actions(
+            tab_idx,
+            vec![crate::app::inspector_ops::InspectorAction::Tool(
+                crate::app::inspector_ops::ToolCommand::Preset(index),
+            )],
+        );
+        true
+    }
+
     /// How many Spectral Brush stamps the active tab holds.
     pub fn test_spectral_brush_stamp_count(&self) -> usize {
         self.active_tab

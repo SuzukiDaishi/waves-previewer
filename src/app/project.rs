@@ -965,6 +965,16 @@ pub struct ProjectToolState {
     pub spectral_time_fade_ms: f32,
     #[serde(default = "default_tool_spectral_freq_fade_hz")]
     pub spectral_freq_fade_hz: f32,
+    /// The parametric EQ. Absent in a session from before it, which then
+    /// reads the three-band `eq_*` fields.
+    #[serde(default)]
+    pub eq_parametric: Option<crate::eq::ParametricEqParams>,
+    #[serde(default)]
+    pub compressor_settings: Option<crate::dynamics::CompressorSettings>,
+    #[serde(default)]
+    pub limiter_settings: Option<crate::dynamics::LimiterSettings>,
+    #[serde(default)]
+    pub gate_settings: Option<crate::dynamics::GateSettings>,
 }
 
 // Settings later sessions added: an older session takes the defaults.
@@ -1040,6 +1050,7 @@ fn default_tool_spectral_freq_fade_hz() -> f32 {
 /// saving a tab, saving a cached edit and the CLI's fresh tab cannot drift.
 impl From<&super::types::ToolState> for ProjectToolState {
     fn from(t: &super::types::ToolState) -> Self {
+        let legacy = legacy_three_band(&t.eq);
         Self {
             fade_in_ms: t.fade_in_ms,
             fade_out_ms: t.fade_out_ms,
@@ -1052,21 +1063,21 @@ impl From<&super::types::ToolState> for ProjectToolState {
             warp_time_radius_ms: t.warp_time_radius_ms,
             warp_freq_radius_hz: t.warp_freq_radius_hz,
             loop_repeat: t.loop_repeat,
-            noise_gate_threshold_db: t.noise_gate_threshold_db,
-            noise_gate_attack_ms: t.noise_gate_attack_ms,
-            noise_gate_release_ms: t.noise_gate_release_ms,
-            eq_low_shelf_freq_hz: t.eq_low_shelf_freq_hz,
-            eq_low_shelf_gain_db: t.eq_low_shelf_gain_db,
-            eq_mid_freq_hz: t.eq_mid_freq_hz,
-            eq_mid_gain_db: t.eq_mid_gain_db,
-            eq_mid_q: t.eq_mid_q,
-            eq_high_shelf_freq_hz: t.eq_high_shelf_freq_hz,
-            eq_high_shelf_gain_db: t.eq_high_shelf_gain_db,
-            compressor_threshold_db: t.compressor_threshold_db,
-            compressor_ratio: t.compressor_ratio,
-            compressor_attack_ms: t.compressor_attack_ms,
-            compressor_release_ms: t.compressor_release_ms,
-            compressor_makeup_db: t.compressor_makeup_db,
+            noise_gate_threshold_db: t.gate.threshold_db,
+            noise_gate_attack_ms: t.gate.attack_ms,
+            noise_gate_release_ms: t.gate.release_ms,
+            eq_low_shelf_freq_hz: legacy.low_shelf_freq_hz,
+            eq_low_shelf_gain_db: legacy.low_shelf_gain_db,
+            eq_mid_freq_hz: legacy.mid_freq_hz,
+            eq_mid_gain_db: legacy.mid_gain_db,
+            eq_mid_q: legacy.mid_q,
+            eq_high_shelf_freq_hz: legacy.high_shelf_freq_hz,
+            eq_high_shelf_gain_db: legacy.high_shelf_gain_db,
+            compressor_threshold_db: t.compressor.threshold_db,
+            compressor_ratio: t.compressor.ratio,
+            compressor_attack_ms: t.compressor.attack_ms,
+            compressor_release_ms: t.compressor.release_ms,
+            compressor_makeup_db: t.compressor.makeup_db,
             pan_mode: t.pan_mode,
             pan_balance: t.pan_balance,
             pan_yaw_deg: t.pan_yaw_deg,
@@ -1089,7 +1100,94 @@ impl From<&super::types::ToolState> for ProjectToolState {
             loop_apply_unroll: t.loop_apply_unroll,
             spectral_time_fade_ms: t.spectral_time_fade_ms,
             spectral_freq_fade_hz: t.spectral_freq_fade_hz,
+            eq_parametric: Some(t.eq),
+            compressor_settings: Some(t.compressor),
+            limiter_settings: Some(t.limiter),
+            gate_settings: Some(t.gate),
         }
+    }
+}
+
+/// The three bands an older build understands: the first low shelf, bell
+/// and high shelf of the parametric EQ (flat where there is none).
+fn legacy_three_band(eq: &crate::eq::ParametricEqParams) -> crate::wave::ThreeBandEqParams {
+    use crate::eq::EqKind;
+    let mut out = crate::wave::ThreeBandEqParams::default();
+    let first = |kind: EqKind| eq.bands.iter().find(|b| b.is_heard() && b.kind == kind);
+    if let Some(b) = first(EqKind::LowShelf) {
+        out.low_shelf_freq_hz = b.freq_hz;
+        out.low_shelf_gain_db = b.gain_db;
+    }
+    if let Some(b) = first(EqKind::Bell) {
+        out.mid_freq_hz = b.freq_hz;
+        out.mid_gain_db = b.gain_db;
+        out.mid_q = b.q;
+    }
+    if let Some(b) = first(EqKind::HighShelf) {
+        out.high_shelf_freq_hz = b.freq_hz;
+        out.high_shelf_gain_db = b.gain_db;
+    }
+    out
+}
+
+/// A session from before the parametric EQ: its three bands, as they were.
+fn legacy_parametric_eq(t: &ProjectToolState) -> crate::eq::ParametricEqParams {
+    use crate::eq::{EqBand, EqKind};
+    let mut p = crate::eq::ParametricEqParams::default();
+    p.bands[0] = EqBand {
+        enabled: true,
+        kind: EqKind::LowShelf,
+        freq_hz: t.eq_low_shelf_freq_hz,
+        gain_db: t.eq_low_shelf_gain_db,
+        q: std::f32::consts::FRAC_1_SQRT_2,
+        ..EqBand::default()
+    };
+    p.bands[1] = EqBand {
+        enabled: true,
+        kind: EqKind::Bell,
+        freq_hz: t.eq_mid_freq_hz,
+        gain_db: t.eq_mid_gain_db,
+        q: t.eq_mid_q,
+        ..EqBand::default()
+    };
+    p.bands[2] = EqBand {
+        enabled: true,
+        kind: EqKind::HighShelf,
+        freq_hz: t.eq_high_shelf_freq_hz,
+        gain_db: t.eq_high_shelf_gain_db,
+        q: std::f32::consts::FRAC_1_SQRT_2,
+        ..EqBand::default()
+    };
+    p
+}
+
+/// A session from before the compressor's new settings: the old hard-knee,
+/// channel-by-channel compressor.
+fn legacy_compressor(t: &ProjectToolState) -> crate::dynamics::CompressorSettings {
+    crate::dynamics::CompressorSettings {
+        threshold_db: t.compressor_threshold_db,
+        ratio: t.compressor_ratio,
+        attack_ms: t.compressor_attack_ms,
+        release_ms: t.compressor_release_ms,
+        makeup_db: t.compressor_makeup_db,
+        knee_db: 0.0,
+        link_pct: 0.0,
+        ..Default::default()
+    }
+}
+
+/// A session from before the gate's new settings: the old gate, which shut
+/// to silence as soon as the level dropped.
+fn legacy_gate(t: &ProjectToolState) -> crate::dynamics::GateSettings {
+    crate::dynamics::GateSettings {
+        threshold_db: t.noise_gate_threshold_db,
+        attack_ms: t.noise_gate_attack_ms,
+        release_ms: t.noise_gate_release_ms,
+        hysteresis_db: 0.0,
+        hold_ms: 0.0,
+        range_db: *crate::dynamics::GateSettings::RANGE_DB.start(),
+        link_pct: 0.0,
+        ..Default::default()
     }
 }
 
@@ -1718,48 +1816,51 @@ fn default_loudness_target_lufs() -> f32 {
     super::types::ToolState::default_values().loudness_target_lufs
 }
 
+// The flat gate / EQ / compressor fields are what sessions wrote before the
+// parametric EQ and the dynamics settings (`eq_parametric` and friends): still
+// read to migrate such a session, still written for an older build.
 fn default_noise_gate_threshold_db() -> f32 {
-    super::types::ToolState::default_values().noise_gate_threshold_db
+    crate::wave::NoiseGateParams::default().threshold_db
 }
 
 fn default_noise_gate_attack_ms() -> f32 {
-    super::types::ToolState::default_values().noise_gate_attack_ms
+    crate::wave::NoiseGateParams::default().attack_ms
 }
 
 fn default_noise_gate_release_ms() -> f32 {
-    super::types::ToolState::default_values().noise_gate_release_ms
+    crate::wave::NoiseGateParams::default().release_ms
 }
 
 fn default_eq_low_shelf_freq_hz() -> f32 {
-    super::types::ToolState::default_values().eq_low_shelf_freq_hz
+    crate::wave::ThreeBandEqParams::default().low_shelf_freq_hz
 }
 
 fn default_eq_mid_freq_hz() -> f32 {
-    super::types::ToolState::default_values().eq_mid_freq_hz
+    crate::wave::ThreeBandEqParams::default().mid_freq_hz
 }
 
 fn default_eq_mid_q() -> f32 {
-    super::types::ToolState::default_values().eq_mid_q
+    crate::wave::ThreeBandEqParams::default().mid_q
 }
 
 fn default_eq_high_shelf_freq_hz() -> f32 {
-    super::types::ToolState::default_values().eq_high_shelf_freq_hz
+    crate::wave::ThreeBandEqParams::default().high_shelf_freq_hz
 }
 
 fn default_compressor_threshold_db() -> f32 {
-    super::types::ToolState::default_values().compressor_threshold_db
+    crate::wave::CompressorParams::default().threshold_db
 }
 
 fn default_compressor_ratio() -> f32 {
-    super::types::ToolState::default_values().compressor_ratio
+    crate::wave::CompressorParams::default().ratio
 }
 
 fn default_compressor_attack_ms() -> f32 {
-    super::types::ToolState::default_values().compressor_attack_ms
+    crate::wave::CompressorParams::default().attack_ms
 }
 
 fn default_compressor_release_ms() -> f32 {
-    super::types::ToolState::default_values().compressor_release_ms
+    crate::wave::CompressorParams::default().release_ms
 }
 
 fn default_bpm_value() -> f32 {
@@ -2237,21 +2338,10 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
             ToolState::default_values().warp_freq_radius_hz
         },
         loop_repeat: t.loop_repeat.max(2),
-        noise_gate_threshold_db: t.noise_gate_threshold_db,
-        noise_gate_attack_ms: t.noise_gate_attack_ms,
-        noise_gate_release_ms: t.noise_gate_release_ms,
-        eq_low_shelf_freq_hz: t.eq_low_shelf_freq_hz,
-        eq_low_shelf_gain_db: t.eq_low_shelf_gain_db,
-        eq_mid_freq_hz: t.eq_mid_freq_hz,
-        eq_mid_gain_db: t.eq_mid_gain_db,
-        eq_mid_q: t.eq_mid_q,
-        eq_high_shelf_freq_hz: t.eq_high_shelf_freq_hz,
-        eq_high_shelf_gain_db: t.eq_high_shelf_gain_db,
-        compressor_threshold_db: t.compressor_threshold_db,
-        compressor_ratio: t.compressor_ratio,
-        compressor_attack_ms: t.compressor_attack_ms,
-        compressor_release_ms: t.compressor_release_ms,
-        compressor_makeup_db: t.compressor_makeup_db,
+        eq: t.eq_parametric.unwrap_or_else(|| legacy_parametric_eq(t)),
+        compressor: t.compressor_settings.unwrap_or_else(|| legacy_compressor(t)),
+        limiter: t.limiter_settings.unwrap_or_default(),
+        gate: t.gate_settings.unwrap_or_else(|| legacy_gate(t)),
         pan_mode: t.pan_mode,
         pan_balance: t.pan_balance.clamp(-1.0, 1.0),
         pan_yaw_deg: t.pan_yaw_deg,
@@ -2651,6 +2741,44 @@ impl super::WavesPreviewer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_session_from_before_the_parametric_eq_and_dynamics_reads_its_old_fields() {
+        use crate::app::types::ToolState;
+        let mut old = ProjectToolState::from(&ToolState::default_values());
+        old.eq_parametric = None;
+        old.compressor_settings = None;
+        old.limiter_settings = None;
+        old.gate_settings = None;
+        old.eq_low_shelf_gain_db = -3.0;
+        old.eq_mid_freq_hz = 700.0;
+        old.eq_mid_gain_db = 5.0;
+        old.eq_mid_q = 2.0;
+        old.compressor_threshold_db = -20.0;
+        old.compressor_ratio = 5.0;
+        old.noise_gate_threshold_db = -33.0;
+        let st = project_tool_state_to_tool_state(&old);
+        assert_eq!(st.eq.bands[0].kind, crate::eq::EqKind::LowShelf);
+        assert_eq!(st.eq.bands[0].gain_db, -3.0);
+        assert_eq!(st.eq.bands[1].freq_hz, 700.0);
+        assert_eq!(st.eq.bands[1].gain_db, 5.0);
+        assert_eq!(st.eq.bands[1].q, 2.0);
+        assert_eq!(st.compressor.threshold_db, -20.0);
+        assert_eq!(st.compressor.ratio, 5.0);
+        assert_eq!(st.compressor.knee_db, 0.0, "the old compressor had a hard knee");
+        assert_eq!(st.gate.threshold_db, -33.0);
+        assert_eq!(st.gate.hysteresis_db, 0.0, "the old gate had none");
+        assert_eq!(st.limiter, crate::dynamics::LimiterSettings::default());
+
+        // A new session writes the old fields too, for an older build.
+        let mut st2 = ToolState::default_values();
+        st2.eq.bands[1].gain_db = 4.0;
+        st2.gate.threshold_db = -50.0;
+        let written = ProjectToolState::from(&st2);
+        assert_eq!(written.eq_mid_gain_db, 4.0);
+        assert_eq!(written.noise_gate_threshold_db, -50.0);
+        assert_eq!(project_tool_state_to_tool_state(&written), st2);
+    }
+
     use super::*;
 
     // ---- Mapped drive <-> UNC rewriting -----------------------------

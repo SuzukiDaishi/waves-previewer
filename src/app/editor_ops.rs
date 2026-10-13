@@ -2727,59 +2727,28 @@ impl crate::app::WavesPreviewer {
         self.editor_apply_op_now(tab_idx, req);
     }
 
-    pub(super) fn editor_apply_noise_gate_range(
+    /// What the Inspector's Apply does for `tool` with the tab's settings,
+    /// over the whole file. Returns whether an apply was made or started.
+    pub(super) fn editor_apply_tool_whole(
         &mut self,
         tab_idx: usize,
-        range: (usize, usize),
-        threshold_db: f32,
-        attack_ms: f32,
-        release_ms: f32,
-    ) {
-        let params = crate::wave::NoiseGateParams {
-            threshold_db,
-            attack_ms,
-            release_ms,
+        tool: crate::app::types::ToolKind,
+    ) -> bool {
+        let Some(op) = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| Self::tool_op_for_tab(tab, tool))
+        else {
+            return false;
         };
         let Some(req) = self.tool_request_for_tab(
             tab_idx,
-            crate::app::tool_render::ToolOp::NoiseGate(params),
-            crate::app::tool_render::RenderTarget::Range(range.0, range.1),
+            op,
+            crate::app::tool_render::RenderTarget::Whole,
         ) else {
-            return;
+            return false;
         };
-        self.editor_apply_op_now(tab_idx, req);
-    }
-
-    pub(super) fn editor_apply_eq_range(
-        &mut self,
-        tab_idx: usize,
-        range: (usize, usize),
-        params: crate::wave::ThreeBandEqParams,
-    ) {
-        let Some(req) = self.tool_request_for_tab(
-            tab_idx,
-            crate::app::tool_render::ToolOp::Eq(params),
-            crate::app::tool_render::RenderTarget::Range(range.0, range.1),
-        ) else {
-            return;
-        };
-        self.editor_apply_op_now(tab_idx, req);
-    }
-
-    pub(super) fn editor_apply_compressor_range(
-        &mut self,
-        tab_idx: usize,
-        range: (usize, usize),
-        params: crate::wave::CompressorParams,
-    ) {
-        let Some(req) = self.tool_request_for_tab(
-            tab_idx,
-            crate::app::tool_render::ToolOp::Compressor(params),
-            crate::app::tool_render::RenderTarget::Range(range.0, range.1),
-        ) else {
-            return;
-        };
-        self.editor_apply_op_now(tab_idx, req);
+        self.editor_apply_op_now(tab_idx, req)
     }
 
     pub(super) fn editor_apply_mute_range(&mut self, tab_idx: usize, range: (usize, usize)) {
@@ -3864,49 +3833,30 @@ mod clear_edit_tests {
         wait_for_decode(&mut app, tab_idx);
         let len = app.tabs[tab_idx].samples_len;
 
-        // Noise Gate
+        let _ = len;
         let before = app.tabs[tab_idx].ch_samples[0].clone();
-        app.editor_apply_noise_gate_range(tab_idx, (0, len), -10.0, 1.0, 20.0);
-        assert!(app.tabs[tab_idx].dirty);
-        assert_ne!(app.tabs[tab_idx].ch_samples[0], before);
-        assert!(app.undo_in_tab(tab_idx));
-        assert_eq!(app.tabs[tab_idx].ch_samples[0], before);
+        let check = |app: &mut WavesPreviewer, tool: crate::app::types::ToolKind| {
+            assert!(app.editor_apply_tool_whole(tab_idx, tool), "{tool:?} applied");
+            assert!(app.tabs[tab_idx].dirty, "{tool:?}");
+            assert_ne!(app.tabs[tab_idx].ch_samples[0], before, "{tool:?} changed the audio");
+            assert!(app.undo_in_tab(tab_idx));
+            assert_eq!(app.tabs[tab_idx].ch_samples[0], before, "{tool:?} undone");
+        };
 
-        // EQ
-        app.editor_apply_eq_range(
-            tab_idx,
-            (0, len),
-            crate::wave::ThreeBandEqParams {
-                low_shelf_freq_hz: 120.0,
-                low_shelf_gain_db: 0.0,
-                mid_freq_hz: 440.0,
-                mid_gain_db: 12.0,
-                mid_q: 1.0,
-                high_shelf_freq_hz: 8000.0,
-                high_shelf_gain_db: 0.0,
-            },
-        );
-        assert!(app.tabs[tab_idx].dirty);
-        assert_ne!(app.tabs[tab_idx].ch_samples[0], before);
-        assert!(app.undo_in_tab(tab_idx));
-        assert_eq!(app.tabs[tab_idx].ch_samples[0], before);
-
-        // Compressor
-        app.editor_apply_compressor_range(
-            tab_idx,
-            (0, len),
-            crate::wave::CompressorParams {
-                threshold_db: -12.0,
-                ratio: 4.0,
-                attack_ms: 1.0,
-                release_ms: 50.0,
-                makeup_db: 0.0,
-            },
-        );
-        assert!(app.tabs[tab_idx].dirty);
-        assert_ne!(app.tabs[tab_idx].ch_samples[0], before);
-        assert!(app.undo_in_tab(tab_idx));
-        assert_eq!(app.tabs[tab_idx].ch_samples[0], before);
+        // Noise Gate: a threshold over the tone closes it.
+        app.tabs[tab_idx].tool_state.gate.threshold_db = -3.0;
+        check(&mut app, crate::app::types::ToolKind::NoiseGate);
+        // EQ: a bell on the tone.
+        app.tabs[tab_idx].tool_state.eq.bands[1].freq_hz = 440.0;
+        app.tabs[tab_idx].tool_state.eq.bands[1].gain_db = 12.0;
+        check(&mut app, crate::app::types::ToolKind::Eq);
+        // Compressor.
+        app.tabs[tab_idx].tool_state.compressor.threshold_db = -12.0;
+        app.tabs[tab_idx].tool_state.compressor.ratio = 4.0;
+        check(&mut app, crate::app::types::ToolKind::Compressor);
+        // Limiter: pushed 12 dB into a -1 dB ceiling.
+        app.tabs[tab_idx].tool_state.limiter.input_gain_db = 12.0;
+        check(&mut app, crate::app::types::ToolKind::Limiter);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 pub mod binning;
 pub mod colors;
+pub mod dynamics_overlay;
 pub mod mini_meter;
 pub mod music_features;
 pub mod overlay;

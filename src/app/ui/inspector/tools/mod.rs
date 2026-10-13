@@ -4,6 +4,7 @@
 
 mod analyze;
 mod basic;
+mod dynamics;
 mod edit;
 mod loop_markers;
 mod spectral;
@@ -31,9 +32,10 @@ pub(super) fn panel(
         ToolKind::Reverse => basic::reverse(ui),
         ToolKind::PitchShift => basic::pitch(app, ui, tab_idx, g),
         ToolKind::TimeStretch | ToolKind::Speed => basic::rate(app, ui, tab_idx, g, tool),
-        ToolKind::Eq => basic::eq(app, ui, tab_idx, g),
-        ToolKind::Compressor => basic::compressor(app, ui, tab_idx, g),
-        ToolKind::NoiseGate => basic::noise_gate(app, ui, tab_idx, g),
+        ToolKind::Eq => dynamics::eq(app, ui, tab_idx, g, actions),
+        ToolKind::Compressor => dynamics::compressor(app, ui, tab_idx, g, actions),
+        ToolKind::Limiter => dynamics::limiter(app, ui, tab_idx, g, actions),
+        ToolKind::NoiseGate => dynamics::gate(app, ui, tab_idx, g, actions),
         ToolKind::DeClick | ToolKind::DeClip => basic::declick(app, ui, tab_idx, g, actions, tool),
         ToolKind::DeHum => basic::dehum(app, ui, tab_idx, g, actions),
         ToolKind::DeNoise => basic::denoise(app, ui, tab_idx, g, actions),

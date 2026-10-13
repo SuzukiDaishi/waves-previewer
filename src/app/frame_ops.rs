@@ -290,6 +290,11 @@ impl WavesPreviewer {
             "tool preview requests",
             self.tick_tool_preview_spawn(ctx)
         ));
+        trace_stage!("tool source analyses", self.drain_source_analysis());
+        deferrable!(trace_stage!(
+            "tool source analysis requests",
+            self.tick_source_analysis()
+        ));
         trace_stage!("list preview results", self.drain_list_preview_results());
         // Not behind `deferrable!`: the user is synchronously waiting to hear
         // the seek they just asked for, and this returns immediately when

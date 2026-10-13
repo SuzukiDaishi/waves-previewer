@@ -7208,6 +7208,13 @@ impl crate::app::WavesPreviewer {
             waveform_draw_ms_total = 0.0;
 
             let show_waveform = view_mode == ViewMode::Waveform || tab.show_waveform_overlay;
+            // A dynamics tool's lines and the gain its render takes, drawn
+            // on the audio itself.
+            let dynamics_overlay = if show_waveform {
+                crate::app::render::dynamics_overlay::DynamicsOverlay::for_tab(tab)
+            } else {
+                None
+            };
 
             // Draw per-channel lanes with dB grid and playhead
             waveform_render_started = Some(std::time::Instant::now());
@@ -7240,6 +7247,11 @@ impl crate::app::WavesPreviewer {
                     ],
                     egui::Stroke::new(WAVE_CENTER_LINE_W, WAVE_CENTER_LINE_COL),
                 );
+                if let Some(overlay) = dynamics_overlay.as_ref() {
+                    overlay.draw_lane_lines(&painter, lane_rect, |amp| {
+                        Self::waveform_y_from_amp(lane_rect, tab.vertical_zoom, tab.vertical_view_center, amp)
+                    });
+                }
                 // The gutter is left of the waveform area, so this never lands
                 // on the trace or on a marker.
                 let gutter_font = TextStyle::Monospace.resolve(ui.style());
@@ -7972,6 +7984,15 @@ impl crate::app::WavesPreviewer {
             if tab.samples_len > 0 {
                 let to_x = |samp: usize| geom.sample_boundary_x(samp);
                 let marker_x = |samp: usize| geom.sample_center_x(samp);
+                if let Some(overlay) = dynamics_overlay.as_ref() {
+                    let first = tab.view_offset.min(tab.samples_len);
+                    let last = (first + (wave_w * spp).ceil() as usize).min(tab.samples_len);
+                    let area = egui::Rect::from_min_max(
+                        egui::pos2(wave_left, rect.top()),
+                        egui::pos2(wave_left + wave_w, rect.bottom()),
+                    );
+                    overlay.draw_gain(&painter, area, (first, last), to_x);
+                }
                 let draw_handle = |x: f32, col: Color32| {
                     let handle_w = 6.0;
                     let handle_h = 16.0;

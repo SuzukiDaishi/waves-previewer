@@ -23,10 +23,14 @@ use super::types::{
 use super::WavesPreviewer;
 use crate::markers::MarkerEntry;
 
-/// Audio either side of a range that a stateful filter (gate, EQ,
-/// compressor) runs over before the range, so its settling happens outside
-/// the part that is kept. Long enough for the gate's default release.
+/// The least audio a stateful filter (EQ, compressor, limiter, gate) runs
+/// over before a range, so its settling happens outside the part that is
+/// kept; each grows it from its own settings (`eq_pre_roll`,
+/// `dynamics_pre_roll`).
 pub const RANGE_CONTEXT_SECS: f64 = 0.05;
+
+/// Less gain change than this (dB) is no change at all.
+const NEUTRAL_REDUCTION_DB: f32 = 1e-3;
 
 /// What a tool does, with every parameter it needs, in samples.
 #[derive(Clone, Debug)]
@@ -70,9 +74,10 @@ pub enum ToolOp {
     Speed {
         rate: f32,
     },
-    NoiseGate(crate::wave::NoiseGateParams),
-    Eq(crate::wave::ThreeBandEqParams),
-    Compressor(crate::wave::CompressorParams),
+    NoiseGate(crate::dynamics::GateSettings),
+    Eq(crate::eq::ParametricEqParams),
+    Compressor(crate::dynamics::CompressorSettings),
+    Limiter(crate::dynamics::LimiterSettings),
     DeClick {
         sensitivity: f32,
     },
@@ -278,6 +283,19 @@ pub struct ToolRenderOutput {
     pub markers_after: Option<Vec<MarkerEntry>>,
     /// The integrated loudness the result was scaled to (LoudNorm).
     pub lufs_override: Option<f32>,
+    /// What the render found out, for the Inspector to draw.
+    pub analysis: Option<Arc<RenderAnalysis>>,
+}
+
+/// What a render found out about the audio, computed alongside the samples
+/// so the picture is of exactly what Apply writes.
+#[derive(Clone, Debug)]
+pub enum RenderAnalysis {
+    /// The processed target's average spectrum: `ANALYZER_COLUMNS` columns,
+    /// log-spaced over the audible range (dBFS).
+    Spectrum(Vec<f32>),
+    /// Level and gain change over the target, in buffer samples.
+    Dynamics(crate::dynamics::DynamicsTrace),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -307,6 +325,7 @@ impl ToolOp {
             ToolOp::NoiseGate(_) => ToolKind::NoiseGate,
             ToolOp::Eq(_) => ToolKind::Eq,
             ToolOp::Compressor(_) => ToolKind::Compressor,
+            ToolOp::Limiter(_) => ToolKind::Limiter,
             ToolOp::DeClick { .. } => ToolKind::DeClick,
             ToolOp::DeClip { .. } => ToolKind::DeClip,
             ToolOp::DeHum(_) => ToolKind::DeHum,
@@ -350,12 +369,8 @@ impl ToolOp {
                 in_len, out_len, ..
             } => *in_len == 0 && *out_len == 0,
             ToolOp::InsertSilence { len } => *len == 0,
-            ToolOp::Eq(p) => {
-                p.low_shelf_gain_db.abs() <= EPS
-                    && p.mid_gain_db.abs() <= EPS
-                    && p.high_shelf_gain_db.abs() <= EPS
-            }
-            ToolOp::Compressor(p) => (p.ratio - 1.0).abs() <= EPS && p.makeup_db.abs() <= EPS,
+            ToolOp::Eq(p) => p.is_neutral(),
+            ToolOp::Compressor(p) => p.is_neutral(),
             ToolOp::SpectralWarp { points, .. } => points.iter().all(|p| p.delta_hz.abs() <= 0.5),
             ToolOp::SpectralBrush { stamps } => stamps.iter().all(|s| s.cut_db <= 0.1),
             ToolOp::LoopCrossfade { half, .. } => *half == 0,
@@ -404,35 +419,12 @@ impl ToolOp {
             }
             ToolOp::InsertSilence { len } => len.hash(&mut h),
             ToolOp::TimeStretch { rate } | ToolOp::Speed { rate } => f(&mut h, *rate),
-            ToolOp::NoiseGate(p) => {
-                for v in [p.threshold_db, p.attack_ms, p.release_ms] {
-                    f(&mut h, v);
-                }
-            }
-            ToolOp::Eq(p) => {
-                for v in [
-                    p.low_shelf_freq_hz,
-                    p.low_shelf_gain_db,
-                    p.mid_freq_hz,
-                    p.mid_gain_db,
-                    p.mid_q,
-                    p.high_shelf_freq_hz,
-                    p.high_shelf_gain_db,
-                ] {
-                    f(&mut h, v);
-                }
-            }
-            ToolOp::Compressor(p) => {
-                for v in [
-                    p.threshold_db,
-                    p.ratio,
-                    p.attack_ms,
-                    p.release_ms,
-                    p.makeup_db,
-                ] {
-                    f(&mut h, v);
-                }
-            }
+            // Plain settings structs: their Debug form names every field and
+            // prints each float exactly, so it hashes what renders.
+            ToolOp::NoiseGate(p) => hash_debug(&mut h, p),
+            ToolOp::Eq(p) => hash_debug(&mut h, p),
+            ToolOp::Compressor(p) => hash_debug(&mut h, p),
+            ToolOp::Limiter(p) => hash_debug(&mut h, p),
             ToolOp::DeClick { sensitivity } | ToolOp::DeClip { sensitivity } => {
                 f(&mut h, *sensitivity)
             }
@@ -534,6 +526,113 @@ fn check(cancel: &AtomicBool) -> Result<(), RenderError> {
     }
 }
 
+/// Feed `value`'s Debug text to `h` without allocating it.
+fn hash_debug(h: &mut rustc_hash::FxHasher, value: &dyn std::fmt::Debug) {
+    struct Feed<'a>(&'a mut rustc_hash::FxHasher);
+    impl std::fmt::Write for Feed<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            s.as_bytes().hash(self.0);
+            Ok(())
+        }
+    }
+    use std::fmt::Write as _;
+    let _ = write!(Feed(h), "{value:?}");
+}
+
+/// The audio a dynamics processor runs over before a range, so its
+/// envelope has settled by the range's first sample: a few release times.
+fn dynamics_pre_roll(release_ms: f32, lookahead_ms: f32, sr: u32) -> usize {
+    let secs = (f64::from(release_ms.max(0.0)) * 5.0 + f64::from(lookahead_ms.max(0.0))) / 1000.0;
+    crate::sample_rate::frames_for_secs(secs.clamp(RANGE_CONTEXT_SECS, DYNAMICS_MAX_PRE_ROLL_SECS), sr)
+}
+
+/// The longest pre-roll a dynamics range gets: past this, a release has
+/// long finished whatever its setting.
+const DYNAMICS_MAX_PRE_ROLL_SECS: f64 = 3.0;
+/// The longest a low corner may ring before a range.
+const EQ_MAX_PRE_ROLL_SECS: f64 = 1.0;
+/// Periods of the lowest active corner an EQ runs over before a range.
+const EQ_PRE_ROLL_PERIODS: f64 = 8.0;
+
+fn eq_pre_roll(p: &crate::eq::ParametricEqParams, sr: u32) -> usize {
+    let secs = p
+        .lowest_active_hz()
+        .map_or(RANGE_CONTEXT_SECS, |hz| EQ_PRE_ROLL_PERIODS / f64::from(hz.max(1.0)));
+    crate::sample_rate::frames_for_secs(secs.clamp(RANGE_CONTEXT_SECS, EQ_MAX_PRE_ROLL_SECS), sr)
+}
+
+/// Run `process` over the in-scope channels of `[s, e)` together, with
+/// `pre` / `post` samples of the audio around it, and splice each channel
+/// back with crossfades at interior edges. Returns the channels and what
+/// `process` reported, plus where the processed segment began.
+#[allow(clippy::too_many_arguments)]
+fn joint_range<X>(
+    src: &[Vec<f32>],
+    mask: &Option<Vec<bool>>,
+    s: usize,
+    e: usize,
+    sr: u32,
+    pre: usize,
+    post: usize,
+    cancel: &AtomicBool,
+    process: impl FnOnce(&[&[f32]]) -> Option<(Vec<Vec<f32>>, X)>,
+) -> Result<(Vec<Vec<f32>>, X, usize), RenderError> {
+    check(cancel)?;
+    let len = src.first().map_or(0, Vec::len);
+    let whole = s == 0 && e >= len;
+    let (seg_s, seg_e) = if whole {
+        (0, len)
+    } else {
+        (s.saturating_sub(pre), (e + post).min(len))
+    };
+    let scope: Vec<usize> = (0..src.len()).filter(|&ci| channel_in_scope(mask, ci)).collect();
+    let slices: Vec<&[f32]> = scope.iter().map(|&ci| &src[ci][seg_s..seg_e]).collect();
+    let (processed, extra) = process(&slices).ok_or(RenderError::Cancelled)?;
+    let mut processed = processed.into_iter();
+    let mut out = Vec::with_capacity(src.len());
+    for (ci, ch) in src.iter().enumerate() {
+        if !scope.contains(&ci) {
+            out.push(ch.clone());
+            continue;
+        }
+        let done = processed.next().unwrap_or_else(|| ch[seg_s..seg_e].to_vec());
+        if whole {
+            out.push(done);
+            continue;
+        }
+        let a = (s - seg_s).min(done.len());
+        let b = (e - seg_s).min(done.len()).max(a);
+        let kept = &done[a..b];
+        let xf = crate::wave::splice_xfade_samples(sr, e - s, kept.len());
+        out.push(crate::wave::splice_range_with_crossfade(ch, s, e, kept, xf));
+    }
+    Ok((out, extra, seg_s))
+}
+
+/// Place a dynamics trace of a segment that began at `seg_s` onto the
+/// buffer, keeping only `[s, e)`.
+fn place_trace(
+    trace: crate::dynamics::DynamicsTrace,
+    seg_s: usize,
+    s: usize,
+    e: usize,
+) -> crate::dynamics::DynamicsTrace {
+    let mut kept = trace.crop(s - seg_s, e - seg_s);
+    kept.start += seg_s;
+    kept
+}
+
+/// The average spectrum of the in-scope channels over `[s, e)`.
+fn target_spectrum(channels: &[Vec<f32>], mask: &Option<Vec<bool>>, s: usize, e: usize, sr: u32) -> Vec<f32> {
+    let scope: Vec<&[f32]> = channels
+        .iter()
+        .enumerate()
+        .filter(|(ci, _)| channel_in_scope(mask, *ci))
+        .map(|(_, c)| c.as_slice())
+        .collect();
+    crate::app::render::mini_meter::average_spectrum(&scope, s, e, sr)
+}
+
 fn channel_in_scope(mask: &Option<Vec<bool>>, ci: usize) -> bool {
     mask.as_ref()
         .map_or(true, |m| m.get(ci).copied().unwrap_or(true))
@@ -558,28 +657,6 @@ fn scale_range(ch: &mut [f32], s: usize, e: usize, g: f32, ramp: usize) {
         };
         *v *= 1.0 + (g - 1.0) * w;
     }
-}
-
-/// Run a whole-signal filter over `[s, e)` with context either side, and
-/// splice the kept part back with crossfades at interior edges.
-fn filter_range(
-    ch: &[f32],
-    s: usize,
-    e: usize,
-    sr: u32,
-    process: impl Fn(&[f32]) -> Vec<f32>,
-) -> Vec<f32> {
-    let len = ch.len();
-    if s == 0 && e >= len {
-        return process(ch);
-    }
-    let ctx = crate::sample_rate::frames_for_secs(RANGE_CONTEXT_SECS, sr);
-    let seg_s = s.saturating_sub(ctx);
-    let seg_e = (e + ctx).min(len);
-    let processed = process(&ch[seg_s..seg_e]);
-    let kept = &processed[(s - seg_s).min(processed.len())..(e - seg_s).min(processed.len())];
-    let xf = crate::wave::splice_xfade_samples(sr, e - s, kept.len());
-    crate::wave::splice_range_with_crossfade(ch, s, e, kept, xf)
 }
 
 /// Render `req.op` over `req.target`. Checks `cancel` between channels.
@@ -613,6 +690,7 @@ pub fn render(
         time_map: TimeMap::Identity,
         markers_after: None,
         lufs_override: None,
+        analysis: None,
     };
     // Per-channel in-place edits share one shape: copy, edit the channels in
     // scope, leave the rest as they were.
@@ -771,26 +849,49 @@ pub fn render(
             }
             out.channels = chans;
         }
-        ToolOp::NoiseGate(p) => {
-            out.channels = per_channel(&|_, ch| {
-                *ch = filter_range(ch, s, e, sr, |x| {
-                    crate::wave::process_noise_gate_offline(x, sr, p)
-                })
-            })?;
-        }
         ToolOp::Eq(p) => {
-            out.channels = per_channel(&|_, ch| {
-                *ch = filter_range(ch, s, e, sr, |x| {
-                    crate::wave::process_three_band_eq_offline(x, sr, p)
-                })
+            let pre = eq_pre_roll(p, sr);
+            let (chans, (), _) = joint_range(src, mask, s, e, sr, pre, 0, cancel, |slices| {
+                let mut chans: Vec<Vec<f32>> = slices.iter().map(|c| c.to_vec()).collect();
+                crate::eq::process(&mut chans, sr, p);
+                Some((chans, ()))
             })?;
+            out.analysis = Some(Arc::new(RenderAnalysis::Spectrum(target_spectrum(
+                &chans, mask, s, e, sr,
+            ))));
+            out.channels = chans;
         }
         ToolOp::Compressor(p) => {
-            out.channels = per_channel(&|_, ch| {
-                *ch = filter_range(ch, s, e, sr, |x| {
-                    crate::wave::process_compressor_offline(x, sr, p)
-                })
+            let pre = dynamics_pre_roll(p.release_ms, p.lookahead_ms, sr);
+            let post = crate::sample_rate::frames_for_secs(f64::from(p.lookahead_ms) / 1000.0, sr) + 1;
+            let (chans, trace, seg_s) = joint_range(src, mask, s, e, sr, pre, post, cancel, |slices| {
+                crate::dynamics::compress(slices, sr, p, cancel).map(|o| (o.channels, o.trace))
             })?;
+            out.analysis = Some(Arc::new(RenderAnalysis::Dynamics(place_trace(trace, seg_s, s, e))));
+            out.channels = chans;
+        }
+        ToolOp::Limiter(p) => {
+            let pre = dynamics_pre_roll(p.release_ms, p.lookahead_ms, sr);
+            let post = crate::sample_rate::frames_for_secs(f64::from(p.lookahead_ms) / 1000.0, sr) + 1;
+            let (chans, trace, seg_s) = joint_range(src, mask, s, e, sr, pre, post, cancel, |slices| {
+                crate::dynamics::limit(slices, sr, p, cancel).map(|o| (o.channels, o.trace))
+            })?;
+            let trace = place_trace(trace, seg_s, s, e);
+            // Nothing over the ceiling and no gain: the audio is as it was.
+            if trace.max_reduction_db() < NEUTRAL_REDUCTION_DB && p.input_gain_db.abs() < NEUTRAL_REDUCTION_DB {
+                return Err(RenderError::NothingToDo);
+            }
+            out.analysis = Some(Arc::new(RenderAnalysis::Dynamics(trace)));
+            out.channels = chans;
+        }
+        ToolOp::NoiseGate(p) => {
+            let pre = dynamics_pre_roll(p.release_ms + p.hold_ms, p.lookahead_ms, sr);
+            let post = crate::sample_rate::frames_for_secs(f64::from(p.lookahead_ms) / 1000.0, sr) + 1;
+            let (chans, trace, seg_s) = joint_range(src, mask, s, e, sr, pre, post, cancel, |slices| {
+                crate::dynamics::gate(slices, sr, p, cancel).map(|o| (o.channels, o.trace))
+            })?;
+            out.analysis = Some(Arc::new(RenderAnalysis::Dynamics(place_trace(trace, seg_s, s, e))));
+            out.channels = chans;
         }
         ToolOp::DeClick { sensitivity } => {
             let cfg = crate::app::declick::DeclickConfig {
@@ -1001,12 +1102,20 @@ mod tests {
             ToolOp::Reverse,
             ToolOp::InvertPolarity { fade: 96 },
             ToolOp::DcOffset,
-            ToolOp::Eq(crate::wave::ThreeBandEqParams {
-                mid_gain_db: 6.0,
+            ToolOp::Eq({
+                let mut p = crate::eq::ParametricEqParams::default();
+                p.bands[1].gain_db = 6.0;
+                p
+            }),
+            ToolOp::Compressor(crate::dynamics::CompressorSettings {
+                threshold_db: -30.0,
                 ..Default::default()
             }),
-            ToolOp::Compressor(crate::wave::CompressorParams::default()),
-            ToolOp::NoiseGate(crate::wave::NoiseGateParams::default()),
+            ToolOp::Limiter(crate::dynamics::LimiterSettings {
+                input_gain_db: 12.0,
+                ..Default::default()
+            }),
+            ToolOp::NoiseGate(crate::dynamics::GateSettings::default()),
         ];
         for op in ops {
             let name = format!("{op:?}");
@@ -1168,7 +1277,7 @@ mod tests {
         assert!(ToolOp::Gain { db: 0.0 }.is_neutral());
         assert!(!ToolOp::Gain { db: 0.5 }.is_neutral());
         assert!(ToolOp::TimeStretch { rate: 1.0 }.is_neutral());
-        assert!(ToolOp::Eq(crate::wave::ThreeBandEqParams::default()).is_neutral());
+        assert!(ToolOp::Eq(crate::eq::ParametricEqParams::default()).is_neutral());
         assert!(!ToolOp::Reverse.is_neutral());
         assert!(ToolOp::PitchShift {
             semitones: 5.0,

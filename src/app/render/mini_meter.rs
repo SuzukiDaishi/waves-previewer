@@ -28,6 +28,12 @@ const HIGH_FFT_WINDOW_SECS: f32 = 0.043;
 pub const SPECTRUM_ATTACK_SECS: f32 = 0.010;
 /// Smoothing time constant while the level is falling.
 pub const SPECTRUM_RELEASE_SECS: f32 = 0.10;
+/// Columns of the Inspector's analyzer (the EQ's): finer than a 480 px plot
+/// needs, coarse enough that a column always spans a few FFT bins up top.
+pub const ANALYZER_COLUMNS: usize = 256;
+/// Windows averaged into a target's spectrum at most: enough for a steady
+/// picture, few enough to stay a fraction of a second on an hour of audio.
+const AVERAGE_MAX_WINDOWS: usize = 96;
 
 fn next_pow2(n: usize) -> usize {
     n.max(2).next_power_of_two()
@@ -135,6 +141,23 @@ fn amp_to_db(v: f32) -> f32 {
 /// hold at least [`spectrum_history_len`] samples ending at the
 /// playhead; shorter input is handled gracefully.
 pub fn spectrum_columns(mono: &[f32], sample_rate: u32, cols: usize, out_db: &mut Vec<f32>) {
+    let nyquist = sample_rate.max(1) as f32 * 0.5;
+    let f_lo = SPECTRUM_MIN_HZ.min(nyquist * 0.25);
+    let f_hi = nyquist.max(f_lo * 2.0);
+    spectrum_columns_in(mono, sample_rate, cols, f_lo, f_hi, out_db);
+}
+
+/// [`spectrum_columns`] over a log axis from `f_lo` to `f_hi` -- the EQ's
+/// plot, whose axis is the audible range whatever the rate. Columns above
+/// Nyquist hold the floor.
+pub fn spectrum_columns_in(
+    mono: &[f32],
+    sample_rate: u32,
+    cols: usize,
+    f_lo: f32,
+    f_hi: f32,
+    out_db: &mut Vec<f32>,
+) {
     out_db.clear();
     out_db.resize(cols, SPECTRUM_DB_FLOOR);
     if cols == 0 || mono.len() < 128 {
@@ -142,8 +165,7 @@ pub fn spectrum_columns(mono: &[f32], sample_rate: u32, cols: usize, out_db: &mu
     }
     let sr = sample_rate.max(1) as f32;
     let nyquist = sr * 0.5;
-    let f_lo = SPECTRUM_MIN_HZ.min(nyquist * 0.25);
-    let f_hi = nyquist.max(f_lo * 2.0);
+    let f_hi = f_hi.max(f_lo * 1.0001);
     let (n_low, n_high) = spectrum_fft_sizes(sample_rate);
     SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
@@ -158,6 +180,10 @@ pub fn spectrum_columns(mono: &[f32], sample_rate: u32, cols: usize, out_db: &mu
             let f0 = f_lo * ratio.powf(t0);
             let f1 = f_lo * ratio.powf(t1);
             let f_center = (f0 * f1).sqrt();
+            if f0 >= nyquist {
+                *slot = SPECTRUM_DB_FLOOR;
+                continue;
+            }
             let db = if f_center <= CROSSOVER_LO_HZ {
                 amp_to_db(band_level(&mags_low, nyquist, f0, f1))
             } else if f_center >= CROSSOVER_HI_HZ {
@@ -174,6 +200,44 @@ pub fn spectrum_columns(mono: &[f32], sample_rate: u32, cols: usize, out_db: &mu
         scratch.mags_low = mags_low;
         scratch.mags_high = mags_high;
     });
+}
+
+/// The power-averaged spectrum of `channels` over `[start, end)`, mixed to
+/// mono a window at a time (so an hour of audio never becomes one buffer):
+/// [`ANALYZER_COLUMNS`] columns over the audible range, dBFS. What the EQ
+/// draws behind its curve, before (the source) and after (the render).
+pub fn average_spectrum(channels: &[&[f32]], start: usize, end: usize, sample_rate: u32) -> Vec<f32> {
+    let cols = ANALYZER_COLUMNS;
+    let (f_lo, f_hi) = (crate::sample_rate::AUDIBLE_LOW_HZ, crate::sample_rate::AUDIBLE_HIGH_HZ);
+    let len = end.saturating_sub(start);
+    if channels.is_empty() || len < 128 {
+        return vec![SPECTRUM_DB_FLOOR; cols];
+    }
+    let n = spectrum_history_len(sample_rate);
+    let windows = if len <= n { 1 } else { (len / n).clamp(1, AVERAGE_MAX_WINDOWS) };
+    let inv = 1.0 / channels.len() as f32;
+    let mut acc = vec![0.0f64; cols];
+    let mut mono = Vec::with_capacity(n.min(len));
+    let mut column = Vec::with_capacity(cols);
+    for w in 0..windows {
+        let win_end = if windows == 1 {
+            end
+        } else {
+            start + n + (len - n) * w / (windows - 1)
+        };
+        let win_start = win_end.saturating_sub(n).max(start);
+        mono.clear();
+        mono.extend((win_start..win_end).map(|i| {
+            channels.iter().map(|c| c.get(i).copied().unwrap_or(0.0)).sum::<f32>() * inv
+        }));
+        spectrum_columns_in(&mono, sample_rate, cols, f_lo, f_hi, &mut column);
+        for (a, db) in acc.iter_mut().zip(&column) {
+            *a += 10f64.powf(f64::from(*db) / 10.0);
+        }
+    }
+    acc.iter()
+        .map(|p| ((10.0 * (p / windows as f64).log10()) as f32).max(SPECTRUM_DB_FLOOR))
+        .collect()
 }
 
 /// Advance the smoothed spectrum toward `target` with a fast attack and
