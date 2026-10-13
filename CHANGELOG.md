@@ -4,6 +4,8 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+## 0.20261013.0 - 2026-10-13
+
 ### エディタの Inspector を作り直した（docs/INSPECTOR_SPEC.md）
 
 - **画面の並び**: 上から順に次のとおり。
