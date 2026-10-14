@@ -6050,6 +6050,8 @@ pub struct DebugConfig {
     pub auto_run_time_stretch_rate: Option<f32>,
     pub auto_run_delay_frames: u32,
     pub auto_run_exit: bool,
+    /// An auto-run script (`debug_script`), run instead of a built-in sweep.
+    pub auto_run_script: Option<String>,
     pub check_interval_frames: u32,
 }
 
@@ -6067,6 +6069,7 @@ impl Default for DebugConfig {
             auto_run_time_stretch_rate: None,
             auto_run_delay_frames: 8,
             auto_run_exit: true,
+            auto_run_script: None,
             check_interval_frames: 30,
         }
     }
@@ -6304,14 +6307,27 @@ pub struct DebugStep {
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 pub enum DebugAction {
     OpenFirst,
     ScreenshotAuto,
     ScreenshotPath(PathBuf),
     SetActiveTool(ToolKind),
-    /// Open a tool with settings that show what it does, and preview them
-    /// (the EQ and dynamics tools; screenshots of their graphs).
-    ShowcaseTool(ToolKind),
+    /// Change one tool setting by its session name (`debug_script`), as a
+    /// gesture on it would: the auto preview follows.
+    SetToolSetting {
+        key: String,
+        value: String,
+    },
+    /// The Inspector's Preview button.
+    RequestPreview,
+    /// The Inspector's Apply.
+    ApplyTool,
+    Undo,
+    Redo,
+    ClearSelection,
+    /// Move the playhead to a fraction of the file.
+    Seek(f32),
     SetSelection {
         start_frac: f32,
         end_frac: f32,
@@ -6367,6 +6383,7 @@ pub enum DebugAction {
     PreviewPitchShift(f32),
     PreviewTimeStretch(f32),
     DumpSummaryAuto,
+    DumpSummaryPath(PathBuf),
     Exit,
 }
 

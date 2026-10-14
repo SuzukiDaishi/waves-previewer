@@ -286,6 +286,15 @@ struct GuiArgs {
     auto_run_delay_frames: u32,
     #[arg(long = "auto-run-no-exit", action = ArgAction::SetTrue)]
     auto_run_no_exit: bool,
+    /// Run the auto-run commands in FILE instead of a built-in sweep: open a
+    /// file, switch tools, `set` any tool setting, preview, apply, take
+    /// screenshots (the commands are listed in src/app/debug_script.rs).
+    #[arg(long = "auto-run-script", value_name = "FILE")]
+    auto_run_script: Option<PathBuf>,
+    /// The same commands inline, separated by `;` (after the script's, when
+    /// both are given): "open-first; tool limiter; set limiter.input_gain_db 9; preview; wait 30; screenshot".
+    #[arg(long = "auto-run-steps", value_name = "COMMANDS")]
+    auto_run_steps: Option<String>,
     #[arg(long = "debug-check-interval", default_value_t = 30)]
     debug_check_interval: u32,
     #[arg(long = "no-ipc-forward", hide = true, action = ArgAction::SetTrue)]
@@ -295,7 +304,39 @@ struct GuiArgs {
 }
 
 impl GuiArgs {
+    /// The auto-run script the command line asks for, checked line by line.
+    /// A script that cannot be read or understood ends the process with a
+    /// message: it is a debug run, and silently skipping it would look like
+    /// a run that did nothing.
+    fn auto_run_script(&self) -> Option<String> {
+        let mut text = String::new();
+        if let Some(path) = self.auto_run_script.as_ref() {
+            match std::fs::read_to_string(path) {
+                Ok(body) => text.push_str(&body),
+                Err(err) => {
+                    eprintln!("--auto-run-script {}: {err}", path.display());
+                    std::process::exit(2);
+                }
+            }
+        }
+        if let Some(inline) = self.auto_run_steps.as_deref() {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&app::debug_script::inline_to_lines(inline));
+        }
+        if self.auto_run_script.is_none() && self.auto_run_steps.is_none() {
+            return None;
+        }
+        if let Err(err) = app::debug_script::parse_script(&text) {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+        Some(text)
+    }
+
     fn into_startup_config(self) -> app::StartupConfig {
+        let auto_run_script = self.auto_run_script();
         let mut cfg = app::StartupConfig::default();
         let open_project = self.open_session.or(self.open_project);
         cfg.open_project = open_project;
@@ -335,7 +376,8 @@ impl GuiArgs {
             || self.auto_run
             || self.auto_run_editor
             || self.auto_run_pitch_shift.is_some()
-            || self.auto_run_time_stretch.is_some();
+            || self.auto_run_time_stretch.is_some()
+            || auto_run_script.is_some();
         cfg.debug.log_path = self.debug_log_path;
         cfg.debug.input_trace_to_console = self.debug_input_trace_console;
         cfg.debug.input_trace_enabled = self.debug_input_trace || self.debug_input_trace_console;
@@ -343,7 +385,9 @@ impl GuiArgs {
         cfg.debug.auto_run = self.auto_run
             || self.auto_run_editor
             || self.auto_run_pitch_shift.is_some()
-            || self.auto_run_time_stretch.is_some();
+            || self.auto_run_time_stretch.is_some()
+            || auto_run_script.is_some();
+        cfg.debug.auto_run_script = auto_run_script;
         cfg.debug.auto_run_editor = self.auto_run_editor;
         cfg.debug.auto_run_pitch_shift_semitones = self.auto_run_pitch_shift;
         cfg.debug.auto_run_time_stretch_rate = self.auto_run_time_stretch;

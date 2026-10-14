@@ -4,6 +4,16 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### デバッグの自動実行をスクリプトで書けるようにした（docs/AUTO_RUN.md）
+
+- `--auto-run-script <ファイル>` または `--auto-run-steps "open-first; tool limiter; set limiter.input_gain_db 9; preview; wait 40; screenshot"` で、自動実行の手順を自由に書けるようにした。
+- **ツールの設定を入れられる**: `set <名前> <値>`。名前はセッションに保存される名前で、全ツールの全設定を指定できる。
+  - 例: `gain_db`、`compressor.threshold_db`、`eq.bands.3.freq_hz`、`gate.detection rms`、`eq.bands.3 {"enabled":true,"kind":"low_cut","freq_hz":80}`
+  - 値の変更はユーザーの操作と同じ扱いで、自動プレビューも追従する。
+- ほかに使えるコマンド: `tool`、`preview`、`apply`、`undo` / `redo`、`selection`、`clear-selection`、`seek`、`view`、`play`、`wait`、`screenshot`、`summary`、`exit`。
+- スクリプトはウィンドウを開く前に検査する。知らないコマンド、ツール名、設定名、型の違う値があれば、行番号付きのメッセージで止まる。設定名の誤りには、その場所にある名前の一覧も出す。
+- 自動実行の `tool` は、Inspector と同じ切り替え処理を通るようになった（前のツールのプレビューを片付ける）。
+
 ### EQ / Compressor / Limiter / Gate を作り込んだ（エディタの Inspector）
 
 - **EQ は最大 8 バンドのパラメトリック EQ になった**。

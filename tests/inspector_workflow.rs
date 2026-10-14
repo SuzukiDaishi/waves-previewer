@@ -603,3 +603,42 @@ fn eq_and_dynamics_settings_survive_a_session() {
     assert_eq!(back.limiter, saved.limiter);
     assert_eq!(back.gate, saved.gate);
 }
+
+#[test]
+fn an_auto_run_script_puts_settings_into_a_tool_previews_and_applies() {
+    let dir = temp_dir("auto_run_script");
+    let path = dir.join("tone.wav");
+    neowaves::wave::export_channels_audio(&[tone(220.0, 0.3, 1.0), tone(330.0, 0.25, 1.0)], FIXTURE_SR, &path)
+        .expect("export fixture");
+    let mut cfg = StartupConfig::default();
+    cfg.open_folder = Some(dir.clone());
+    cfg.open_first = false;
+    cfg.debug.enabled = true;
+    cfg.debug.auto_run = true;
+    cfg.debug.auto_run_exit = false;
+    cfg.debug.auto_run_delay_frames = 2;
+    cfg.debug.auto_run_script = Some(
+        "open-first
+wait 60
+tool limiter
+set limiter.input_gain_db 12
+set limiter.ceiling_db -2
+preview
+wait 60
+apply
+"
+            .to_string(),
+    );
+    let mut harness = harness_with_startup(cfg);
+    wait_until(&mut harness, "the script's apply", |h| {
+        h.state().test_tab_dirty() && !h.state().test_editor_apply_busy()
+    });
+    assert_eq!(harness.state().test_active_tool(), Some(ToolKind::Limiter));
+    let st = harness.state().test_tool_state().unwrap();
+    assert_eq!(st.limiter.input_gain_db, 12.0);
+    assert_eq!(st.limiter.ceiling_db, -2.0);
+    let ceiling = 10f32.powf(-2.0 / 20.0);
+    let after = harness.state().test_tab_channel_samples().unwrap();
+    assert!(peak(&after) <= ceiling + 1e-6, "{}", peak(&after));
+    assert!(peak(&after) > ceiling * 0.9);
+}

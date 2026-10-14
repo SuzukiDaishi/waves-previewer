@@ -7,6 +7,40 @@ use super::types::{
 };
 use super::{RateMode, WavesPreviewer};
 
+/// The EQ and the dynamics tools with settings that show what each does,
+/// previewed and photographed: part of `--auto-run-editor`, and an example of
+/// what an `--auto-run-script` can say (see `debug_script`).
+const DYNAMICS_SHOWCASE: &str = "
+tool eq
+set eq.bands.0.gain_db -4
+set eq.bands.1 {\"enabled\":true,\"freq_hz\":2500,\"gain_db\":5,\"q\":1.4}
+set eq.bands.2.gain_db 3
+set eq.bands.3 {\"enabled\":true,\"kind\":\"low_cut\",\"freq_hz\":60}
+set eq.bands.4 {\"enabled\":true,\"freq_hz\":400,\"gain_db\":-3,\"mode\":\"side\"}
+preview
+wait 40
+screenshot
+tool compressor
+set compressor.threshold_db -30
+set compressor.ratio 4
+set compressor.knee_db 8
+preview
+wait 40
+screenshot
+tool limiter
+set limiter.input_gain_db 9
+preview
+wait 40
+screenshot
+tool noise-gate
+set gate.threshold_db -24
+set gate.range_db -40
+set gate.hysteresis_db 4
+preview
+wait 40
+screenshot
+";
+
 impl WavesPreviewer {
     pub(super) fn debug_start_external_merge_test(&mut self, rows: usize, cols: usize) {
         let rows = rows.max(1);
@@ -988,6 +1022,33 @@ impl WavesPreviewer {
         }
         let delay = self.debug.cfg.auto_run_delay_frames.max(1);
         let mut steps = std::collections::VecDeque::new();
+        if let Some(script) = self.debug.cfg.auto_run_script.clone() {
+            // Checked when the command line was read; a script that fails
+            // here was handed in by a test or an embedder.
+            match crate::app::debug_script::parse_script(&script) {
+                Ok(parsed) => {
+                    for step in parsed {
+                        steps.push_back(DebugStep {
+                            wait_frames: step.wait_frames.unwrap_or(delay),
+                            action: step.action,
+                        });
+                    }
+                }
+                Err(err) => {
+                    self.debug_log(err.to_string());
+                    return;
+                }
+            }
+            if self.debug.cfg.auto_run_exit {
+                steps.push_back(DebugStep {
+                    wait_frames: delay,
+                    action: DebugAction::Exit,
+                });
+            }
+            self.debug_log(format!("auto-run script: {} steps", steps.len()));
+            self.debug.auto = Some(DebugAutomation { steps });
+            return;
+        }
         if self.debug.cfg.auto_run_editor {
             self.build_editor_debug_steps(&mut steps, delay);
             if self.debug.cfg.auto_run_exit {
@@ -1097,16 +1158,14 @@ impl WavesPreviewer {
             wait_frames: delay,
             action: DebugAction::ScreenshotAuto,
         });
-        // The EQ and dynamics tools with their graphs over the audio: a
-        // render and a source analysis each, so a longer wait.
-        for tool in [ToolKind::Eq, ToolKind::Compressor, ToolKind::Limiter, ToolKind::NoiseGate] {
+        // The EQ and dynamics tools with their graphs over the audio, put
+        // through the same script commands a user's `--auto-run-script` has.
+        let showcase = crate::app::debug_script::parse_script(DYNAMICS_SHOWCASE)
+            .expect("the built-in showcase script parses");
+        for step in showcase {
             steps.push_back(DebugStep {
-                wait_frames: delay,
-                action: DebugAction::ShowcaseTool(tool),
-            });
-            steps.push_back(DebugStep {
-                wait_frames: delay.saturating_mul(3),
-                action: DebugAction::ScreenshotAuto,
+                wait_frames: step.wait_frames.unwrap_or(delay),
+                action: step.action,
             });
         }
         steps.push_back(DebugStep {
@@ -1457,63 +1516,63 @@ impl WavesPreviewer {
                 self.request_screenshot(ctx, path, false);
                 self.debug_log("auto: screenshot path");
             }
-            DebugAction::ShowcaseTool(tool) => {
+            DebugAction::SetToolSetting { key, value } => {
                 if let Some(tab_idx) = self.active_tab {
-                    self.editor_select_tool(tab_idx, tool);
-                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                        use crate::eq::{CutSlope, EqBand, EqChannelMode, EqKind};
-                        let st = &mut tab.tool_state;
-                        match tool {
-                            ToolKind::Eq => {
-                                st.eq.bands[0].gain_db = -4.0;
-                                st.eq.bands[1] = EqBand {
-                                    enabled: true,
-                                    freq_hz: 2_500.0,
-                                    gain_db: 5.0,
-                                    q: 1.4,
-                                    ..EqBand::default()
-                                };
-                                st.eq.bands[2].gain_db = 3.0;
-                                st.eq.bands[3] = EqBand {
-                                    enabled: true,
-                                    kind: EqKind::LowCut,
-                                    freq_hz: 60.0,
-                                    slope: CutSlope::Db24,
-                                    ..EqBand::default()
-                                };
-                                st.eq.bands[4] = EqBand {
-                                    enabled: true,
-                                    freq_hz: 400.0,
-                                    gain_db: -3.0,
-                                    mode: EqChannelMode::Side,
-                                    ..EqBand::default()
-                                };
-                            }
-                            ToolKind::Compressor => {
-                                st.compressor.threshold_db = -30.0;
-                                st.compressor.ratio = 4.0;
-                                st.compressor.knee_db = 8.0;
-                            }
-                            ToolKind::Limiter => st.limiter.input_gain_db = 9.0,
-                            ToolKind::NoiseGate => {
-                                st.gate.threshold_db = -24.0;
-                                st.gate.range_db = -40.0;
-                                st.gate.hysteresis_db = 4.0;
-                            }
-                            _ => {}
+                    let before = crate::app::tool_session::DraftSnapshot::capture(&self.tabs[tab_idx]);
+                    match crate::app::debug_script::set_tool_setting(
+                        &mut self.tabs[tab_idx].tool_state,
+                        &key,
+                        &value,
+                    ) {
+                        Ok(()) => {
+                            self.note_tool_draft_change(tab_idx, before);
+                            self.debug_log(format!("auto: set {key} = {value}"));
                         }
-                        self.debug_log(format!("auto: showcase {tool:?}"));
+                        Err(err) => self.debug_log(format!("auto: set {key}: {err}")),
                     }
-                    self.tool_preview_request_now(tab_idx);
+                }
+            }
+            DebugAction::RequestPreview => {
+                if let Some(tab_idx) = self.active_tab {
+                    self.apply_inspector_actions(tab_idx, vec![crate::app::inspector_ops::InspectorAction::Preview]);
+                    self.debug_log("auto: preview");
+                }
+            }
+            DebugAction::ApplyTool => {
+                if let Some(tab_idx) = self.active_tab {
+                    self.apply_inspector_actions(tab_idx, vec![crate::app::inspector_ops::InspectorAction::Apply]);
+                    self.debug_log("auto: apply");
+                }
+            }
+            DebugAction::Undo => {
+                let done = self.trigger_undo_redo(false);
+                self.debug_log(format!("auto: undo ({})", if done { "done" } else { "nothing" }));
+            }
+            DebugAction::Redo => {
+                let done = self.trigger_undo_redo(true);
+                self.debug_log(format!("auto: redo ({})", if done { "done" } else { "nothing" }));
+            }
+            DebugAction::ClearSelection => {
+                if let Some(tab) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) {
+                    tab.selection = None;
+                    tab.selection_anchor_sample = None;
+                    self.debug_log("auto: clear selection");
+                }
+            }
+            DebugAction::Seek(frac) => {
+                if let Some(tab_idx) = self.active_tab {
+                    let len = self.tabs[tab_idx].samples_len;
+                    let at = (len as f64 * f64::from(frac.clamp(0.0, 1.0))) as usize;
+                    self.editor_seek_display_sample(tab_idx, at.min(len.saturating_sub(1)));
+                    self.debug_log(format!("auto: seek {frac:.3}"));
                 }
             }
             DebugAction::SetActiveTool(tool) => {
                 if let Some(tab_idx) = self.active_tab {
-                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                        tab.active_tool = tool;
-                        self.debug_log(format!("auto: tool {:?}", tool));
-                    }
-                    self.refresh_tool_preview_for_tab(tab_idx);
+                    // The Inspector's own switch: the old tool's preview goes,
+                    // the new one starts a fresh session.
+                    self.editor_select_tool(tab_idx, tool);
+                    self.debug_log(format!("auto: tool {:?}", tool));
                 }
             }
             DebugAction::SetSelection {
@@ -1813,6 +1872,7 @@ impl WavesPreviewer {
                     .unwrap_or_else(|| self.default_debug_summary_path());
                 self.save_debug_summary(path);
             }
+            DebugAction::DumpSummaryPath(path) => self.save_debug_summary(path),
             DebugAction::Exit => {
                 self.force_quit = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);

@@ -28,6 +28,7 @@ mod comment_ops;
 pub mod comments;
 mod crash_report_ops;
 mod debug_ops;
+pub(crate) mod debug_script;
 pub mod declick;
 pub mod declip;
 pub mod dehum;

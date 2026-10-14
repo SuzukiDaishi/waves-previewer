@@ -23,6 +23,7 @@ Repository Layout
   - `SPATIAL_AUDIO_SPEC.md`: object audio -- ADM BWF and TrueHD read into a scene of beds and objects, played through the 7.1.4 object mix, the editor's Spatial view, spatial edits in the session, and the ADM BWF export.
   - `MULTI_EDITS_SPEC.md`: the Multi Edits workspace -- what the list pane shares with the List, the timeline's gestures, how a mix is made, and what a session stores.
   - `INSPECTOR_SPEC.md`: the editor's Inspector -- tool specs, the one render shared by preview and Apply, the auto-preview state machine, and the undo rules (draft history first, one undo step per gesture, `audio_rev` for the unsaved mark, Revert to Saved as an undoable step).
+  - `AUTO_RUN.md`: the debug automation's script commands (`--auto-run-script` / `--auto-run-steps`) and the `set` keys that reach every tool setting.
   - `CLIPBOARD_HOTKEY_ISSUE_20260201.md`: clipboard hotkey investigation log.
 - `icons/`: App icon sources/exports.
 - `installer/`: Installer assets/scripts (packaging).
@@ -179,6 +180,8 @@ Legacy GUI flags
 - `--auto-run-time-stretch <rate>`
 - `--auto-run-delay <frames>`
 - `--auto-run-no-exit`
+- `--auto-run-script <file>` (run the commands in a file instead of a built-in sweep; see `docs/AUTO_RUN.md`)
+- `--auto-run-steps "<cmd>; <cmd>; ..."` (the same commands inline)
 - `--debug-check-interval <frames>`
 - `--help` / `-h`
 
@@ -206,6 +209,7 @@ Editor Debug Automation (CLI)
 - Full editor sweep with screenshots:
   `cargo run -- --open-file debug\\gui_test_440.wav --auto-run-editor --auto-run-delay 20`
 - Screenshots save to the OS screenshots folder; a summary is saved under `debug\\summary_*.txt`.
+- Any other run is a script: `--auto-run-script <file>` or `--auto-run-steps "open-first; tool compressor; set compressor.threshold_db -30; preview; wait 40; screenshot"`. `set` reaches every tool setting by its session name (`gain_db`, `eq.bands.3.freq_hz`, `gate.detection`); the commands and keys are in `docs/AUTO_RUN.md`, the parser in `src/app/debug_script.rs`. A script is checked before the window opens, and a bad line stops the process with its line number.
 
 Implementation Principles
 - Keep the list view fast (large file counts must stay responsive).
