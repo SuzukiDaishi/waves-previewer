@@ -31,9 +31,22 @@ pub(super) struct EditorViewportHint {
     pub end: usize,
     pub wave_width_px: usize,
     pub lane_height_px: usize,
+    /// Every lane, and the window of them to render (see
+    /// `EditorViewportRenderKey::first_lane`).
     pub lane_count: usize,
+    pub first_lane: usize,
+    pub window_lanes: usize,
     pub use_mixdown: bool,
     pub visible_channels: Vec<usize>,
+}
+
+impl EditorViewportHint {
+    /// The window, kept inside the lanes there are.
+    fn lane_window(&self) -> std::ops::Range<usize> {
+        let total = self.lane_count.max(1);
+        let first = self.first_lane.min(total - 1);
+        first..(first + self.window_lanes.max(1)).min(total)
+    }
 }
 
 #[derive(Clone)]
@@ -514,6 +527,8 @@ impl super::WavesPreviewer {
             start: hint.start,
             end: hint.end,
             lane_count: hint.lane_count,
+            first_lane: hint.lane_window().start,
+            window_lanes: hint.lane_window().len(),
             lane_height_px: hint.lane_height_px.max(1),
             wave_width_px: hint.wave_width_px.max(1),
             use_mixdown: hint.use_mixdown,
@@ -558,10 +573,11 @@ impl super::WavesPreviewer {
                 let samples_per_column = visible_len as f32 / bins.max(1) as f32;
                 let raw_mode = matches!(quality, EditorViewportRenderQuality::Fine)
                     && samples_per_column < 2.0;
-                let mut lanes = Vec::with_capacity(hint.lane_count.max(1));
+                let window = hint.lane_window();
+                let mut lanes = Vec::with_capacity(window.len());
                 if Self::editor_draws_overview_only(tab) && !tab.loading_waveform_minmax.is_empty()
                 {
-                    for _ in 0..hint.lane_count.max(1) {
+                    for _ in window.clone() {
                         lanes.push(WaveLaneRequest::Overview {
                             overview: tab.loading_waveform_minmax.clone(),
                             display_samples_len: hint.display_samples_len.max(1),
@@ -579,7 +595,8 @@ impl super::WavesPreviewer {
                         render_raw: raw_mode && visible_len <= hint.wave_width_px.saturating_mul(4),
                     });
                 } else {
-                    for &channel_idx in &hint.visible_channels {
+                    let window_channels = hint.visible_channels.get(window.clone()).unwrap_or(&[]);
+                    for &channel_idx in window_channels {
                         let Some(channel) = tab.ch_samples.get(channel_idx) else {
                             continue;
                         };
@@ -622,17 +639,20 @@ impl super::WavesPreviewer {
             }
             ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
                 let specs = self.spectro_cache.get(&tab.path)?.clone();
+                // Only the lanes in the window; the texture is drawn at the
+                // window's first lane.
+                let window = hint.lane_window();
                 let lane_spec_indices = if hint.use_mixdown {
-                    vec![0usize; hint.lane_count.max(1)]
+                    vec![0usize; window.len()]
                 } else if hint.visible_channels.is_empty() {
-                    (0..hint.lane_count.max(1)).collect()
+                    window.clone().collect()
                 } else {
                     hint.visible_channels
-                        .iter()
-                        .copied()
-                        .take(hint.lane_count.max(1))
-                        .collect::<Vec<_>>()
+                        .get(window.clone())
+                        .unwrap_or(&[])
+                        .to_vec()
                 };
+                let window_lanes = lane_spec_indices.len().max(1);
                 Some(EditorViewportRequest::Spectral {
                     tab_path: tab.path.clone(),
                     generation,
@@ -642,7 +662,7 @@ impl super::WavesPreviewer {
                     lane_spec_indices,
                     wave_width_px: hint.wave_width_px.max(1),
                     lane_height_px: hint.lane_height_px.max(1),
-                    lane_count: hint.lane_count.max(1),
+                    lane_count: window_lanes,
                     start: hint.start,
                     end: hint.end,
                     vertical_zoom: tab.vertical_zoom,
@@ -665,7 +685,7 @@ impl super::WavesPreviewer {
                     data,
                     wave_width_px: hint.wave_width_px.max(1),
                     lane_height_px: hint.lane_height_px.max(1),
-                    lane_count: hint.lane_count.max(1),
+                    lane_count: hint.lane_window().len(),
                     start: hint.start,
                     end: hint.end,
                     vertical_zoom: tab.vertical_zoom,
@@ -688,7 +708,7 @@ impl super::WavesPreviewer {
                     data,
                     wave_width_px: hint.wave_width_px.max(1),
                     lane_height_px: hint.lane_height_px.max(1),
-                    lane_count: hint.lane_count.max(1),
+                    lane_count: hint.lane_window().len(),
                     start: hint.start,
                     end: hint.end,
                     vertical_zoom: tab.vertical_zoom,
@@ -713,7 +733,7 @@ impl super::WavesPreviewer {
                     f0_focus: tab.world_f0_focus,
                     wave_width_px: hint.wave_width_px.max(1),
                     lane_height_px: hint.lane_height_px.max(1),
-                    lane_count: hint.lane_count.max(1),
+                    lane_count: hint.lane_window().len(),
                     start: hint.start,
                     end: hint.end,
                     vertical_zoom: tab.vertical_zoom,

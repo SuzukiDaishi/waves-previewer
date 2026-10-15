@@ -168,8 +168,14 @@ pub struct ToolSpec {
     /// Does a Custom channel view limit the edit to the visible channels?
     pub honors_channel_view: bool,
     /// Slow enough that re-rendering a long clip on every settle would be
-    /// felt: the auto preview of such a tool starts out manual on long clips.
+    /// felt: the auto preview of such a tool starts out manual on long clips
+    /// -- unless it is `progressive`.
     pub heavy: bool,
+    /// What it does at any moment depends only on the audio near that
+    /// moment, so a render of a window is the full render there: the auto
+    /// preview renders around the playhead first and the rest after it, and
+    /// stays automatic on a clip of any length.
+    pub progressive: bool,
 }
 
 const fn spec(
@@ -192,6 +198,7 @@ const fn spec(
         changes_length: false,
         honors_channel_view: true,
         heavy: false,
+        progressive: false,
     }
 }
 
@@ -211,6 +218,11 @@ impl ToolSpec {
 
     const fn heavy(mut self) -> Self {
         self.heavy = true;
+        self
+    }
+
+    const fn progressive(mut self) -> Self {
+        self.progressive = true;
         self
     }
 }
@@ -387,10 +399,11 @@ impl ToolKind {
                 "📊",
                 C::Dynamics,
                 "Parametric EQ: up to eight bands, on stereo, mid or side",
-                "Double-click the graph to add a band. Drag a handle for frequency and gain (Shift: fine), scroll on it for Q, Alt+click to bypass it, right-click for its shape, mode and Delete.",
+                "Double-click the graph to add a band. Drag a handle for frequency and gain -- a cut's height is its resonance Q (Shift: fine) -- scroll on it for Q, Alt+click to bypass it, right-click for its shape, mode and Delete.",
                 T::SelectionOrWhole,
                 P::Rendered,
-            ),
+            )
+            .progressive(),
             ToolKind::Compressor => spec(
                 "Compressor",
                 "⬇",
@@ -399,7 +412,8 @@ impl ToolKind {
                 "Drag the knee for the threshold, the top point for the ratio, the knee's edge for its width. The lower graph is the gain reduction over the target; click it to go there.",
                 T::SelectionOrWhole,
                 P::Rendered,
-            ),
+            )
+            .progressive(),
             ToolKind::Limiter => spec(
                 "Limiter",
                 "⏏",
@@ -409,7 +423,8 @@ impl ToolKind {
                 T::SelectionOrWhole,
                 P::Rendered,
             )
-            .heavy(),
+            .heavy()
+            .progressive(),
             ToolKind::NoiseGate => spec(
                 "Noise Gate",
                 "🔇",
@@ -418,7 +433,8 @@ impl ToolKind {
                 "Drag the open threshold on either graph. Audio below the close line (shaded) is turned down to the floor (Range).",
                 T::SelectionOrWhole,
                 P::Rendered,
-            ),
+            )
+            .progressive(),
             ToolKind::DeClick => spec(
                 "De-click",
                 "⚡",
@@ -647,6 +663,22 @@ mod tests {
         for tool in ToolKind::ALL {
             assert_eq!(tool.label(), tool.spec().label);
         }
+    }
+
+    #[test]
+    fn progressive_tools_keep_the_length_and_render_in_place() {
+        // A window render is only the full render's middle when the tool
+        // neither moves audio in time nor measures the whole target.
+        for tool in ToolKind::ALL {
+            let spec = tool.spec();
+            if spec.progressive {
+                assert!(!spec.changes_length, "{tool:?}");
+                assert_eq!(spec.preview, PreviewKind::Rendered, "{tool:?}");
+                assert_eq!(spec.target, TargetRule::SelectionOrWhole, "{tool:?}");
+            }
+        }
+        assert!(ToolKind::Limiter.spec().progressive);
+        assert!(!ToolKind::Normalize.spec().progressive, "measures the whole target");
     }
 
     #[test]

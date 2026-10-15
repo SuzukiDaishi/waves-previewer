@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::automation::{Automatable, Evaluator, Scale, Tracks, AUTOMATION_BLOCK};
+
 /// How many bands one EQ holds.
 pub const EQ_MAX_BANDS: usize = 8;
 
@@ -60,9 +62,10 @@ impl EqKind {
         matches!(self, EqKind::Bell | EqKind::LowShelf | EqKind::HighShelf)
     }
 
-    /// Whether the band's Q means anything (a cut is Butterworth).
+    /// Whether the band has a Q: every shape. A cut's is its resonance
+    /// (`EqBand::cut_q`), flat at 0.707.
     pub fn uses_q(self) -> bool {
-        !self.uses_slope()
+        true
     }
 
     /// Whether the band has a slope (the cuts).
@@ -150,6 +153,11 @@ pub struct EqBand {
     pub q: f32,
     pub slope: CutSlope,
     pub mode: EqChannelMode,
+    /// A cut's resonance: 0.707 is the flat Butterworth corner, more is a
+    /// peak just before the corner. Its own field rather than `q`, because
+    /// a cut saved before cuts had a Q still carries the bell's `q` it was
+    /// made from, and reading that as a resonance would change its sound.
+    pub cut_q: f32,
 }
 
 impl Default for EqBand {
@@ -164,6 +172,7 @@ impl Default for EqBand {
             q: 1.0,
             slope: CutSlope::Db24,
             mode: EqChannelMode::Stereo,
+            cut_q: BUTTERWORTH_Q as f32,
         }
     }
 }
@@ -184,6 +193,27 @@ impl EqBand {
         self.mode == EqChannelMode::Stereo || self.mode == view
     }
 
+    /// The Q this band's shape uses: `cut_q` for a cut, `q` otherwise.
+    pub fn q_value(&self) -> f32 {
+        if self.kind.uses_slope() {
+            self.cut_q
+        } else {
+            self.q
+        }
+    }
+
+    /// Set the Q this band's shape uses, kept in its range.
+    pub fn set_q(&mut self, q: f32) {
+        if self.kind.uses_slope() {
+            self.cut_q = q.clamp(
+                *ParametricEqParams::CUT_Q.start(),
+                *ParametricEqParams::CUT_Q.end(),
+            );
+        } else {
+            self.q = q.clamp(*ParametricEqParams::Q.start(), *ParametricEqParams::Q.end());
+        }
+    }
+
     /// The sections that make this band at `sample_rate`.
     pub fn sections(&self, sample_rate: u32) -> Vec<Section> {
         let sr = f64::from(sample_rate.max(1));
@@ -195,15 +225,18 @@ impl EqBand {
             EqKind::LowShelf => vec![Section::design(SectionKind::LowShelf, f, g, q, sr)],
             EqKind::HighShelf => vec![Section::design(SectionKind::HighShelf, f, g, q, sr)],
             EqKind::Notch => vec![Section::design(SectionKind::Notch, f, 0.0, q, sr)],
-            EqKind::LowCut => butterworth_qs(self.slope.order())
+            EqKind::LowCut => cut_qs(self.slope.order(), self.cut_q)
                 .map(|q| Section::design(SectionKind::HighPass, f, 0.0, q, sr))
                 .collect(),
-            EqKind::HighCut => butterworth_qs(self.slope.order())
+            EqKind::HighCut => cut_qs(self.slope.order(), self.cut_q)
                 .map(|q| Section::design(SectionKind::LowPass, f, 0.0, q, sr))
                 .collect(),
         }
     }
 }
+
+/// The Q of a second-order Butterworth section: the flat corner.
+pub const BUTTERWORTH_Q: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
 /// The Q of each second-order section of an `order`-th order Butterworth
 /// filter (`order` even).
@@ -213,6 +246,27 @@ fn butterworth_qs(order: usize) -> impl Iterator<Item = f64> {
         let angle = std::f64::consts::PI * (2.0 * k as f64 + 1.0) / (2.0 * n);
         1.0 / (2.0 * angle.cos())
     })
+}
+
+/// A cut's sections with resonance `cut_q`: the Butterworth cascade with
+/// its sharpest section (the last, nearest the corner) scaled by how far
+/// `cut_q` is from flat. At 0.707 this is exactly the Butterworth cascade,
+/// so a cut that has never been given a Q sounds as it always did; above it
+/// the corner peaks, below it the corner softens, and the slope past the
+/// corner is the slope either way.
+fn cut_qs(order: usize, cut_q: f32) -> impl Iterator<Item = f64> {
+    let sections = order.max(2) / 2;
+    let q = f64::from(cut_q).max(0.05);
+    // An f32 cannot hold 1/sqrt(2): the flat default is snapped to exactly
+    // flat, so its sections are bit for bit the Butterworth ones.
+    let scale = if (q - BUTTERWORTH_Q).abs() < 1e-6 {
+        1.0
+    } else {
+        q / BUTTERWORTH_Q
+    };
+    butterworth_qs(order)
+        .enumerate()
+        .map(move |(k, q)| if k + 1 == sections { q * scale } else { q })
 }
 
 /// The whole EQ.
@@ -232,6 +286,9 @@ impl ParametricEqParams {
     pub const GAIN_DB: std::ops::RangeInclusive<f32> = -24.0..=24.0;
     /// From a broad tilt to a surgical notch.
     pub const Q: std::ops::RangeInclusive<f32> = 0.1..=18.0;
+    /// A cut's resonance: from a soft, early roll-off to a corner peaking
+    /// about 20 dB at 12 dB/oct. 0.707 is flat.
+    pub const CUT_Q: std::ops::RangeInclusive<f32> = 0.4..=10.0;
     pub const OUTPUT_DB: std::ops::RangeInclusive<f32> = -24.0..=24.0;
 
     /// Changes nothing: every band neutral and no output gain.
@@ -259,6 +316,103 @@ impl ParametricEqParams {
     /// The first unused slot.
     pub fn free_slot(&self) -> Option<usize> {
         self.bands.iter().position(|b| !b.enabled)
+    }
+
+    /// `lowest_active_hz`, counting where an automated band's corner goes
+    /// and the bands only automation makes active.
+    pub fn lowest_active_hz_automated(&self, tracks: &Tracks<EqParam>) -> Option<f32> {
+        let swept = tracks.tracks.iter().filter_map(|(param, curve)| match param {
+            EqParam::Freq(b) if self.bands.get(*b as usize).is_some_and(EqBand::is_heard) => {
+                curve.min_value()
+            }
+            _ => None,
+        });
+        let automated = (0..EQ_MAX_BANDS)
+            .filter(|b| is_band_automated(tracks, *b) && self.bands[*b].is_heard())
+            .map(|b| self.bands[b].freq_hz);
+        self.lowest_active_hz()
+            .into_iter()
+            .chain(swept)
+            .chain(automated)
+            .reduce(f32::min)
+    }
+}
+
+/// An EQ setting that can follow a curve: a band's corner, gain or Q (by
+/// slot), or the output gain. Not a band's shape, slope, mode or bypass
+/// (switches).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EqParam {
+    Freq(u8),
+    Gain(u8),
+    Q(u8),
+    Output,
+}
+
+impl EqParam {
+    /// The band slot it belongs to, if any.
+    pub fn band(self) -> Option<usize> {
+        match self {
+            EqParam::Freq(b) | EqParam::Gain(b) | EqParam::Q(b) => Some(b as usize),
+            EqParam::Output => None,
+        }
+    }
+
+    /// Frequencies and Qs move by ratio, gains by dB.
+    pub fn scale(self) -> Scale {
+        match self {
+            EqParam::Freq(_) | EqParam::Q(_) => Scale::Log,
+            EqParam::Gain(_) | EqParam::Output => Scale::Linear,
+        }
+    }
+
+    /// The range of the value, for a band of `kind` (a cut's Q is its
+    /// resonance, with a range of its own).
+    pub fn range(self, kind: EqKind) -> std::ops::RangeInclusive<f32> {
+        type P = ParametricEqParams;
+        match self {
+            EqParam::Freq(_) => P::FREQ_HZ,
+            EqParam::Gain(_) => P::GAIN_DB,
+            EqParam::Q(_) if kind.uses_slope() => P::CUT_Q,
+            EqParam::Q(_) => P::Q,
+            EqParam::Output => P::OUTPUT_DB,
+        }
+    }
+}
+
+fn is_band_automated(tracks: &Tracks<EqParam>, band: usize) -> bool {
+    tracks.params().any(|p| p.band() == Some(band))
+}
+
+impl Automatable for ParametricEqParams {
+    type Param = EqParam;
+
+    fn set_param(&mut self, param: EqParam, value: f32) {
+        let Some(slot) = param.band() else {
+            let r = EqParam::Output.range(EqKind::Bell);
+            self.output_db = value.max(*r.start()).min(*r.end());
+            return;
+        };
+        let Some(band) = self.bands.get_mut(slot) else {
+            return;
+        };
+        let r = param.range(band.kind);
+        let v = value.max(*r.start()).min(*r.end());
+        match param {
+            EqParam::Freq(_) => band.freq_hz = v,
+            EqParam::Gain(_) => band.gain_db = v,
+            EqParam::Q(_) => band.set_q(v),
+            EqParam::Output => {}
+        }
+    }
+
+    fn param(&self, param: EqParam) -> f32 {
+        match param {
+            EqParam::Output => self.output_db,
+            EqParam::Freq(b) => self.bands.get(b as usize).map_or(0.0, |x| x.freq_hz),
+            EqParam::Gain(b) => self.bands.get(b as usize).map_or(0.0, |x| x.gain_db),
+            EqParam::Q(b) => self.bands.get(b as usize).map_or(0.0, EqBand::q_value),
+        }
     }
 }
 
@@ -366,6 +520,102 @@ pub fn process(channels: &mut [Vec<f32>], sample_rate: u32, params: &ParametricE
         if out_gain != 1.0 {
             ch.iter_mut().for_each(|v| *v *= out_gain);
         }
+    }
+}
+
+/// Run the EQ over `channels` with `tracks` moving its settings over time:
+/// an automated band's sections are designed afresh every
+/// `AUTOMATION_BLOCK` samples, keeping each filter's state, and the output
+/// gain follows its curve. `offset` is the buffer sample `channels` start
+/// at. With no tracks this is exactly [`process`].
+pub fn process_automated(
+    channels: &mut [Vec<f32>],
+    sample_rate: u32,
+    params: &ParametricEqParams,
+    tracks: &Tracks<EqParam>,
+    offset: usize,
+) {
+    if tracks.is_empty() {
+        process(channels, sample_rate, params);
+        return;
+    }
+    // A band only automation lifts off zero still has to be run.
+    let active: Vec<usize> = (0..EQ_MAX_BANDS)
+        .filter(|&b| {
+            let band = &params.bands[b];
+            band.is_heard() && (!band.is_neutral() || is_band_automated(tracks, b))
+        })
+        .collect();
+    let run_view = |view: EqChannelMode, buf: &mut [f32]| {
+        let bands: Vec<usize> = active
+            .iter()
+            .copied()
+            .filter(|&b| params.bands[b].acts_on(view))
+            .collect();
+        let mut filters: Vec<Vec<SectionFilter>> = bands
+            .iter()
+            .map(|&b| {
+                params.bands[b]
+                    .sections(sample_rate)
+                    .into_iter()
+                    .map(SectionFilter::new)
+                    .collect()
+            })
+            .collect();
+        let mut eval = Evaluator::new(*params, tracks);
+        let mut start = 0;
+        while start < buf.len() {
+            let end = (start + AUTOMATION_BLOCK).min(buf.len());
+            let now = eval.at(offset + start);
+            for (filters, &b) in filters.iter_mut().zip(&bands) {
+                if is_band_automated(tracks, b) {
+                    for (filter, section) in filters.iter_mut().zip(now.bands[b].sections(sample_rate)) {
+                        filter.set_section(section);
+                    }
+                }
+            }
+            for v in &mut buf[start..end] {
+                let mut x = f64::from(*v);
+                for filter in filters.iter_mut().flatten() {
+                    x = filter.tick(x);
+                }
+                *v = x as f32;
+            }
+            start = end;
+        }
+    };
+    // The output gain, a block at a time.
+    let apply_output = |buf: &mut [f32]| {
+        let mut eval = Evaluator::new(*params, tracks);
+        for (block, chunk) in buf.chunks_mut(AUTOMATION_BLOCK).enumerate() {
+            let db = eval.at(offset + block * AUTOMATION_BLOCK).output_db;
+            if db != 0.0 {
+                let g = 10f32.powf(db / 20.0);
+                chunk.iter_mut().for_each(|v| *v *= g);
+            }
+        }
+    };
+    if channels.len() == 2 && params.has_mid_side() {
+        let len = channels[0].len().min(channels[1].len());
+        let (mut mid, mut side): (Vec<f32>, Vec<f32>) = (0..len)
+            .map(|i| {
+                let (l, r) = (channels[0][i], channels[1][i]);
+                ((l + r) * 0.5, (l - r) * 0.5)
+            })
+            .unzip();
+        run_view(EqChannelMode::Mid, &mut mid);
+        run_view(EqChannelMode::Side, &mut side);
+        for i in 0..len {
+            channels[0][i] = mid[i] + side[i];
+            channels[1][i] = mid[i] - side[i];
+        }
+    } else {
+        for ch in channels.iter_mut() {
+            run_view(EqChannelMode::Mid, ch);
+        }
+    }
+    for ch in channels.iter_mut() {
+        apply_output(ch);
     }
 }
 
@@ -504,6 +754,12 @@ impl SectionFilter {
         }
     }
 
+    /// New coefficients, the state kept: a filter whose settings move
+    /// carries on from where it was instead of starting from silence.
+    pub fn set_section(&mut self, section: Section) {
+        self.section = section;
+    }
+
     #[inline]
     pub fn tick(&mut self, x: f64) -> f64 {
         let s = &self.section;
@@ -597,6 +853,185 @@ mod tests {
         let mut steep = p;
         steep.bands[0].slope = CutSlope::Db48;
         assert!(response_db(&steep, EqChannelMode::Stereo, SR, 250.0) < two_down - 40.0);
+    }
+
+    #[test]
+    fn a_cut_with_the_flat_q_is_the_butterworth_cut_it_always_was() {
+        for slope in CutSlope::ALL {
+            for kind in [EqKind::LowCut, EqKind::HighCut] {
+                let band = EqBand {
+                    enabled: true,
+                    kind,
+                    freq_hz: 700.0,
+                    slope,
+                    ..EqBand::default()
+                };
+                let section_kind = if kind == EqKind::LowCut {
+                    SectionKind::HighPass
+                } else {
+                    SectionKind::LowPass
+                };
+                let butterworth: Vec<Section> = butterworth_qs(slope.order())
+                    .map(|q| Section::design(section_kind, 700.0, 0.0, q, f64::from(SR)))
+                    .collect();
+                assert_eq!(band.sections(SR), butterworth, "{kind:?} {slope:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_resonant_cut_peaks_at_its_corner_and_keeps_its_slope() {
+        for slope in CutSlope::ALL {
+            let flat = one_band(EqBand {
+                kind: EqKind::HighCut,
+                freq_hz: 2_000.0,
+                slope,
+                ..EqBand::default()
+            });
+            let mut peaked = flat;
+            peaked.bands[0].cut_q = 4.0;
+            // Just under the corner of a high cut: flat is under 0 dB, the
+            // resonant one rises well above it.
+            let near = 1_900.0;
+            let flat_db = response_db(&flat, EqChannelMode::Stereo, SR, near);
+            let peaked_db = response_db(&peaked, EqChannelMode::Stereo, SR, near);
+            assert!(flat_db < 0.0, "{slope:?}: {flat_db}");
+            assert!(peaked_db > 6.0, "{slope:?}: {peaked_db}");
+            // Far past the corner the slope is the slope: the two differ by
+            // what the resonant section adds there, a fraction of a dB.
+            let far = 16_000.0;
+            let a = response_db(&flat, EqChannelMode::Stereo, SR, far);
+            let b = response_db(&peaked, EqChannelMode::Stereo, SR, far);
+            assert!((a - b).abs() < 3.0, "{slope:?}: {a} vs {b}");
+            // And the processed audio follows the drawn curve.
+            let heard = measured_gain_db(&peaked, near);
+            assert!((heard - peaked_db).abs() < 0.5, "{slope:?}: heard {heard}, drawn {peaked_db}");
+        }
+        // A low Q softens the corner.
+        let mut soft = one_band(EqBand {
+            kind: EqKind::LowCut,
+            freq_hz: 1_000.0,
+            ..EqBand::default()
+        });
+        soft.bands[0].cut_q = 0.4;
+        assert!(response_db(&soft, EqChannelMode::Stereo, SR, 1_000.0) < -6.0);
+    }
+
+    #[test]
+    fn q_value_reads_the_field_the_shape_uses() {
+        let mut band = EqBand {
+            enabled: true,
+            kind: EqKind::LowCut,
+            ..EqBand::default()
+        };
+        band.set_q(3.0);
+        assert_eq!(band.cut_q, 3.0);
+        assert_eq!(band.q, 1.0, "a cut leaves the bell's q alone");
+        assert_eq!(band.q_value(), 3.0);
+        band.set_q(100.0);
+        assert_eq!(band.q_value(), *ParametricEqParams::CUT_Q.end());
+        band.kind = EqKind::Bell;
+        assert_eq!(band.q_value(), 1.0);
+    }
+
+    fn curve(scale: Scale, points: &[(usize, f32)]) -> crate::automation::Curve {
+        crate::automation::Curve::new(points.to_vec(), scale)
+    }
+
+    #[test]
+    fn an_automated_gain_raises_only_the_second_half() {
+        // A bell at 0 dB is neutral on its own: only its curve makes it act.
+        let p = one_band(EqBand {
+            kind: EqKind::Bell,
+            freq_hz: 1_000.0,
+            gain_db: 0.0,
+            ..EqBand::default()
+        });
+        assert!(p.is_neutral());
+        let len = SR as usize * 2;
+        let src = sine(1_000.0, len, 0.1);
+        let mut tracks = Tracks::none();
+        tracks.push(
+            EqParam::Gain(0),
+            curve(Scale::Linear, &[(len / 2 - 1, 0.0), (len / 2, 12.0)]),
+        );
+        let mut chans = vec![src.clone()];
+        process_automated(&mut chans, SR, &p, &tracks, 0);
+        let rms = |v: &[f32]| (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
+        let q = len / 4;
+        let first = 20.0 * (rms(&chans[0][q..2 * q]) / rms(&src[q..2 * q])).log10();
+        let second = 20.0 * (rms(&chans[0][3 * q..]) / rms(&src[3 * q..])).log10();
+        assert!(first.abs() < 0.2, "{first}");
+        assert!((second - 12.0).abs() < 0.3, "{second}");
+    }
+
+    #[test]
+    fn a_swept_cut_stays_stable_and_ends_where_it_was_sent() {
+        let p = one_band(EqBand {
+            kind: EqKind::HighCut,
+            freq_hz: 18_000.0,
+            slope: CutSlope::Db48,
+            cut_q: 3.0,
+            ..EqBand::default()
+        });
+        let len = SR as usize * 2;
+        // Noise-like: a sum of tones across the band.
+        let src: Vec<f32> = (0..len)
+            .map(|i| {
+                [110.0f32, 830.0, 3_100.0, 9_700.0]
+                    .iter()
+                    .map(|f| (i as f32 / SR as f32 * f * std::f32::consts::TAU).sin() * 0.2)
+                    .sum()
+            })
+            .collect();
+        let mut tracks = Tracks::none();
+        tracks.push(
+            EqParam::Freq(0),
+            curve(Scale::Log, &[(0, 18_000.0), (len * 3 / 4, 300.0)]),
+        );
+        let mut chans = vec![src.clone()];
+        process_automated(&mut chans, SR, &p, &tracks, 0);
+        assert!(chans[0].iter().all(|v| v.is_finite() && v.abs() < 8.0));
+        // At the end the cut is at 300 Hz: the 9.7 kHz tone is gone.
+        let tail = &chans[0][len * 7 / 8..];
+        let mut swept_to = p;
+        swept_to.bands[0].freq_hz = 300.0;
+        let mut still = vec![src[len * 7 / 8..].to_vec()];
+        process(&mut still, SR, &swept_to);
+        let rms = |v: &[f32]| (v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32).sqrt();
+        let a = rms(&tail[SR as usize / 10..]);
+        let b = rms(&still[0][SR as usize / 10..]);
+        assert!((20.0 * (a / b).log10()).abs() < 0.5, "{a} vs {b}");
+        assert_eq!(p.lowest_active_hz_automated(&tracks), Some(300.0));
+    }
+
+    #[test]
+    fn an_empty_track_set_is_the_plain_eq() {
+        let mut p = ParametricEqParams::default();
+        p.bands[1].gain_db = 6.0;
+        p.output_db = -2.0;
+        let src = sine(700.0, 9_600, 0.3);
+        let mut plain = vec![src.clone(), src.clone()];
+        process(&mut plain, SR, &p);
+        let mut auto = vec![src.clone(), src];
+        process_automated(&mut auto, SR, &p, &Tracks::none(), 0);
+        assert_eq!(plain, auto);
+    }
+
+    #[test]
+    fn eq_params_reach_every_band_field() {
+        let mut p = ParametricEqParams::default();
+        p.set_param(EqParam::Freq(2), 5_000.0);
+        p.set_param(EqParam::Gain(2), 99.0);
+        p.set_param(EqParam::Q(2), 2.0);
+        p.set_param(EqParam::Output, -3.0);
+        assert_eq!(p.bands[2].freq_hz, 5_000.0);
+        assert_eq!(p.bands[2].gain_db, *ParametricEqParams::GAIN_DB.end());
+        assert_eq!(p.param(EqParam::Q(2)), 2.0);
+        assert_eq!(p.output_db, -3.0);
+        p.bands[3].kind = EqKind::LowCut;
+        p.set_param(EqParam::Q(3), 4.0);
+        assert_eq!(p.bands[3].cut_q, 4.0);
     }
 
     #[test]
@@ -704,5 +1139,10 @@ mod tests {
         let partial: EqBand = serde_json::from_str(r#"{"enabled":true,"freq_hz":200.0}"#).unwrap();
         assert_eq!(partial.kind, EqKind::Bell);
         assert_eq!(partial.freq_hz, 200.0);
+        // A cut saved before cuts had a Q stays the flat Butterworth cut.
+        let old_cut: EqBand =
+            serde_json::from_str(r#"{"enabled":true,"kind":"low_cut","freq_hz":80.0,"q":1.0}"#)
+                .unwrap();
+        assert_eq!(old_cut.cut_q as f64, BUTTERWORTH_Q as f32 as f64);
     }
 }

@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+use crate::automation::{Automatable, Evaluator, Scale, Tracks, AUTOMATION_BLOCK};
 use crate::eq::{Section, SectionFilter, SectionKind};
 
 /// The trace's resolution: 5 ms is finer than any drawn pixel at the zoom a
@@ -246,15 +247,7 @@ impl Detector {
         let sr = f64::from(sample_rate.max(1));
         let nyquist_guard = sr * 0.45;
         let butterworth = std::f64::consts::FRAC_1_SQRT_2;
-        let hpf = (hpf_hz > 0.0).then(|| {
-            SectionFilter::new(Section::design(
-                SectionKind::HighPass,
-                f64::from(hpf_hz).min(nyquist_guard),
-                0.0,
-                butterworth,
-                sr,
-            ))
-        });
+        let hpf = key_hpf(sample_rate, hpf_hz).map(SectionFilter::new);
         let lpf = (lpf_hz > 0.0 && f64::from(lpf_hz) < nyquist_guard).then(|| {
             SectionFilter::new(Section::design(
                 SectionKind::LowPass,
@@ -271,6 +264,17 @@ impl Detector {
             rms_coeff: coeff(rms_ms, sample_rate),
             peak_coeff: peak_release_ms.map_or(0.0, |ms| coeff(ms, sample_rate)),
             state: 0.0,
+        }
+    }
+
+    /// Follow a new RMS window and key high-pass, keeping the detector's
+    /// state: what an automated compressor does between blocks.
+    fn retune(&mut self, sample_rate: u32, rms_ms: f32, hpf_hz: f32) {
+        self.rms_coeff = coeff(rms_ms, sample_rate);
+        match (key_hpf(sample_rate, hpf_hz), self.hpf.as_mut()) {
+            (Some(section), Some(filter)) => filter.set_section(section),
+            (Some(section), None) => self.hpf = Some(SectionFilter::new(section)),
+            (None, _) => self.hpf = None,
         }
     }
 
@@ -302,6 +306,21 @@ impl Detector {
             }
         }
     }
+}
+
+/// A key high-pass at `hpf_hz`, or none at 0: Butterworth, kept under the
+/// rate's Nyquist guard.
+fn key_hpf(sample_rate: u32, hpf_hz: f32) -> Option<Section> {
+    let sr = f64::from(sample_rate.max(1));
+    (hpf_hz > 0.0).then(|| {
+        Section::design(
+            SectionKind::HighPass,
+            f64::from(hpf_hz).min(sr * 0.45),
+            0.0,
+            std::f64::consts::FRAC_1_SQRT_2,
+            sr,
+        )
+    })
 }
 
 /// Every channel's detected level for one sample, linked by `link` (0..1):
@@ -411,6 +430,106 @@ impl CompressorSettings {
     }
 }
 
+/// A compressor setting that can follow a curve. Not the lookahead (it is
+/// the delay between the detector and the output), and not the detection
+/// mode or auto makeup (switches).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CompParam {
+    Threshold,
+    Ratio,
+    Knee,
+    Attack,
+    Release,
+    Makeup,
+    Mix,
+    Range,
+    Link,
+    SidechainHpf,
+    RmsWindow,
+}
+
+impl CompParam {
+    pub const ALL: [CompParam; 11] = [
+        CompParam::Threshold,
+        CompParam::Ratio,
+        CompParam::Knee,
+        CompParam::Attack,
+        CompParam::Release,
+        CompParam::Makeup,
+        CompParam::Mix,
+        CompParam::Range,
+        CompParam::Link,
+        CompParam::SidechainHpf,
+        CompParam::RmsWindow,
+    ];
+
+    pub fn range(self) -> std::ops::RangeInclusive<f32> {
+        type C = CompressorSettings;
+        match self {
+            CompParam::Threshold => C::THRESHOLD_DB,
+            CompParam::Ratio => C::RATIO,
+            CompParam::Knee => C::KNEE_DB,
+            CompParam::Attack => C::ATTACK_MS,
+            CompParam::Release => C::RELEASE_MS,
+            CompParam::Makeup => C::MAKEUP_DB,
+            CompParam::Mix => C::MIX_PCT,
+            CompParam::Range => C::RANGE_DB,
+            CompParam::Link => C::LINK_PCT,
+            CompParam::SidechainHpf => C::SIDECHAIN_HPF_HZ,
+            CompParam::RmsWindow => C::RMS_MS,
+        }
+    }
+
+    /// Times and the ratio move by ratio; levels, shares and the key filter
+    /// (which runs from 0, off) move by amount.
+    pub fn scale(self) -> Scale {
+        match self {
+            CompParam::Ratio | CompParam::Attack | CompParam::Release | CompParam::RmsWindow => {
+                Scale::Log
+            }
+            _ => Scale::Linear,
+        }
+    }
+}
+
+impl Automatable for CompressorSettings {
+    type Param = CompParam;
+
+    fn set_param(&mut self, param: CompParam, value: f32) {
+        let range = param.range();
+        let v = value.max(*range.start()).min(*range.end());
+        match param {
+            CompParam::Threshold => self.threshold_db = v,
+            CompParam::Ratio => self.ratio = v,
+            CompParam::Knee => self.knee_db = v,
+            CompParam::Attack => self.attack_ms = v,
+            CompParam::Release => self.release_ms = v,
+            CompParam::Makeup => self.makeup_db = v,
+            CompParam::Mix => self.mix_pct = v,
+            CompParam::Range => self.range_db = v,
+            CompParam::Link => self.link_pct = v,
+            CompParam::SidechainHpf => self.sidechain_hpf_hz = v,
+            CompParam::RmsWindow => self.rms_ms = v,
+        }
+    }
+
+    fn param(&self, param: CompParam) -> f32 {
+        match param {
+            CompParam::Threshold => self.threshold_db,
+            CompParam::Ratio => self.ratio,
+            CompParam::Knee => self.knee_db,
+            CompParam::Attack => self.attack_ms,
+            CompParam::Release => self.release_ms,
+            CompParam::Makeup => self.makeup_db,
+            CompParam::Mix => self.mix_pct,
+            CompParam::Range => self.range_db,
+            CompParam::Link => self.link_pct,
+            CompParam::SidechainHpf => self.sidechain_hpf_hz,
+            CompParam::RmsWindow => self.rms_ms,
+        }
+    }
+}
+
 impl Default for CompressorSettings {
     /// Gentle bus settings that audibly work without pumping.
     fn default() -> Self {
@@ -440,9 +559,27 @@ pub fn compress(
     s: &CompressorSettings,
     cancel: &AtomicBool,
 ) -> Option<DynamicsOutput> {
+    compress_automated(channels, sample_rate, s, &Tracks::none(), 0, cancel)
+}
+
+/// Compress `channels` together with `tracks` moving the settings over
+/// time. `offset` is the buffer sample `channels` start at: the curves'
+/// points are buffer samples. With no tracks this is exactly [`compress`].
+/// `None` when cancelled.
+pub fn compress_automated(
+    channels: &[&[f32]],
+    sample_rate: u32,
+    s: &CompressorSettings,
+    tracks: &Tracks<CompParam>,
+    offset: usize,
+    cancel: &AtomicBool,
+) -> Option<DynamicsOutput> {
     let len = shortest_len(channels);
     let n = channels.len();
-    let makeup = s.effective_makeup_db();
+    // The settings in force; an automated compressor moves them a block at
+    // a time, and the trace keeps the static makeup as its offset.
+    let mut cur = *s;
+    let mut makeup = cur.effective_makeup_db();
     let mut trace = TraceBuilder::new(len, sample_rate, makeup);
     let mut out: Vec<Vec<f32>> = channels.iter().map(|_| Vec::with_capacity(len)).collect();
     if len == 0 {
@@ -463,21 +600,42 @@ pub fn compress(
             )
         })
         .collect();
-    let attack = coeff(s.attack_ms, sample_rate);
-    let release = coeff(s.release_ms, sample_rate);
+    let mut attack = coeff(s.attack_ms, sample_rate);
+    let mut release = coeff(s.release_ms, sample_rate);
     let la = frames(s.lookahead_ms, sample_rate);
-    let mix = (s.mix_pct / 100.0).clamp(0.0, 1.0);
-    let link = (s.link_pct / 100.0).clamp(0.0, 1.0);
+    let mut mix = (s.mix_pct / 100.0).clamp(0.0, 1.0);
+    let mut link = (s.link_pct / 100.0).clamp(0.0, 1.0);
     let mut levels = vec![0.0f32; n];
     let mut env = vec![0.0f32; n];
+    let mut eval = (!tracks.is_empty()).then(|| Evaluator::new(*s, tracks));
     for i in 0..len + la {
         if i % CANCEL_STRIDE == 0 && cancel.load(Ordering::Relaxed) {
             return None;
         }
+        if let Some(eval) = eval.as_mut().filter(|_| i % AUTOMATION_BLOCK == 0) {
+            let next = eval.at(offset + i);
+            if next != cur {
+                if next.attack_ms != cur.attack_ms {
+                    attack = coeff(next.attack_ms, sample_rate);
+                }
+                if next.release_ms != cur.release_ms {
+                    release = coeff(next.release_ms, sample_rate);
+                }
+                if next.rms_ms != cur.rms_ms || next.sidechain_hpf_hz != cur.sidechain_hpf_hz {
+                    for det in detectors.iter_mut() {
+                        det.retune(sample_rate, next.rms_ms, next.sidechain_hpf_hz);
+                    }
+                }
+                mix = (next.mix_pct / 100.0).clamp(0.0, 1.0);
+                link = (next.link_pct / 100.0).clamp(0.0, 1.0);
+                makeup = next.effective_makeup_db();
+                cur = next;
+            }
+        }
         let lead = channels.iter().map(|c| if i < len { c[i] } else { 0.0 });
         linked_levels(&mut detectors, lead, link, &mut levels);
         for (e, level) in env.iter_mut().zip(&levels) {
-            let target = s.static_gain_db(amp_to_db(*level));
+            let target = cur.static_gain_db(amp_to_db(*level));
             let c = if target < *e { attack } else { release };
             *e = target + c * (*e - target);
         }
@@ -521,10 +679,124 @@ pub struct LimiterSettings {
 }
 
 impl LimiterSettings {
-    pub const INPUT_GAIN_DB: std::ops::RangeInclusive<f32> = 0.0..=24.0;
-    pub const CEILING_DB: std::ops::RangeInclusive<f32> = -12.0..=0.0;
+    /// Up to +48 dB: far enough to crush a whole programme flat against the
+    /// ceiling as an effect, not only to shave its peaks.
+    pub const INPUT_GAIN_DB: std::ops::RangeInclusive<f32> = 0.0..=48.0;
+    /// Down to -30 dB, so the ceiling can also hold a part well under full
+    /// scale (a stem, a bed under dialogue).
+    pub const CEILING_DB: std::ops::RangeInclusive<f32> = -30.0..=0.0;
+
+    /// The reduction a full GR scale should show for these settings: the
+    /// usual 24 dB, or 48 dB once the limiter is driven past what that holds.
+    pub fn gr_scale_db(&self) -> f32 {
+        if self.input_gain_db - self.ceiling_db > 24.0 {
+            48.0
+        } else {
+            24.0
+        }
+    }
     pub const RELEASE_MS: std::ops::RangeInclusive<f32> = 1.0..=1_000.0;
     pub const LOOKAHEAD_MS: std::ops::RangeInclusive<f32> = 0.5..=10.0;
+}
+
+/// A limiter setting that can follow a curve. Not the lookahead (the
+/// window length), true peak or link (switches).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LimiterParam {
+    InputGain,
+    Ceiling,
+    Release,
+}
+
+impl LimiterParam {
+    pub const ALL: [LimiterParam; 3] = [
+        LimiterParam::InputGain,
+        LimiterParam::Ceiling,
+        LimiterParam::Release,
+    ];
+
+    pub fn range(self) -> std::ops::RangeInclusive<f32> {
+        match self {
+            LimiterParam::InputGain => LimiterSettings::INPUT_GAIN_DB,
+            LimiterParam::Ceiling => LimiterSettings::CEILING_DB,
+            LimiterParam::Release => LimiterSettings::RELEASE_MS,
+        }
+    }
+
+    pub fn scale(self) -> Scale {
+        match self {
+            LimiterParam::Release => Scale::Log,
+            _ => Scale::Linear,
+        }
+    }
+}
+
+impl Automatable for LimiterSettings {
+    type Param = LimiterParam;
+
+    fn set_param(&mut self, param: LimiterParam, value: f32) {
+        let range = param.range();
+        let v = value.max(*range.start()).min(*range.end());
+        match param {
+            LimiterParam::InputGain => self.input_gain_db = v,
+            LimiterParam::Ceiling => self.ceiling_db = v,
+            LimiterParam::Release => self.release_ms = v,
+        }
+    }
+
+    fn param(&self, param: LimiterParam) -> f32 {
+        match param {
+            LimiterParam::InputGain => self.input_gain_db,
+            LimiterParam::Ceiling => self.ceiling_db,
+            LimiterParam::Release => self.release_ms,
+        }
+    }
+}
+
+/// A limiter's input gain, ceiling (both linear) and release coefficient at
+/// a sample, re-evaluated a block at a time when automated.
+struct LimiterAt<'a> {
+    eval: Option<Evaluator<'a, LimiterSettings>>,
+    offset: usize,
+    sample_rate: u32,
+    block: usize,
+    gin: f32,
+    ceiling: f32,
+    release: f32,
+}
+
+impl<'a> LimiterAt<'a> {
+    fn new(
+        s: &LimiterSettings,
+        tracks: &'a Tracks<LimiterParam>,
+        offset: usize,
+        sample_rate: u32,
+    ) -> Self {
+        Self {
+            eval: (!tracks.is_empty()).then(|| Evaluator::new(*s, tracks)),
+            offset,
+            sample_rate,
+            block: usize::MAX,
+            gin: db_to_amp(s.input_gain_db),
+            ceiling: db_to_amp(s.ceiling_db.min(0.0)),
+            release: coeff(s.release_ms, sample_rate),
+        }
+    }
+
+    #[inline]
+    fn at(&mut self, j: usize) -> (f32, f32, f32) {
+        if let Some(eval) = self.eval.as_mut() {
+            let block = j / AUTOMATION_BLOCK;
+            if block != self.block {
+                self.block = block;
+                let now = eval.at(self.offset + block * AUTOMATION_BLOCK);
+                self.gin = db_to_amp(now.input_gain_db);
+                self.ceiling = db_to_amp(now.ceiling_db.min(0.0));
+                self.release = coeff(now.release_ms, self.sample_rate);
+            }
+        }
+        (self.gin, self.ceiling, self.release)
+    }
 }
 
 impl Default for LimiterSettings {
@@ -653,6 +925,23 @@ pub fn limit(
     s: &LimiterSettings,
     cancel: &AtomicBool,
 ) -> Option<DynamicsOutput> {
+    limit_automated(channels, sample_rate, s, &Tracks::none(), 0, cancel)
+}
+
+/// Limit `channels` together with `tracks` moving the input gain, ceiling
+/// and release over time. A peak is judged by the settings at the peak
+/// (which the lookahead reaches before the output does); the output is
+/// held to the ceiling in force where it is written. `offset` is the
+/// buffer sample `channels` start at. With no tracks this is exactly
+/// [`limit`]. `None` when cancelled.
+pub fn limit_automated(
+    channels: &[&[f32]],
+    sample_rate: u32,
+    s: &LimiterSettings,
+    tracks: &Tracks<LimiterParam>,
+    offset: usize,
+    cancel: &AtomicBool,
+) -> Option<DynamicsOutput> {
     let len = shortest_len(channels);
     let n = channels.len();
     let mut trace = TraceBuilder::new(len, sample_rate, s.input_gain_db);
@@ -663,16 +952,17 @@ pub fn limit(
             trace: trace.finish(),
         });
     }
-    let gin = db_to_amp(s.input_gain_db);
-    let ceiling = db_to_amp(s.ceiling_db.min(0.0));
     let window = frames(s.lookahead_ms, sample_rate).max(1);
-    let release = coeff(s.release_ms, sample_rate);
     let taps = s.true_peak.then(true_peak_taps);
     let chains = if s.link { 1 } else { n };
+    // The settings where a requirement is decided, and where the output is
+    // written: the same until something is automated.
+    let mut at_peak = LimiterAt::new(s, tracks, offset, sample_rate);
+    let mut at_out = LimiterAt::new(s, tracks, offset, sample_rate);
     let mut gains: Vec<LookaheadGain> = (0..chains)
-        .map(|_| LookaheadGain::new(window, release))
+        .map(|_| LookaheadGain::new(window, at_out.release))
         .collect();
-    let required = |j: usize, chain: usize| -> f32 {
+    let required = |j: usize, chain: usize, gin: f32, ceiling: f32| -> f32 {
         let peak = if s.link {
             channels
                 .iter()
@@ -688,11 +978,15 @@ pub fn limit(
     };
     for (c, g) in gains.iter_mut().enumerate() {
         let first = (0..window.min(len))
-            .map(|j| required(j, c))
+            .map(|j| {
+                let (gin, ceiling, _) = at_peak.at(j);
+                required(j, c, gin, ceiling)
+            })
             .fold(1.0f32, f32::min);
         g.prime(first);
         for j in 0..(window - 1).min(len) {
-            g.require(j, required(j, c));
+            let (gin, ceiling, _) = at_peak.at(j);
+            g.require(j, required(j, c, gin, ceiling));
         }
     }
     let mut chain_gain = vec![1.0f32; chains];
@@ -701,10 +995,13 @@ pub fn limit(
             return None;
         }
         let ahead = i + window - 1;
+        let peak_settings = (ahead < len).then(|| at_peak.at(ahead));
+        let (gin, ceiling, release) = at_out.at(i);
         for (c, g) in gains.iter_mut().enumerate() {
-            if ahead < len {
-                g.require(ahead, required(ahead, c));
+            if let Some((ahead_gin, ahead_ceiling, _)) = peak_settings {
+                g.require(ahead, required(ahead, c, ahead_gin, ahead_ceiling));
             }
+            g.release = release;
             chain_gain[c] = g.gain_at(i);
         }
         let mut peak = 0.0f32;
@@ -1077,6 +1374,111 @@ mod tests {
         let out = limit(&[&src], SR, &LimiterSettings::default(), &go()).unwrap();
         assert_eq!(out.channels[0], src);
         assert!(out.trace.max_reduction_db() < 1e-4);
+    }
+
+    fn curve(scale: Scale, points: &[(usize, f32)]) -> crate::automation::Curve {
+        crate::automation::Curve::new(points.to_vec(), scale)
+    }
+
+    #[test]
+    fn a_constant_curve_is_the_static_setting() {
+        let src = sine(500.0, SR as usize / 2, 0.8);
+        let s = CompressorSettings {
+            threshold_db: -24.0,
+            ..CompressorSettings::default()
+        };
+        let plain = compress(&[&src], SR, &s, &go()).unwrap();
+        let mut tracks = Tracks::none();
+        tracks.push(CompParam::Threshold, curve(Scale::Linear, &[(0, -24.0)]));
+        tracks.push(CompParam::Attack, curve(Scale::Log, &[(0, s.attack_ms)]));
+        let auto = compress_automated(&[&src], SR, &s, &tracks, 0, &go()).unwrap();
+        for (a, b) in plain.channels[0].iter().zip(&auto.channels[0]) {
+            assert!((a - b).abs() < 1e-6);
+        }
+        let lim = LimiterSettings {
+            input_gain_db: 12.0,
+            ..LimiterSettings::default()
+        };
+        let plain = limit(&[&src], SR, &lim, &go()).unwrap();
+        let mut tracks = Tracks::none();
+        tracks.push(LimiterParam::Ceiling, curve(Scale::Linear, &[(0, -1.0)]));
+        let auto = limit_automated(&[&src], SR, &lim, &tracks, 0, &go()).unwrap();
+        for (a, b) in plain.channels[0].iter().zip(&auto.channels[0]) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn a_falling_threshold_compresses_the_second_half_harder() {
+        let len = SR as usize * 2;
+        let src = sine(300.0, len, 0.5);
+        let s = CompressorSettings {
+            threshold_db: -6.0,
+            ratio: 8.0,
+            knee_db: 0.0,
+            ..CompressorSettings::default()
+        };
+        // -6 dB for the first second, then a step down to -36 dB.
+        let mut tracks = Tracks::none();
+        tracks.push(
+            CompParam::Threshold,
+            curve(Scale::Linear, &[(len / 2 - 1, -6.0), (len / 2, -36.0)]),
+        );
+        let out = compress_automated(&[&src], SR, &s, &tracks, 0, &go()).unwrap();
+        let q = len / 4;
+        let first = rms(&out.channels[0][q..2 * q]);
+        let second = rms(&out.channels[0][3 * q..]);
+        assert!(20.0 * (second / first).log10() < -15.0, "{first} {second}");
+        // The curve's points are buffer samples: rendered from half way in,
+        // the same audio starts already past the step.
+        let tail = &src[len / 2..];
+        let late = compress_automated(&[tail], SR, &s, &tracks, len / 2, &go()).unwrap();
+        let late_rms = rms(&late.channels[0][q..]);
+        assert!((20.0 * (late_rms / second).log10()).abs() < 0.5, "{late_rms} vs {second}");
+    }
+
+    #[test]
+    fn an_automated_ceiling_holds_every_stretch_under_its_own_level() {
+        let len = SR as usize * 2;
+        let src = sine(997.0, len, 0.9);
+        let s = LimiterSettings {
+            ceiling_db: -1.0,
+            true_peak: false,
+            ..LimiterSettings::default()
+        };
+        let mut tracks = Tracks::none();
+        tracks.push(
+            LimiterParam::Ceiling,
+            curve(Scale::Linear, &[(0, -1.0), (len / 2, -1.0), (len / 2 + 1, -20.0)]),
+        );
+        tracks.push(LimiterParam::InputGain, curve(Scale::Linear, &[(0, 0.0), (len, 12.0)]));
+        let out = limit_automated(&[&src], SR, &s, &tracks, 0, &go()).unwrap();
+        let y = &out.channels[0];
+        assert!(peak(&y[..len / 2]) <= 10f32.powf(-1.0 / 20.0) + 1e-6);
+        // Past the step plus a lookahead, under the new ceiling.
+        let settle = len / 2 + SR as usize / 10;
+        assert!(peak(&y[settle..]) <= 10f32.powf(-20.0 / 20.0) + 1e-6);
+        assert!(peak(&y[settle..]) > 10f32.powf(-21.0 / 20.0), "held at it");
+    }
+
+    #[test]
+    fn the_deepest_settings_hold_a_quiet_tone_flat_at_a_low_ceiling() {
+        let s = LimiterSettings {
+            input_gain_db: *LimiterSettings::INPUT_GAIN_DB.end(),
+            ceiling_db: *LimiterSettings::CEILING_DB.start(),
+            ..LimiterSettings::default()
+        };
+        assert_eq!((s.input_gain_db, s.ceiling_db), (48.0, -30.0));
+        assert_eq!(s.gr_scale_db(), 48.0);
+        // A tone at -40 dBFS, pushed 48 dB: 18 dB over a -30 dB ceiling.
+        let src = sine(220.0, SR as usize, 10f32.powf(-40.0 / 20.0));
+        let out = limit(&[&src], SR, &s, &go()).unwrap();
+        let ceiling = 10f32.powf(-30.0 / 20.0);
+        assert!(peak(&out.channels[0]) <= ceiling + 1e-6);
+        let tail = &out.channels[0][SR as usize / 2..];
+        assert!(peak(tail) > ceiling * 0.9, "held at the ceiling, not under it");
+        assert!(out.trace.max_reduction_db() > 15.0);
+        assert_eq!(LimiterSettings::default().gr_scale_db(), 24.0);
     }
 
     #[test]

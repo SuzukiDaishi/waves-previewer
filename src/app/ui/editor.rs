@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 
+use crate::app::editor_layout::{self as lanes_layout, LaneGeometry};
+use crate::app::tool_automation::{self, AutoParam};
+use crate::app::ui::curve_canvas::{self, CurveAxis, CurveLook};
 use crate::app::input_focus::UiSurface;
 use crate::app::render::overlay as ov;
 use crate::app::render::waveform_pyramid as wf_cache;
@@ -242,10 +245,6 @@ const WAVE_CENTER_LINE_COL: Color32 = Color32::from_rgb(96, 104, 120);
 const WAVE_CENTER_LINE_W: f32 = 1.4;
 const WAVE_CENTER_LABEL_COL: Color32 = Color32::from_rgb(150, 158, 172);
 const WAVE_DB_GRID_COL: Color32 = Color32::from_rgb(38, 38, 44);
-
-/// Height a single channel lane needs before its trace stops reading as a line.
-/// Enough room for the centre line and the -6/-12 dBFS grid either side of it.
-const MIN_LANE_H: f32 = 44.0;
 
 /// Laid over a lane whose channel is muted (or lost to someone else's solo).
 /// The canvas background at ~59% alpha, so the lane fades toward the backdrop
@@ -1385,7 +1384,7 @@ impl crate::app::WavesPreviewer {
             }
             ui.vertical(|ui| {
                 ui.label(RichText::new("Time").small().strong());
-                let desired = egui::vec2(desired_width.max(120.0), 54.0);
+                let desired = egui::vec2(desired_width.max(120.0), lanes_layout::TIME_NAV_H);
                 let (navigator_resp, painter) =
                     ui.allocate_painter(desired, Sense::click_and_drag());
                 rect = navigator_resp.rect;
@@ -1492,6 +1491,105 @@ impl crate::app::WavesPreviewer {
             next_view = Some(center.saturating_sub(visible / 2).min(max_left));
         }
         next_view
+    }
+
+    /// The colour an automation lane is drawn in: an EQ band's own colour
+    /// (as on the EQ graph), the threshold / ceiling colours of the dynamics
+    /// panels for those tools.
+    fn automation_color(param: AutoParam) -> Color32 {
+        use crate::eq::EqParam;
+        match param {
+            AutoParam::Eq(EqParam::Output) => Color32::from_rgb(230, 230, 236),
+            AutoParam::Eq(p) => crate::app::ui::inspector::plots::BAND_COLORS
+                [p.band().unwrap_or(0) % crate::app::ui::inspector::plots::BAND_COLORS.len()],
+            AutoParam::Comp(_) => Color32::from_rgb(255, 170, 70),
+            AutoParam::Limiter(_) => Color32::from_rgb(255, 120, 120),
+        }
+    }
+
+    /// "Ch N" (and the speaker, when the layout names one) in the bottom-left
+    /// corner of each lane on screen. Bottom, not top: the time ruler's
+    /// labels run along the canvas's top edge.
+    fn draw_editor_lane_labels(
+        painter: &egui::Painter,
+        lanes: LaneGeometry,
+        visible: std::ops::Range<usize>,
+        lane_channels: &[usize],
+        layout: Option<&[Option<crate::audio_channels::SpeakerPos>]>,
+        wave_left: f32,
+    ) {
+        let font = egui::FontId::monospace(10.0);
+        for lane in visible {
+            let Some(&channel) = lane_channels.get(lane) else {
+                continue;
+            };
+            let speaker = layout.and_then(|layout| {
+                layout
+                    .get(channel)
+                    .copied()
+                    .flatten()
+                    .map(|pos| pos.label(layout))
+            });
+            let text = match speaker {
+                Some(name) => format!("Ch {} {name}", channel + 1),
+                None => format!("Ch {}", channel + 1),
+            };
+            let galley = painter.layout_no_wrap(text, font.clone(), Color32::from_rgb(178, 188, 204));
+            let anchor = egui::pos2(wave_left + 4.0, lanes.lane_top(lane + 1) - 3.0);
+            let text_rect = egui::Align2::LEFT_BOTTOM.anchor_size(anchor, galley.size());
+            painter.rect_filled(
+                text_rect.expand2(egui::vec2(3.0, 1.0)),
+                3.0,
+                Color32::from_rgba_unmultiplied(10, 11, 14, 180),
+            );
+            painter.galley(text_rect.min, galley, Color32::WHITE);
+        }
+    }
+
+    /// The lane scrollbar, shown while the lanes overflow the canvas. Drag
+    /// the thumb to scroll; click the track beside it to page. Returns where
+    /// it scrolled to, if it did. Interacted after the canvas, so it is on
+    /// top of the canvas's own click-and-drag (as the amplitude rail is).
+    fn draw_editor_lane_scrollbar(
+        ui: &mut egui::Ui,
+        bar_rect: egui::Rect,
+        lanes: LaneGeometry,
+    ) -> Option<f32> {
+        let resp = ui
+            .interact(
+                bar_rect,
+                ui.id().with("editor_lane_scrollbar"),
+                Sense::click_and_drag(),
+            )
+            .on_hover_text(
+                "Scroll the channel lanes. The wheel here or over the left scale, \
+                 or Alt+wheel over the waveform, scrolls them too.",
+            );
+        let mut next = None;
+        if resp.dragged() {
+            next = Some(lanes.scroll_after_thumb_drag(resp.drag_delta().y, bar_rect.height()));
+        } else if resp.clicked() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                next = Some(lanes.scroll_after_track_click(pos.y, bar_rect.top(), bar_rect.height()));
+            }
+        }
+        let shown = next.map_or(lanes, |scroll_px| LaneGeometry { scroll_px, ..lanes });
+        let (thumb_top, thumb_h) = shown.thumb_span(bar_rect.top(), bar_rect.height());
+        let thumb = egui::Rect::from_min_size(
+            egui::pos2(bar_rect.left(), thumb_top),
+            egui::vec2(bar_rect.width(), thumb_h),
+        );
+        let painter = ui.painter_at(bar_rect);
+        painter.rect_filled(bar_rect, 4.0, Color32::from_rgb(14, 16, 20));
+        let thumb_col = if resp.dragged() {
+            Color32::from_rgb(92, 188, 255)
+        } else if resp.hovered() {
+            Color32::from_rgb(110, 124, 146)
+        } else {
+            Color32::from_rgb(72, 82, 98)
+        };
+        painter.rect_filled(thumb.shrink2(egui::vec2(1.5, 1.0)), 3.0, thumb_col);
+        next.filter(|scroll_px| *scroll_px != lanes.scroll_px)
     }
 
     fn draw_editor_amplitude_navigator(
@@ -2323,11 +2421,13 @@ impl crate::app::WavesPreviewer {
     /// Realtime "mini meter" strip under the editor: oscilloscope,
     /// dual-resolution spectrum analyzer, stereo vectorscope with
     /// correlation, and per-channel peak/RMS meters of the audio around
-    /// the playhead. Fills the otherwise empty space below the overview
-    /// navigator. Smoothing/hold state lives on `tab.mini_meter`.
+    /// the playhead. Sits on the bottom edge of the canvas column, `strip_h`
+    /// tall (the splitter above it sets that; see `editor_layout`).
+    /// Smoothing/hold state lives on `tab.mini_meter`.
     fn draw_editor_mini_meter(
         ui: &mut egui::Ui,
         tab: &mut EditorTab,
+        strip_h: f32,
         playhead_display: usize,
         preview_audio: Option<&crate::audio::AudioBuffer>,
         preview_playhead: usize,
@@ -2340,7 +2440,7 @@ impl crate::app::WavesPreviewer {
     ) {
         use crate::app::render::mini_meter;
 
-        let h = ui.available_height().clamp(64.0, 210.0);
+        let h = strip_h.max(lanes_layout::MINI_METER_MIN_H);
         let w = ui.available_width().max(160.0);
         let use_preview = preview_audio.filter(|audio| {
             !audio.channels.is_empty() && audio.channels.iter().any(|channel| !channel.is_empty())
@@ -2452,7 +2552,11 @@ impl crate::app::WavesPreviewer {
         let panel_bg = Color32::from_rgb(16, 18, 23);
 
         // ---- Layout: [SCOPE][SPECTRUM][STEREO][LEVELS] -------------------
-        let levels_w = (30.0 + n_ch as f32 * 14.0).clamp(56.0, inner.width() * 0.28);
+        // `min` then `max`, never `clamp`: under 200 px of strip the upper
+        // bound falls below the lower one, and `f32::clamp` panics on that.
+        let levels_w = (30.0 + n_ch as f32 * 14.0)
+            .min(inner.width() * 0.28)
+            .max(56.0);
         let stereo_w = inner
             .height()
             .clamp(56.0, 170.0)
@@ -3821,6 +3925,7 @@ impl crate::app::WavesPreviewer {
             if channel_count > 0 {
                 let mut view = tab.channel_view.clone();
                 let mut view_changed = false;
+                let channel_menu_max_h = (ctx.content_rect().height() * 0.6).max(160.0);
                 ui.label("Ch:");
                 if ui
                     .selectable_label(view.mode == ChannelViewMode::Mixdown, "Mix")
@@ -3838,20 +3943,27 @@ impl crate::app::WavesPreviewer {
                 }
                 ui.menu_button("Channels", |ui| {
                     let mut selection_changed = false;
-                    for idx in 0..channel_count {
-                        let label = format!("Ch {}", idx + 1);
-                        let mut selected = view.selected.contains(&idx);
-                        if ui.checkbox(&mut selected, label).changed() {
-                            selection_changed = true;
-                            if selected {
-                                if !view.selected.contains(&idx) {
-                                    view.selected.push(idx);
+                    // A file with hundreds of channels would run the list off
+                    // the screen, and "Clear" with it.
+                    egui::ScrollArea::vertical()
+                        .id_salt("editor_channel_view_list")
+                        .max_height(channel_menu_max_h)
+                        .show(ui, |ui| {
+                            for idx in 0..channel_count {
+                                let label = format!("Ch {}", idx + 1);
+                                let mut selected = view.selected.contains(&idx);
+                                if ui.checkbox(&mut selected, label).changed() {
+                                    selection_changed = true;
+                                    if selected {
+                                        if !view.selected.contains(&idx) {
+                                            view.selected.push(idx);
+                                        }
+                                    } else {
+                                        view.selected.retain(|&v| v != idx);
+                                    }
                                 }
-                            } else {
-                                view.selected.retain(|&v| v != idx);
                             }
-                        }
-                    }
+                        });
                     if ui.button("Clear").clicked() {
                         view.selected.clear();
                         selection_changed = true;
@@ -3877,30 +3989,35 @@ impl crate::app::WavesPreviewer {
                     tab.ch_muted.resize(channel_count, false);
                     tab.ch_solo.resize(channel_count, false);
                     ui.label("Playback mute / solo");
-                    for idx in 0..channel_count {
-                        ui.horizontal(|ui| {
-                            let name = match (channel_count, idx) {
-                                (2, 0) => "L".to_string(),
-                                (2, 1) => "R".to_string(),
-                                _ => format!("Ch {}", idx + 1),
-                            };
-                            ui.label(name);
-                            if ui
-                                .selectable_label(tab.ch_muted[idx], "M")
-                                .on_hover_text("Mute this channel during playback")
-                                .clicked()
-                            {
-                                tab.ch_muted[idx] = !tab.ch_muted[idx];
-                            }
-                            if ui
-                                .selectable_label(tab.ch_solo[idx], "S")
-                                .on_hover_text("Solo this channel during playback")
-                                .clicked()
-                            {
-                                tab.ch_solo[idx] = !tab.ch_solo[idx];
+                    egui::ScrollArea::vertical()
+                        .id_salt("editor_channel_mute_solo_list")
+                        .max_height(channel_menu_max_h)
+                        .show(ui, |ui| {
+                            for idx in 0..channel_count {
+                                ui.horizontal(|ui| {
+                                    let name = match (channel_count, idx) {
+                                        (2, 0) => "L".to_string(),
+                                        (2, 1) => "R".to_string(),
+                                        _ => format!("Ch {}", idx + 1),
+                                    };
+                                    ui.label(name);
+                                    if ui
+                                        .selectable_label(tab.ch_muted[idx], "M")
+                                        .on_hover_text("Mute this channel during playback")
+                                        .clicked()
+                                    {
+                                        tab.ch_muted[idx] = !tab.ch_muted[idx];
+                                    }
+                                    if ui
+                                        .selectable_label(tab.ch_solo[idx], "S")
+                                        .on_hover_text("Solo this channel during playback")
+                                        .clicked()
+                                    {
+                                        tab.ch_solo[idx] = !tab.ch_solo[idx];
+                                    }
+                                });
                             }
                         });
-                    }
                     if ui.button("Clear").clicked() {
                         tab.ch_muted.iter_mut().for_each(|m| *m = false);
                         tab.ch_solo.iter_mut().for_each(|s| *s = false);
@@ -4290,6 +4407,10 @@ impl crate::app::WavesPreviewer {
         // User-resizable inspector width (drag the divider between canvas and
         // inspector); remembered for the session via egui memory.
         let inspector_width_id = egui::Id::new("editor_inspector_width");
+        // The mini meter's height, set by the splitter above it. Remembered
+        // for the session like the Inspector's width, and shared by every tab
+        // so switching tabs does not move the meter.
+        let mini_meter_height_id = egui::Id::new("editor_mini_meter_height");
         let stored_inspector_w: f32 =
             ctx.data_mut(|d| *d.get_temp_mut_or(inspector_width_id, 310.0f32));
         let max_inspector_w = (avail.x * 0.5).max(min_inspector_w);
@@ -4340,12 +4461,15 @@ impl crate::app::WavesPreviewer {
                     )
             })
             .and_then(|_| self.audio.object_bed_recent(crate::audio::OBJECT_BED_TAP_FRAMES));
+        // The file's speakers, for the lane labels.
+        let lane_speaker_layout = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| self.channel_layout_for(&tab.path, tab.ch_samples.len()));
         let mini_meter_layout = if object_bed_meter.is_some() {
             crate::audio_channels::standard_layout_vec(crate::spatial::panner::BED_CHANNELS)
         } else {
-            self.tabs
-                .get(tab_idx)
-                .and_then(|tab| self.channel_layout_for(&tab.path, tab.ch_samples.len()))
+            lane_speaker_layout.clone()
         };
         // The Panner's panel: the speakers and where each channel goes.
         // The file the headphone rendering is playing now, if any.
@@ -4383,20 +4507,53 @@ impl crate::app::WavesPreviewer {
                     let view_mode = tab.leaf_view_mode();
                     let (use_mixdown, visible_channels, lane_count) =
                         Self::editor_lane_layout(tab, view_mode);
-                    // Room for the lanes that are about to be drawn: the
-                    // aspect-derived height alone gave a 12-channel file 15 px
-                    // per lane. `min` last, never `clamp` -- the editor's
-                    // available height can fall under the 180 px floor, and
-                    // `f32::clamp` panics when its min exceeds its max.
-                    let canvas_h = (canvas_w * 0.35)
-                        .max(180.0)
-                        .max(lane_count as f32 * MIN_LANE_H)
-                        .min(canvas_area_h.max(1.0));
+                    // The column, top to bottom: the waveform, the time
+                    // navigator, the splitter and the mini meter. The meter
+                    // sits on the column's bottom edge at the height the
+                    // splitter last left it and the waveform takes the rest,
+                    // so neither moves when the window only gets wider. Lanes
+                    // that do not fit the waveform scroll (`LaneGeometry`).
+                    let column_rect = ui.max_rect();
+                    let nav_reserved_h = ui.text_style_height(&TextStyle::Small)
+                        + ui.spacing().item_spacing.y * 3.0
+                        + lanes_layout::TIME_NAV_H;
+                    let meter_pref_h: f32 = ctx.data_mut(|d| {
+                        *d.get_temp_mut_or(
+                            mini_meter_height_id,
+                            lanes_layout::MINI_METER_DEFAULT_H,
+                        )
+                    });
+                    let column_layout = lanes_layout::editor_column_layout(
+                        column_rect.height(),
+                        nav_reserved_h,
+                        meter_pref_h,
+                    );
+                    let canvas_h = column_layout.wave_h;
                     let (resp, painter) = ui.allocate_painter(egui::vec2(canvas_w, canvas_h), Sense::click_and_drag());
                     let rect = resp.rect;
                     let w = rect.width().max(1.0); let h = rect.height().max(1.0);
                     let mut hover_cursor: Option<egui::CursorIcon> = None;
                     painter.rect_filled(rect, 0.0, Color32::from_rgb(16,16,18));
+                    // Where the lanes are. Settled before the right rail is
+                    // laid out, because a scrollbar takes its width from it.
+                    let lane_geom = LaneGeometry::new(rect.top(), h, lane_count, tab.lane_scroll_px);
+                    tab.lane_scroll_px = lane_geom.scroll_px;
+                    tab.last_lane_geometry = Some(lane_geom);
+                    let lane_scrollbar_rect = lane_geom.overflows().then(|| {
+                        egui::Rect::from_min_max(
+                            egui::pos2(rect.right() - lanes_layout::LANE_SCROLLBAR_W, rect.top()),
+                            rect.max,
+                        )
+                    });
+                    tab.last_lane_scrollbar_rect = lane_scrollbar_rect;
+                    let lane_scrollbar_reserved_w = if lane_scrollbar_rect.is_some() {
+                        lanes_layout::LANE_SCROLLBAR_W + lanes_layout::LANE_SCROLLBAR_GAP
+                    } else {
+                        0.0
+                    };
+                    // The right rail (amplitude navigator, colour range) lays
+                    // out from here leftward.
+                    let rail_right = rect.right() - lane_scrollbar_reserved_w;
                     let gutter_w = 44.0;
                     let show_amplitude_navigator = matches!(
                         view_mode,
@@ -4416,13 +4573,14 @@ impl crate::app::WavesPreviewer {
                             + amplitude_nav_right_pad
                             + amplitude_nav_strip_w
                             + spectro_color_range_gap
-                            + spectro_color_range_w;
+                            + spectro_color_range_w
+                            + lane_scrollbar_reserved_w;
                     let wave_left = rect.left() + gutter_w;
                     let wave_w = (w - gutter_w - amplitude_nav_reserved_w).max(1.0);
                     let amplitude_nav_rect = if show_amplitude_navigator {
                         Some(egui::Rect::from_min_max(
-                            egui::pos2(rect.right() - amplitude_nav_right_pad - amplitude_nav_strip_w, rect.top() + 10.0),
-                            egui::pos2(rect.right() - amplitude_nav_right_pad, rect.bottom() - 10.0),
+                            egui::pos2(rail_right - amplitude_nav_right_pad - amplitude_nav_strip_w, rect.top() + 10.0),
+                            egui::pos2(rail_right - amplitude_nav_right_pad, rect.bottom() - 10.0),
                         ))
                     } else {
                         None
@@ -4454,7 +4612,10 @@ impl crate::app::WavesPreviewer {
                             tab.vertical_view_center,
                         )
                     });
-                        let lane_h = h / lane_count as f32;
+                    let lane_h = lane_geom.lane_h;
+                    // The lanes any part of which is on screen: the only ones
+                    // drawn, however many channels the file has.
+                    let visible_lanes = lane_geom.visible_lanes();
 
                     // Visual amplitude scale: assume Volume=0 dB for display; apply per-file Gain only
                     let scale = db_to_amp(gain_db);
@@ -4542,6 +4703,11 @@ impl crate::app::WavesPreviewer {
                 Self::editor_viewport_dimension_px(wave_w, pixels_per_point);
             let lane_height_px =
                 Self::editor_viewport_dimension_px(lane_h, pixels_per_point);
+            // The spectral views render the lanes on screen (and one either
+            // side), never the whole stack: a texture one lane tall per
+            // channel outgrows the GPU's limit long before the channel count
+            // stops being plausible.
+            let lane_window = lane_geom.window(lanes_layout::LANE_WINDOW_OVERSCAN);
             pending_viewport_hint = matches!(
                 view_mode,
                 ViewMode::Spectrogram
@@ -4559,6 +4725,8 @@ impl crate::app::WavesPreviewer {
                 wave_width_px,
                 lane_height_px,
                 lane_count,
+                first_lane: lane_window.start,
+                window_lanes: lane_window.len(),
                 use_mixdown,
                 visible_channels: visible_channels.clone(),
             });
@@ -4579,6 +4747,8 @@ impl crate::app::WavesPreviewer {
                         start,
                         end,
                         lane_count: lane_count.max(1),
+                        first_lane: lane_window.start,
+                        window_lanes: lane_window.len(),
                         lane_height_px,
                         wave_width_px,
                         use_mixdown,
@@ -4714,6 +4884,7 @@ impl crate::app::WavesPreviewer {
                                 .as_ref()
                                 .and_then(|key| Self::best_editor_viewport_cache(tab, key));
                             if let Some(crate::app::types::EditorViewportRenderCache {
+                                key: texture_key,
                                 payload:
                                     crate::app::types::EditorViewportCachePayload::Image {
                                         texture: Some(texture),
@@ -4722,11 +4893,13 @@ impl crate::app::WavesPreviewer {
                                 ..
                             }) = current_viewport_cache
                             {
+                                // At the lanes this render covers, which after
+                                // a scroll are not yet the lanes on screen.
                                 painter.image(
                                     texture.id(),
                                     egui::Rect::from_min_size(
-                                        egui::pos2(wave_left, rect.top()),
-                                        egui::vec2(wave_w, lane_h * lane_count as f32),
+                                        egui::pos2(wave_left, lane_geom.lane_top(texture_key.first_lane)),
+                                        egui::vec2(wave_w, lane_h * texture_key.window_lanes.max(1) as f32),
                                     ),
                                     egui::Rect::from_min_max(
                                         egui::pos2(0.0, 0.0),
@@ -4823,8 +4996,8 @@ impl crate::app::WavesPreviewer {
                                 tab.vertical_view_center,
                                 &self.spectro_cfg,
                             );
-                            for ci in 0..lane_count {
-                                let lane_top = rect.top() + lane_h * ci as f32;
+                            for ci in visible_lanes.clone() {
+                                let lane_top = lane_geom.lane_top(ci);
                                 let lane_rect = egui::Rect::from_min_size(
                                     egui::pos2(wave_left, lane_top),
                                     egui::vec2(wave_w, lane_h),
@@ -5386,7 +5559,28 @@ impl crate::app::WavesPreviewer {
                         .map(|range_rect| !range_rect.contains(p))
                         .unwrap_or(true)
             });
-            if pointer_over_waveform {
+            // Lanes that overflow the canvas scroll vertically: Alt+wheel
+            // anywhere over it (egui's own vertical-scroll modifier, which
+            // also folds a sideways wheel into a vertical one), or the plain
+            // wheel over the gutter and the scrollbar, where there is no time
+            // position to zoom around. Shift (pan) and Ctrl (zoom) keep their
+            // meaning everywhere: egui turns both into something other than a
+            // vertical delta before this reads it.
+            let lane_wheel_dy = if pointer_over_waveform && lane_geom.overflows() {
+                let (wheel_y, alt) =
+                    ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.alt));
+                let over_lane_strip = pointer_pos.is_some_and(|p| {
+                    p.x < wave_left || lane_scrollbar_rect.is_some_and(|bar| bar.contains(p))
+                });
+                (wheel_y != 0.0 && (alt || over_lane_strip)).then_some(-wheel_y)
+            } else {
+                None
+            };
+            if let Some(dy) = lane_wheel_dy {
+                tab.lane_scroll_px = lane_geom.scrolled_by(dy);
+                ctx.request_repaint();
+            }
+            if pointer_over_waveform && lane_wheel_dy.is_none() {
                 // Zoom with wheel/pinch over this widget.
                 // `zoom_delta` captures ctrl/cmd+wheel and pinch gestures robustly.
                 let (wheel_smooth, zoom_delta, modifiers) = ui.input(|i| {
@@ -5649,6 +5843,16 @@ impl crate::app::WavesPreviewer {
             const PITCH_SEMI_RANGE: f32 = 12.0;
             let frac_to_y = |frac: f32| rect.top() + (1.0 - frac.clamp(0.0, 1.0)) * canvas_h;
             let y_to_frac = |y: f32| (1.0 - (y - rect.top()) / canvas_h).clamp(0.0, 1.0);
+            // Every breakpoint curve on the canvas shares its x axis.
+            let curve_sample_to_x = |s: usize| geom.sample_center_x(s.min(display_samples_len));
+            let curve_x_to_sample =
+                |x: f32| geom.x_to_display_sample(x.clamp(wave_left, wave_left + wave_w));
+            // The automation lane the canvas edits: the active tool's, picked
+            // in the Inspector, switched on.
+            let automation_param: Option<AutoParam> = tab
+                .automation_selected
+                .filter(|p| p.tool() == tab.active_tool)
+                .filter(|p| tool_automation::lane(tab, *p).is_some_and(|l| l.enabled));
 
             let cancel_selection_stretch = !wave_view_gestures
                 || ui.input(|input| {
@@ -5740,6 +5944,20 @@ impl crate::app::WavesPreviewer {
                                 egui::pos2(x, y).distance(pos) <= 8.0
                             });
                         }
+                        ToolKind::Eq | ToolKind::Compressor | ToolKind::Limiter
+                            if automation_param.is_some() =>
+                        {
+                            let st = tab.tool_state;
+                            if let Some(lane) =
+                                automation_param.and_then(|p| tool_automation::lane(tab, p))
+                            {
+                                specialized_handle_hit = lane.points.iter().any(|point| {
+                                    let x = geom.sample_center_x(point.0.min(display_samples_len));
+                                    let y = frac_to_y(lane.param.to_frac(&st, point.1));
+                                    egui::pos2(x, y).distance(pos) <= curve_canvas::POINT_HIT_RADIUS
+                                });
+                            }
+                        }
                         ToolKind::PitchShift => {
                             let semitones = tab.tool_state.pitch_semitones.clamp(
                                 -PITCH_SEMI_RANGE,
@@ -5804,100 +6022,29 @@ impl crate::app::WavesPreviewer {
                 if resp.hovered() {
                     hover_cursor = Some(egui::CursorIcon::Crosshair);
                 }
-                let db_to_frac = |db: f32| 0.5 + db / (GAIN_ENV_DB_RANGE * 2.0);
-                let frac_to_db = |frac: f32| (frac - 0.5) * GAIN_ENV_DB_RANGE * 2.0;
-                let hit_radius = 8.0f32;
-                let mut env_changed = false;
-                let point_screen = |p: &(usize, f32)| -> egui::Pos2 {
-                    egui::pos2(
-                        geom.sample_center_x(p.0.min(display_samples_len)),
-                        frac_to_y(db_to_frac(p.1)),
-                    )
+                let value_to_y = |db: f32| frac_to_y(0.5 + db / (GAIN_ENV_DB_RANGE * 2.0));
+                let y_to_value = |y: f32| {
+                    ((y_to_frac(y) - 0.5) * GAIN_ENV_DB_RANGE * 2.0)
+                        .clamp(-GAIN_ENV_DB_RANGE, GAIN_ENV_DB_RANGE)
                 };
-                let nearest_point = |points: &[(usize, f32)], pos: egui::Pos2| -> Option<usize> {
-                    let mut best: Option<(usize, f32)> = None;
-                    for (idx, p) in points.iter().enumerate() {
-                        let sp = point_screen(p);
-                        let d = sp.distance(pos);
-                        if d <= hit_radius && best.map(|(_, bd)| d < bd).unwrap_or(true) {
-                            best = Some((idx, d));
-                        }
-                    }
-                    best.map(|(idx, _)| idx)
+                let axis = CurveAxis {
+                    value_to_y: &value_to_y,
+                    y_to_value: &y_to_value,
+                    sample_to_x: &curve_sample_to_x,
+                    x_to_sample: &curve_x_to_sample,
                 };
-                // Double-click empty space to add; double-click a breakpoint
-                // to delete. A normal click remains the standard seek action.
-                let double_clicked = resp.double_clicked_by(egui::PointerButton::Primary);
-                if double_clicked {
-                    tool_gesture_active = true;
-                    suppress_seek = true;
-                    if let Some(pos) = resp.interact_pointer_pos() {
-                        if let Some(idx) = nearest_point(&tab.gain_env_points, pos) {
-                            tab.gain_env_points.remove(idx);
-                            tab.gain_env_drag = None;
-                        } else {
-                            let sample = geom
-                                .x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
-                            let db = frac_to_db(y_to_frac(pos.y))
-                                .clamp(-GAIN_ENV_DB_RANGE, GAIN_ENV_DB_RANGE);
-                            let insert_at = tab
-                                .gain_env_points
-                                .iter()
-                                .position(|point| point.0 > sample)
-                                .unwrap_or(tab.gain_env_points.len());
-                            tab.gain_env_points.insert(insert_at, (sample, db));
-                        }
-                        env_changed = true;
-                    }
-                }
-                // A drag may grab an existing point, but dragging empty space
-                // continues to use the normal range-selection gesture.
-                if !double_clicked
-                    && resp.drag_started_by(egui::PointerButton::Primary)
-                    && tab.gain_env_drag.is_none()
-                {
-                    if let Some(pos) = ui
-                        .input(|i| i.pointer.press_origin())
-                        .or_else(|| resp.interact_pointer_pos())
-                    {
-                        if let Some(idx) = nearest_point(&tab.gain_env_points, pos) {
-                            tab.gain_env_drag = Some(idx);
-                        }
-                    }
-                }
-                if tab.gain_env_drag.is_some() {
+                let edit = curve_canvas::edit_breakpoint_curve(
+                    ui,
+                    &resp,
+                    &mut tab.gain_env_points,
+                    &mut tab.gain_env_drag,
+                    &axis,
+                );
+                if edit.owns_pointer {
                     tool_gesture_active = true;
                     suppress_seek = true;
                 }
-                // Drag: move the grabbed breakpoint (kept between neighbours).
-                if resp.dragged_by(egui::PointerButton::Primary) {
-                    if let (Some(idx), Some(pos)) =
-                        (tab.gain_env_drag, resp.interact_pointer_pos())
-                    {
-                        if idx < tab.gain_env_points.len() {
-                            let mut sample = geom
-                                .x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
-                            if idx > 0 {
-                                sample = sample.max(tab.gain_env_points[idx - 1].0.saturating_add(1));
-                            }
-                            if idx + 1 < tab.gain_env_points.len() {
-                                sample =
-                                    sample.min(tab.gain_env_points[idx + 1].0.saturating_sub(1));
-                            }
-                            let db = frac_to_db(y_to_frac(pos.y))
-                                .clamp(-GAIN_ENV_DB_RANGE, GAIN_ENV_DB_RANGE);
-                            tab.gain_env_points[idx] = (sample, db);
-                        }
-                    }
-                }
-                // Any primary release (click or drag end) drops the grab and
-                // commits the change to the audio preview.
-                if ui.input(|i| i.pointer.primary_released()) {
-                    if tab.gain_env_drag.take().is_some() {
-                        env_changed = true;
-                    }
-                }
-                if env_changed {
+                if edit.changed {
                     stop_playback = true;
                     tab.preview_overlay = None;
                     if tab.gain_env_points.is_empty() {
@@ -5912,101 +6059,29 @@ impl crate::app::WavesPreviewer {
                 if resp.hovered() {
                     hover_cursor = Some(egui::CursorIcon::Crosshair);
                 }
-                let semi_to_frac = |semi: f32| 0.5 + semi / (PITCH_SEMI_RANGE * 2.0);
-                let frac_to_semi = |frac: f32| (frac - 0.5) * PITCH_SEMI_RANGE * 2.0;
-                let hit_radius = 8.0f32;
-                let mut env_changed = false;
-                let point_screen = |point: &(usize, f32)| -> egui::Pos2 {
-                    egui::pos2(
-                        geom.sample_center_x(point.0.min(display_samples_len)),
-                        frac_to_y(semi_to_frac(point.1)),
-                    )
+                let value_to_y = |semi: f32| frac_to_y(0.5 + semi / (PITCH_SEMI_RANGE * 2.0));
+                let y_to_value = |y: f32| {
+                    ((y_to_frac(y) - 0.5) * PITCH_SEMI_RANGE * 2.0)
+                        .clamp(-PITCH_SEMI_RANGE, PITCH_SEMI_RANGE)
                 };
-                let nearest_point =
-                    |points: &[(usize, f32)], pos: egui::Pos2| -> Option<usize> {
-                        let mut best: Option<(usize, f32)> = None;
-                        for (index, point) in points.iter().enumerate() {
-                            let distance = point_screen(point).distance(pos);
-                            if distance <= hit_radius
-                                && best
-                                    .map(|(_, best_distance)| distance < best_distance)
-                                    .unwrap_or(true)
-                            {
-                                best = Some((index, distance));
-                            }
-                        }
-                        best.map(|(index, _)| index)
-                    };
-
-                let double_clicked = resp.double_clicked_by(egui::PointerButton::Primary);
-                if double_clicked {
-                    tool_gesture_active = true;
-                    suppress_seek = true;
-                    if let Some(pos) = resp.interact_pointer_pos() {
-                        if let Some(index) = nearest_point(&tab.pitch_env_points, pos) {
-                            tab.pitch_env_points.remove(index);
-                            tab.pitch_env_drag = None;
-                        } else {
-                            let sample = geom
-                                .x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
-                            let semitones = frac_to_semi(y_to_frac(pos.y))
-                                .clamp(-PITCH_SEMI_RANGE, PITCH_SEMI_RANGE);
-                            let insert_at = tab
-                                .pitch_env_points
-                                .iter()
-                                .position(|point| point.0 > sample)
-                                .unwrap_or(tab.pitch_env_points.len());
-                            tab.pitch_env_points
-                                .insert(insert_at, (sample, semitones));
-                        }
-                        env_changed = true;
-                    }
-                }
-                if !double_clicked
-                    && resp.drag_started_by(egui::PointerButton::Primary)
-                    && tab.pitch_env_drag.is_none()
-                {
-                    if let Some(pos) = ui
-                        .input(|input| input.pointer.press_origin())
-                        .or_else(|| resp.interact_pointer_pos())
-                    {
-                        if let Some(index) = nearest_point(&tab.pitch_env_points, pos) {
-                            tab.pitch_env_drag = Some(index);
-                        }
-                    }
-                }
-                if tab.pitch_env_drag.is_some() {
+                let axis = CurveAxis {
+                    value_to_y: &value_to_y,
+                    y_to_value: &y_to_value,
+                    sample_to_x: &curve_sample_to_x,
+                    x_to_sample: &curve_x_to_sample,
+                };
+                let edit = curve_canvas::edit_breakpoint_curve(
+                    ui,
+                    &resp,
+                    &mut tab.pitch_env_points,
+                    &mut tab.pitch_env_drag,
+                    &axis,
+                );
+                if edit.owns_pointer {
                     tool_gesture_active = true;
                     suppress_seek = true;
                 }
-                if resp.dragged_by(egui::PointerButton::Primary) {
-                    if let (Some(index), Some(pos)) =
-                        (tab.pitch_env_drag, resp.interact_pointer_pos())
-                    {
-                        if index < tab.pitch_env_points.len() {
-                            let mut sample = geom
-                                .x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
-                            if index > 0 {
-                                sample =
-                                    sample.max(tab.pitch_env_points[index - 1].0.saturating_add(1));
-                            }
-                            if index + 1 < tab.pitch_env_points.len() {
-                                sample = sample.min(
-                                    tab.pitch_env_points[index + 1].0.saturating_sub(1),
-                                );
-                            }
-                            let semitones = frac_to_semi(y_to_frac(pos.y))
-                                .clamp(-PITCH_SEMI_RANGE, PITCH_SEMI_RANGE);
-                            tab.pitch_env_points[index] = (sample, semitones);
-                        }
-                    }
-                }
-                if ui.input(|input| input.pointer.primary_released()) {
-                    if tab.pitch_env_drag.take().is_some() {
-                        env_changed = true;
-                    }
-                }
-                if env_changed {
+                if edit.changed {
                     stop_playback = true;
                     tab.preview_overlay = None;
                     let has_shift = tab
@@ -6022,6 +6097,34 @@ impl crate::app::WavesPreviewer {
                     }
                 }
             }
+            // An EQ / Compressor / Limiter automation lane: its points are
+            // part of the tool's draft, so the preview follows them like any
+            // other setting (no stop, no restart).
+            if let Some(param) = automation_param
+                .filter(|_| wave_view_gestures && tab.selection_stretch_gesture.is_none())
+            {
+                if resp.hovered() {
+                    hover_cursor = Some(egui::CursorIcon::Crosshair);
+                }
+                let st = tab.tool_state;
+                let value_to_y = |v: f32| frac_to_y(param.to_frac(&st, v));
+                let y_to_value = |y: f32| param.from_frac(&st, y_to_frac(y));
+                let axis = CurveAxis {
+                    value_to_y: &value_to_y,
+                    y_to_value: &y_to_value,
+                    sample_to_x: &curve_sample_to_x,
+                    x_to_sample: &curve_x_to_sample,
+                };
+                let mut drag = tab.automation_drag;
+                let lane = tool_automation::lane_mut(tab, param);
+                let edit =
+                    curve_canvas::edit_breakpoint_curve(ui, &resp, &mut lane.points, &mut drag, &axis);
+                tab.automation_drag = drag;
+                if edit.owns_pointer {
+                    tool_gesture_active = true;
+                    suppress_seek = true;
+                }
+            }
             // Pencil: Ctrl+drag draws. Plain interaction selects sample points,
             // drags a point/selected range vertically, or box-selects by time.
             let pencil_editing = wave_view_gestures
@@ -6034,17 +6137,15 @@ impl crate::app::WavesPreviewer {
                 let use_mixdown =
                     tab.channel_view.mode == crate::app::types::ChannelViewMode::Mixdown
                         || visible.is_empty();
-                let lane_count = if use_mixdown { 1 } else { visible.len().max(1) };
-                let lane_h = (rect.height() / lane_count as f32).max(1.0);
                 let zoomed_in_enough = tab.samples_per_px <= 0.5;
                 let pointer_context = |tab: &EditorTab, pos: egui::Pos2| {
                     let sample =
                         geom.x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
+                    // The lane under the pointer as drawn, scroll included.
                     let lane_idx = if use_mixdown {
                         0
                     } else {
-                        (((pos.y - rect.top()) / lane_h).floor().max(0.0) as usize)
-                            .min(lane_count.saturating_sub(1))
+                        lane_geom.lane_at_y(pos.y).min(visible.len().saturating_sub(1))
                     };
                     let channels = if use_mixdown {
                         (0..tab.ch_samples.len()).collect::<Vec<_>>()
@@ -6052,8 +6153,8 @@ impl crate::app::WavesPreviewer {
                         vec![visible[lane_idx]]
                     };
                     let lane_rect = egui::Rect::from_min_size(
-                        egui::pos2(wave_left, rect.top() + lane_h * lane_idx as f32),
-                        egui::vec2(wave_w, lane_h),
+                        egui::pos2(wave_left, lane_geom.lane_top(lane_idx)),
+                        egui::vec2(wave_w, lane_geom.lane_h),
                     );
                     let display_amp = crate::app::render::overlay::waveform_amp_from_y(
                         lane_rect,
@@ -6681,19 +6782,11 @@ impl crate::app::WavesPreviewer {
                 tab.vertical_view_center,
                 &self.spectro_cfg,
             );
-            let spec_lane_at_y = {
-                let rect_top = rect.top();
-                let lane_h = lane_h.max(1.0);
-                move |y: f32| -> usize {
-                    (((y - rect_top) / lane_h).floor() as isize)
-                        .clamp(0, lane_count as isize - 1) as usize
-                }
-            };
+            let spec_lane_at_y = move |y: f32| -> usize { lane_geom.lane_at_y(y) };
             let spec_y_to_freq = {
-                let rect_top = rect.top();
                 let lane_h = lane_h.max(1.0);
                 move |y: f32, lane: usize| -> f32 {
-                    let lane_top = rect_top + lane_h * lane as f32;
+                    let lane_top = lane_geom.lane_top(lane);
                     let frac_local = 1.0 - ((y - lane_top) / lane_h).clamp(0.0, 1.0);
                     let frac = spec_vis_min + frac_local * (spec_vis_max - spec_vis_min);
                     Self::editor_spec_frac_to_freq(
@@ -6722,7 +6815,7 @@ impl crate::app::WavesPreviewer {
                     let frac_local = ((frac - spec_vis_min)
                         / (spec_vis_max - spec_vis_min).max(1e-6))
                     .clamp(0.0, 1.0);
-                    let lane_top = rect.top() + lane_h.max(1.0) * lane as f32;
+                    let lane_top = lane_geom.lane_top(lane);
                     lane_top + (1.0 - frac_local) * lane_h.max(1.0)
                 };
                 let hit_radius = 10.0f32;
@@ -7219,13 +7312,13 @@ impl crate::app::WavesPreviewer {
             // Draw per-channel lanes with dB grid and playhead
             waveform_render_started = Some(std::time::Instant::now());
             if show_waveform {
-            for lane_idx in 0..lane_count {
+            for lane_idx in visible_lanes.clone() {
                 let channel_index = if use_mixdown {
                     None
                 } else {
                     visible_channels.get(lane_idx).copied()
                 };
-                let lane_top = rect.top() + lane_h * lane_idx as f32;
+                let lane_top = lane_geom.lane_top(lane_idx);
                 let lane_rect = egui::Rect::from_min_size(egui::pos2(wave_left, lane_top), egui::vec2(wave_w, lane_h));
                 let waveform_columns =
                     ov::compute_waveform_device_columns(lane_rect, pixels_per_point);
@@ -7262,7 +7355,8 @@ impl crate::app::WavesPreviewer {
                     gutter_font.clone(),
                     WAVE_CENTER_LABEL_COL,
                 );
-                for &db in &dbs {
+                let mut db_label_ys = [(0.0f32, 0.0f32); 2];
+                for (slot, &db) in db_label_ys.iter_mut().zip(dbs.iter()) {
                     let a = db_to_amp(db).clamp(0.0, 1.0);
                     let y0 = Self::waveform_y_from_amp(
                         lane_rect,
@@ -7278,8 +7372,25 @@ impl crate::app::WavesPreviewer {
                     );
                     painter.line_segment([egui::pos2(lane_rect.left(), y0), egui::pos2(lane_rect.right(), y0)], egui::Stroke::new(1.0_f32, WAVE_DB_GRID_COL));
                     painter.line_segment([egui::pos2(lane_rect.left(), y1), egui::pos2(lane_rect.right(), y1)], egui::Stroke::new(1.0_f32, WAVE_DB_GRID_COL));
-                    // labels on the left gutter
-                    painter.text(egui::pos2(rect.left() + 2.0, y0), egui::Align2::LEFT_CENTER, format!("{db:.0} dB"), gutter_font.clone(), Color32::GRAY);
+                    *slot = (db, y0);
+                }
+                // Labels on the left gutter, nearest the "0" first, each only
+                // where it clears the one before it and stays in its own lane.
+                // At the 44 px a lane keeps once the lanes scroll, the -6 and
+                // -12 dB labels would otherwise sit on top of the "0", of each
+                // other and of the neighbouring lane's labels.
+                let gutter_row_h = ui.text_style_height(&TextStyle::Monospace);
+                db_label_ys.sort_by(|a, b| {
+                    (a.1 - center_y).abs().total_cmp(&(b.1 - center_y).abs())
+                });
+                let mut last_label_y = center_y;
+                for (db, y) in db_label_ys {
+                    let clear_of_last = (y - last_label_y).abs() >= gutter_row_h;
+                    let inside_lane = y - gutter_row_h * 0.5 >= lane_rect.top();
+                    if clear_of_last && inside_lane {
+                        painter.text(egui::pos2(rect.left() + 2.0, y), egui::Align2::LEFT_CENTER, format!("{db:.0} dB"), gutter_font.clone(), Color32::GRAY);
+                        last_label_y = y;
+                    }
                 }
 
                 if visible_len > 0 {
@@ -8090,9 +8201,8 @@ impl crate::app::WavesPreviewer {
                                     ) - spec_vis_min)
                                         / denom)
                                         .clamp(0.0, 1.0);
-                                    for lane in 0..lane_count {
-                                        let lane_bottom =
-                                            rect.top() + lane_h * (lane as f32 + 1.0);
+                                    for lane in visible_lanes.clone() {
+                                        let lane_bottom = lane_geom.lane_top(lane + 1);
                                         let y_top = lane_bottom - frac_hi * lane_h;
                                         let y_bottom = lane_bottom - frac_lo * lane_h;
                                         if y_bottom - y_top >= 0.5 {
@@ -8198,8 +8308,8 @@ impl crate::app::WavesPreviewer {
                             if frac_hi <= 0.0 || frac_lo >= 1.0 {
                                 continue;
                             }
-                            for lane in 0..lane_count {
-                                let lane_bottom = rect.top() + lane_h * (lane as f32 + 1.0);
+                            for lane in visible_lanes.clone() {
+                                let lane_bottom = lane_geom.lane_top(lane + 1);
                                 let y_top = lane_bottom - frac_hi * lane_h;
                                 let y_bottom = lane_bottom - frac_lo * lane_h;
                                 if y_bottom - y_top < 0.5 {
@@ -8653,10 +8763,22 @@ impl crate::app::WavesPreviewer {
             // ---- Tool gesture overlays (drawn above waveform lanes) ----
             if view_mode == ViewMode::Waveform && display_samples_len > 0 {
                 let overlay_font = TextStyle::Monospace.resolve(ui.style());
+                let curve_vis = {
+                    let vis_start = tab.view_offset.min(display_samples_len);
+                    let vis_end = ((tab.view_offset as f64
+                        + (wave_w as f64) * (geom.spp.max(0.0001) as f64))
+                        .ceil() as usize)
+                        .min(display_samples_len);
+                    (vis_start, vis_end)
+                };
+                let curve_hover = ui.input(|i| i.pointer.hover_pos());
+                let curve_sample_to_x =
+                    |s: usize| geom.sample_center_x(s.min(display_samples_len));
+                let curve_x_to_sample =
+                    |x: f32| geom.x_to_display_sample(x.clamp(wave_left, wave_left + wave_w));
                 // Gain automation curve (breakpoint polyline)
                 if matches!(tab.active_tool, ToolKind::Gain) && tab.gain_env_enabled {
                     let curve_color = Color32::from_rgb(255, 170, 60);
-                    let db_to_frac = |db: f32| 0.5 + db / (GAIN_ENV_DB_RANGE * 2.0);
                     let fallback_db = if tab.tool_state.gain_db.is_finite() {
                         tab.tool_state.gain_db
                     } else {
@@ -8674,61 +8796,103 @@ impl crate::app::WavesPreviewer {
                             Color32::from_rgba_unmultiplied(255, 170, 60, 50),
                         ),
                     );
-                    let vis_start = tab.view_offset.min(display_samples_len);
-                    let vis_end = ((tab.view_offset as f64
-                        + (wave_w as f64) * (geom.spp.max(0.0001) as f64))
-                        .ceil() as usize)
-                        .min(display_samples_len);
-                    let env_y = |sample: usize| -> f32 {
-                        let db = crate::wave::gain_envelope_db_at(
-                            &tab.gain_env_points,
-                            fallback_db,
-                            sample,
-                        );
-                        frac_to_y(db_to_frac(db))
+                    let value_to_y = |db: f32| frac_to_y(0.5 + db / (GAIN_ENV_DB_RANGE * 2.0));
+                    let y_to_value = |y: f32| (y_to_frac(y) - 0.5) * GAIN_ENV_DB_RANGE * 2.0;
+                    let axis = CurveAxis {
+                        value_to_y: &value_to_y,
+                        y_to_value: &y_to_value,
+                        sample_to_x: &curve_sample_to_x,
+                        x_to_sample: &curve_x_to_sample,
                     };
-                    let mut line: Vec<egui::Pos2> =
-                        vec![egui::pos2(wave_left, env_y(vis_start))];
-                    for p in &tab.gain_env_points {
-                        if p.0 > vis_start && p.0 < vis_end {
-                            line.push(egui::pos2(
-                                geom.sample_center_x(p.0),
-                                frac_to_y(db_to_frac(p.1)),
-                            ));
-                        }
-                    }
-                    line.push(egui::pos2(wave_left + wave_w, env_y(vis_end)));
-                    painter.add(egui::Shape::line(
-                        line,
-                        egui::Stroke::new(2.0_f32, curve_color),
-                    ));
-                    let hover = ui.input(|i| i.pointer.hover_pos());
-                    for (idx, p) in tab.gain_env_points.iter().enumerate() {
-                        if p.0 < vis_start || p.0 > vis_end {
+                    let value_at = |sample: usize| {
+                        crate::wave::gain_envelope_db_at(&tab.gain_env_points, fallback_db, sample)
+                    };
+                    curve_canvas::draw_breakpoint_curve(
+                        &painter,
+                        &axis,
+                        &tab.gain_env_points,
+                        &value_at,
+                        curve_vis,
+                        (wave_left, wave_left + wave_w),
+                        &CurveLook {
+                            color: curve_color,
+                            width: 2.0,
+                            editable: true,
+                            label: &|db| format!("{db:+.1} dB"),
+                            font: overlay_font.clone(),
+                        },
+                        tab.gain_env_drag,
+                        curve_hover,
+                    );
+                }
+                // EQ / Compressor / Limiter automation: every lane of the
+                // active tool that is on; the one being edited bright, with
+                // its points, the rest as faint lines.
+                if matches!(
+                    tab.active_tool,
+                    ToolKind::Eq | ToolKind::Compressor | ToolKind::Limiter
+                ) {
+                    let st = tab.tool_state;
+                    let selected = tab.automation_selected.filter(|p| p.tool() == tab.active_tool);
+                    for lane in tab
+                        .automation
+                        .iter()
+                        .filter(|l| l.param.tool() == tab.active_tool && l.enabled)
+                    {
+                        let param = lane.param;
+                        let editing = selected == Some(param);
+                        if lane.points.is_empty() && !editing {
                             continue;
                         }
-                        let sp = egui::pos2(
-                            geom.sample_center_x(p.0.min(display_samples_len)),
-                            frac_to_y(db_to_frac(p.1)),
+                        let base = Self::automation_color(param);
+                        let color = if editing && param.has_effect(&st) {
+                            base
+                        } else {
+                            base.gamma_multiply(0.45)
+                        };
+                        let value_to_y = |v: f32| frac_to_y(param.to_frac(&st, v));
+                        let y_to_value = |y: f32| param.from_frac(&st, y_to_frac(y));
+                        let axis = CurveAxis {
+                            value_to_y: &value_to_y,
+                            y_to_value: &y_to_value,
+                            sample_to_x: &curve_sample_to_x,
+                            x_to_sample: &curve_x_to_sample,
+                        };
+                        let curve =
+                            crate::automation::Curve::new(lane.points.clone(), param.scale());
+                        let static_value = param.static_value(&st);
+                        let value_at =
+                            |sample: usize| curve.value_at(sample).unwrap_or(static_value);
+                        curve_canvas::draw_breakpoint_curve(
+                            &painter,
+                            &axis,
+                            &lane.points,
+                            &value_at,
+                            curve_vis,
+                            (wave_left, wave_left + wave_w),
+                            &CurveLook {
+                                color,
+                                width: if editing { 2.0 } else { 1.2 },
+                                editable: editing,
+                                label: &|v| param.format(v),
+                                font: overlay_font.clone(),
+                            },
+                            if editing { tab.automation_drag } else { None },
+                            curve_hover,
                         );
-                        let grabbed = tab.gain_env_drag == Some(idx);
-                        let hovered = hover.map(|h| h.distance(sp) <= 8.0).unwrap_or(false);
-                        let r = if grabbed || hovered { 5.0 } else { 3.5 };
-                        painter.circle_filled(sp, r, curve_color);
-                        painter.circle_stroke(
-                            sp,
-                            r,
-                            egui::Stroke::new(1.0_f32, Color32::from_rgb(40, 30, 10)),
-                        );
-                        if grabbed || hovered {
-                            painter.text(
-                                sp + egui::vec2(8.0, -8.0),
-                                egui::Align2::LEFT_BOTTOM,
-                                format!("{:+.1} dB", p.1),
-                                overlay_font.clone(),
-                                curve_color,
-                            );
+                        // Its name at the left edge, on the line.
+                        let left_y = value_to_y(value_at(curve_vis.0));
+                        let mut name = param.label();
+                        if editing && lane.points.is_empty() {
+                            name.push_str(" \u{2014} double-click the waveform to add a point");
                         }
+                        painter.text(
+                            egui::pos2(wave_left + 6.0, left_y - 3.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            name,
+                            overlay_font.clone(),
+                            color,
+                        );
                     }
                 }
                 // PitchShift: static line or breakpoint automation curve.
@@ -8754,63 +8918,37 @@ impl crate::app::WavesPreviewer {
                         frac_to_y(0.5 + value / (PITCH_SEMI_RANGE * 2.0))
                     };
                     if tab.pitch_env_enabled {
-                        let vis_start = tab.view_offset.min(display_samples_len);
-                        let vis_end = ((tab.view_offset as f64
-                            + (wave_w as f64) * (geom.spp.max(0.0001) as f64))
-                            .ceil() as usize)
-                            .min(display_samples_len);
-                        let env_y = |sample: usize| -> f32 {
-                            semi_to_y(crate::wave::pitch_envelope_semitones_at(
+                        let y_to_value = |y: f32| (y_to_frac(y) - 0.5) * PITCH_SEMI_RANGE * 2.0;
+                        let axis = CurveAxis {
+                            value_to_y: &semi_to_y,
+                            y_to_value: &y_to_value,
+                            sample_to_x: &curve_sample_to_x,
+                            x_to_sample: &curve_x_to_sample,
+                        };
+                        let value_at = |sample: usize| {
+                            crate::wave::pitch_envelope_semitones_at(
                                 &tab.pitch_env_points,
                                 semi,
                                 sample,
-                            ))
+                            )
                         };
-                        let mut line =
-                            vec![egui::pos2(wave_left, env_y(vis_start))];
-                        for point in &tab.pitch_env_points {
-                            if point.0 > vis_start && point.0 < vis_end {
-                                line.push(egui::pos2(
-                                    geom.sample_center_x(point.0),
-                                    semi_to_y(point.1),
-                                ));
-                            }
-                        }
-                        line.push(egui::pos2(wave_left + wave_w, env_y(vis_end)));
-                        painter.add(egui::Shape::line(
-                            line,
-                            egui::Stroke::new(2.0_f32, pitch_color),
-                        ));
-                        let hover = ui.input(|input| input.pointer.hover_pos());
-                        for (index, point) in tab.pitch_env_points.iter().enumerate() {
-                            if point.0 < vis_start || point.0 > vis_end {
-                                continue;
-                            }
-                            let position = egui::pos2(
-                                geom.sample_center_x(point.0.min(display_samples_len)),
-                                semi_to_y(point.1),
-                            );
-                            let grabbed = tab.pitch_env_drag == Some(index);
-                            let hovered = hover
-                                .map(|hover_position| hover_position.distance(position) <= 8.0)
-                                .unwrap_or(false);
-                            let radius = if grabbed || hovered { 5.0 } else { 3.5 };
-                            painter.circle_filled(position, radius, pitch_color);
-                            painter.circle_stroke(
-                                position,
-                                radius,
-                                egui::Stroke::new(1.0_f32, Color32::from_rgb(35, 20, 45)),
-                            );
-                            if grabbed || hovered {
-                                painter.text(
-                                    position + egui::vec2(8.0, -8.0),
-                                    egui::Align2::LEFT_BOTTOM,
-                                    format!("{:+.2} st", point.1),
-                                    overlay_font.clone(),
-                                    pitch_color,
-                                );
-                            }
-                        }
+                        curve_canvas::draw_breakpoint_curve(
+                            &painter,
+                            &axis,
+                            &tab.pitch_env_points,
+                            &value_at,
+                            curve_vis,
+                            (wave_left, wave_left + wave_w),
+                            &CurveLook {
+                                color: pitch_color,
+                                width: 2.0,
+                                editable: true,
+                                label: &|st| format!("{st:+.2} st"),
+                                font: overlay_font.clone(),
+                            },
+                            tab.pitch_env_drag,
+                            curve_hover,
+                        );
                     } else {
                         let y = semi_to_y(semi);
                         let width = if tab.pitch_drag_active { 2.5_f32 } else { 2.0_f32 };
@@ -8939,11 +9077,11 @@ impl crate::app::WavesPreviewer {
                     let frac_local = ((frac - spec_vis_min)
                         / (spec_vis_max - spec_vis_min).max(1e-6))
                     .clamp(0.0, 1.0);
-                    let lane_top = rect.top() + lane_h.max(1.0) * lane as f32;
+                    let lane_top = lane_geom.lane_top(lane);
                     lane_top + (1.0 - frac_local) * lane_h.max(1.0)
                 };
                 let hover = ui.input(|i| i.pointer.hover_pos());
-                for lane in 0..lane_count {
+                for lane in visible_lanes.clone() {
                     for (idx, p) in tab.spectral_warp_points.iter().enumerate() {
                         let x = geom.sample_center_x(p.sample.min(display_samples_len));
                         if x < wave_left - 20.0 || x > wave_left + wave_w + 20.0 {
@@ -9013,10 +9151,10 @@ impl crate::app::WavesPreviewer {
                     let frac_local = ((frac - spec_vis_min)
                         / (spec_vis_max - spec_vis_min).max(1e-6))
                     .clamp(0.0, 1.0);
-                    let lane_top = rect.top() + lane_h.max(1.0) * lane as f32;
+                    let lane_top = lane_geom.lane_top(lane);
                     lane_top + (1.0 - frac_local) * lane_h.max(1.0)
                 };
-                for lane in 0..lane_count {
+                for lane in visible_lanes.clone() {
                     for s in tab.spectral_brush_stamps.iter() {
                         let x = geom.sample_center_x(s.sample.min(display_samples_len));
                         if x < wave_left - 20.0 || x > wave_left + wave_w + 20.0 {
@@ -9042,6 +9180,27 @@ impl crate::app::WavesPreviewer {
                             ),
                         );
                     }
+                }
+            }
+
+            // Which channel each lane is: once the lanes scroll, nothing else
+            // tells lane 17 from lane 18. A mixdown is one lane and needs none.
+            if !use_mixdown && lane_count > 1 {
+                Self::draw_editor_lane_labels(
+                    &painter,
+                    lane_geom,
+                    visible_lanes.clone(),
+                    &visible_channels,
+                    lane_speaker_layout.as_deref(),
+                    wave_left,
+                );
+            }
+            if let Some(bar_rect) = lane_scrollbar_rect {
+                if let Some(next_scroll) =
+                    Self::draw_editor_lane_scrollbar(ui, bar_rect, lane_geom)
+                {
+                    tab.lane_scroll_px = next_scroll;
+                    ctx.request_repaint();
                 }
             }
 
@@ -9097,9 +9256,80 @@ impl crate::app::WavesPreviewer {
                 ) {
                     Self::editor_set_view_offset(tab, next_view);
                 }
-                // MiniMeter: realtime scope/spectrum/level strip in the
-                // leftover space below the navigator.
-                if ui.available_height() >= 64.0 && !tab.loading {
+            }
+
+            // The splitter and the mini meter, on the column's bottom edge.
+            // Placed from the bottom rather than after the navigator, so the
+            // meter stays put whatever the waveform above it does.
+            if column_layout.shows_meter() {
+                let meter_rect = egui::Rect::from_min_max(
+                    egui::pos2(column_rect.left(), column_rect.bottom() - column_layout.meter_h),
+                    column_rect.max,
+                );
+                let splitter_rect = egui::Rect::from_min_max(
+                    egui::pos2(
+                        column_rect.left(),
+                        meter_rect.top() - lanes_layout::METER_SPLITTER_H,
+                    ),
+                    egui::pos2(column_rect.right(), meter_rect.top()),
+                );
+                tab.last_mini_meter_rect = Some(meter_rect);
+                tab.last_meter_splitter_rect = Some(splitter_rect);
+                let splitter_resp = ui
+                    .allocate_rect(splitter_rect, egui::Sense::click_and_drag())
+                    .on_hover_text("Drag to resize the meter. Double-click to reset it.");
+                let splitter_hot = splitter_resp.hovered() || splitter_resp.dragged();
+                if splitter_hot {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                }
+                ui.painter().hline(
+                    splitter_rect.x_range(),
+                    splitter_rect.center().y,
+                    egui::Stroke::new(
+                        if splitter_hot { 2.0_f32 } else { 1.0_f32 },
+                        if splitter_hot {
+                            Color32::from_rgb(90, 170, 255)
+                        } else {
+                            ui.visuals().widgets.noninteractive.bg_stroke.color
+                        },
+                    ),
+                );
+                // The splitter also senses drags, so `double_clicked()` alone
+                // never fires on it; see `helpers::note_repeated_click`.
+                let splitter_reset = splitter_resp.double_clicked()
+                    || (splitter_resp.clicked()
+                        && splitter_resp.interact_pointer_pos().is_some_and(|pos| {
+                            let click_id = mini_meter_height_id.with("last_click");
+                            let mut last: Option<(std::time::Instant, egui::Pos2)> =
+                                ctx.data_mut(|d| d.get_temp(click_id)).flatten();
+                            let repeat =
+                                crate::app::helpers::note_repeated_click(&mut last, pos);
+                            ctx.data_mut(|d| d.insert_temp(click_id, last));
+                            repeat
+                        }));
+                if splitter_reset {
+                    ctx.data_mut(|d| {
+                        d.insert_temp(mini_meter_height_id, lanes_layout::MINI_METER_DEFAULT_H)
+                    });
+                    ctx.request_repaint();
+                } else if splitter_resp.dragged() {
+                    let next_h = lanes_layout::meter_height_after_drag(
+                        &column_layout,
+                        splitter_resp.drag_delta().y,
+                    );
+                    ctx.data_mut(|d| d.insert_temp(mini_meter_height_id, next_h));
+                    ctx.request_repaint();
+                }
+                // The strip's frame is drawn even with nothing to meter yet
+                // (a file still loading), so nothing moves when it arrives.
+                ui.painter().rect_filled(meter_rect, 6.0, Color32::from_rgb(11, 12, 16));
+                ui.painter().rect_stroke(
+                    meter_rect,
+                    6.0,
+                    Stroke::new(1.0_f32, Color32::from_rgb(40, 46, 56)),
+                    egui::StrokeKind::Inside,
+                );
+                if display_samples_len > 0 && !tab.loading {
                     let playing = self
                         .audio
                         .shared
@@ -9141,21 +9371,27 @@ impl crate::app::WavesPreviewer {
                         (None, Some(bed)) => (Some(bed), bed.len().saturating_sub(1)),
                         (None, None) => (None, pos_audio_now),
                     };
-                    Self::draw_editor_mini_meter(
-                        ui,
-                        tab,
-                        playhead_display_now,
-                        meter_audio,
-                        meter_pos,
-                        out_sr,
-                        playing,
-                        video_secs,
-                        mini_meter_spectrum_interval_secs,
-                        mini_meter_layout.as_deref(),
-                        hrtf_active_path.as_deref() == Some(tab.path.as_path()),
-                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(meter_rect), |ui| {
+                        Self::draw_editor_mini_meter(
+                            ui,
+                            tab,
+                            column_layout.meter_h,
+                            playhead_display_now,
+                            meter_audio,
+                            meter_pos,
+                            out_sr,
+                            playing,
+                            video_secs,
+                            mini_meter_spectrum_interval_secs,
+                            mini_meter_layout.as_deref(),
+                            hrtf_active_path.as_deref() == Some(tab.path.as_path()),
+                        );
+                    });
                     video_request = Some((video_secs, playing));
                 }
+            } else {
+                tab.last_mini_meter_rect = None;
+                tab.last_meter_splitter_rect = None;
             }
 
             if tab.loading {

@@ -37,6 +37,15 @@ pub const TOOL_PREVIEW_DEBOUNCE: Duration = Duration::from_millis(200);
 /// the fade the jump clicks.
 pub const PREVIEW_SWAP_FADE_MS: f32 = 6.0;
 
+/// A progressive tool's first render runs from this long before the
+/// playhead...
+const PROGRESSIVE_BEHIND_SECS: f64 = 1.0;
+/// ...to this long after it. Twenty seconds of a limiter at 48 kHz stereo
+/// renders in a few tens of milliseconds, and outlasts the full render of
+/// most songs, so the playhead seldom reaches the window's edge before the
+/// rest of the preview arrives.
+const PROGRESSIVE_AHEAD_SECS: f64 = 20.0;
+
 /// A finished render on its way back from the worker.
 pub(super) struct ToolPreviewReady {
     pub output: ToolRenderOutput,
@@ -44,11 +53,61 @@ pub(super) struct ToolPreviewReady {
     pub overlay: PreviewOverlay,
 }
 
+/// What a preview worker sends: for a progressive tool first the window
+/// around the playhead, then the whole target.
+pub(super) enum PreviewMsg {
+    Partial(ToolPreviewReady),
+    Done(Result<ToolPreviewReady, Option<String>>),
+}
+
 pub(super) struct ToolPreviewJob {
     pub key: PreviewKey,
-    pub rx: mpsc::Receiver<Result<ToolPreviewReady, Option<String>>>,
+    pub rx: mpsc::Receiver<PreviewMsg>,
     pub cancel: Arc<AtomicBool>,
     pub started: Instant,
+}
+
+/// The window a progressive preview renders first: around `playhead`,
+/// inside `target`. `None` when the target is short enough that rendering
+/// it whole is as quick.
+pub(super) fn progressive_window(
+    target: (usize, usize),
+    playhead: usize,
+    buffer_sr: u32,
+) -> Option<(usize, usize)> {
+    let (s, e) = (target.0.min(target.1), target.0.max(target.1));
+    let behind = crate::sample_rate::frames_for_secs(PROGRESSIVE_BEHIND_SECS, buffer_sr);
+    let ahead = crate::sample_rate::frames_for_secs(PROGRESSIVE_AHEAD_SECS, buffer_sr);
+    if e - s <= 2 * (behind + ahead) {
+        return None;
+    }
+    let p = playhead.clamp(s, e);
+    let ws = p.saturating_sub(behind).max(s);
+    let we = (p + ahead).min(e);
+    (we > ws).then_some((ws, we))
+}
+
+/// The preview of a render's output: the samples, and the overlay drawn
+/// over the waveform.
+fn preview_ready(mut output: ToolRenderOutput, tool: crate::app::types::ToolKind) -> ToolPreviewReady {
+    let channels = std::mem::take(&mut output.channels);
+    let timeline_len = channels.first().map(Vec::len).unwrap_or(0);
+    // Long clips draw an overview: a full-sample overlay would be another
+    // clip-sized copy for detail nobody can see zoomed out.
+    let overlay = if timeline_len > LIVE_PREVIEW_SAMPLE_LIMIT {
+        WavesPreviewer::preview_overlay_from_overview(
+            WavesPreviewer::build_overview_bins_from_channels(&channels),
+            tool,
+            timeline_len,
+        )
+    } else {
+        WavesPreviewer::preview_overlay_from_channels(channels.clone(), tool, timeline_len)
+    };
+    ToolPreviewReady {
+        output,
+        channels: Arc::new(channels),
+        overlay,
+    }
 }
 
 /// A source analysis on its way back from the worker.
@@ -159,38 +218,29 @@ impl WavesPreviewer {
         let worker_cancel = cancel.clone();
         let (tx, rx) = mpsc::channel();
         let tool = key.tool;
-        let long = req.channels.first().map_or(0, Vec::len) > LIVE_PREVIEW_SAMPLE_LIMIT;
+        // A progressive tool on a long target is heard around the playhead
+        // first: the same op over a window, the rest of the file as it was.
+        let partial = self.progressive_preview_request(key.tab_id, &req);
         std::thread::spawn(move || {
-            let result = match tool_render::render(&req, &worker_cancel) {
-                Ok(mut output) => {
-                    let channels = std::mem::take(&mut output.channels);
-                    let timeline_len = channels.first().map(Vec::len).unwrap_or(0);
-                    // Long clips draw an overview: a full-sample overlay would
-                    // be another clip-sized copy for detail nobody can see
-                    // zoomed out.
-                    let overlay = if long {
-                        WavesPreviewer::preview_overlay_from_overview(
-                            WavesPreviewer::build_overview_bins_from_channels(&channels),
-                            tool,
-                            timeline_len,
-                        )
-                    } else {
-                        WavesPreviewer::preview_overlay_from_channels(
-                            channels.clone(),
-                            tool,
-                            timeline_len,
-                        )
-                    };
-                    Ok(ToolPreviewReady {
-                        output,
-                        channels: Arc::new(channels),
-                        overlay,
-                    })
+            if let Some(partial) = partial {
+                match tool_render::render(&partial, &worker_cancel) {
+                    Ok(output) => {
+                        if tx.send(PreviewMsg::Partial(preview_ready(output, tool))).is_err() {
+                            return;
+                        }
+                        crate::ui_wake::wake_ui();
+                    }
+                    Err(RenderError::Cancelled) => return,
+                    // The whole render says why, or that there is nothing.
+                    Err(_) => {}
                 }
+            }
+            let result = match tool_render::render(&req, &worker_cancel) {
+                Ok(output) => Ok(preview_ready(output, tool)),
                 Err(RenderError::Invalid(msg)) => Err(Some(msg)),
                 Err(RenderError::NothingToDo | RenderError::Cancelled) => Err(None),
             };
-            let _ = tx.send(result);
+            let _ = tx.send(PreviewMsg::Done(result));
             crate::ui_wake::wake_ui();
         });
         // The tab's preview belongs to this tool from now on: Play waits for
@@ -205,6 +255,34 @@ impl WavesPreviewer {
             started: Instant::now(),
         });
         self.tool_preview.last_spawn = Some(Instant::now());
+    }
+
+    /// The window render a progressive preview starts with, if `req` is
+    /// one: a progressive tool, a span long enough to be worth splitting.
+    fn progressive_preview_request(
+        &self,
+        tab_id: u64,
+        req: &ToolRenderRequest,
+    ) -> Option<ToolRenderRequest> {
+        if !req.op.tool().spec().progressive {
+            return None;
+        }
+        let tab_idx = self.tabs.iter().position(|t| t.tab_id == tab_id)?;
+        let len = req.channels.first().map_or(0, Vec::len);
+        let target = match req.target {
+            RenderTarget::Whole => (0, len),
+            RenderTarget::Range(a, b) => (a.min(b), a.max(b).min(len)),
+            RenderTarget::InsertAt(_) => return None,
+        };
+        let playhead = self.tool_preview_source_pos(tab_idx).max(0.0).round() as usize;
+        let (ws, we) = progressive_window(target, playhead, req.buffer_sr)?;
+        Some(ToolRenderRequest {
+            op: req.op.clone(),
+            channels: req.channels.clone(),
+            buffer_sr: req.buffer_sr,
+            target: RenderTarget::Range(ws, we),
+            ch_mask: req.ch_mask.clone(),
+        })
     }
 
     /// Start a render when the active tab's settings call for one. Deferrable.
@@ -277,7 +355,20 @@ impl WavesPreviewer {
                     tab.tool_session.error = Some("The preview stopped unexpectedly".into());
                 }
             }
-            JobPoll::Ready(result) => {
+            JobPoll::Ready(PreviewMsg::Partial(ready)) => {
+                // The window around the playhead: heard now, while the job
+                // goes on to render the rest.
+                let Some(tab_idx) = self.tabs.iter().position(|t| t.tab_id == key.tab_id) else {
+                    return;
+                };
+                let wanted = self
+                    .tool_preview_target(tab_idx)
+                    .is_some_and(|(want, _)| want == key);
+                if wanted {
+                    self.install_tool_preview(tab_idx, key, ready, false);
+                }
+            }
+            JobPoll::Ready(PreviewMsg::Done(result)) => {
                 self.tool_preview.job = None;
                 let Some(tab_idx) = self.tabs.iter().position(|t| t.tab_id == key.tab_id) else {
                     return;
@@ -289,7 +380,7 @@ impl WavesPreviewer {
                             .tool_preview_target(tab_idx)
                             .is_some_and(|(want, _)| want == key);
                         if wanted {
-                            self.install_tool_preview(tab_idx, key, ready);
+                            self.install_tool_preview(tab_idx, key, ready, true);
                         }
                     }
                     Err(why) => {
@@ -552,7 +643,13 @@ impl WavesPreviewer {
         }
     }
 
-    fn install_tool_preview(&mut self, tab_idx: usize, key: PreviewKey, ready: ToolPreviewReady) {
+    fn install_tool_preview(
+        &mut self,
+        tab_idx: usize,
+        key: PreviewKey,
+        ready: ToolPreviewReady,
+        complete: bool,
+    ) {
         let ToolPreviewReady {
             output,
             channels,
@@ -577,6 +674,7 @@ impl WavesPreviewer {
             key,
             output,
             channels,
+            complete,
         });
         tab.tool_session.error = None;
         let ab_original = tab.tool_session.ab_original;
@@ -669,12 +767,14 @@ impl WavesPreviewer {
     }
 
     /// A new session for the tab's active tool: nothing previewed, a fresh
-    /// draft history. Heavy tools start manual on long clips.
+    /// draft history. Heavy tools start manual on long clips, unless they
+    /// preview progressively (around the playhead first).
     pub(super) fn reset_tool_session(&mut self, tab_idx: usize) {
         self.cancel_tool_preview_for_tab(tab_idx);
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            let spec = tab.active_tool.spec();
             let manual =
-                tab.active_tool.spec().heavy && tab.samples_len > LIVE_PREVIEW_SAMPLE_LIMIT;
+                spec.heavy && !spec.progressive && tab.samples_len > LIVE_PREVIEW_SAMPLE_LIMIT;
             tab.tool_session = ToolSession::started(tab, manual);
         }
     }
@@ -785,5 +885,42 @@ impl WavesPreviewer {
         tab.tool_session
             .fresh_preview(&key)
             .map(ToolPreviewResult::to_output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SR: u32 = 48_000;
+
+    fn secs(s: f64) -> usize {
+        crate::sample_rate::frames_for_secs(s, SR)
+    }
+
+    #[test]
+    fn a_short_target_is_rendered_whole() {
+        assert_eq!(progressive_window((0, secs(30.0)), secs(5.0), SR), None);
+    }
+
+    #[test]
+    fn the_window_runs_from_just_before_the_playhead() {
+        let whole = (0, secs(300.0));
+        let (s, e) = progressive_window(whole, secs(100.0), SR).unwrap();
+        assert_eq!(s, secs(100.0 - PROGRESSIVE_BEHIND_SECS));
+        assert_eq!(e, secs(100.0 + PROGRESSIVE_AHEAD_SECS));
+    }
+
+    #[test]
+    fn the_window_stays_inside_the_target() {
+        let range = (secs(60.0), secs(200.0));
+        // A playhead before the range starts at the range.
+        let (s, e) = progressive_window(range, 0, SR).unwrap();
+        assert_eq!(s, range.0);
+        assert_eq!(e, range.0 + secs(PROGRESSIVE_AHEAD_SECS));
+        // One past its end still renders the range's last stretch.
+        let (s, e) = progressive_window(range, secs(500.0), SR).unwrap();
+        assert_eq!(e, range.1);
+        assert!(s < e && s >= range.0);
     }
 }

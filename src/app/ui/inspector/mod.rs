@@ -8,7 +8,7 @@
 //! tool is previewed, applied and undone through the same footer, by the
 //! rules in `editor_tool.rs` and `tool_session.rs`.
 
-mod plots;
+pub(in crate::app) mod plots;
 mod tools;
 mod views;
 pub(in crate::app) mod widgets;
@@ -359,6 +359,11 @@ impl WavesPreviewer {
         let fresh = preview_target
             .as_ref()
             .is_some_and(|(key, _)| session.fresh_preview(key).is_some());
+        // A progressive tool's window around the playhead, heard while the
+        // rest renders.
+        let partial = preview_target
+            .as_ref()
+            .is_some_and(|(key, _)| session.partial_preview(key));
         let live_on = tab.preview_audio_tool == Some(ToolKind::Panner);
         let pencil_editing = tab.pencil_draft.is_some();
         let recently_applied = session
@@ -403,6 +408,15 @@ impl WavesPreviewer {
                     } else if preview_target.is_none() {
                         dot(ui, DOT_OFF);
                         ui.label(RichText::new("No change to hear").small().weak());
+                    } else if busy && partial {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.label(
+                            RichText::new("Hearing it around the playhead \u{2014} rendering the rest...")
+                                .small(),
+                        )
+                        .on_hover_text(
+                            "The audio around the playhead is already processed; the rest of the target follows. Apply waits for it.",
+                        );
                     } else if busy {
                         ui.add(egui::Spinner::new().size(12.0));
                         ui.label(RichText::new("Rendering preview...").small());

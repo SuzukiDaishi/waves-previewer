@@ -8,6 +8,7 @@ pub mod audio_io;
 #[cfg(windows)]
 pub mod audio_mf;
 pub mod audio_mpegts;
+pub mod automation;
 #[cfg(feature = "truehd")]
 pub mod audio_truehd;
 pub mod binaural;

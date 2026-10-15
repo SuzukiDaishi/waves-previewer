@@ -3136,6 +3136,16 @@ pub struct EditorTab {
     /// Stretch grip is anchored to its top, and a pointer-driven test has no
     /// other way to land inside a band measured from there.
     pub last_wave_canvas_rect: Option<egui::Rect>,
+    /// How far the channel lanes are scrolled, in points from the top of the
+    /// stack. Only means anything while the lanes overflow the canvas (see
+    /// `editor_layout::LaneGeometry`); a view, not an edit, so never saved.
+    pub lane_scroll_px: f32,
+    /// Transient, for UI tests: the lanes as last drawn, the mini meter strip,
+    /// the splitter above it and the lane scrollbar (when the lanes overflow).
+    pub(crate) last_lane_geometry: Option<crate::app::editor_layout::LaneGeometry>,
+    pub last_mini_meter_rect: Option<egui::Rect>,
+    pub last_meter_splitter_rect: Option<egui::Rect>,
+    pub last_lane_scrollbar_rect: Option<egui::Rect>,
     pub last_amplitude_viewport_rect: Option<egui::Rect>, // transient right rail viewport
     pub last_amplitude_nav_click_at: f64, // transient double-click timing for amplitude rail
     pub last_amplitude_nav_click_pos: Option<egui::Pos2>, // transient double-click location
@@ -3324,6 +3334,13 @@ pub struct EditorTab {
     pub pitch_env_enabled: bool, // Pitch Shift tool: edit the curve on the waveform canvas
     pub pitch_env_points: Vec<(usize, f32)>, // (sample, semitones), sorted by sample
     pub pitch_env_drag: Option<usize>, // index of the breakpoint being dragged
+    /// The EQ, Compressor and Limiter settings that follow a curve
+    /// (`tool_automation`). Part of the tool draft; not saved in a session.
+    pub automation: Vec<crate::app::tool_automation::AutomationLane>,
+    /// The lane the canvas edits while its tool is active.
+    pub automation_selected: Option<crate::app::tool_automation::AutoParam>,
+    /// Index of the point being dragged in that lane (transient).
+    pub automation_drag: Option<usize>,
     // --- Canvas gesture state for PitchShift (transient) ---
     pub pitch_drag_active: bool, // dragging the static pitch line up/down
     // --- Spectral warp (image-like frequency warp on Spec/Log views, transient) ---
@@ -3513,6 +3530,11 @@ impl EditorTab {
             last_wave_w: 0.0,
             last_amplitude_nav_rect: None,
             last_wave_canvas_rect: None,
+            lane_scroll_px: 0.0,
+            last_lane_geometry: None,
+            last_mini_meter_rect: None,
+            last_meter_splitter_rect: None,
+            last_lane_scrollbar_rect: None,
             last_amplitude_viewport_rect: None,
             last_amplitude_nav_click_at: 0.0,
             last_amplitude_nav_click_pos: None,
@@ -3640,6 +3662,9 @@ impl EditorTab {
             pitch_env_enabled: false,
             pitch_env_points: Vec::new(),
             pitch_env_drag: None,
+            automation: Vec::new(),
+            automation_selected: None,
+            automation_drag: None,
             pitch_drag_active: false,
             spectral_warp_edit: false,
             spectral_warp_points: Vec::new(),
@@ -3805,10 +3830,18 @@ pub struct EditorViewportRenderKey {
     pub display_samples_len: usize,
     pub start: usize,
     pub end: usize,
+    /// Every lane in the view, scrolled out of sight or not.
     pub lane_count: usize,
+    /// The lanes this render covers: `window_lanes` of them from
+    /// `first_lane`. A render is drawn at its own window, so one made before
+    /// a scroll still lands on the lanes it shows.
+    pub first_lane: usize,
+    pub window_lanes: usize,
     pub lane_height_px: usize,
     pub wave_width_px: usize,
     pub use_mixdown: bool,
+    /// The channel in every lane, not only the rendered ones: what tells a
+    /// render of another channel view apart.
     pub visible_channels: Vec<usize>,
     pub samples_per_px_bits: u32,
     pub vertical_zoom_bits: u32,

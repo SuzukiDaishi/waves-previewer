@@ -10,6 +10,7 @@ use std::sync::Arc;
 use super::tool_render::{
     self, RenderError, RenderTarget, TimeMap, ToolOp, ToolRenderOutput, ToolRenderRequest,
 };
+use super::tool_automation;
 use super::types::{
     EditorApplyResult, EditorApplyViewportRestore, EditorTab, EditorUndoState, ToolKind,
 };
@@ -82,9 +83,11 @@ impl WavesPreviewer {
                 rate: st.speed_rate,
             },
             ToolKind::NoiseGate => ToolOp::NoiseGate(st.gate),
-            ToolKind::Eq => ToolOp::Eq(st.eq),
-            ToolKind::Compressor => ToolOp::Compressor(st.compressor),
-            ToolKind::Limiter => ToolOp::Limiter(st.limiter),
+            ToolKind::Eq => ToolOp::Eq(st.eq, tool_automation::eq_tracks(tab)),
+            ToolKind::Compressor => {
+                ToolOp::Compressor(st.compressor, tool_automation::comp_tracks(tab))
+            }
+            ToolKind::Limiter => ToolOp::Limiter(st.limiter, tool_automation::limiter_tracks(tab)),
             ToolKind::DeClick => ToolOp::DeClick {
                 sensitivity: st.declick_sensitivity,
             },
@@ -310,6 +313,8 @@ impl WavesPreviewer {
         }
         if *time_map != TimeMap::Identity {
             Self::editor_remap_annotations(tab, time_map, old_len);
+            let new_len = tab.samples_len;
+            tool_automation::remap(tab, time_map, new_len);
         }
         if let TimeMap::Unwrap { end, .. } = *time_map {
             // The loop has been written out: it no longer exists as a loop,

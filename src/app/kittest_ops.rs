@@ -1777,6 +1777,103 @@ impl super::WavesPreviewer {
         true
     }
 
+    // ---- Automation (EQ / Compressor / Limiter curves) --------------------
+
+    /// The automatable setting `name` of `tool`: its label in lower case
+    /// ("threshold", "input", "ceiling", "output", "sidechain hpf"), or
+    /// "band<N>.freq" / ".gain" / ".q" for the EQ (N from 1).
+    fn test_auto_param(tool: ToolKind, name: &str) -> Option<crate::app::tool_automation::AutoParam> {
+        use crate::app::tool_automation::AutoParam;
+        use crate::eq::EqParam;
+        if let Some(rest) = name.strip_prefix("band") {
+            let (n, field) = rest.split_once('.')?;
+            let band = n.parse::<u8>().ok()?.checked_sub(1)?;
+            return match field {
+                "freq" => Some(AutoParam::Eq(EqParam::Freq(band))),
+                "gain" => Some(AutoParam::Eq(EqParam::Gain(band))),
+                "q" => Some(AutoParam::Eq(EqParam::Q(band))),
+                _ => None,
+            };
+        }
+        let candidates: Vec<AutoParam> = match tool {
+            ToolKind::Compressor => crate::dynamics::CompParam::ALL
+                .into_iter()
+                .map(AutoParam::Comp)
+                .collect(),
+            ToolKind::Limiter => crate::dynamics::LimiterParam::ALL
+                .into_iter()
+                .map(AutoParam::Limiter)
+                .collect(),
+            ToolKind::Eq => vec![AutoParam::Eq(EqParam::Output)],
+            _ => Vec::new(),
+        };
+        candidates
+            .into_iter()
+            .find(|p| p.short_label().eq_ignore_ascii_case(name))
+    }
+
+    /// Test-only: give `tool`'s setting `name` a curve through `points` (on,
+    /// and picked for the canvas), as one draft change.
+    pub fn test_set_automation(&mut self, tool: ToolKind, name: &str, points: Vec<(usize, f32)>) -> bool {
+        let Some(param) = Self::test_auto_param(tool, name) else {
+            return false;
+        };
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let before = crate::app::tool_session::DraftSnapshot::capture(tab);
+        let lane = crate::app::tool_automation::lane_mut(tab, param);
+        lane.enabled = true;
+        lane.points = points;
+        lane.points.sort_by_key(|(s, _)| *s);
+        tab.automation_selected = Some(param);
+        self.note_tool_draft_change(tab_idx, before);
+        true
+    }
+
+    /// Test-only: pick `tool`'s setting `name` as the lane the canvas edits,
+    /// switched on (as the Inspector's Automation section does).
+    pub fn test_select_automation(&mut self, tool: ToolKind, name: &str) -> bool {
+        let Some(param) = Self::test_auto_param(tool, name) else {
+            return false;
+        };
+        let Some(tab) = self.active_tab.and_then(|idx| self.tabs.get_mut(idx)) else {
+            return false;
+        };
+        crate::app::tool_automation::lane_mut(tab, param).enabled = true;
+        tab.automation_selected = Some(param);
+        true
+    }
+
+    /// Test-only: the points of `tool`'s setting `name`, if it has a lane.
+    pub fn test_automation_points(&self, tool: ToolKind, name: &str) -> Option<Vec<(usize, f32)>> {
+        let param = Self::test_auto_param(tool, name)?;
+        let tab = self.tabs.get(self.active_tab?)?;
+        crate::app::tool_automation::lane(tab, param).map(|l| l.points.clone())
+    }
+
+    /// Test-only: how many automation lanes the active tab holds.
+    pub fn test_automation_lane_count(&self) -> usize {
+        self.active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .map_or(0, |tab| tab.automation.len())
+    }
+
+    /// Test-only: whether the active tab's preview covers the whole target
+    /// (`false`: only the window around the playhead so far).
+    pub fn test_tool_preview_complete(&self) -> Option<bool> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        tab.tool_session.preview.as_ref().map(|p| p.complete)
+    }
+
+    /// Test-only: whether the active tab's tool session waits for Refresh.
+    pub fn test_tool_session_manual(&self) -> Option<bool> {
+        Some(self.tabs.get(self.active_tab?)?.tool_session.manual)
+    }
+
     /// The Inspector footer's Apply.
     pub fn test_inspector_apply(&mut self) -> bool {
         let Some(tab_idx) = self.active_tab else {
@@ -2381,6 +2478,90 @@ impl super::WavesPreviewer {
         self.tabs
             .get(tab_idx)
             .and_then(|tab| tab.last_wave_canvas_rect)
+    }
+
+    // ---- Editor canvas column: lanes, scrollbar, splitter, meter ----------
+
+    /// Test-only: the active tab's lanes as last drawn --
+    /// `(lane_h, lane_count, scroll_px, max_scroll, visible lanes)`.
+    pub fn test_editor_lane_geometry(
+        &self,
+    ) -> Option<(f32, usize, f32, f32, std::ops::Range<usize>)> {
+        let lanes = self.tabs.get(self.active_tab?)?.last_lane_geometry?;
+        Some((
+            lanes.lane_h,
+            lanes.lane_count,
+            lanes.scroll_px,
+            lanes.max_scroll(),
+            lanes.visible_lanes(),
+        ))
+    }
+
+    /// Test-only: scroll the active tab's lanes; kept in range on the next
+    /// frame, as a wheel or the scrollbar would be.
+    pub fn test_set_editor_lane_scroll(&mut self, scroll_px: f32) -> bool {
+        let Some(tab) = self.active_tab.and_then(|idx| self.tabs.get_mut(idx)) else {
+            return false;
+        };
+        tab.lane_scroll_px = scroll_px;
+        true
+    }
+
+    pub fn test_editor_mini_meter_rect(&self) -> Option<egui::Rect> {
+        self.tabs.get(self.active_tab?)?.last_mini_meter_rect
+    }
+
+    pub fn test_editor_meter_splitter_rect(&self) -> Option<egui::Rect> {
+        self.tabs.get(self.active_tab?)?.last_meter_splitter_rect
+    }
+
+    pub fn test_editor_lane_scrollbar_rect(&self) -> Option<egui::Rect> {
+        self.tabs.get(self.active_tab?)?.last_lane_scrollbar_rect
+    }
+
+    /// Test-only: the lanes the active tab's spectral viewport was last asked
+    /// to render, `(first_lane, window_lanes, lane_count)`, and whether a
+    /// texture for exactly that request has arrived.
+    pub fn test_editor_viewport_window(&self) -> Option<((usize, usize, usize), bool)> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        let key = tab.viewport_render_requested_key.as_ref()?;
+        let ready = [&tab.viewport_render_fine, &tab.viewport_render_coarse]
+            .into_iter()
+            .flatten()
+            .any(|cache| cache.key == *key);
+        Some(((key.first_lane, key.window_lanes, key.lane_count), ready))
+    }
+
+    /// Test-only: a virtual row of `channels` channels, `secs` long, at the
+    /// output rate -- the way to open more channels than a WAV decodes (26).
+    /// Every channel is a tone of its own pitch with a burst at its own place
+    /// in time, so neighbouring lanes look different in a screenshot.
+    pub fn test_add_virtual_multichannel(&mut self, channels: usize, secs: f32) -> Option<PathBuf> {
+        if channels == 0 {
+            return None;
+        }
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let frames = crate::sample_rate::frames_for_secs(secs as f64, out_sr).max(1);
+        let chans: Vec<Vec<f32>> = (0..channels)
+            .map(|c| {
+                let freq = 110.0 * (1.0 + (c % 24) as f32 * 0.25);
+                let burst_at = (c as f32 * 0.618_034).fract();
+                (0..frames)
+                    .map(|i| {
+                        let t = i as f32 / frames as f32;
+                        let burst = if (t - burst_at).abs() < 0.08 { 0.8 } else { 0.15 };
+                        (i as f32 / out_sr as f32 * freq * std::f32::consts::TAU).sin() * burst
+                    })
+                    .collect()
+            })
+            .collect();
+        let audio = Arc::new(crate::audio::AudioBuffer::from_channels(chans));
+        let name = self.unique_virtual_display_name(&format!("{channels}ch"));
+        let item = self.make_virtual_item(name, audio, out_sr, 32, None);
+        let path = item.path.clone();
+        self.add_virtual_item(item, None);
+        self.after_add_refresh();
+        Some(path)
     }
 
     /// Height of the selection's Time Stretch grip, measured down from the

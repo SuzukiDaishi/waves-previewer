@@ -15,6 +15,8 @@ follows; read it before changing a tool, the preview, or undo.
 | The preview engine: debounce, render on a worker, install under the playhead | `src/app/tool_preview_ops.rs` |
 | What the Inspector asks for, carried out (select tool, Apply, Discard, tool buttons) | `src/app/inspector_ops.rs` (`InspectorAction`, `ToolCommand`) |
 | The UI | `src/app/ui/inspector/` (`mod.rs` shell and footer, `widgets.rs`, `tools/*.rs` panels, `views.rs` analysis views) |
+| Automation of the EQ / Compressor / Limiter: which settings follow a curve, the lanes on a tab | `src/app/tool_automation.rs` (`AutoParam`, `AutomationLane`); the DSP side is `src/automation.rs` (`Curve`, `Tracks`, `Evaluator`) |
+| Breakpoint curves on the waveform (Gain, Pitch Shift, automation) | `src/app/ui/curve_canvas.rs` (`edit_breakpoint_curve`, `draw_breakpoint_curve`) |
 
 `ui_editor_view` (`ui/editor.rs`) only calls `ui_editor_inspector` where the
 pane goes, after handing it what the canvas changed this frame
@@ -126,8 +128,19 @@ Session states (per tab, `ToolSession::phase`):
   the original) stays on screen and the footer says it is rendering; the old
   "overview first, full later" staging is gone.
 - **Manual.** With `Auto` off -- the default for `heavy` tools on clips
-  longer than `LIVE_PREVIEW_SAMPLE_LIMIT` -- a change shows "Settings
-  changed" and Refresh renders.
+  longer than `LIVE_PREVIEW_SAMPLE_LIMIT`, unless they are `progressive` --
+  a change shows "Settings changed" and Refresh renders.
+- **Progressive.** A `progressive` tool (EQ, Compressor, Limiter, Noise
+  Gate: what it does at a moment depends only on the audio near it) on a
+  target longer than twice its window is rendered in two passes by the same
+  worker: first from 1 s before the playhead to 20 s after it
+  (`progressive_window`), installed as an incomplete preview -- the rest of
+  the file as it was -- then the whole target, which replaces it. The footer
+  says "Hearing it around the playhead -- rendering the rest". Apply only
+  ever commits a complete preview (`fresh_preview`); one asked for while
+  the window is all there is renders the whole target itself. So the
+  Limiter, `heavy` as it is, previews automatically on a file of any
+  length and is heard about 0.3 s after a setting rests.
 - **Under the playhead.** A finished preview is swapped in where the
   playhead is, mapped through the `TimeMap`, with a short fade back in
   (`PREVIEW_SWAP_FADE_MS`); playback does not stop. Under a pitch/stretch
@@ -167,6 +180,56 @@ they were so a saved graph keeps rendering the same).
   `limiter_settings` and `gate_settings`; a session without them is read from
   the old flat fields (three bands, the hard-knee per-channel compressor, the
   gate that shut to silence), which are still written for older builds.
+- **A cut's Q** is its resonance, in its own field (`EqBand::cut_q`, 0.4-10):
+  0.707 is the flat Butterworth corner and the default, so a cut saved before
+  cuts had a Q (and whose `q` is whatever its bell had) sounds as it did. The
+  sharpest section of the cascade is scaled; the slope past the corner stays.
+  On the graph a cut's handle sits at the resonance it adds, and dragging it
+  up or down sets it; the wheel still steps the slope.
+- **The Limiter** drives up to +48 dB into a ceiling down to -30 dB; its GR
+  scales show 48 dB once the drive needs it (`LimiterSettings::gr_scale_db`).
+
+## Automation
+
+The EQ, Compressor and Limiter can let most of their settings follow a curve
+drawn on the waveform, like the Gain and Pitch Shift curves:
+
+| Tool | Settings that can follow a curve | Not (why) |
+|---|---|---|
+| EQ | each band's Freq, Gain (bell, shelves) and Q (a cut's resonance); Output | shape, slope, mode, bypass (switches) |
+| Compressor | Threshold, Ratio, Knee, Attack, Release, Makeup, Mix, Range, Link, Sidechain HPF, RMS window | Lookahead (it is the detector's delay), detection, auto makeup (switches) |
+| Limiter | Input, Ceiling, Release | Lookahead (the window), true peak, link (switches) |
+
+- **Lanes.** `EditorTab::automation` holds one `AutomationLane` per setting:
+  its points `(sample, value)` in the tab's buffer samples and the setting's
+  own units, and whether it is on. The lanes are part of the tool's draft
+  (`DraftSnapshot`), so every point added or dragged is a draft step, Esc
+  throws them away with the rest, and the preview follows them as it follows
+  any setting. They move with the audio through an edit's `TimeMap`. A tool's
+  Reset clears its lanes; an emptied EQ band slot loses its lanes. They are
+  not saved in a session -- nor are the Gain and Pitch Shift curves.
+- **Between and beyond the points.** Values are interpolated on the
+  setting's scale -- frequencies, Qs, times and the ratio by ratio (a
+  straight line on a log axis), the rest linearly -- and hold before the
+  first point and after the last.
+- **Rendering.** `ToolOp::Eq / Compressor / Limiter` carry `Tracks` beside
+  their settings (in the preview key, so a moved point re-renders). The DSP
+  re-evaluates the settings every `AUTOMATION_BLOCK` (32) samples: the
+  compressor its coefficients, the limiter its drive and ceiling where a peak
+  is judged and where the output is written, the EQ the sections of the
+  automated bands, keeping each filter's state. With no tracks every
+  processor runs exactly as before. A range render tells the DSP the buffer
+  sample its segment starts at, so a curve applies where the buffer has it.
+- **Editing.** The Inspector's Automation section picks the setting the
+  canvas edits and switches its curve on; the canvas then edits that lane
+  like the gain curve (double-click to add or remove a point, drag to move
+  it). Other lanes of the tool that are on are drawn faintly, with their names.
+- **The panel at the playhead.** A setting that follows a curve shows its
+  value at the playhead, read-only, in place of its control. The EQ graph,
+  the compressor's transfer curve and the limiter's meters show the settings
+  at the playhead; what is dragged on a graph goes back into the settings
+  only for what no curve owns (`merge_unautomated`). The time graphs draw an
+  automated threshold or ceiling as the curve it is.
 
 ## Undo / Redo
 

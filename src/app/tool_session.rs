@@ -35,6 +35,8 @@ pub struct DraftSnapshot {
     pub loop_xfade_shape: LoopXfadeShape,
     pub spectral_warp_points: Vec<SpectralWarpPoint>,
     pub spectral_brush_stamps: Vec<SpectralBrushStamp>,
+    /// The EQ / Compressor / Limiter curves (`tool_automation`).
+    pub automation: Vec<crate::app::tool_automation::AutomationLane>,
 }
 
 impl DraftSnapshot {
@@ -51,6 +53,7 @@ impl DraftSnapshot {
             loop_xfade_shape: tab.loop_xfade_shape,
             spectral_warp_points: tab.spectral_warp_points.clone(),
             spectral_brush_stamps: tab.spectral_brush_stamps.clone(),
+            automation: tab.automation.clone(),
         }
     }
 
@@ -66,7 +69,9 @@ impl DraftSnapshot {
         tab.loop_xfade_shape = self.loop_xfade_shape;
         tab.spectral_warp_points = self.spectral_warp_points.clone();
         tab.spectral_brush_stamps = self.spectral_brush_stamps.clone();
+        tab.automation = self.automation.clone();
         // Half-finished canvas gestures belong to the settings just replaced.
+        tab.automation_drag = None;
         tab.gain_env_drag = None;
         tab.pitch_env_drag = None;
         tab.pitch_drag_active = false;
@@ -132,6 +137,10 @@ pub struct ToolPreviewResult {
     pub key: PreviewKey,
     pub output: ToolRenderOutput,
     pub channels: std::sync::Arc<Vec<Vec<f32>>>,
+    /// The whole target. `false` for a progressive tool's first render,
+    /// which covers the window around the playhead and leaves the rest as
+    /// it was: heard, never applied.
+    pub complete: bool,
 }
 
 impl ToolPreviewResult {
@@ -348,8 +357,19 @@ impl ToolSession {
     }
 
     /// The preview the settings describe now, if it has been rendered.
+    /// The finished preview of exactly `key`: what Apply may commit.
     pub fn fresh_preview(&self, key: &PreviewKey) -> Option<&ToolPreviewResult> {
-        self.preview.as_ref().filter(|p| p.key == *key)
+        self.preview
+            .as_ref()
+            .filter(|p| p.key == *key && p.complete)
+    }
+
+    /// Whether the window around the playhead of `key` is being heard while
+    /// the rest of it renders.
+    pub fn partial_preview(&self, key: &PreviewKey) -> bool {
+        self.preview
+            .as_ref()
+            .is_some_and(|p| p.key == *key && !p.complete)
     }
 }
 

@@ -114,6 +114,23 @@ pub(in crate::app) fn check_row(
     g.track(&response)
 }
 
+/// The colour a setting that follows its curve is shown in.
+pub(in crate::app) const AUTOMATED_COLOR: Color32 = Color32::from_rgb(120, 200, 255);
+
+/// A setting that follows its curve on the waveform: its value at the
+/// playhead, read-only, in place of its control.
+pub(in crate::app) fn automated_row(ui: &mut egui::Ui, label: &str, value: String) {
+    let hover = "Follows its curve on the waveform (see Automation below). Switch the curve off to set it here.";
+    ui.label(label).on_hover_text(hover);
+    ui.label(
+        RichText::new(format!("{value}  \u{223F} curve"))
+            .color(AUTOMATED_COLOR)
+            .monospace(),
+    )
+    .on_hover_text(hover);
+    ui.end_row();
+}
+
 /// A small heading between groups of settings.
 pub(in crate::app) fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(4.0);

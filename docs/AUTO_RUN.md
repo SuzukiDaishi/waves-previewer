@@ -59,7 +59,8 @@ A key names a field of the session's tool settings (`ProjectToolState` in
   - `eq.` is the parametric EQ (`crate::eq::ParametricEqParams`):
     `eq.output_db`, and `eq.bands.<n>.<field>` with bands numbered 0-7.
     A band's fields are `enabled`, `bypassed`, `kind`, `freq_hz`, `gain_db`,
-    `q`, `slope` and `mode`.
+    `q`, `slope`, `mode` and `cut_q` (a low or high cut's resonance, 0.707
+    flat).
   - `compressor.` is the compressor (`crate::dynamics::CompressorSettings`):
     `threshold_db`, `ratio`, `knee_db`, `attack_ms`, `release_ms`,
     `lookahead_ms`, `makeup_db`, `auto_makeup`, `mix_pct`, `range_db`,

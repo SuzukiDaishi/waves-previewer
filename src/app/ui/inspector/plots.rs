@@ -176,10 +176,34 @@ fn y_to_gain(r: Rect, y: f32) -> f32 {
     -EQ_DB + t * 2.0 * EQ_DB
 }
 
-/// Where a band's handle sits: its corner, at its gain (0 dB for a cut).
+/// How high a cut's handle sits: the resonance its Q adds over the flat
+/// corner, in dB. Dragging the handle up and down sets that Q.
+fn cut_resonance_db(cut_q: f32) -> f32 {
+    20.0 * (cut_q / crate::eq::BUTTERWORTH_Q as f32).max(1e-3).log10()
+}
+
+fn cut_q_for_resonance_db(db: f32) -> f32 {
+    (crate::eq::BUTTERWORTH_Q as f32 * 10f32.powf(db / 20.0)).clamp(
+        *ParametricEqParams::CUT_Q.start(),
+        *ParametricEqParams::CUT_Q.end(),
+    )
+}
+
+/// The height a band's handle sits at: its gain, a cut's resonance, or
+/// 0 dB (a notch).
+fn handle_db(b: &EqBand) -> f32 {
+    if b.kind.uses_gain() {
+        b.gain_db
+    } else if b.kind.uses_slope() {
+        cut_resonance_db(b.cut_q)
+    } else {
+        0.0
+    }
+}
+
+/// Where a band's handle sits: its corner, at `handle_db`.
 fn band_handle(r: Rect, b: &EqBand) -> Pos2 {
-    let db = if b.kind.uses_gain() { b.gain_db } else { 0.0 };
-    Pos2::new(freq_to_x(r, b.freq_hz), gain_to_y(r, db))
+    Pos2::new(freq_to_x(r, b.freq_hz), gain_to_y(r, handle_db(b)))
 }
 
 /// The audio behind the EQ's curve.
@@ -204,9 +228,9 @@ struct EqGrab {
 }
 
 /// The parametric EQ's response over its analyzer, with a handle per band.
-/// Double-click empty space to add a band; drag a handle (Shift: fine);
-/// scroll on one for Q (a cut's slope); Alt+click to bypass; right-click
-/// for its shape, mode and Delete.
+/// Double-click empty space to add a band; drag a handle (Shift: fine) --
+/// a cut's height is its resonance; scroll on one for Q (a cut's slope);
+/// Alt+click to bypass; right-click for its shape, mode and Delete.
 pub(in crate::app) fn eq_plot(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -372,7 +396,7 @@ pub(in crate::app) fn eq_plot(
                     band,
                     from: pos,
                     freq: b.freq_hz,
-                    gain: b.gain_db,
+                    gain: handle_db(&b),
                 });
                 edit.began = true;
             }
@@ -389,6 +413,8 @@ pub(in crate::app) fn eq_plot(
         );
         if b.kind.uses_gain() {
             b.gain_db = y_to_gain(r, y).clamp(-EQ_DB, EQ_DB);
+        } else if b.kind.uses_slope() {
+            b.cut_q = cut_q_for_resonance_db(y_to_gain(r, y));
         }
         edit.changed = true;
     }
@@ -496,9 +522,8 @@ pub(in crate::app) fn eq_plot(
             }
             if band.kind.uses_slope() {
                 text.push_str(&format!(" {}", band.slope.label()));
-            } else {
-                text.push_str(&format!(" Q {:.2}", band.q));
             }
+            text.push_str(&format!(" Q {:.2}", band.q_value()));
             if band.mode != EqChannelMode::Stereo {
                 text.push_str(&format!(" · {}", band.mode.label()));
             }
@@ -909,12 +934,15 @@ fn hist_db(r: Rect, y: f32) -> f32 {
     HIST_LO + ((r.bottom() - y) / r.height().max(1.0)).clamp(0.0, 1.0) * (HIST_HI - HIST_LO)
 }
 
-/// A horizontal level line on the time graph (a threshold, a ceiling).
+/// A level line on the time graph (a threshold, a ceiling): horizontal at
+/// `db`, or -- when the setting follows a curve -- the curve, which is
+/// edited on the waveform and so is not draggable here.
 pub(in crate::app) struct HistoryLine {
     pub db: f32,
     pub color: Color32,
     pub label: &'static str,
     pub draggable: bool,
+    pub curve: Option<crate::automation::Curve>,
 }
 
 /// What the time graph shows.
@@ -1043,6 +1071,31 @@ pub(in crate::app) fn history_plot(
     ui.data_mut(|d| d.insert_temp(grab_id, grab));
     let hover = resp.hover_pos();
     for (i, line) in view.lines.iter().enumerate() {
+        if let Some(curve) = line.curve.as_ref() {
+            // The setting over the target, a few pixels a step.
+            let steps = (r.width() / 3.0).max(2.0) as usize;
+            let at = |k: usize| s + (span as f64 * k as f64 / steps as f64) as usize;
+            let pts: Vec<Pos2> = (0..=steps)
+                .map(|k| {
+                    let db = curve.value_at(at(k)).unwrap_or(line.db);
+                    Pos2::new(
+                        r.left() + k as f32 / steps as f32 * r.width(),
+                        hist_y(r, db),
+                    )
+                })
+                .collect();
+            let end_db = curve.value_at(e).unwrap_or(line.db);
+            painter.add(egui::Shape::line(pts, Stroke::new(1.6, line.color)));
+            label_at(
+                &painter,
+                ui,
+                Pos2::new(r.right() - 2.0, hist_y(r, end_db) - 1.0),
+                egui::Align2::RIGHT_BOTTOM,
+                format!("{} (curve)", line.label),
+                line.color,
+            );
+            continue;
+        }
         let y = hist_y(
             r,
             moved.filter(|(l, _)| *l == i).map_or(line.db, |(_, db)| db),
@@ -1094,14 +1147,16 @@ pub(in crate::app) fn history_plot(
 // Meters
 
 const METER_LO: f32 = -60.0;
-/// The reduction a full GR bar shows.
-const METER_GR_SCALE_DB: f32 = 24.0;
+/// The reduction a full GR bar shows, unless the tool asks for more.
+pub(in crate::app) const METER_GR_SCALE_DB: f32 = 24.0;
 
-/// In / GR / Out bars for the playing audio.
+/// In / GR / Out bars for the playing audio. A full GR bar is
+/// `gr_scale_db` of reduction.
 pub(in crate::app) fn meters(
     ui: &mut egui::Ui,
     live: &LiveMeters,
     ceiling_db: Option<f32>,
+    gr_scale_db: f32,
     size: Vec2,
 ) {
     let (resp, painter) = ui.allocate_painter(size, Sense::hover());
@@ -1134,7 +1189,7 @@ pub(in crate::app) fn meters(
         let b = bar(i);
         painter.rect_filled(b, 1.0, Color32::from_rgb(28, 31, 38));
         if i == 1 {
-            let depth = (-db / METER_GR_SCALE_DB).clamp(0.0, 1.0) * b.height();
+            let depth = (-db / gr_scale_db.max(1.0)).clamp(0.0, 1.0) * b.height();
             painter.rect_filled(
                 Rect::from_min_max(b.min, Pos2::new(b.right(), b.top() + depth)),
                 1.0,

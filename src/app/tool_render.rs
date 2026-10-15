@@ -21,6 +21,7 @@ use super::types::{
     FadeShape, LoopXfadeShape, NoiseProfile, SpectralBrushStamp, SpectralWarpPoint, ToolKind,
 };
 use super::WavesPreviewer;
+use crate::automation::Tracks;
 use crate::markers::MarkerEntry;
 
 /// The least audio a stateful filter (EQ, compressor, limiter, gate) runs
@@ -75,9 +76,19 @@ pub enum ToolOp {
         rate: f32,
     },
     NoiseGate(crate::dynamics::GateSettings),
-    Eq(crate::eq::ParametricEqParams),
-    Compressor(crate::dynamics::CompressorSettings),
-    Limiter(crate::dynamics::LimiterSettings),
+    /// The settings, and the curves some of them follow (automation).
+    Eq(
+        crate::eq::ParametricEqParams,
+        Tracks<crate::eq::EqParam>,
+    ),
+    Compressor(
+        crate::dynamics::CompressorSettings,
+        Tracks<crate::dynamics::CompParam>,
+    ),
+    Limiter(
+        crate::dynamics::LimiterSettings,
+        Tracks<crate::dynamics::LimiterParam>,
+    ),
     DeClick {
         sensitivity: f32,
     },
@@ -323,9 +334,9 @@ impl ToolOp {
             ToolOp::TimeStretch { .. } => ToolKind::TimeStretch,
             ToolOp::Speed { .. } => ToolKind::Speed,
             ToolOp::NoiseGate(_) => ToolKind::NoiseGate,
-            ToolOp::Eq(_) => ToolKind::Eq,
-            ToolOp::Compressor(_) => ToolKind::Compressor,
-            ToolOp::Limiter(_) => ToolKind::Limiter,
+            ToolOp::Eq(..) => ToolKind::Eq,
+            ToolOp::Compressor(..) => ToolKind::Compressor,
+            ToolOp::Limiter(..) => ToolKind::Limiter,
             ToolOp::DeClick { .. } => ToolKind::DeClick,
             ToolOp::DeClip { .. } => ToolKind::DeClip,
             ToolOp::DeHum(_) => ToolKind::DeHum,
@@ -369,8 +380,9 @@ impl ToolOp {
                 in_len, out_len, ..
             } => *in_len == 0 && *out_len == 0,
             ToolOp::InsertSilence { len } => *len == 0,
-            ToolOp::Eq(p) => p.is_neutral(),
-            ToolOp::Compressor(p) => p.is_neutral(),
+            // A curve makes even neutral settings act somewhere.
+            ToolOp::Eq(p, tracks) => p.is_neutral() && tracks.is_empty(),
+            ToolOp::Compressor(p, tracks) => p.is_neutral() && tracks.is_empty(),
             ToolOp::SpectralWarp { points, .. } => points.iter().all(|p| p.delta_hz.abs() <= 0.5),
             ToolOp::SpectralBrush { stamps } => stamps.iter().all(|s| s.cut_db <= 0.1),
             ToolOp::LoopCrossfade { half, .. } => *half == 0,
@@ -422,9 +434,18 @@ impl ToolOp {
             // Plain settings structs: their Debug form names every field and
             // prints each float exactly, so it hashes what renders.
             ToolOp::NoiseGate(p) => hash_debug(&mut h, p),
-            ToolOp::Eq(p) => hash_debug(&mut h, p),
-            ToolOp::Compressor(p) => hash_debug(&mut h, p),
-            ToolOp::Limiter(p) => hash_debug(&mut h, p),
+            ToolOp::Eq(p, tracks) => {
+                hash_debug(&mut h, p);
+                hash_debug(&mut h, tracks);
+            }
+            ToolOp::Compressor(p, tracks) => {
+                hash_debug(&mut h, p);
+                hash_debug(&mut h, tracks);
+            }
+            ToolOp::Limiter(p, tracks) => {
+                hash_debug(&mut h, p);
+                hash_debug(&mut h, tracks);
+            }
             ToolOp::DeClick { sensitivity } | ToolOp::DeClip { sensitivity } => {
                 f(&mut h, *sensitivity)
             }
@@ -554,17 +575,23 @@ const EQ_MAX_PRE_ROLL_SECS: f64 = 1.0;
 /// Periods of the lowest active corner an EQ runs over before a range.
 const EQ_PRE_ROLL_PERIODS: f64 = 8.0;
 
-fn eq_pre_roll(p: &crate::eq::ParametricEqParams, sr: u32) -> usize {
+fn eq_pre_roll(
+    p: &crate::eq::ParametricEqParams,
+    tracks: &Tracks<crate::eq::EqParam>,
+    sr: u32,
+) -> usize {
     let secs = p
-        .lowest_active_hz()
+        .lowest_active_hz_automated(tracks)
         .map_or(RANGE_CONTEXT_SECS, |hz| EQ_PRE_ROLL_PERIODS / f64::from(hz.max(1.0)));
     crate::sample_rate::frames_for_secs(secs.clamp(RANGE_CONTEXT_SECS, EQ_MAX_PRE_ROLL_SECS), sr)
 }
 
 /// Run `process` over the in-scope channels of `[s, e)` together, with
 /// `pre` / `post` samples of the audio around it, and splice each channel
-/// back with crossfades at interior edges. Returns the channels and what
-/// `process` reported, plus where the processed segment began.
+/// back with crossfades at interior edges. `process` is told the buffer
+/// sample its slices start at (where automation curves are). Returns the
+/// channels and what `process` reported, plus where the processed segment
+/// began.
 #[allow(clippy::too_many_arguments)]
 fn joint_range<X>(
     src: &[Vec<f32>],
@@ -575,7 +602,7 @@ fn joint_range<X>(
     pre: usize,
     post: usize,
     cancel: &AtomicBool,
-    process: impl FnOnce(&[&[f32]]) -> Option<(Vec<Vec<f32>>, X)>,
+    process: impl FnOnce(&[&[f32]], usize) -> Option<(Vec<Vec<f32>>, X)>,
 ) -> Result<(Vec<Vec<f32>>, X, usize), RenderError> {
     check(cancel)?;
     let len = src.first().map_or(0, Vec::len);
@@ -587,7 +614,7 @@ fn joint_range<X>(
     };
     let scope: Vec<usize> = (0..src.len()).filter(|&ci| channel_in_scope(mask, ci)).collect();
     let slices: Vec<&[f32]> = scope.iter().map(|&ci| &src[ci][seg_s..seg_e]).collect();
-    let (processed, extra) = process(&slices).ok_or(RenderError::Cancelled)?;
+    let (processed, extra) = process(&slices, seg_s).ok_or(RenderError::Cancelled)?;
     let mut processed = processed.into_iter();
     let mut out = Vec::with_capacity(src.len());
     for (ci, ch) in src.iter().enumerate() {
@@ -849,11 +876,11 @@ pub fn render(
             }
             out.channels = chans;
         }
-        ToolOp::Eq(p) => {
-            let pre = eq_pre_roll(p, sr);
-            let (chans, (), _) = joint_range(src, mask, s, e, sr, pre, 0, cancel, |slices| {
+        ToolOp::Eq(p, tracks) => {
+            let pre = eq_pre_roll(p, tracks, sr);
+            let (chans, (), _) = joint_range(src, mask, s, e, sr, pre, 0, cancel, |slices, at| {
                 let mut chans: Vec<Vec<f32>> = slices.iter().map(|c| c.to_vec()).collect();
-                crate::eq::process(&mut chans, sr, p);
+                crate::eq::process_automated(&mut chans, sr, p, tracks, at);
                 Some((chans, ()))
             })?;
             out.analysis = Some(Arc::new(RenderAnalysis::Spectrum(target_spectrum(
@@ -861,24 +888,30 @@ pub fn render(
             ))));
             out.channels = chans;
         }
-        ToolOp::Compressor(p) => {
+        ToolOp::Compressor(p, tracks) => {
             let pre = dynamics_pre_roll(p.release_ms, p.lookahead_ms, sr);
             let post = crate::sample_rate::frames_for_secs(f64::from(p.lookahead_ms) / 1000.0, sr) + 1;
-            let (chans, trace, seg_s) = joint_range(src, mask, s, e, sr, pre, post, cancel, |slices| {
-                crate::dynamics::compress(slices, sr, p, cancel).map(|o| (o.channels, o.trace))
+            let (chans, trace, seg_s) = joint_range(src, mask, s, e, sr, pre, post, cancel, |slices, at| {
+                crate::dynamics::compress_automated(slices, sr, p, tracks, at, cancel)
+                    .map(|o| (o.channels, o.trace))
             })?;
             out.analysis = Some(Arc::new(RenderAnalysis::Dynamics(place_trace(trace, seg_s, s, e))));
             out.channels = chans;
         }
-        ToolOp::Limiter(p) => {
+        ToolOp::Limiter(p, tracks) => {
             let pre = dynamics_pre_roll(p.release_ms, p.lookahead_ms, sr);
             let post = crate::sample_rate::frames_for_secs(f64::from(p.lookahead_ms) / 1000.0, sr) + 1;
-            let (chans, trace, seg_s) = joint_range(src, mask, s, e, sr, pre, post, cancel, |slices| {
-                crate::dynamics::limit(slices, sr, p, cancel).map(|o| (o.channels, o.trace))
+            let (chans, trace, seg_s) = joint_range(src, mask, s, e, sr, pre, post, cancel, |slices, at| {
+                crate::dynamics::limit_automated(slices, sr, p, tracks, at, cancel)
+                    .map(|o| (o.channels, o.trace))
             })?;
             let trace = place_trace(trace, seg_s, s, e);
             // Nothing over the ceiling and no gain: the audio is as it was.
-            if trace.max_reduction_db() < NEUTRAL_REDUCTION_DB && p.input_gain_db.abs() < NEUTRAL_REDUCTION_DB {
+            let gain_moves = tracks.contains(crate::dynamics::LimiterParam::InputGain);
+            if trace.max_reduction_db() < NEUTRAL_REDUCTION_DB
+                && p.input_gain_db.abs() < NEUTRAL_REDUCTION_DB
+                && !gain_moves
+            {
                 return Err(RenderError::NothingToDo);
             }
             out.analysis = Some(Arc::new(RenderAnalysis::Dynamics(trace)));
@@ -887,7 +920,7 @@ pub fn render(
         ToolOp::NoiseGate(p) => {
             let pre = dynamics_pre_roll(p.release_ms + p.hold_ms, p.lookahead_ms, sr);
             let post = crate::sample_rate::frames_for_secs(f64::from(p.lookahead_ms) / 1000.0, sr) + 1;
-            let (chans, trace, seg_s) = joint_range(src, mask, s, e, sr, pre, post, cancel, |slices| {
+            let (chans, trace, seg_s) = joint_range(src, mask, s, e, sr, pre, post, cancel, |slices, _| {
                 crate::dynamics::gate(slices, sr, p, cancel).map(|o| (o.channels, o.trace))
             })?;
             out.analysis = Some(Arc::new(RenderAnalysis::Dynamics(place_trace(trace, seg_s, s, e))));
@@ -1102,19 +1135,28 @@ mod tests {
             ToolOp::Reverse,
             ToolOp::InvertPolarity { fade: 96 },
             ToolOp::DcOffset,
-            ToolOp::Eq({
-                let mut p = crate::eq::ParametricEqParams::default();
-                p.bands[1].gain_db = 6.0;
-                p
-            }),
-            ToolOp::Compressor(crate::dynamics::CompressorSettings {
-                threshold_db: -30.0,
-                ..Default::default()
-            }),
-            ToolOp::Limiter(crate::dynamics::LimiterSettings {
-                input_gain_db: 12.0,
-                ..Default::default()
-            }),
+            ToolOp::Eq(
+                {
+                    let mut p = crate::eq::ParametricEqParams::default();
+                    p.bands[1].gain_db = 6.0;
+                    p
+                },
+                Tracks::none(),
+            ),
+            ToolOp::Compressor(
+                crate::dynamics::CompressorSettings {
+                    threshold_db: -30.0,
+                    ..Default::default()
+                },
+                Tracks::none(),
+            ),
+            ToolOp::Limiter(
+                crate::dynamics::LimiterSettings {
+                    input_gain_db: 12.0,
+                    ..Default::default()
+                },
+                Tracks::none(),
+            ),
             ToolOp::NoiseGate(crate::dynamics::GateSettings::default()),
         ];
         for op in ops {
@@ -1277,7 +1319,16 @@ mod tests {
         assert!(ToolOp::Gain { db: 0.0 }.is_neutral());
         assert!(!ToolOp::Gain { db: 0.5 }.is_neutral());
         assert!(ToolOp::TimeStretch { rate: 1.0 }.is_neutral());
-        assert!(ToolOp::Eq(crate::eq::ParametricEqParams::default()).is_neutral());
+        assert!(ToolOp::Eq(crate::eq::ParametricEqParams::default(), Tracks::none()).is_neutral());
+        let mut tracks = Tracks::none();
+        tracks.push(
+            crate::eq::EqParam::Gain(1),
+            crate::automation::Curve::new(vec![(0, 0.0), (100, 6.0)], crate::automation::Scale::Linear),
+        );
+        assert!(
+            !ToolOp::Eq(crate::eq::ParametricEqParams::default(), tracks).is_neutral(),
+            "a curve makes a flat EQ act"
+        );
         assert!(!ToolOp::Reverse.is_neutral());
         assert!(ToolOp::PitchShift {
             semitones: 5.0,
@@ -1296,10 +1347,55 @@ mod tests {
     }
 
     #[test]
+    fn an_automated_range_render_reads_the_curve_at_buffer_positions() {
+        // A threshold step at 60 000: a range render that starts later
+        // must see the step where the buffer has it, not at its own start.
+        let src = stereo(SR as usize * 2);
+        let settings = crate::dynamics::CompressorSettings {
+            threshold_db: 0.0,
+            ratio: 10.0,
+            knee_db: 0.0,
+            ..Default::default()
+        };
+        let mut tracks = Tracks::none();
+        tracks.push(
+            crate::dynamics::CompParam::Threshold,
+            crate::automation::Curve::new(
+                vec![(60_000, 0.0), (60_001, -40.0)],
+                crate::automation::Scale::Linear,
+            ),
+        );
+        let op = ToolOp::Compressor(settings, tracks);
+        let range = run(&req(op.clone(), src.clone(), RenderTarget::Range(40_000, 90_000)));
+        let whole = run(&req(op, src.clone(), RenderTarget::Whole));
+        // Before the step nothing is compressed; after it, the range and the
+        // whole render agree once both have settled.
+        for i in (45_000..59_000).step_by(997) {
+            assert!((range.channels[0][i] - src[0][i]).abs() < 1e-4, "at {i}");
+        }
+        for i in (70_000..88_000).step_by(997) {
+            assert!(
+                (range.channels[0][i] - whole.channels[0][i]).abs() < 1e-3,
+                "at {i}: {} vs {}",
+                range.channels[0][i],
+                whole.channels[0][i]
+            );
+        }
+    }
+
+    #[test]
     fn fingerprints_follow_the_parameters() {
         let a = ToolOp::Gain { db: 3.0 }.fingerprint();
         assert_eq!(a, ToolOp::Gain { db: 3.0 }.fingerprint());
         assert_ne!(a, ToolOp::Gain { db: 3.1 }.fingerprint());
         assert_ne!(a, ToolOp::Normalize { target_db: 3.0 }.fingerprint());
+        let limiter = crate::dynamics::LimiterSettings::default();
+        let plain = ToolOp::Limiter(limiter, Tracks::none()).fingerprint();
+        let mut tracks = Tracks::none();
+        tracks.push(
+            crate::dynamics::LimiterParam::Ceiling,
+            crate::automation::Curve::new(vec![(0, -3.0)], crate::automation::Scale::Linear),
+        );
+        assert_ne!(plain, ToolOp::Limiter(limiter, tracks).fingerprint());
     }
 }

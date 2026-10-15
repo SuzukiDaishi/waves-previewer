@@ -647,9 +647,19 @@ impl WavesPreviewer {
             ToolKind::TimeStretch => st.stretch_rate = d.stretch_rate,
             ToolKind::Speed => st.speed_rate = d.speed_rate,
             ToolKind::NoiseGate => st.gate = d.gate,
-            ToolKind::Eq => st.eq = d.eq,
-            ToolKind::Compressor => st.compressor = d.compressor,
-            ToolKind::Limiter => st.limiter = d.limiter,
+            // The tool's curves go with its settings.
+            ToolKind::Eq => {
+                st.eq = d.eq;
+                tab.automation.retain(|l| l.param.tool() != ToolKind::Eq);
+            }
+            ToolKind::Compressor => {
+                st.compressor = d.compressor;
+                tab.automation.retain(|l| l.param.tool() != ToolKind::Compressor);
+            }
+            ToolKind::Limiter => {
+                st.limiter = d.limiter;
+                tab.automation.retain(|l| l.param.tool() != ToolKind::Limiter);
+            }
             ToolKind::DeClick => st.declick_sensitivity = d.declick_sensitivity,
             ToolKind::DeClip => st.declip_sensitivity = d.declip_sensitivity,
             ToolKind::DeHum => {
