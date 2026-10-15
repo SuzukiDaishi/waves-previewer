@@ -4,6 +4,8 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+## 0.20261015.0 - 2026-10-15
+
 ### EQ / Compressor / Limiter の設定をカーブで動かせるようにした（オートメーション。docs/INSPECTOR_SPEC.md）
 
 - 設定の多くを、波形の上に描くカーブで時間とともに動かせる。操作は Gain / Pitch Shift のカーブと同じ。
