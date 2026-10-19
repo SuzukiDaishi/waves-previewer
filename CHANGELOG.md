@@ -4,6 +4,8 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+## 0.20261020.0 - 2026-10-20
+
 ### 畳み込みリバーブを追加した（Analyze/FX の Reverb。docs/INSPECTOR_SPEC.md）
 
 - インパルス応答（IR）を畳み込むリバーブ。IR は Conner's Impulse Response Library（MIT）を使う。
