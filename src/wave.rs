@@ -1782,8 +1782,8 @@ pub fn process_pitchshift_offline(
     }
     let mut stretch = Stretch::preset_default(1, out_sr);
     stretch.set_transpose_factor_semitones(semitones, None);
-    stretch_seek_preroll(&mut stretch, &resampled, 1.0);
-    stretch.process(&resampled, &mut out);
+    let rest = stretch_seek_preroll(&mut stretch, &resampled, 1.0);
+    stretch.process(&rest, &mut out);
     let olat = stretch.output_latency();
     if olat > 0 {
         let mut tail = vec![0.0_f32; olat];
@@ -1867,8 +1867,9 @@ fn deinterleave_fixed_len(
 ///
 /// One Signalsmith instance processes every channel for the whole render, so
 /// channel timing and spectral decisions remain coherent. Input and output
-/// block lengths are equal; latency is removed after flush so the result has
-/// exactly the same frame count as the input.
+/// block lengths are equal, and both latencies are removed (see
+/// `stretch_seek_preroll`), so the result has exactly the input's frame count
+/// and every transient stays where it was.
 pub fn process_pitchshift_curve_multi(
     channels: &[Vec<f32>],
     sample_rate: u32,
@@ -1899,6 +1900,11 @@ pub fn process_pitchshift_curve_multi(
         automation_frames.min(block_frames.saturating_sub(1).max(1)),
     );
 
+    // The seek puts the analysis on frame 0, so the loop below feeds input
+    // `input_latency` frames ahead of the frame it is processing: the frames
+    // after the pre-roll, then silence past the end. Feeding frame 0 again
+    // here played the pre-roll twice and moved everything after it late by
+    // the input latency (60 ms).
     let input_latency = stretch.input_latency();
     if input_latency > 0 {
         let pre_roll = interleave_channel_range(channels, 0, input_latency);
@@ -1922,7 +1928,8 @@ pub fn process_pitchshift_curve_multi(
                 .clamp(-12.0, 12.0);
         stretch.set_transpose_factor_semitones(semitones, None);
 
-        let input = interleave_channel_range(channels, frame, frames_this);
+        let input =
+            interleave_channel_range(channels, frame.saturating_add(input_latency), frames_this);
         let mut output = vec![0.0_f32; frames_this.saturating_mul(channel_count)];
         stretch.process(&input, &mut output);
         raw_output.extend_from_slice(&output);
@@ -2031,8 +2038,8 @@ pub fn process_timestretch_offline(mono: &[f32], in_sr: u32, out_sr: u32, rate: 
     }
     let mut stretch = Stretch::preset_default(1, out_sr);
     stretch.set_transpose_factor(1.0, None);
-    stretch_seek_preroll(&mut stretch, &resampled, rate);
-    stretch.process(&resampled, &mut out);
+    let rest = stretch_seek_preroll(&mut stretch, &resampled, rate);
+    stretch.process(&rest, &mut out);
     let olat = stretch.output_latency();
     if olat > 0 {
         let mut tail = vec![0.0_f32; olat];
@@ -2721,19 +2728,31 @@ pub fn process_three_band_eq_offline(
     high_shelf.process(&stage2)
 }
 
-fn stretch_seek_preroll(stretch: &mut Stretch, input: &[f32], playback_rate: f32) {
+/// Seek `stretch` onto the start of mono `input` and return what to
+/// `process` after it.
+///
+/// Signalsmith analyses `input_latency()` frames behind the newest input it
+/// holds. The seek hands it the first `input_latency()` frames, which puts
+/// that analysis on frame 0, so processing must carry on from the frame after
+/// them. Processing `input` from frame 0 again plays those frames twice and
+/// moves everything after them late by the input latency (60 ms with the
+/// default 120 ms window). The returned
+/// input runs `input_latency()` frames of silence past the end instead, so it
+/// is as long as `input` and the analysis reaches its last frame. Its output
+/// still trails by `output_latency()`, which the caller drops after `flush`.
+fn stretch_seek_preroll(stretch: &mut Stretch, input: &[f32], playback_rate: f32) -> Vec<f32> {
     let in_lat = stretch.input_latency();
-    if in_lat == 0 {
-        return;
-    }
-    // Feed pre-roll so the processed output starts aligned (prevents leading silence drift).
     let take = in_lat.min(input.len());
-    let mut pre = Vec::with_capacity(in_lat);
-    pre.extend_from_slice(&input[..take]);
-    if take < in_lat {
+    if in_lat > 0 {
+        let mut pre = Vec::with_capacity(in_lat);
+        pre.extend_from_slice(&input[..take]);
         pre.resize(in_lat, 0.0);
+        stretch.seek(&pre, playback_rate as f64);
     }
-    stretch.seek(&pre, playback_rate as f64);
+    let mut rest = Vec::with_capacity(input.len());
+    rest.extend_from_slice(&input[take..]);
+    rest.resize(input.len(), 0.0);
+    rest
 }
 
 // Export: apply gain to source WAV and write to a new file (preserve channels & sample_rate).
@@ -4259,6 +4278,150 @@ mod tests {
             cents.abs() <= 2.0,
             "expected 440 Hz, measured {measured_hz:.3} Hz ({cents:.3} cents)"
         );
+    }
+
+    /// `secs` of silence with a 6 ms burst of 1 kHz centred on each of `at`.
+    fn bursts(sr: u32, secs: f64, at: &[f64]) -> Vec<f32> {
+        let len = (secs * f64::from(sr)).round() as usize;
+        let half = (0.003 * f64::from(sr)).round() as usize;
+        let mut out = vec![0.0f32; len];
+        for &t in at {
+            let c = (t * f64::from(sr)).round() as usize;
+            for (i, v) in out
+                .iter_mut()
+                .enumerate()
+                .take((c + half).min(len))
+                .skip(c.saturating_sub(half))
+            {
+                let x = (i as f64 - c as f64) / half as f64;
+                let env = 0.5 * (1.0 + (std::f64::consts::PI * x).cos());
+                let phase = std::f64::consts::TAU * 1000.0 * i as f64 / f64::from(sr);
+                *v += (env * phase.sin() * 0.8) as f32;
+            }
+        }
+        out
+    }
+
+    /// Where the energy of `x` between `from` and `to` seconds sits, in
+    /// seconds from the start of `x`.
+    fn energy_centre_secs(x: &[f32], sr: u32, from: f64, to: f64) -> f64 {
+        let a = ((from * f64::from(sr)) as usize).min(x.len());
+        let b = ((to * f64::from(sr)) as usize).min(x.len());
+        let (mut moment, mut energy) = (0.0f64, 0.0f64);
+        for (i, v) in x[a..b].iter().enumerate() {
+            let p = f64::from(*v) * f64::from(*v);
+            moment += (a + i) as f64 * p;
+            energy += p;
+        }
+        moment / energy.max(1e-30) / f64::from(sr)
+    }
+
+    /// How far a pitch or stretch render may move a transient. The phase
+    /// vocoder smears a click over its 120 ms window, but evenly: a correct
+    /// render measures within 0.2 ms. The bug this guards against played the
+    /// first 60 ms (the input latency) twice and moved everything after it
+    /// 60 ms late -- so every burst below sits past the first 60 ms.
+    const TRANSIENT_TOLERANCE_SECS: f64 = 0.003;
+
+    #[test]
+    fn pitch_curve_keeps_transients_in_place() {
+        let sr = 48_000u32;
+        let input = bursts(sr, 1.2, &[0.08, 0.6]);
+        let at = |secs: f64| (secs * f64::from(sr)) as usize;
+        let cases: Vec<(&str, Vec<(usize, f32)>, f32)> = vec![
+            ("+5 st", Vec::new(), 5.0),
+            ("-7 st", Vec::new(), -7.0),
+            ("+12 st", Vec::new(), 12.0),
+            ("curve", vec![(at(0.08), 6.0), (at(0.33), -12.0)], 0.0),
+        ];
+        for (name, points, semitones) in cases {
+            let out = super::process_pitchshift_curve_multi(
+                &[input.clone(), input.clone()],
+                sr,
+                &points,
+                semitones,
+                0,
+            );
+            for (from, to, expected) in [(0.0, 0.3, 0.08), (0.3, 1.2, 0.6)] {
+                for ch in &out {
+                    let got = energy_centre_secs(ch, sr, from, to);
+                    assert!(
+                        (got - expected).abs() <= TRANSIENT_TOLERANCE_SECS,
+                        "{name}: the burst at {expected} s came out at {got:.4} s"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pitch_curve_range_render_keeps_transients_in_place() {
+        let sr = 48_000u32;
+        let input = bursts(sr, 1.2, &[0.6]);
+        let at = |secs: f64| (secs * f64::from(sr)) as usize;
+        let out = super::process_pitchshift_curve_multi_spliced(
+            &[input],
+            sr,
+            &[],
+            5.0,
+            Some((at(0.4), at(0.8))),
+        );
+        let got = energy_centre_secs(&out[0], sr, 0.3, 0.9);
+        assert!(
+            (got - 0.6).abs() <= TRANSIENT_TOLERANCE_SECS,
+            "the burst at 0.6 s came out at {got:.4} s"
+        );
+    }
+
+    #[test]
+    fn offline_pitch_shift_keeps_transients_in_place() {
+        let sr = 48_000u32;
+        // Long enough for `exact()`, and too short for it (the fallback).
+        for (secs, at) in [(1.2, 0.6), (0.1, 0.075)] {
+            let input = bursts(sr, secs, &[at]);
+            let out = super::process_pitchshift_offline(&input, sr, sr, 5.0);
+            assert_eq!(out.len(), input.len(), "{secs} s");
+            let got = energy_centre_secs(&out, sr, 0.0, secs);
+            assert!(
+                (got - at).abs() <= TRANSIENT_TOLERANCE_SECS,
+                "{secs} s: the burst at {at} s came out at {got:.4} s"
+            );
+        }
+    }
+
+    #[test]
+    fn time_stretch_moves_transients_by_the_rate() {
+        let sr = 48_000u32;
+        let input = bursts(sr, 1.2, &[0.1, 0.7]);
+        for rate in [0.5f32, 0.8, 1.25, 2.0] {
+            let out = super::process_timestretch_offline(&input, sr, sr, rate);
+            let r = f64::from(rate);
+            for (from, to, at) in [(0.0, 0.4, 0.1), (0.4, 1.2, 0.7)] {
+                let expected = at / r;
+                let got = energy_centre_secs(&out, sr, from / r, to / r);
+                assert!(
+                    (got - expected).abs() <= TRANSIENT_TOLERANCE_SECS,
+                    "rate {rate}: the burst at {at} s belongs at {expected:.4} s, came out at {got:.4} s"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_time_stretch_moves_transients_by_the_rate() {
+        // Too short for `exact()`: this is the fallback path.
+        let sr = 48_000u32;
+        let input = bursts(sr, 0.09, &[0.07]);
+        for rate in [0.8f32, 1.25] {
+            let out = super::process_timestretch_offline(&input, sr, sr, rate);
+            let r = f64::from(rate);
+            let expected = 0.07 / r;
+            let got = energy_centre_secs(&out, sr, 0.0, 0.09 / r);
+            assert!(
+                (got - expected).abs() <= TRANSIENT_TOLERANCE_SECS,
+                "rate {rate}: the burst belongs at {expected:.4} s, came out at {got:.4} s"
+            );
+        }
     }
 
     #[test]
