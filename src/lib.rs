@@ -17,6 +17,7 @@ pub mod crash_report;
 pub mod dynamics;
 pub mod eq;
 pub mod flac_meta;
+pub mod impulse;
 pub mod ipc;
 #[cfg(feature = "mp3_lame")]
 pub mod lame;
@@ -28,10 +29,12 @@ pub mod metadata;
 pub mod meter;
 pub mod mpegts;
 pub mod object_mix;
+pub mod oversample;
 pub mod panning;
 #[cfg(windows)]
 pub(crate) mod mf;
 pub mod plugin;
+pub mod reverb;
 pub mod sample_rate;
 pub mod spatial;
 pub mod ui_wake;

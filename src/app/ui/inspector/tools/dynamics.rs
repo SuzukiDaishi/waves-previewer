@@ -15,9 +15,10 @@ use crate::app::tool_automation::{self, AutoParam};
 use crate::app::types::ToolState;
 use crate::automation::Curve;
 use crate::dynamics::{
-    CompParam, CompressorSettings, Detection, DynamicsTrace, GateSettings, LimiterParam,
-    LimiterSettings,
+    ClipperParam, ClipperSettings, CompParam, CompressorSettings, Detection, DynamicsTrace,
+    GateSettings, LimiterParam, LimiterSettings,
 };
+use crate::oversample::Oversampling;
 use crate::eq::{CutSlope, EqBand, EqChannelMode, EqKind, EqParam, ParametricEqParams};
 
 /// The meters' width beside a graph.
@@ -70,7 +71,7 @@ fn source_levels(app: &WavesPreviewer, tab_idx: usize) -> Option<DynamicsTrace> 
 }
 
 /// The preset menu of the active tool.
-fn preset_menu(
+pub(super) fn preset_menu(
     app: &WavesPreviewer,
     ui: &mut egui::Ui,
     tab_idx: usize,
@@ -95,7 +96,7 @@ fn preset_menu(
 
 /// A frequency where 0 means the filter is off.
 #[allow(clippy::too_many_arguments)]
-fn hz_or_off_row(
+pub(super) fn hz_or_off_row(
     ui: &mut egui::Ui,
     g: &mut Gestures,
     label: &str,
@@ -137,6 +138,29 @@ fn detection_row(ui: &mut egui::Ui, g: &mut Gestures, detection: &mut Detection)
     ui.end_row();
 }
 
+fn oversampling_row(ui: &mut egui::Ui, g: &mut Gestures, os: &mut Oversampling, hover: &str) {
+    ui.label("Oversampling").on_hover_text(hover);
+    ui.horizontal(|ui| {
+        for o in Oversampling::ALL {
+            if ui.selectable_label(*os == o, o.label()).on_hover_text(hover).clicked() && *os != o {
+                *os = o;
+                g.began = true;
+                g.ended = true;
+            }
+        }
+    });
+    ui.end_row();
+}
+
+/// The loudest the render's output gets, from its trace.
+fn output_peak_db(t: &DynamicsTrace) -> f32 {
+    t.input_db
+        .iter()
+        .zip(&t.gain_db)
+        .map(|(i, gr)| i + gr + t.output_offset_db)
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
 /// Seek to a sample of the tab's source.
 fn seek(actions: &mut Vec<InspectorAction>, edit: &PlotEdit) {
     if let Some(sample) = edit.seek {
@@ -147,13 +171,14 @@ fn seek(actions: &mut Vec<InspectorAction>, edit: &PlotEdit) {
 /// What the panels need to know about automation, read before the tab's
 /// settings are borrowed: which settings follow a curve, and all settings
 /// as they are at the playhead.
-struct AutoView {
+pub(super) struct AutoView {
     automated: Vec<AutoParam>,
-    at: ToolState,
+    /// Every setting as it is at the playhead.
+    pub(super) at: ToolState,
 }
 
 impl AutoView {
-    fn new(app: &WavesPreviewer, tab_idx: usize) -> Self {
+    pub(super) fn new(app: &WavesPreviewer, tab_idx: usize) -> Self {
         let playhead = app.automation_playhead(tab_idx);
         let tab = &app.tabs[tab_idx];
         Self {
@@ -167,12 +192,12 @@ impl AutoView {
         }
     }
 
-    fn is(&self, param: AutoParam) -> bool {
+    pub(super) fn is(&self, param: AutoParam) -> bool {
         self.automated.contains(&param)
     }
 
     /// The read-only row of an automated setting.
-    fn row(&self, ui: &mut egui::Ui, param: AutoParam, label: &str) {
+    pub(super) fn row(&self, ui: &mut egui::Ui, param: AutoParam, label: &str) {
         widgets::automated_row(ui, label, param.format(param.static_value(&self.at)));
     }
 
@@ -184,10 +209,10 @@ impl AutoView {
     }
 }
 
-/// The Automation section of the EQ, Compressor and Limiter: which setting
+/// The Automation section of the EQ, Compressor, Limiter, Clipper and Reverb: which setting
 /// the waveform's curve edits, whether that setting follows it, and what
 /// else of this tool does. `eq_band` is the EQ band picked in its panel.
-fn automation_section(app: &mut WavesPreviewer, ui: &mut egui::Ui, tab_idx: usize, g: &mut Gestures, eq_band: usize) {
+pub(super) fn automation_section(app: &mut WavesPreviewer, ui: &mut egui::Ui, tab_idx: usize, g: &mut Gestures, eq_band: usize) {
     let tab = &mut app.tabs[tab_idx];
     let tool = tab.active_tool;
     let params = AutoParam::for_tool(tool, eq_band, &tab.tool_state);
@@ -952,13 +977,7 @@ pub(super) fn limiter(
     let s = &mut tab.tool_state.limiter;
     match result.as_ref() {
         Some(t) => {
-            let out_peak = t
-                .input_db
-                .iter()
-                .zip(&t.gain_db)
-                .map(|(i, gr)| i + gr + t.output_offset_db)
-                .fold(f32::NEG_INFINITY, f32::max)
-                .min(shown.limiter.ceiling_db);
+            let out_peak = output_peak_db(t).min(shown.limiter.ceiling_db);
             ui.label(
                 RichText::new(format!(
                     "Max reduction {:.1} dB · output peak {:.1} dB{}",
@@ -1042,6 +1061,176 @@ pub(super) fn limiter(
             "Link channels",
             "One gain for every channel, so a peak in one does not move the image",
         );
+        oversampling_row(
+            ui,
+            g,
+            &mut s.oversampling,
+            "Run the limiter at this many times the rate, so its fast gain changes and the clamp at the ceiling make no aliasing. Rendering takes about that many times longer; nothing moves in time.",
+        );
+    });
+    automation_section(app, ui, tab_idx, g, 0);
+    preset_menu(app, ui, tab_idx, actions);
+}
+
+// ---------------------------------------------------------------------------
+// Clipper
+
+pub(super) fn clipper(
+    app: &mut WavesPreviewer,
+    ui: &mut egui::Ui,
+    tab_idx: usize,
+    g: &mut Gestures,
+    actions: &mut Vec<InspectorAction>,
+) {
+    let now = ui.input(|i| i.time);
+    app.update_tool_live_meters(tab_idx, now);
+    let range = target_range(app, tab_idx);
+    let levels = source_levels(app, tab_idx);
+    let result = rendered_trace(app, tab_idx);
+    let auto = AutoView::new(app, tab_idx);
+    let tab = &mut app.tabs[tab_idx];
+    let live = tab.tool_session.live.clone();
+    let id = tab.tab_id;
+    let width = ui.available_width();
+    // The graphs show the clipper at the playhead; what is dragged there
+    // goes back into the settings unless a curve owns it.
+    let before = auto.at;
+    let mut shown = before;
+    let gr_scale = shown.clipper.gr_scale_db();
+    ui.horizontal(|ui| {
+        let edit = plots::transfer_plot(
+            ui,
+            egui::Id::new(("clip_transfer", id)),
+            Transfer::Clipper(&mut shown.clipper),
+            levels.as_ref().or(result.as_ref()),
+            live.playing.then_some(live.in_db),
+            Vec2::new((width - METERS_W - 6.0).max(120.0), TRANSFER_H),
+        );
+        note_plot(g, edit);
+        plots::meters(
+            ui,
+            &live,
+            Some(shown.clipper.ceiling_db),
+            gr_scale,
+            Vec2::new(METERS_W, TRANSFER_H),
+        );
+    });
+    let ceiling = AutoParam::Clipper(ClipperParam::Ceiling);
+    let lines = [HistoryLine {
+        db: shown.clipper.ceiling_db,
+        color: CEILING_COLOR,
+        label: "Ceiling",
+        draggable: !auto.is(ceiling),
+        curve: auto.curve(tab, ceiling),
+    }];
+    let (edit, moved) = plots::history_plot(
+        ui,
+        egui::Id::new(("clip_history", id)),
+        &HistoryView {
+            range,
+            levels: levels.as_ref(),
+            result: result.as_ref(),
+            lines: &lines,
+            playhead: live.source_pos,
+            shade_closed: false,
+            gain_scale_db: gr_scale,
+        },
+        Vec2::new(width, HISTORY_H),
+    );
+    note_plot(g, edit);
+    seek(actions, &edit);
+    if let Some((_, db)) = moved {
+        shown.clipper.ceiling_db = db.clamp(
+            *ClipperSettings::CEILING_DB.start(),
+            *ClipperSettings::CEILING_DB.end(),
+        );
+    }
+    if shown != before {
+        tool_automation::merge_unautomated(tab, &before, &shown);
+    }
+    let s = &mut tab.tool_state.clipper;
+    match result.as_ref() {
+        Some(t) => {
+            let out_peak = output_peak_db(t);
+            let over = out_peak > shown.clipper.ceiling_db + 0.01;
+            let text = format!(
+                "Max cut {:.1} dB · output peak {:.1} dBFS{}",
+                t.max_reduction_db(),
+                out_peak,
+                if over { " (over the ceiling: the filters round the cut corners)" } else { "" }
+            );
+            ui.label(RichText::new(text).small());
+        }
+        None => {
+            widgets::note(
+                ui,
+                "Nothing over the ceiling yet: raise Input or lower the Ceiling to hear it work.",
+            );
+        }
+    }
+    let p = |c: ClipperParam| AutoParam::Clipper(c);
+    widgets::settings_grid(ui, ("insp_clipper", tab_idx), |ui| {
+        if auto.is(p(ClipperParam::InputGain)) {
+            auto.row(ui, p(ClipperParam::InputGain), "Input");
+        } else {
+            widgets::drag_row(
+                ui,
+                g,
+                "Input",
+                "Gain before the clipper: how hard the audio is pushed into the ceiling",
+                &mut s.input_gain_db,
+                ClipperSettings::INPUT_GAIN_DB,
+                0.1,
+                " dB",
+                1,
+            );
+        }
+        if auto.is(ceiling) {
+            auto.row(ui, ceiling, "Ceiling");
+        } else {
+            widgets::drag_row(
+                ui,
+                g,
+                "Ceiling",
+                "Whatever passes this is cut to it",
+                &mut s.ceiling_db,
+                ClipperSettings::CEILING_DB,
+                0.05,
+                " dB",
+                2,
+            );
+        }
+        if auto.is(p(ClipperParam::Knee)) {
+            auto.row(ui, p(ClipperParam::Knee), "Knee");
+        } else {
+            widgets::drag_row(
+                ui,
+                g,
+                "Knee",
+                "How far under the ceiling the curve starts to bend (0: a hard clip)",
+                &mut s.knee_db,
+                ClipperSettings::KNEE_DB,
+                0.05,
+                " dB",
+                1,
+            );
+        }
+        oversampling_row(
+            ui,
+            g,
+            &mut s.oversampling,
+            "Clip at this many times the rate, so the harmonics of the cut corners are filtered out instead of folding back as aliasing. Rendering takes about that many times longer; nothing moves in time.",
+        );
+        ui.label("");
+        let response = ui
+            .add_enabled(
+                s.oversampling != Oversampling::Off,
+                egui::Checkbox::new(&mut s.hard_ceiling, "Hard ceiling"),
+            )
+            .on_hover_text("Keep every sample under the ceiling: the filter back down rounds the cut corners over it (up to about 1 dB), and a fast limiter turns just that down. Off: the clip alone, with the overshoot left for a limiter after it.")
+            .on_disabled_hover_text("Without oversampling nothing passes the ceiling anyway");
+        ui.end_row();
+        g.track(&response);
     });
     automation_section(app, ui, tab_idx, g, 0);
     preset_menu(app, ui, tab_idx, actions);

@@ -88,6 +88,16 @@ impl WavesPreviewer {
                 ToolOp::Compressor(st.compressor, tool_automation::comp_tracks(tab))
             }
             ToolKind::Limiter => ToolOp::Limiter(st.limiter, tool_automation::limiter_tracks(tab)),
+            ToolKind::Clipper => ToolOp::Clipper(st.clipper, tool_automation::clipper_tracks(tab)),
+            // Not until the IR its settings name is loaded at this rate.
+            ToolKind::Reverb => {
+                let want = st.reverb.ir_or_default();
+                let ir = tab
+                    .reverb_ir
+                    .as_ref()
+                    .filter(|ir| ir.id == want && ir.buffer_sr == sr)?;
+                ToolOp::Reverb(st.reverb, tool_automation::reverb_tracks(tab), ir.clone())
+            }
             ToolKind::DeClick => ToolOp::DeClick {
                 sensitivity: st.declick_sensitivity,
             },

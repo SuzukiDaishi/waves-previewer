@@ -89,6 +89,17 @@ pub enum ToolOp {
         crate::dynamics::LimiterSettings,
         Tracks<crate::dynamics::LimiterParam>,
     ),
+    Clipper(
+        crate::dynamics::ClipperSettings,
+        Tracks<crate::dynamics::ClipperParam>,
+    ),
+    /// The settings, their curves, and the IR they name, loaded at the
+    /// buffer's rate.
+    Reverb(
+        crate::reverb::ReverbSettings,
+        Tracks<crate::reverb::ReverbParam>,
+        Arc<crate::impulse::ImpulseResponse>,
+    ),
     DeClick {
         sensitivity: f32,
     },
@@ -337,6 +348,8 @@ impl ToolOp {
             ToolOp::Eq(..) => ToolKind::Eq,
             ToolOp::Compressor(..) => ToolKind::Compressor,
             ToolOp::Limiter(..) => ToolKind::Limiter,
+            ToolOp::Clipper(..) => ToolKind::Clipper,
+            ToolOp::Reverb(..) => ToolKind::Reverb,
             ToolOp::DeClick { .. } => ToolKind::DeClick,
             ToolOp::DeClip { .. } => ToolKind::DeClip,
             ToolOp::DeHum(_) => ToolKind::DeHum,
@@ -383,6 +396,7 @@ impl ToolOp {
             // A curve makes even neutral settings act somewhere.
             ToolOp::Eq(p, tracks) => p.is_neutral() && tracks.is_empty(),
             ToolOp::Compressor(p, tracks) => p.is_neutral() && tracks.is_empty(),
+            ToolOp::Reverb(p, tracks, _) => p.is_neutral() && tracks.is_empty(),
             ToolOp::SpectralWarp { points, .. } => points.iter().all(|p| p.delta_hz.abs() <= 0.5),
             ToolOp::SpectralBrush { stamps } => stamps.iter().all(|s| s.cut_db <= 0.1),
             ToolOp::LoopCrossfade { half, .. } => *half == 0,
@@ -445,6 +459,18 @@ impl ToolOp {
             ToolOp::Limiter(p, tracks) => {
                 hash_debug(&mut h, p);
                 hash_debug(&mut h, tracks);
+            }
+            ToolOp::Clipper(p, tracks) => {
+                hash_debug(&mut h, p);
+                hash_debug(&mut h, tracks);
+            }
+            ToolOp::Reverb(p, tracks, ir) => {
+                hash_debug(&mut h, p);
+                hash_debug(&mut h, tracks);
+                ir.id.hash(&mut h);
+                ir.buffer_sr.hash(&mut h);
+                ir.frames().hash(&mut h);
+                ir.channels.len().hash(&mut h);
             }
             ToolOp::DeClick { sensitivity } | ToolOp::DeClip { sensitivity } => {
                 f(&mut h, *sensitivity)
@@ -565,6 +591,16 @@ fn hash_debug(h: &mut rustc_hash::FxHasher, value: &dyn std::fmt::Debug) {
 fn dynamics_pre_roll(release_ms: f32, lookahead_ms: f32, sr: u32) -> usize {
     let secs = (f64::from(release_ms.max(0.0)) * 5.0 + f64::from(lookahead_ms.max(0.0))) / 1000.0;
     crate::sample_rate::frames_for_secs(secs.clamp(RANGE_CONTEXT_SECS, DYNAMICS_MAX_PRE_ROLL_SECS), sr)
+}
+
+/// The buffer samples an oversampled tool's filters read past a range's
+/// edge; nothing when it is not oversampled.
+fn oversample_reach(os: crate::oversample::Oversampling) -> usize {
+    if os == crate::oversample::Oversampling::Off {
+        0
+    } else {
+        crate::oversample::TAPS_PER_PHASE / 2 + 1
+    }
 }
 
 /// The longest pre-roll a dynamics range gets: past this, a release has
@@ -900,7 +936,9 @@ pub fn render(
         }
         ToolOp::Limiter(p, tracks) => {
             let pre = dynamics_pre_roll(p.release_ms, p.lookahead_ms, sr);
-            let post = crate::sample_rate::frames_for_secs(f64::from(p.lookahead_ms) / 1000.0, sr) + 1;
+            let post = crate::sample_rate::frames_for_secs(f64::from(p.lookahead_ms) / 1000.0, sr)
+                + 1
+                + oversample_reach(p.oversampling);
             let (chans, trace, seg_s) = joint_range(src, mask, s, e, sr, pre, post, cancel, |slices, at| {
                 crate::dynamics::limit_automated(slices, sr, p, tracks, at, cancel)
                     .map(|o| (o.channels, o.trace))
@@ -916,6 +954,65 @@ pub fn render(
             }
             out.analysis = Some(Arc::new(RenderAnalysis::Dynamics(trace)));
             out.channels = chans;
+        }
+        ToolOp::Clipper(p, tracks) => {
+            // The clip needs nothing around a sample; the filters do.
+            let reach = crate::sample_rate::frames_for_secs(RANGE_CONTEXT_SECS, sr)
+                .max(oversample_reach(p.oversampling));
+            let (chans, trace, seg_s) = joint_range(src, mask, s, e, sr, reach, reach, cancel, |slices, at| {
+                crate::dynamics::clip_automated(slices, sr, p, tracks, at, cancel)
+                    .map(|o| (o.channels, o.trace))
+            })?;
+            let trace = place_trace(trace, seg_s, s, e);
+            // Nothing over the ceiling and no gain: the audio is as it was.
+            let gain_moves = tracks.contains(crate::dynamics::ClipperParam::InputGain);
+            if trace.max_reduction_db() < NEUTRAL_REDUCTION_DB
+                && p.input_gain_db.abs() < NEUTRAL_REDUCTION_DB
+                && !gain_moves
+            {
+                return Err(RenderError::NothingToDo);
+            }
+            out.analysis = Some(Arc::new(RenderAnalysis::Dynamics(trace)));
+            out.channels = chans;
+        }
+        ToolOp::Reverb(p, tracks, ir) => {
+            if ir.buffer_sr != sr {
+                return Err(RenderError::Invalid(format!(
+                    "the impulse response was loaded at {} Hz, the audio is at {sr} Hz",
+                    ir.buffer_sr
+                )));
+            }
+            let scope: Vec<usize> = (0..src.len()).filter(|&ci| channel_in_scope(mask, ci)).collect();
+            if scope.is_empty() {
+                return Err(RenderError::NothingToDo);
+            }
+            let slices: Vec<&[f32]> = scope.iter().map(|&ci| src[ci].as_slice()).collect();
+            let processed = crate::reverb::render(&slices, (s, e), sr, p, tracks, ir, cancel)
+                .ok_or(RenderError::Cancelled)?;
+            let new_len = processed.first().map_or(len, Vec::len).max(len);
+            let mut processed = processed.into_iter();
+            out.channels = src
+                .iter()
+                .enumerate()
+                .map(|(ci, ch)| {
+                    if scope.contains(&ci) {
+                        processed.next().unwrap_or_else(|| ch.clone())
+                    } else {
+                        // Out of scope: as it was, and silent for the tail.
+                        let mut c = ch.clone();
+                        c.resize(new_len, 0.0);
+                        c
+                    }
+                })
+                .collect();
+            if new_len > len {
+                out.time_map = TimeMap::Range {
+                    start: len,
+                    old_end: len,
+                    new_end: new_len,
+                };
+            }
+            out.selection_after = range;
         }
         ToolOp::NoiseGate(p) => {
             let pre = dynamics_pre_roll(p.release_ms + p.hold_ms, p.lookahead_ms, sr);
@@ -1157,6 +1254,29 @@ mod tests {
                 },
                 Tracks::none(),
             ),
+            ToolOp::Limiter(
+                crate::dynamics::LimiterSettings {
+                    input_gain_db: 12.0,
+                    oversampling: crate::oversample::Oversampling::X4,
+                    ..Default::default()
+                },
+                Tracks::none(),
+            ),
+            ToolOp::Clipper(
+                crate::dynamics::ClipperSettings {
+                    input_gain_db: 9.0,
+                    ..Default::default()
+                },
+                Tracks::none(),
+            ),
+            ToolOp::Clipper(
+                crate::dynamics::ClipperSettings {
+                    input_gain_db: 9.0,
+                    oversampling: crate::oversample::Oversampling::Off,
+                    ..Default::default()
+                },
+                Tracks::none(),
+            ),
             ToolOp::NoiseGate(crate::dynamics::GateSettings::default()),
         ];
         for op in ops {
@@ -1383,6 +1503,69 @@ mod tests {
         }
     }
 
+    fn reverb_op(tail: crate::reverb::ReverbTail) -> ToolOp {
+        let decay: Vec<f32> = (0..9_600)
+            .map(|i| ((i * 7_919) % 1_000) as f32 / 500.0 - 1.0)
+            .enumerate()
+            .map(|(i, v)| v * (-(i as f32) / 2_400.0).exp())
+            .collect();
+        let ir = crate::impulse::ImpulseResponse::from_channels(
+            crate::impulse::IrId::default_ir(),
+            "t".into(),
+            std::path::PathBuf::new(),
+            vec![decay],
+            0,
+            SR,
+            SR,
+            9_600,
+        );
+        ToolOp::Reverb(
+            crate::reverb::ReverbSettings {
+                tail,
+                ..Default::default()
+            },
+            Tracks::none(),
+            Arc::new(ir),
+        )
+    }
+
+    #[test]
+    fn a_reverb_rings_on_keeps_the_length_or_stops_as_its_tail_says() {
+        use crate::reverb::ReverbTail;
+        let src = stereo(SR as usize);
+        let len = src[0].len();
+        let (s, e) = (12_000, 30_000);
+        // Stop at the end: a range edit like any other.
+        let out = run(&req(reverb_op(ReverbTail::Cut), src.clone(), RenderTarget::Range(s, e)));
+        for (ci, ch) in out.channels.iter().enumerate() {
+            assert_eq!(&ch[..s], &src[ci][..s]);
+            assert_eq!(&ch[e..], &src[ci][e..]);
+        }
+        assert_eq!(out.time_map, TimeMap::Identity);
+        // Keep the length: the tail rings over what follows.
+        let out = run(&req(reverb_op(ReverbTail::Overlap), src.clone(), RenderTarget::Range(s, e)));
+        assert_eq!(out.channels[0].len(), len);
+        assert_eq!(&out.channels[0][..s], &src[0][..s]);
+        assert_ne!(&out.channels[0][e..e + 2_000], &src[0][e..e + 2_000]);
+        // Ring on at the end of the file: it grows, everything before stays.
+        let mut r = req(reverb_op(ReverbTail::Extend), src.clone(), RenderTarget::Range(len - 6_000, len));
+        r.ch_mask = Some(vec![true, false]);
+        let out = run(&r);
+        let new_len = out.channels[0].len();
+        assert!(new_len > len, "{new_len}");
+        assert_eq!(out.channels[1].len(), new_len, "every channel grows alike");
+        assert_eq!(&out.channels[1][..len], &src[1][..], "out of scope: as it was");
+        assert!(out.channels[1][len..].iter().all(|v| *v == 0.0), "and silent after");
+        assert_eq!(
+            out.time_map,
+            TimeMap::Range {
+                start: len,
+                old_end: len,
+                new_end: new_len
+            }
+        );
+    }
+
     #[test]
     fn fingerprints_follow_the_parameters() {
         let a = ToolOp::Gain { db: 3.0 }.fingerprint();
@@ -1397,5 +1580,25 @@ mod tests {
             crate::automation::Curve::new(vec![(0, -3.0)], crate::automation::Scale::Linear),
         );
         assert_ne!(plain, ToolOp::Limiter(limiter, tracks).fingerprint());
+        let oversampled = crate::dynamics::LimiterSettings {
+            oversampling: crate::oversample::Oversampling::X8,
+            ..limiter
+        };
+        assert_ne!(plain, ToolOp::Limiter(oversampled, Tracks::none()).fingerprint());
+        let a = reverb_op(crate::reverb::ReverbTail::Extend).fingerprint();
+        assert_eq!(a, reverb_op(crate::reverb::ReverbTail::Extend).fingerprint());
+        assert_ne!(a, reverb_op(crate::reverb::ReverbTail::Cut).fingerprint());
+        let clipper = crate::dynamics::ClipperSettings::default();
+        assert_ne!(
+            ToolOp::Clipper(clipper, Tracks::none()).fingerprint(),
+            ToolOp::Clipper(
+                crate::dynamics::ClipperSettings {
+                    hard_ceiling: false,
+                    ..clipper
+                },
+                Tracks::none()
+            )
+            .fingerprint()
+        );
     }
 }

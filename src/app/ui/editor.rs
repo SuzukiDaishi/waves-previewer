@@ -1504,6 +1504,8 @@ impl crate::app::WavesPreviewer {
                 [p.band().unwrap_or(0) % crate::app::ui::inspector::plots::BAND_COLORS.len()],
             AutoParam::Comp(_) => Color32::from_rgb(255, 170, 70),
             AutoParam::Limiter(_) => Color32::from_rgb(255, 120, 120),
+            AutoParam::Clipper(_) => Color32::from_rgb(255, 150, 210),
+            AutoParam::Reverb(_) => Color32::from_rgb(120, 230, 200),
         }
     }
 
@@ -5944,7 +5946,11 @@ impl crate::app::WavesPreviewer {
                                 egui::pos2(x, y).distance(pos) <= 8.0
                             });
                         }
-                        ToolKind::Eq | ToolKind::Compressor | ToolKind::Limiter
+                        ToolKind::Eq
+                        | ToolKind::Compressor
+                        | ToolKind::Limiter
+                        | ToolKind::Clipper
+                        | ToolKind::Reverb
                             if automation_param.is_some() =>
                         {
                             let st = tab.tool_state;
@@ -6097,7 +6103,7 @@ impl crate::app::WavesPreviewer {
                     }
                 }
             }
-            // An EQ / Compressor / Limiter automation lane: its points are
+            // An EQ / Compressor / Limiter / Clipper automation lane: its points are
             // part of the tool's draft, so the preview follows them like any
             // other setting (no stop, no restart).
             if let Some(param) = automation_param
@@ -8825,12 +8831,16 @@ impl crate::app::WavesPreviewer {
                         curve_hover,
                     );
                 }
-                // EQ / Compressor / Limiter automation: every lane of the
-                // active tool that is on; the one being edited bright, with
-                // its points, the rest as faint lines.
+                // EQ / Compressor / Limiter / Clipper automation: every
+                // lane of the active tool that is on; the one being edited
+                // bright, with its points, the rest as faint lines.
                 if matches!(
                     tab.active_tool,
-                    ToolKind::Eq | ToolKind::Compressor | ToolKind::Limiter
+                    ToolKind::Eq
+                        | ToolKind::Compressor
+                        | ToolKind::Limiter
+                        | ToolKind::Clipper
+                        | ToolKind::Reverb
                 ) {
                     let st = tab.tool_state;
                     let selected = tab.automation_selected.filter(|p| p.tool() == tab.active_tool);

@@ -406,6 +406,9 @@ impl WavesPreviewer {
             if self.hrtf.load_prefs_line(line) {
                 continue;
             }
+            if self.reverb.load_prefs_line(line) {
+                continue;
+            }
             if let Some(rest) = line.strip_prefix("theme=") {
                 self.theme_mode = match rest {
                     "light" => ThemeMode::Light,
@@ -1269,6 +1272,7 @@ zoo_flip_manual={}\n",
         out.push('\n');
         out.push_str(&self.channel_layout_prefs_lines());
         out.push_str(&self.hrtf.prefs_lines());
+        out.push_str(&self.reverb.prefs_lines());
         if let Some(name) = &self.session_display_name {
             out.push_str("display_name=");
             out.push_str(&name.replace('\n', " "));

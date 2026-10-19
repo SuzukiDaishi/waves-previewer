@@ -1777,7 +1777,7 @@ impl super::WavesPreviewer {
         true
     }
 
-    // ---- Automation (EQ / Compressor / Limiter curves) --------------------
+    // ---- Automation (EQ / Compressor / Limiter / Clipper / Reverb curves) --
 
     /// The automatable setting `name` of `tool`: its label in lower case
     /// ("threshold", "input", "ceiling", "output", "sidechain hpf"), or
@@ -1803,6 +1803,14 @@ impl super::WavesPreviewer {
             ToolKind::Limiter => crate::dynamics::LimiterParam::ALL
                 .into_iter()
                 .map(AutoParam::Limiter)
+                .collect(),
+            ToolKind::Clipper => crate::dynamics::ClipperParam::ALL
+                .into_iter()
+                .map(AutoParam::Clipper)
+                .collect(),
+            ToolKind::Reverb => crate::reverb::ReverbParam::ALL
+                .into_iter()
+                .map(AutoParam::Reverb)
                 .collect(),
             ToolKind::Eq => vec![AutoParam::Eq(EqParam::Output)],
             _ => Vec::new(),
@@ -1867,6 +1875,18 @@ impl super::WavesPreviewer {
     pub fn test_tool_preview_complete(&self) -> Option<bool> {
         let tab = self.tabs.get(self.active_tab?)?;
         tab.tool_session.preview.as_ref().map(|p| p.complete)
+    }
+
+    /// Test-only: whether the active tab's preview is of the settings as
+    /// they are now (and complete).
+    pub fn test_tool_preview_current(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some((key, _)) = self.tool_preview_target(tab_idx) else {
+            return false;
+        };
+        self.tabs[tab_idx].tool_session.fresh_preview(&key).is_some()
     }
 
     /// Test-only: whether the active tab's tool session waits for Refresh.
@@ -1971,6 +1991,22 @@ impl super::WavesPreviewer {
                 )
             })
             .unwrap_or((0, 0))
+    }
+
+    /// Whether the active tab holds the IR its Reverb settings name.
+    pub fn test_reverb_ir_ready(&self) -> bool {
+        self.active_tab
+            .is_some_and(|idx| matches!(self.reverb_ir_status(idx), crate::app::reverb_ops::IrStatus::Ready(_)))
+    }
+
+    /// How many IRs the library scan found, once it has.
+    pub fn test_ir_catalog_len(&self) -> Option<usize> {
+        self.reverb.catalog.as_ref().map(|c| c.entries.len())
+    }
+
+    /// Type `query` into the Reverb's IR browser search.
+    pub fn test_set_ir_query(&mut self, query: &str) {
+        self.reverb.query = query.to_string();
     }
 
     /// The active tab's tool settings.

@@ -68,6 +68,11 @@
       "id": "Apache-2.0-SADIE-II",
       "name": "Apache License 2.0 (SADIE II database, University of York)",
       "text_file": "Apache-2.0-SADIE-II.txt"
+    },
+    {
+      "id": "MIT-IR-Library",
+      "name": "MIT License (Conner's Impulse Response Library)",
+      "text_file": "MIT-IR-Library.txt"
     }
   ],
   "components": [
@@ -218,6 +223,18 @@
       "repository": "https://www.york.ac.uk/sadie-project/database.html",
       "flag": "notice",
       "note": "Head-related impulse responses of the KU100 dummy head as SOFA files under assets/sofas/D1_HRIR_SOFA/ (44.1 kHz/16-bit and 48 kHz/24-bit at 256 taps, 96 kHz/24-bit at 512 taps), unmodified. Copyright 2018, University of York; Apache License 2.0. The database asks that the original dataset be referenced wherever it is used, in original or modified form: Armstrong, Thresh, Murphy and Kearney, \"A Perceptual Evaluation of Individual and Non-Individual HRTFs: A Case Study of the SADIE II Database\", Applied Sciences 8(11), 2029 (2018), doi:10.3390/app8112029. The bundled HRTF for headphone monitoring: the installer copies the 48 kHz file to hrtf\\ beside NeoWaves; the 44.1 kHz file stays in the repository for tests, and the 96 kHz file is not committed."
+    },
+    {
+      "name": "Conner's Impulse Response Library",
+      "version": "2.0.0 (07cbb6f)",
+      "kind": "data",
+      "license_ids": [
+        "MIT-IR-Library"
+      ],
+      "authors": "Conner, with Gater and Liam G (contributors)",
+      "repository": "https://github.com/itsmusician/IR-Library",
+      "flag": "notice",
+      "note": "Impulse responses for the editor's Reverb, unmodified. The whole library (738 WAV files, about 1.2 GB) is a git submodule at vendor/IR-Library, which a development build reads directly; the installer copies the selection listed in assets/ir/bundled.txt (41 files, about 83 MB) to ir\\ beside NeoWaves, with the library's License.md and README.md. MIT License, Copyright (c) 2022 Conner: the notice travels with every copy. Equipment in the library carries generic names; its References.md names the gear for identification only, with no affiliation or endorsement."
     },
     {
       "name": "Steinberg VST 3 interface",

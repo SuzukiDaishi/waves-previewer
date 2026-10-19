@@ -349,6 +349,14 @@ Section "!${APP_SHORT}" SecCore
   File "${REPO_DIR}\assets\sofas\D1_HRIR_SOFA\README.md"
   SetOutPath "$INSTDIR"
 
+  ; The Reverb's impulse responses: a selection of Conner's Impulse Response
+  ; Library (MIT -- its notice is in THIRD_PARTY_NOTICES.txt and License.md
+  ; beside them), unmodified. reverb_ops looks for them in ir\. The list is
+  ; assets\ir\bundled.txt; build_installer.ps1 writes these File lines.
+  !ifdef IR_FILES_NSH
+    !include "${IR_FILES_NSH}"
+  !endif
+
   ; Start menu entry (Inno created this unconditionally).
   CreateDirectory "$SMPROGRAMS\${APP_SHORT}"
   CreateShortcut "$SMPROGRAMS\${APP_SHORT}\${APP_SHORT}.lnk" \
@@ -480,6 +488,7 @@ Section "Uninstall"
 
   RMDir /r "$INSTDIR\commands"
   RMDir /r "$INSTDIR\hrtf"
+  RMDir /r "$INSTDIR\ir"
 
   Delete "$INSTDIR\${APP_EXE}"
   Delete "$INSTDIR\${WORKER_EXE}"

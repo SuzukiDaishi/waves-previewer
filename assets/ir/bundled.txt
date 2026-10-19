@@ -1,0 +1,58 @@
+# The impulse responses the installer copies to ir\ beside NeoWaves: a
+# selection of Conner's Impulse Response Library (vendor/IR-Library, MIT),
+# unmodified. The whole library is a folder away (Reverb -> IR folder...).
+# One path inside the library per line; a line starting with # is a comment.
+# The total is checked by ir_library::tests (under 160 MB).
+
+# Rooms
+Rooms/Historical/Religious/Sunnybrook Farm Willowdale Church/Sunnybrook Farm Willowdale Church.wav
+Rooms/Historical/Religious/Drumheller's Little Church/Drumheller's Little Church.wav
+Rooms/Historical/Landmarks/The Pantheon (Rome)/The Pantheon Optimal.wav
+Rooms/Historical/Shelters/Menorcan Spanish Civil War Bunkers/Bunker 2 Stair Bottom.wav
+Rooms/Commercial/Hotels/Ballrooms/Palm Ballroom.wav
+Rooms/Commercial/Hotels/Ballrooms/Royal Ballroom.wav
+Rooms/Commercial/Hotels/Bathrooms/Lux Hotel Bathroom.wav
+Rooms/Commercial/Hotels/Guest Rooms/Hotel Room 1 XY (Balloon).wav
+Rooms/Commercial/Parking Garages/Firenze Parking Garage.wav
+Rooms/Commercial/Shops/Tall Coffee Shop/Tall Coffee Shop Lobby.wav
+Rooms/Commercial/Shops/Gold Coffee Shop/Gold Coffee Shop Lobby Corner.wav
+Rooms/Public/Arenas/Giant Center/Giant Center Temporary Flown PA Upper Bleachers (Low Gain).wav
+Rooms/Public/Colleges & Universities/University of Central Florida/MSB Brick Stairwell Downstairs.wav
+Rooms/Public/Colleges & Universities/University of Central Florida/Engineering II Atrium Stereo Clap.wav
+Rooms/Public/Convention Centers/Phoenix Convention Center/PCC North 300 Level Exhibit Hall XY Balloon Far.wav
+Rooms/Public/Convention Centers/Orange County Convention Center/OCCC Freight Elevator.wav
+Rooms/Residential/13th Century Venetian Home/13th Century Venetian Home.wav
+Rooms/Residential/Arroyo House/Arroyo House Living Room Mid A.wav
+Rooms/Residential/College House/College House Living Room Front.wav
+Rooms/Residential/College House/College House Master Bathroom.wav
+Rooms/Residential/Old Home/Old Home Hallway Far.wav
+Rooms/Residential/Ranch House/Ranch House Open Living Room.wav
+
+# Outdoors and enclosed spaces
+Outdoors/Historical/Ostia Antica Theatre/Ostia Antica Theatre.wav
+Outdoors/Public/Parks/Florida SR40 Bridge Underpass.wav
+Outdoors/Public/Colleges & Universities/University Garage 3 Ramp Above.wav
+Outdoors/Public/Forests/Small Forest Clearing 2 Bang Snap.wav
+Outdoors/Residential/Apartments/Rome Apartment Alley/Rome Apartment Alley.wav
+Enclosed Spaces/Watercraft/Catamaran Hull.wav
+Enclosed Spaces/Old Home Appliances/Old Home Washing Machine.wav
+
+# Plates
+Plates/Conner Plate I/Conner Plate I Sweeps/Conner Plate I 1s -45.wav
+Plates/Conner Plate I/Conner Plate I Sweeps/Conner Plate I 5s -45.wav
+Plates/Conner Plate I/Conner Plate I Sweeps/Conner Plate I 10s -45.wav
+Plates/Conner Plate I/Conner Plate I Sweeps/Conner Plate I 50s -45.wav
+
+# Springs
+Springs/HG Spring/HG Spring Stereo Soft.wav
+Springs/Reverb Amp 500/Reverb Amp 500 Sweeps/Spring Stereo 5.wav
+Springs/Reverb Amp 500/Reverb Amp 500 Sweeps/Spring True Stereo 5.wav
+Springs/Amateur Speaker Spring/Amateur Speaker Spring (Early Stereo).wav
+
+# Synthesized
+Synthesized/Rooms/Synth Room Generator 1/Synth Room Gen 1 Size 2 (With Direct).wav
+Synthesized/Rooms/Synth Room Generator 1/Synth Room Gen 1 Size 4 (With Direct).wav
+Synthesized/Rooms/Silly Spaces/Silly Space 1.wav
+
+# Utility
+Utility/Unit Impulse.wav

@@ -83,6 +83,7 @@ impl ToolCategory {
                 ToolKind::Eq,
                 ToolKind::Compressor,
                 ToolKind::Limiter,
+                ToolKind::Clipper,
                 ToolKind::NoiseGate,
             ],
             ToolCategory::Repair => &[
@@ -97,7 +98,7 @@ impl ToolCategory {
             ToolCategory::LoopMarkers => {
                 &[ToolKind::LoopEdit, ToolKind::Markers, ToolKind::EditorNote]
             }
-            ToolCategory::Analyze => &[ToolKind::MusicAnalyze, ToolKind::PluginFx],
+            ToolCategory::Analyze => &[ToolKind::Reverb, ToolKind::MusicAnalyze, ToolKind::PluginFx],
             ToolCategory::Spectral => &[ToolKind::SpectralWarp, ToolKind::SpectralBrush],
         }
     }
@@ -216,6 +217,13 @@ impl ToolSpec {
         self
     }
 
+    /// The result can be longer -- every channel alike, so the channel view
+    /// still holds: a channel out of scope gets silence for the extra length.
+    const fn extends_at_end(mut self) -> Self {
+        self.changes_length = true;
+        self
+    }
+
     const fn heavy(mut self) -> Self {
         self.heavy = true;
         self
@@ -229,7 +237,7 @@ impl ToolSpec {
 
 impl ToolKind {
     /// Every tool, in palette order (Spectral last).
-    pub const ALL: [ToolKind; 32] = [
+    pub const ALL: [ToolKind; 34] = [
         ToolKind::Trim,
         ToolKind::Fade,
         ToolKind::InsertSilence,
@@ -246,6 +254,7 @@ impl ToolKind {
         ToolKind::Eq,
         ToolKind::Compressor,
         ToolKind::Limiter,
+        ToolKind::Clipper,
         ToolKind::NoiseGate,
         ToolKind::DeClick,
         ToolKind::DeClip,
@@ -258,6 +267,7 @@ impl ToolKind {
         ToolKind::LoopEdit,
         ToolKind::Markers,
         ToolKind::EditorNote,
+        ToolKind::Reverb,
         ToolKind::MusicAnalyze,
         ToolKind::PluginFx,
         ToolKind::SpectralWarp,
@@ -415,11 +425,22 @@ impl ToolKind {
             )
             .progressive(),
             ToolKind::Limiter => spec(
-                "Limiter",
+                "Brickwall Limiter",
                 "⏏",
                 C::Dynamics,
-                "Hold the peaks under a ceiling",
-                "Drag the ceiling line on the level graph. Input gain pushes the audio into it; True peak also catches the peaks between samples.",
+                "Hold every peak under a ceiling by turning the gain down just in time",
+                "Drag the ceiling line on the level graph. Input gain pushes the audio into it; True peak also catches the peaks between samples; Oversampling runs it at a higher rate so fast gain changes make no aliasing.",
+                T::SelectionOrWhole,
+                P::Rendered,
+            )
+            .heavy()
+            .progressive(),
+            ToolKind::Clipper => spec(
+                "Clipper",
+                "Π",
+                C::Dynamics,
+                "Cut whatever passes a ceiling, on the spot",
+                "Drag the corner of the curve: up and down for the ceiling, sideways for the input gain; the lower handle sets the knee. Oversampling clips at a higher rate so the cut corners do not fold back as aliasing.",
                 T::SelectionOrWhole,
                 P::Rendered,
             )
@@ -541,6 +562,17 @@ impl ToolKind {
                 P::None,
             )
             .all_channels(),
+            ToolKind::Reverb => spec(
+                "Reverb",
+                "\u{26EA}",
+                C::Analyze,
+                "Put the sound in a space: a convolution reverb over impulse responses",
+                "Pick an impulse response in the browser (or open any WAV). Only the target is sent into the reverb; its tail rings on after it, keeps the length, or stops at its end, as Tail says.",
+                T::SelectionOrWhole,
+                P::Rendered,
+            )
+            .extends_at_end()
+            .heavy(),
             ToolKind::MusicAnalyze => spec(
                 "Music Analyze",
                 "♫",
@@ -678,18 +710,23 @@ mod tests {
             }
         }
         assert!(ToolKind::Limiter.spec().progressive);
+        assert!(ToolKind::Clipper.spec().progressive);
         assert!(!ToolKind::Normalize.spec().progressive, "measures the whole target");
     }
 
     #[test]
     fn length_changing_tools_never_claim_the_channel_view() {
-        // A channel view cannot shorten some channels and not others.
+        // A channel view cannot shorten some channels and not others. The
+        // Reverb only ever adds a tail at the end, which every channel gets
+        // (silence where it is out of scope), so it may.
         for tool in ToolKind::ALL {
             let spec = tool.spec();
-            if spec.changes_length {
+            if spec.changes_length && tool != ToolKind::Reverb {
                 assert!(!spec.honors_channel_view, "{tool:?}");
             }
         }
+        assert!(ToolKind::Reverb.spec().honors_channel_view);
+        assert!(!ToolKind::Reverb.spec().progressive, "a window cannot hold the tails reaching into it");
     }
 
     #[test]

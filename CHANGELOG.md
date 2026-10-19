@@ -4,6 +4,46 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased
 
+### 畳み込みリバーブを追加した（Analyze/FX の Reverb。docs/INSPECTOR_SPEC.md）
+
+- インパルス応答（IR）を畳み込むリバーブ。IR は Conner's Impulse Response Library（MIT）を使う。
+  - インストーラーには厳選した 41 本（約 83 MB、assets/ir/bundled.txt）が入る。
+  - 全ライブラリ（738 本）は「IR folder...」でそのフォルダを指定すれば使える。
+  - 「Open IR file...」で任意の WAV も IR にできる。
+- パネルの IR ブラウザで、カテゴリと検索から選ぶ。選んだ IR の減衰カーブを、Length の切り位置と Pre-delay 付きで表示する。
+- モノラル・ステレオ・4ch（True Stereo）の IR に対応する。
+- **テール（残響の尾）を選べる**。
+  - Ring on: 後ろの音に重ねて響かせ、ファイル末尾では尾の分だけファイルを延ばす。
+  - Keep length: 長さは変えない。
+  - Stop at the end: 範囲の終わりで止める。範囲の外は変わらない。
+- Mix / Output / Width / Low cut / High cut は、波形の上のカーブで動かせる。
+- Pre-delay・Length・Reverse・Normalize（IR の音量をそろえる）は、IR そのものを変える設定。
+- IR の選択と設定はセッションに保存する。ライブラリの IR はライブラリ内のパスで保存するので、ライブラリの置き場所が違う PC でも開ける。
+- IR のリサンプルで、先頭の直接音が欠けたり位置がずれたりしないようにした。
+- ライブラリのライセンス（MIT、Copyright (c) 2022 Conner）を Licenses 画面と THIRD_PARTY_NOTICES に追加した。
+
+### Limiter を Brickwall Limiter と Clipper の 2 つにし、オーバーサンプリングを付けた
+
+- これまでの Limiter は「Brickwall Limiter」になった。セッションやスクリプトの `limiter` はそのまま使える。
+- **Clipper を追加した**。天井を超えた分をその場で切る。
+  - Input（0〜+24 dB）、Ceiling、Knee（0 でハードクリップ、最大 12 dB のソフトクリップ）を設定でき、どれもカーブで動かせる。
+  - 転送曲線の角のハンドルを上下にドラッグすると Ceiling、左右で Input、下のハンドルで Knee が変わる。
+- **どちらも Off / 2x / 4x / 8x / 16x のオーバーサンプリングができる**。
+  - 高いレートで処理してから戻すので、折り返しノイズ（エイリアシング）が減る。クリップした 4.1 kHz では −30 dB が −98 dB になる。
+  - フィルタは遅延なしで中心をそろえるので、時間方向には一切ずれない。
+  - 処理時間は倍率に比例して延びる。16x では 10 秒のステレオで、Limiter が約 2 秒、Clipper が約 0.6 秒。
+- Brickwall Limiter の既定は Off。以前とまったく同じ音になる。
+- Clipper の既定は 4x で、Hard ceiling（既定 ON）付き。
+  - Hard ceiling は、戻すときのフィルタで天井をわずかに超えた分（最大 1 dB 程度）を高速リミッターで滑らかに抑える。
+  - 単純に切らないので、オーバーサンプリングの効果を損なわない。
+
+### Pitch Shift で音の位置が 60 ms ずれるのを直した
+
+- ピッチカーブのある Pitch Shift で、冒頭の 60 ms が二重に再生され、それ以降の音がすべて 60 ms 遅れていた。
+  - プレビューと Apply、範囲選択での処理、Multi Edits の Pitch レーンのすべてで起きていた。
+  - ピッチの変化点と音の位置もそろった。
+- Pitch Shift と Time Stretch で、0.12 秒より短い音にも同じずれがあったので直した。
+
 ## 0.20261015.0 - 2026-10-15
 
 ### EQ / Compressor / Limiter の設定をカーブで動かせるようにした（オートメーション。docs/INSPECTOR_SPEC.md）

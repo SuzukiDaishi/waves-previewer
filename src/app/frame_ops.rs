@@ -286,6 +286,8 @@ impl WavesPreviewer {
         // for. Starting the next render is only a request, so that one waits
         // its turn behind the frame budget.
         trace_stage!("tool preview results", self.drain_tool_preview_jobs());
+        // Not deferred: an IR loading is what the Reverb's preview waits for.
+        trace_stage!("reverb", self.tick_reverb());
         deferrable!(trace_stage!(
             "tool preview requests",
             self.tick_tool_preview_spawn(ctx)

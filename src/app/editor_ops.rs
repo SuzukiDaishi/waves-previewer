@@ -3857,6 +3857,12 @@ mod clear_edit_tests {
         // Limiter: pushed 12 dB into a -1 dB ceiling.
         app.tabs[tab_idx].tool_state.limiter.input_gain_db = 12.0;
         check(&mut app, crate::app::types::ToolKind::Limiter);
+        // ...and again oversampled.
+        app.tabs[tab_idx].tool_state.limiter.oversampling = crate::oversample::Oversampling::X4;
+        check(&mut app, crate::app::types::ToolKind::Limiter);
+        // Clipper: pushed 9 dB into its ceiling.
+        app.tabs[tab_idx].tool_state.clipper.input_gain_db = 9.0;
+        check(&mut app, crate::app::types::ToolKind::Clipper);
     }
 
     #[test]

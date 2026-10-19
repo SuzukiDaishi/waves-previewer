@@ -1,4 +1,4 @@
-//! The editor's compressor, limiter and gate, DSP and rules only. Each one
+//! The editor's compressor, limiter, clipper and gate, DSP and rules only. Each one
 //! takes the channels an edit is in scope for together -- so a stereo link
 //! can hold the image still -- and returns, beside the audio, a
 //! [`DynamicsTrace`]: what came in and how much gain was taken, hop by hop.
@@ -7,6 +7,11 @@
 //!
 //! Lookahead costs no latency here: the whole buffer is in memory, so the
 //! detector simply reads ahead of the sample whose gain it decides.
+//!
+//! The limiter and the clipper can run oversampled (`crate::oversample`):
+//! the same code reads the buffer at `factor` times its rate and writes
+//! through the filter back down. Off, it reads the buffer itself and renders
+//! exactly what it always did.
 //! Everything streams -- nothing allocates a buffer per sample beyond the
 //! output itself, because an hour-long stereo file is 345 million samples.
 //!
@@ -21,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::automation::{Automatable, Evaluator, Scale, Tracks, AUTOMATION_BLOCK};
 use crate::eq::{Section, SectionFilter, SectionKind};
+use crate::oversample::{Oversampler, Oversampling, UpStream};
 
 /// The trace's resolution: 5 ms is finer than any drawn pixel at the zoom a
 /// whole selection is seen at.
@@ -676,6 +682,10 @@ pub struct LimiterSettings {
     pub true_peak: bool,
     /// One gain for every channel, so a peak in one does not move the image.
     pub link: bool,
+    /// Run at this many times the rate, so fast gain changes and the clamp
+    /// at the ceiling make no aliasing. Off renders what the limiter always
+    /// did.
+    pub oversampling: Oversampling,
 }
 
 impl LimiterSettings {
@@ -700,7 +710,7 @@ impl LimiterSettings {
 }
 
 /// A limiter setting that can follow a curve. Not the lookahead (the
-/// window length), true peak or link (switches).
+/// window length), true peak, link or oversampling (switches).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LimiterParam {
     InputGain,
@@ -753,12 +763,53 @@ impl Automatable for LimiterSettings {
     }
 }
 
+/// Where the frames a limiter or clipper works on sit in the buffer: the
+/// segment starts at buffer sample `offset`, and frame `j` belongs to its
+/// sample `(j - pad) / factor` (its first, for the frames before it).
+/// Plain frames are the samples: `factor` 1, `pad` 0.
+#[derive(Clone, Copy, Debug)]
+struct Clock {
+    offset: usize,
+    factor: usize,
+    pad: usize,
+}
+
+impl Clock {
+    fn plain(offset: usize) -> Self {
+        Self {
+            offset,
+            factor: 1,
+            pad: 0,
+        }
+    }
+
+    fn oversampled(offset: usize, os: &Oversampler) -> Self {
+        Self {
+            offset,
+            factor: os.factor(),
+            pad: os.pad(),
+        }
+    }
+
+    /// The automation block frame `j` falls in.
+    #[inline]
+    fn block(&self, j: usize) -> usize {
+        j.saturating_sub(self.pad) / self.factor / AUTOMATION_BLOCK
+    }
+
+    /// The buffer sample a block's settings are evaluated at.
+    fn block_start(&self, block: usize) -> usize {
+        self.offset + block * AUTOMATION_BLOCK
+    }
+}
+
 /// A limiter's input gain, ceiling (both linear) and release coefficient at
-/// a sample, re-evaluated a block at a time when automated.
+/// a frame, re-evaluated a block of buffer samples at a time when automated.
 struct LimiterAt<'a> {
     eval: Option<Evaluator<'a, LimiterSettings>>,
-    offset: usize,
-    sample_rate: u32,
+    clock: Clock,
+    /// The frames' rate, which the release is timed in.
+    rate: u32,
     block: usize,
     gin: f32,
     ceiling: f32,
@@ -766,33 +817,28 @@ struct LimiterAt<'a> {
 }
 
 impl<'a> LimiterAt<'a> {
-    fn new(
-        s: &LimiterSettings,
-        tracks: &'a Tracks<LimiterParam>,
-        offset: usize,
-        sample_rate: u32,
-    ) -> Self {
+    fn new(s: &LimiterSettings, tracks: &'a Tracks<LimiterParam>, clock: Clock, rate: u32) -> Self {
         Self {
             eval: (!tracks.is_empty()).then(|| Evaluator::new(*s, tracks)),
-            offset,
-            sample_rate,
+            clock,
+            rate,
             block: usize::MAX,
             gin: db_to_amp(s.input_gain_db),
             ceiling: db_to_amp(s.ceiling_db.min(0.0)),
-            release: coeff(s.release_ms, sample_rate),
+            release: coeff(s.release_ms, rate),
         }
     }
 
     #[inline]
     fn at(&mut self, j: usize) -> (f32, f32, f32) {
         if let Some(eval) = self.eval.as_mut() {
-            let block = j / AUTOMATION_BLOCK;
+            let block = self.clock.block(j);
             if block != self.block {
                 self.block = block;
-                let now = eval.at(self.offset + block * AUTOMATION_BLOCK);
+                let now = eval.at(self.clock.block_start(block));
                 self.gin = db_to_amp(now.input_gain_db);
                 self.ceiling = db_to_amp(now.ceiling_db.min(0.0));
-                self.release = coeff(now.release_ms, self.sample_rate);
+                self.release = coeff(now.release_ms, self.rate);
             }
         }
         (self.gin, self.ceiling, self.release)
@@ -809,13 +855,72 @@ impl Default for LimiterSettings {
             lookahead_ms: 5.0,
             true_peak: true,
             link: true,
+            oversampling: Oversampling::Off,
         }
     }
 }
 
+/// What a limiter or clipper reads, frame by frame: the buffer itself, or
+/// the buffer oversampled (`UpStream`). One code path for both, so with
+/// oversampling off a tool renders exactly what it rendered before there
+/// was any.
+trait Frames {
+    fn channels(&self) -> usize;
+    fn len(&self) -> usize;
+    /// Frame `j < len` of channel `c`.
+    fn at(&mut self, c: usize, j: usize) -> f32;
+}
+
+/// The buffer's own samples.
+struct Plain<'a> {
+    channels: &'a [&'a [f32]],
+    len: usize,
+}
+
+impl<'a> Plain<'a> {
+    fn new(channels: &'a [&'a [f32]]) -> Self {
+        Self {
+            channels,
+            len: shortest_len(channels),
+        }
+    }
+}
+
+impl Frames for Plain<'_> {
+    fn channels(&self) -> usize {
+        self.channels.len()
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    fn at(&mut self, c: usize, j: usize) -> f32 {
+        self.channels[c][j]
+    }
+}
+
+impl Frames for UpStream<'_> {
+    fn channels(&self) -> usize {
+        UpStream::channels(self)
+    }
+
+    fn len(&self) -> usize {
+        UpStream::len(self)
+    }
+
+    #[inline]
+    fn at(&mut self, c: usize, j: usize) -> f32 {
+        UpStream::at(self, c, j)
+    }
+}
+
+type TruePeakTaps = [[f32; 2 * TRUE_PEAK_HALF_TAPS]; 3];
+
 /// Windowed-sinc taps for the inter-sample points, per phase, for samples
 /// `j - HALF + 1 ..= j + HALF` around a point between `j` and `j + 1`.
-fn true_peak_taps() -> [[f32; 2 * TRUE_PEAK_HALF_TAPS]; 3] {
+fn true_peak_taps() -> TruePeakTaps {
     let mut taps = [[0.0f32; 2 * TRUE_PEAK_HALF_TAPS]; 3];
     let half = TRUE_PEAK_HALF_TAPS as f64;
     for (p, frac) in TRUE_PEAK_PHASES.iter().enumerate() {
@@ -834,24 +939,53 @@ fn true_peak_taps() -> [[f32; 2 * TRUE_PEAK_HALF_TAPS]; 3] {
     taps
 }
 
-/// The largest magnitude at or just after sample `j` of `x`.
+/// The largest magnitude at or just after frame `j` of channel `c`.
 #[inline]
-fn peak_at(x: &[f32], j: usize, taps: Option<&[[f32; 2 * TRUE_PEAK_HALF_TAPS]; 3]>) -> f32 {
-    let mut peak = x[j].abs();
+fn peak_at<F: Frames>(src: &mut F, c: usize, j: usize, taps: Option<&TruePeakTaps>) -> f32 {
+    let mut peak = src.at(c, j).abs();
     if let Some(taps) = taps {
+        let len = src.len();
         let first = j as isize - (TRUE_PEAK_HALF_TAPS as isize - 1);
         for phase in taps {
             let mut acc = 0.0f32;
             for (k, tap) in phase.iter().enumerate() {
                 let idx = first + k as isize;
-                if idx >= 0 && (idx as usize) < x.len() {
-                    acc += x[idx as usize] * tap;
+                if idx >= 0 && (idx as usize) < len {
+                    acc += src.at(c, idx as usize) * tap;
                 }
             }
             peak = peak.max(acc.abs());
         }
     }
     peak
+}
+
+/// The gain frame `j` needs so its peak, driven by `gin`, stays under
+/// `ceiling`: every channel's peak when linked, else `chain`'s own.
+#[inline]
+fn limiter_required<F: Frames>(
+    src: &mut F,
+    link: bool,
+    chain: usize,
+    j: usize,
+    taps: Option<&TruePeakTaps>,
+    gin: f32,
+    ceiling: f32,
+) -> f32 {
+    let peak = if link {
+        let mut m = 0.0f32;
+        for c in 0..src.channels() {
+            m = m.max(peak_at(src, c, j, taps));
+        }
+        m
+    } else {
+        peak_at(src, chain, j, taps)
+    } * gin;
+    if peak > ceiling {
+        ceiling / peak
+    } else {
+        1.0
+    }
 }
 
 /// The gain one limiter chain follows: the smallest requirement in the
@@ -943,7 +1077,6 @@ pub fn limit_automated(
     cancel: &AtomicBool,
 ) -> Option<DynamicsOutput> {
     let len = shortest_len(channels);
-    let n = channels.len();
     let mut trace = TraceBuilder::new(len, sample_rate, s.input_gain_db);
     let mut out: Vec<Vec<f32>> = channels.iter().map(|_| Vec::with_capacity(len)).collect();
     if len == 0 {
@@ -952,73 +1085,477 @@ pub fn limit_automated(
             trace: trace.finish(),
         });
     }
-    let window = frames(s.lookahead_ms, sample_rate).max(1);
+    let input_peak = |i: usize| channels.iter().fold(0.0f32, |m, c| m.max(c[i].abs()));
+    match Oversampler::new(s.oversampling) {
+        None => {
+            let mut src = Plain::new(channels);
+            let clock = Clock::plain(offset);
+            let done = limit_frames(&mut src, sample_rate, s, tracks, clock, cancel, |i, frame, lowest| {
+                for (dst, y) in out.iter_mut().zip(frame) {
+                    dst.push(*y);
+                }
+                trace.push(input_peak(i), amp_to_db(lowest));
+            });
+            if !done {
+                return None;
+            }
+        }
+        Some(os) => {
+            let factor = os.factor();
+            let rate = sample_rate.saturating_mul(factor as u32);
+            // Reads reach from the true-peak taps behind the frame being
+            // written to those after the end of the lookahead.
+            let reach = frames(s.lookahead_ms, rate).max(1) + 2 * TRUE_PEAK_HALF_TAPS;
+            let mut src = UpStream::new(&os, channels, len, reach);
+            let clock = Clock::oversampled(offset, &os);
+            let mut downs: Vec<_> = channels.iter().map(|_| os.down_stream()).collect();
+            let mut lowest_here = 1.0f32;
+            let done = limit_frames(&mut src, rate, s, tracks, clock, cancel, |k, frame, lowest| {
+                // A buffer sample's frames make its trace point.
+                if let Some(m) = k.checked_sub(clock.pad).filter(|m| *m < len * factor) {
+                    lowest_here = lowest_here.min(lowest);
+                    if m % factor == factor - 1 {
+                        trace.push(input_peak(m / factor), amp_to_db(lowest_here));
+                        lowest_here = 1.0;
+                    }
+                }
+                for ((down, dst), y) in downs.iter_mut().zip(out.iter_mut()).zip(frame) {
+                    if let Some(v) = down.push(*y) {
+                        dst.push(v);
+                    }
+                }
+            });
+            if !done {
+                return None;
+            }
+            // A brickwall: the filter back down rings a hair past what it
+            // was given, so the ceiling is held once more at the buffer's rate.
+            let mut at = LimiterAt::new(s, tracks, Clock::plain(offset), sample_rate);
+            for i in 0..len {
+                let (_, ceiling, _) = at.at(i);
+                for dst in out.iter_mut() {
+                    dst[i] = dst[i].clamp(-ceiling, ceiling);
+                }
+            }
+        }
+    }
+    Some(DynamicsOutput {
+        channels: out,
+        trace: trace.finish(),
+    })
+}
+
+/// The limiter over `src`: `emit(j, outputs, lowest gain)` for every frame
+/// in order. `rate` is the frames' rate (the lookahead and the release are
+/// times). `false` when cancelled.
+fn limit_frames<F: Frames>(
+    src: &mut F,
+    rate: u32,
+    s: &LimiterSettings,
+    tracks: &Tracks<LimiterParam>,
+    clock: Clock,
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(usize, &[f32], f32),
+) -> bool {
+    let len = src.len();
+    let n = src.channels();
+    let window = frames(s.lookahead_ms, rate).max(1);
     let taps = s.true_peak.then(true_peak_taps);
+    let taps = taps.as_ref();
     let chains = if s.link { 1 } else { n };
     // The settings where a requirement is decided, and where the output is
     // written: the same until something is automated.
-    let mut at_peak = LimiterAt::new(s, tracks, offset, sample_rate);
-    let mut at_out = LimiterAt::new(s, tracks, offset, sample_rate);
+    let mut at_peak = LimiterAt::new(s, tracks, clock, rate);
+    let mut at_out = LimiterAt::new(s, tracks, clock, rate);
     let mut gains: Vec<LookaheadGain> = (0..chains)
         .map(|_| LookaheadGain::new(window, at_out.release))
         .collect();
-    let required = |j: usize, chain: usize, gin: f32, ceiling: f32| -> f32 {
-        let peak = if s.link {
-            channels
-                .iter()
-                .fold(0.0f32, |m, c| m.max(peak_at(c, j, taps.as_ref())))
-        } else {
-            peak_at(channels[chain], j, taps.as_ref())
-        } * gin;
-        if peak > ceiling {
-            ceiling / peak
-        } else {
-            1.0
-        }
-    };
     for (c, g) in gains.iter_mut().enumerate() {
-        let first = (0..window.min(len))
-            .map(|j| {
-                let (gin, ceiling, _) = at_peak.at(j);
-                required(j, c, gin, ceiling)
-            })
-            .fold(1.0f32, f32::min);
+        let mut first = 1.0f32;
+        for j in 0..window.min(len) {
+            let (gin, ceiling, _) = at_peak.at(j);
+            first = first.min(limiter_required(src, s.link, c, j, taps, gin, ceiling));
+        }
         g.prime(first);
         for j in 0..(window - 1).min(len) {
             let (gin, ceiling, _) = at_peak.at(j);
-            g.require(j, required(j, c, gin, ceiling));
+            g.require(j, limiter_required(src, s.link, c, j, taps, gin, ceiling));
         }
     }
     let mut chain_gain = vec![1.0f32; chains];
+    let mut frame = vec![0.0f32; n];
     for i in 0..len {
         if i % CANCEL_STRIDE == 0 && cancel.load(Ordering::Relaxed) {
-            return None;
+            return false;
         }
         let ahead = i + window - 1;
         let peak_settings = (ahead < len).then(|| at_peak.at(ahead));
         let (gin, ceiling, release) = at_out.at(i);
         for (c, g) in gains.iter_mut().enumerate() {
             if let Some((ahead_gin, ahead_ceiling, _)) = peak_settings {
-                g.require(ahead, required(ahead, c, ahead_gin, ahead_ceiling));
+                let r = limiter_required(src, s.link, c, ahead, taps, ahead_gin, ahead_ceiling);
+                g.require(ahead, r);
             }
             g.release = release;
             chain_gain[c] = g.gain_at(i);
         }
-        let mut peak = 0.0f32;
         let mut lowest = 1.0f32;
-        for (ci, (dst, src)) in out.iter_mut().zip(channels).enumerate() {
+        for (ci, y) in frame.iter_mut().enumerate() {
             let g = chain_gain[if s.link { 0 } else { ci }];
-            let y = (src[i] * gin * g).clamp(-ceiling, ceiling);
-            dst.push(y);
-            peak = peak.max(src[i].abs());
+            *y = (src.at(ci, i) * gin * g).clamp(-ceiling, ceiling);
             lowest = lowest.min(g);
         }
-        trace.push(peak, amp_to_db(lowest));
+        emit(i, &frame, lowest);
     }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Clipper
+
+/// A clipper: whatever passes the ceiling is cut to it on the spot -- no
+/// gain riding, no lookahead, no release -- below an optional soft knee.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClipperSettings {
+    /// Gain before clipping: how hard the audio is pushed into the ceiling.
+    pub input_gain_db: f32,
+    pub ceiling_db: f32,
+    /// How far under the ceiling the curve starts to bend; 0 cuts hard.
+    pub knee_db: f32,
+    /// Clip at this many times the rate, so the harmonics of the cut
+    /// corners are filtered out instead of folding back as aliasing.
+    pub oversampling: Oversampling,
+    /// After oversampling, keep every sample under the ceiling. The filter
+    /// back down rounds the cut corners and overshoots by up to about a
+    /// decibel; a fast limiter turns that down (`catch_overshoot`).
+    pub hard_ceiling: bool,
+}
+
+impl ClipperSettings {
+    /// Up to +24 dB: a clipper driven further is a square wave.
+    pub const INPUT_GAIN_DB: std::ops::RangeInclusive<f32> = 0.0..=24.0;
+    /// The limiter's range.
+    pub const CEILING_DB: std::ops::RangeInclusive<f32> = -30.0..=0.0;
+    pub const KNEE_DB: std::ops::RangeInclusive<f32> = 0.0..=12.0;
+
+    /// The output level (dBFS) of a steady input at `in_db`, before the
+    /// input gain.
+    pub fn transfer_db(&self, in_db: f32) -> f32 {
+        let (gin, knee_start, ceiling) = clipper_levels(self);
+        amp_to_db(clip_sample(db_to_amp(in_db) * gin, knee_start, ceiling))
+    }
+
+    /// The reduction a full GR scale shows: the drive's whole range.
+    pub fn gr_scale_db(&self) -> f32 {
+        24.0
+    }
+}
+
+impl Default for ClipperSettings {
+    /// A clean safety clipper: hard at -1 dB, at 4x, never over the ceiling.
+    fn default() -> Self {
+        Self {
+            input_gain_db: 0.0,
+            ceiling_db: -1.0,
+            knee_db: 0.0,
+            oversampling: Oversampling::X4,
+            hard_ceiling: true,
+        }
+    }
+}
+
+/// A clipper setting that can follow a curve. Not the oversampling or the
+/// hard ceiling (switches).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClipperParam {
+    InputGain,
+    Ceiling,
+    Knee,
+}
+
+impl ClipperParam {
+    pub const ALL: [ClipperParam; 3] = [
+        ClipperParam::InputGain,
+        ClipperParam::Ceiling,
+        ClipperParam::Knee,
+    ];
+
+    pub fn range(self) -> std::ops::RangeInclusive<f32> {
+        match self {
+            ClipperParam::InputGain => ClipperSettings::INPUT_GAIN_DB,
+            ClipperParam::Ceiling => ClipperSettings::CEILING_DB,
+            ClipperParam::Knee => ClipperSettings::KNEE_DB,
+        }
+    }
+
+    pub fn scale(self) -> Scale {
+        Scale::Linear
+    }
+}
+
+impl Automatable for ClipperSettings {
+    type Param = ClipperParam;
+
+    fn set_param(&mut self, param: ClipperParam, value: f32) {
+        let range = param.range();
+        let v = value.max(*range.start()).min(*range.end());
+        match param {
+            ClipperParam::InputGain => self.input_gain_db = v,
+            ClipperParam::Ceiling => self.ceiling_db = v,
+            ClipperParam::Knee => self.knee_db = v,
+        }
+    }
+
+    fn param(&self, param: ClipperParam) -> f32 {
+        match param {
+            ClipperParam::InputGain => self.input_gain_db,
+            ClipperParam::Ceiling => self.ceiling_db,
+            ClipperParam::Knee => self.knee_db,
+        }
+    }
+}
+
+/// The input gain, where the knee starts and the ceiling, all linear.
+fn clipper_levels(s: &ClipperSettings) -> (f32, f32, f32) {
+    let ceiling = db_to_amp(s.ceiling_db.min(0.0));
+    (
+        db_to_amp(s.input_gain_db),
+        ceiling * db_to_amp(-s.knee_db.max(0.0)),
+        ceiling,
+    )
+}
+
+/// The clipper's curve: `u` as it is up to `knee_start`, then bent towards
+/// `ceiling` -- flat against it at once where the two meet (a hard clip),
+/// otherwise along a tanh, which leaves the knee at the slope it came in
+/// with and only ever approaches the ceiling.
+#[inline]
+pub fn clip_sample(u: f32, knee_start: f32, ceiling: f32) -> f32 {
+    let a = u.abs();
+    if a <= knee_start {
+        return u;
+    }
+    let span = ceiling - knee_start;
+    let y = if span > 0.0 {
+        knee_start + span * ((a - knee_start) / span).tanh()
+    } else {
+        ceiling
+    };
+    y.min(ceiling).copysign(u)
+}
+
+/// A clipper's levels at a frame, re-evaluated a block of buffer samples
+/// at a time when automated.
+struct ClipperAt<'a> {
+    eval: Option<Evaluator<'a, ClipperSettings>>,
+    clock: Clock,
+    block: usize,
+    levels: (f32, f32, f32),
+}
+
+impl<'a> ClipperAt<'a> {
+    fn new(s: &ClipperSettings, tracks: &'a Tracks<ClipperParam>, clock: Clock) -> Self {
+        Self {
+            eval: (!tracks.is_empty()).then(|| Evaluator::new(*s, tracks)),
+            clock,
+            block: usize::MAX,
+            levels: clipper_levels(s),
+        }
+    }
+
+    /// (input gain, knee start, ceiling) at frame `j`.
+    #[inline]
+    fn at(&mut self, j: usize) -> (f32, f32, f32) {
+        if let Some(eval) = self.eval.as_mut() {
+            let block = self.clock.block(j);
+            if block != self.block {
+                self.block = block;
+                self.levels = clipper_levels(&eval.at(self.clock.block_start(block)));
+            }
+        }
+        self.levels
+    }
+}
+
+/// Clip `channels`. `None` when cancelled.
+pub fn clip(
+    channels: &[&[f32]],
+    sample_rate: u32,
+    s: &ClipperSettings,
+    cancel: &AtomicBool,
+) -> Option<DynamicsOutput> {
+    clip_automated(channels, sample_rate, s, &Tracks::none(), 0, cancel)
+}
+
+/// Clip `channels` with `tracks` moving the input gain, ceiling and knee
+/// over time; `offset` is the buffer sample `channels` start at. The trace
+/// says, hop by hop, how far the loudest output came under the loudest
+/// driven input -- what the clipper took, the filters' overshoot included.
+/// `None` when cancelled.
+pub fn clip_automated(
+    channels: &[&[f32]],
+    sample_rate: u32,
+    s: &ClipperSettings,
+    tracks: &Tracks<ClipperParam>,
+    offset: usize,
+    cancel: &AtomicBool,
+) -> Option<DynamicsOutput> {
+    let len = shortest_len(channels);
+    let mut out: Vec<Vec<f32>> = channels.iter().map(|_| Vec::with_capacity(len)).collect();
+    if len > 0 {
+        let done = match Oversampler::new(s.oversampling) {
+            None => {
+                let mut src = Plain::new(channels);
+                clip_frames(&mut src, s, tracks, Clock::plain(offset), cancel, |_, frame| {
+                    for (dst, y) in out.iter_mut().zip(frame) {
+                        dst.push(*y);
+                    }
+                })
+            }
+            Some(os) => {
+                // A clip reads only the frame it writes.
+                let mut src = UpStream::new(&os, channels, len, 1);
+                let mut downs: Vec<_> = channels.iter().map(|_| os.down_stream()).collect();
+                let clock = Clock::oversampled(offset, &os);
+                let done = clip_frames(&mut src, s, tracks, clock, cancel, |_, frame| {
+                    for ((down, dst), y) in downs.iter_mut().zip(out.iter_mut()).zip(frame) {
+                        if let Some(v) = down.push(*y) {
+                            dst.push(v);
+                        }
+                    }
+                });
+                if done && s.hard_ceiling {
+                    out = catch_overshoot(&out, sample_rate, s, tracks, offset, cancel)?;
+                }
+                done
+            }
+        };
+        if !done {
+            return None;
+        }
+    }
+    let trace = clipper_trace(channels, &out, sample_rate, s, tracks, offset);
     Some(DynamicsOutput {
         channels: out,
-        trace: trace.finish(),
+        trace,
     })
+}
+
+/// The hard ceiling's limiter reads this far ahead: the overshoot is a
+/// ripple at the cut corners, a fraction of a millisecond wide...
+const HARD_CEILING_LOOKAHEAD_MS: f32 = 1.0;
+/// ...and lets go this slowly, so a run of clipped crests is held one steady
+/// fraction of a decibel down instead of being turned down and up at their
+/// rate, which would put back the aliasing oversampling took out.
+const HARD_CEILING_RELEASE_MS: f32 = 20.0;
+
+/// An oversampled clip's output held under its ceiling. Clamping the
+/// overshoot would clip again at the buffer's rate and fold much of what
+/// oversampling removed back in; a fast linked limiter turns down only
+/// around it, smoothly, and leaves every other sample as it is. `None` when
+/// cancelled.
+fn catch_overshoot(
+    out: &[Vec<f32>],
+    sample_rate: u32,
+    s: &ClipperSettings,
+    tracks: &Tracks<ClipperParam>,
+    offset: usize,
+    cancel: &AtomicBool,
+) -> Option<Vec<Vec<f32>>> {
+    let catch = LimiterSettings {
+        input_gain_db: 0.0,
+        ceiling_db: s.ceiling_db,
+        release_ms: HARD_CEILING_RELEASE_MS,
+        lookahead_ms: HARD_CEILING_LOOKAHEAD_MS,
+        true_peak: false,
+        link: true,
+        oversampling: Oversampling::Off,
+    };
+    let mut ceiling = Tracks::none();
+    if let Some(curve) = tracks.curve(ClipperParam::Ceiling) {
+        ceiling.push(LimiterParam::Ceiling, curve.clone());
+    }
+    let refs: Vec<&[f32]> = out.iter().map(Vec::as_slice).collect();
+    let mut caught: Vec<Vec<f32>> = out.iter().map(|c| Vec::with_capacity(c.len())).collect();
+    let mut src = Plain::new(&refs);
+    let done = limit_frames(&mut src, sample_rate, &catch, &ceiling, Clock::plain(offset), cancel, |_, frame, _| {
+        for (dst, y) in caught.iter_mut().zip(frame) {
+            dst.push(*y);
+        }
+    });
+    done.then_some(caught)
+}
+
+/// The clipper over `src`: `emit(j, outputs)` for every frame in order.
+/// `false` when cancelled.
+fn clip_frames<F: Frames>(
+    src: &mut F,
+    s: &ClipperSettings,
+    tracks: &Tracks<ClipperParam>,
+    clock: Clock,
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(usize, &[f32]),
+) -> bool {
+    let len = src.len();
+    let mut at = ClipperAt::new(s, tracks, clock);
+    let mut frame = vec![0.0f32; src.channels()];
+    for j in 0..len {
+        if j % CANCEL_STRIDE == 0 && cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        let (gin, knee_start, ceiling) = at.at(j);
+        for (c, y) in frame.iter_mut().enumerate() {
+            *y = clip_sample(src.at(c, j) * gin, knee_start, ceiling);
+        }
+        emit(j, &frame);
+    }
+    true
+}
+
+/// A clipper's trace, measured from what it wrote: per hop, the loudest
+/// input sample, and the loudest output against the loudest input times the
+/// gain in force there (0 dB when nothing was cut).
+fn clipper_trace(
+    src: &[&[f32]],
+    out: &[Vec<f32>],
+    sample_rate: u32,
+    s: &ClipperSettings,
+    tracks: &Tracks<ClipperParam>,
+    offset: usize,
+) -> DynamicsTrace {
+    let len = out.first().map_or(0, Vec::len);
+    let hop = DynamicsTrace::hop_for(len, sample_rate);
+    let mut trace = DynamicsTrace {
+        start: 0,
+        hop,
+        input_db: Vec::with_capacity(len / hop + 1),
+        gain_db: Vec::with_capacity(len / hop + 1),
+        output_offset_db: s.input_gain_db,
+    };
+    let mut at = ClipperAt::new(s, tracks, Clock::plain(offset));
+    let mut i = 0;
+    while i < len {
+        let end = (i + hop).min(len);
+        let (mut peak, mut driven, mut loudest) = (0.0f32, 0.0f32, 0.0f32);
+        for j in i..end {
+            let (gin, _, _) = at.at(j);
+            for (x, y) in src.iter().zip(out) {
+                let a = x[j].abs();
+                peak = peak.max(a);
+                driven = driven.max(a * gin);
+                loudest = loudest.max(y[j].abs());
+            }
+        }
+        trace.input_db.push(amp_to_db(peak));
+        trace.gain_db.push(if driven > 0.0 {
+            (amp_to_db(loudest) - amp_to_db(driven)).min(0.0)
+        } else {
+            0.0
+        });
+        i = end;
+    }
+    trace
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,15 +1894,479 @@ mod tests {
             ..LimiterSettings::default()
         };
         let out = limit(&[&src], SR, &s, &go()).unwrap();
-        let taps = true_peak_taps();
         let ceiling = 10f32.powf(-0.9 / 20.0);
+        assert!(true_peak(&out.channels[0]) <= ceiling);
+    }
+
+    /// The highest inter-sample peak of `y` (the 4x estimate), away from
+    /// its ends.
+    fn true_peak(y: &[f32]) -> f32 {
+        let taps = true_peak_taps();
+        let chans = [y];
+        let mut frames = Plain::new(&chans);
+        (TRUE_PEAK_HALF_TAPS..y.len() - TRUE_PEAK_HALF_TAPS)
+            .map(|j| peak_at(&mut frames, 0, j, Some(&taps)))
+            .fold(0.0f32, f32::max)
+    }
+
+    /// The limiter as it was before oversampling: reading the buffer
+    /// directly. The plain path must render exactly this.
+    fn reference_limit(
+        channels: &[&[f32]],
+        sample_rate: u32,
+        s: &LimiterSettings,
+        tracks: &Tracks<LimiterParam>,
+    ) -> Vec<Vec<f32>> {
+        fn peak_at_slice(x: &[f32], j: usize, taps: Option<&TruePeakTaps>) -> f32 {
+            let mut peak = x[j].abs();
+            if let Some(taps) = taps {
+                let first = j as isize - (TRUE_PEAK_HALF_TAPS as isize - 1);
+                for phase in taps {
+                    let mut acc = 0.0f32;
+                    for (k, tap) in phase.iter().enumerate() {
+                        let idx = first + k as isize;
+                        if idx >= 0 && (idx as usize) < x.len() {
+                            acc += x[idx as usize] * tap;
+                        }
+                    }
+                    peak = peak.max(acc.abs());
+                }
+            }
+            peak
+        }
+        let len = shortest_len(channels);
+        let n = channels.len();
+        let mut out: Vec<Vec<f32>> = channels.iter().map(|_| Vec::with_capacity(len)).collect();
+        let window = frames(s.lookahead_ms, sample_rate).max(1);
+        let taps = s.true_peak.then(true_peak_taps);
+        let chains = if s.link { 1 } else { n };
+        let mut at_peak = LimiterAt::new(s, tracks, Clock::plain(0), sample_rate);
+        let mut at_out = LimiterAt::new(s, tracks, Clock::plain(0), sample_rate);
+        let mut gains: Vec<LookaheadGain> = (0..chains)
+            .map(|_| LookaheadGain::new(window, at_out.release))
+            .collect();
+        let required = |j: usize, chain: usize, gin: f32, ceiling: f32| -> f32 {
+            let peak = if s.link {
+                channels
+                    .iter()
+                    .fold(0.0f32, |m, c| m.max(peak_at_slice(c, j, taps.as_ref())))
+            } else {
+                peak_at_slice(channels[chain], j, taps.as_ref())
+            } * gin;
+            if peak > ceiling {
+                ceiling / peak
+            } else {
+                1.0
+            }
+        };
+        for (c, g) in gains.iter_mut().enumerate() {
+            let first = (0..window.min(len))
+                .map(|j| {
+                    let (gin, ceiling, _) = at_peak.at(j);
+                    required(j, c, gin, ceiling)
+                })
+                .fold(1.0f32, f32::min);
+            g.prime(first);
+            for j in 0..(window - 1).min(len) {
+                let (gin, ceiling, _) = at_peak.at(j);
+                g.require(j, required(j, c, gin, ceiling));
+            }
+        }
+        let mut chain_gain = vec![1.0f32; chains];
+        for i in 0..len {
+            let ahead = i + window - 1;
+            let peak_settings = (ahead < len).then(|| at_peak.at(ahead));
+            let (gin, ceiling, release) = at_out.at(i);
+            for (c, g) in gains.iter_mut().enumerate() {
+                if let Some((ahead_gin, ahead_ceiling, _)) = peak_settings {
+                    g.require(ahead, required(ahead, c, ahead_gin, ahead_ceiling));
+                }
+                g.release = release;
+                chain_gain[c] = g.gain_at(i);
+            }
+            for (ci, (dst, src)) in out.iter_mut().zip(channels).enumerate() {
+                let g = chain_gain[if s.link { 0 } else { ci }];
+                dst.push((src[i] * gin * g).clamp(-ceiling, ceiling));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_plain_limiter_renders_exactly_what_it_did_before_oversampling() {
+        let mut left = sine(997.0, SR as usize / 2, 0.6);
+        for (i, v) in left.iter_mut().enumerate() {
+            if i % 3_000 < 30 {
+                *v *= 2.5;
+            }
+        }
+        let right = sine(331.0, SR as usize / 2, 0.9);
+        let mut tracks = Tracks::none();
+        tracks.push(
+            LimiterParam::Ceiling,
+            curve(Scale::Linear, &[(0, -1.0), (SR as usize / 4, -9.0)]),
+        );
+        tracks.push(LimiterParam::Release, curve(Scale::Log, &[(0, 10.0), (20_000, 200.0)]));
+        let base = LimiterSettings {
+            input_gain_db: 9.0,
+            ..LimiterSettings::default()
+        };
+        for (name, s, tracks) in [
+            ("default", base, Tracks::none()),
+            ("sample peak", LimiterSettings { true_peak: false, ..base }, Tracks::none()),
+            ("unlinked", LimiterSettings { link: false, ..base }, Tracks::none()),
+            ("automated", base, tracks),
+        ] {
+            let chans = [left.as_slice(), right.as_slice()];
+            let got = limit_automated(&chans, SR, &s, &tracks, 0, &go()).unwrap();
+            assert_eq!(got.channels, reference_limit(&chans, SR, &s, &tracks), "{name}");
+        }
+    }
+
+    /// The limiter at every oversampling factor.
+    const FACTORS: [Oversampling; 4] = [
+        Oversampling::X2,
+        Oversampling::X4,
+        Oversampling::X8,
+        Oversampling::X16,
+    ];
+
+    #[test]
+    fn an_oversampled_limiter_holds_the_ceiling_at_and_between_samples() {
+        // A tone at a quarter of the rate, phased so every sample misses
+        // the crest, pushed 6 dB into the ceiling.
+        let src: Vec<f32> = (0..SR as usize / 4)
+            .map(|i| ((i as f32 + 0.5) * std::f32::consts::FRAC_PI_2).sin() * 0.7)
+            .collect();
+        let ceiling = 10f32.powf(-1.0 / 20.0);
+        for os in FACTORS {
+            let s = LimiterSettings {
+                input_gain_db: 6.0,
+                oversampling: os,
+                ..LimiterSettings::default()
+            };
+            let out = limit(&[&src], SR, &s, &go()).unwrap();
+            let y = &out.channels[0];
+            assert_eq!(y.len(), src.len());
+            assert!(peak(y) <= ceiling + 1e-6, "{os:?}: sample peak {}", peak(y));
+            let over_db = 20.0 * (true_peak(y) / ceiling).log10();
+            assert!(over_db < 0.1, "{os:?}: inter-sample peak {over_db:.3} dB over");
+            // The crest is 0.7 between samples: pushed to 1.4 against 0.89.
+            assert!(out.trace.max_reduction_db() > 3.5, "{os:?}");
+        }
+    }
+
+    #[test]
+    fn an_oversampled_limiter_with_nothing_to_catch_gives_the_audio_back() {
+        let src = sine(1_000.0, SR as usize / 4, 0.3);
+        for os in FACTORS {
+            let s = LimiterSettings {
+                oversampling: os,
+                ..LimiterSettings::default()
+            };
+            let out = limit(&[&src], SR, &s, &go()).unwrap();
+            assert!(out.trace.max_reduction_db() < 1e-4, "{os:?}");
+            let y = &out.channels[0];
+            let worst = src[100..src.len() - 100]
+                .iter()
+                .zip(&y[100..src.len() - 100])
+                .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+            assert!(worst < 1e-4, "{os:?}: {worst}");
+        }
+    }
+
+    /// Where the energy of `x` sits, in samples.
+    fn energy_centre(x: &[f32]) -> f64 {
+        let (mut m, mut e) = (0.0f64, 0.0f64);
+        for (i, v) in x.iter().enumerate() {
+            let p = f64::from(*v).powi(2);
+            m += i as f64 * p;
+            e += p;
+        }
+        m / e.max(1e-30)
+    }
+
+    /// A 2 ms burst of 3 kHz centred on `at`, in `len` samples of silence.
+    fn burst(len: usize, at: usize, amp: f32) -> Vec<f32> {
+        let half = 48;
+        (0..len)
+            .map(|i| {
+                let d = i as f32 - at as f32;
+                if d.abs() >= half as f32 {
+                    return 0.0;
+                }
+                let env = 0.5 * (1.0 + (std::f32::consts::PI * d / half as f32).cos());
+                env * (d / SR as f32 * 3_000.0 * std::f32::consts::TAU).sin() * amp
+            })
+            .collect()
+    }
+
+    #[test]
+    fn oversampling_moves_nothing_in_time() {
+        // Against the same tool at the buffer's rate: the filters add no
+        // delay, so the burst comes out where it did (within half a sample).
+        let src = burst(SR as usize / 10, 2_400, 0.9);
+        let lim = LimiterSettings {
+            input_gain_db: 12.0,
+            ..LimiterSettings::default()
+        };
+        // The clip alone: the hard ceiling's limiter rides the level.
+        let clipper = ClipperSettings {
+            input_gain_db: 12.0,
+            oversampling: Oversampling::Off,
+            hard_ceiling: false,
+            ..ClipperSettings::default()
+        };
+        let lim_at = energy_centre(&limit(&[&src], SR, &lim, &go()).unwrap().channels[0]);
+        let clip_at = energy_centre(&clip(&[&src], SR, &clipper, &go()).unwrap().channels[0]);
+        assert!((clip_at - energy_centre(&src)).abs() < 0.5, "a symmetric clip of a symmetric burst");
+        for os in FACTORS {
+            let s = LimiterSettings {
+                oversampling: os,
+                ..lim
+            };
+            let y = &limit(&[&src], SR, &s, &go()).unwrap().channels[0];
+            assert!((energy_centre(y) - lim_at).abs() < 0.5, "limiter {os:?}");
+            let s = ClipperSettings {
+                oversampling: os,
+                ..clipper
+            };
+            let y = &clip(&[&src], SR, &s, &go()).unwrap().channels[0];
+            assert!((energy_centre(y) - clip_at).abs() < 0.5, "clipper {os:?}");
+        }
+    }
+
+    #[test]
+    fn an_oversampled_ceiling_follows_its_curve() {
+        let len = SR as usize;
+        let src = sine(997.0, len, 0.9);
+        let mut tracks = Tracks::none();
+        tracks.push(
+            LimiterParam::Ceiling,
+            curve(Scale::Linear, &[(len / 2 - 1, -1.0), (len / 2, -20.0)]),
+        );
+        let s = LimiterSettings {
+            oversampling: Oversampling::X4,
+            ..LimiterSettings::default()
+        };
+        let y = &limit_automated(&[&src], SR, &s, &tracks, 0, &go()).unwrap().channels[0];
+        assert!(peak(&y[..len / 2]) <= 10f32.powf(-1.0 / 20.0) + 1e-6);
+        let settle = len / 2 + SR as usize / 10;
+        assert!(peak(&y[settle..]) <= 10f32.powf(-20.0 / 20.0) + 1e-6);
+        assert!(peak(&y[settle..]) > 10f32.powf(-21.0 / 20.0), "held at it");
+    }
+
+    // ---- Clipper ----------------------------------------------------------
+
+    #[test]
+    fn a_hard_clip_cuts_at_the_ceiling_and_leaves_the_rest() {
+        let src = sine(441.0, SR as usize / 4, 0.9);
+        let s = ClipperSettings {
+            ceiling_db: -6.0,
+            oversampling: Oversampling::Off,
+            ..ClipperSettings::default()
+        };
+        let out = clip(&[&src], SR, &s, &go()).unwrap();
+        let ceiling = 10f32.powf(-6.0 / 20.0);
         let y = &out.channels[0];
-        for j in (TRUE_PEAK_HALF_TAPS..y.len() - TRUE_PEAK_HALF_TAPS).step_by(7) {
-            assert!(
-                peak_at(y, j, Some(&taps)) <= ceiling,
-                "inter-sample peak at {j}"
+        assert!((peak(y) - ceiling).abs() < 1e-6);
+        for (a, b) in src.iter().zip(y) {
+            if a.abs() <= ceiling {
+                assert_eq!(a, b);
+            }
+        }
+        // 0.9 against 0.5: about 5 dB taken off the crests.
+        let taken = out.trace.max_reduction_db();
+        assert!((taken - 20.0 * (0.9 / ceiling).log10()).abs() < 0.1, "{taken}");
+    }
+
+    #[test]
+    fn the_knee_bends_smoothly_up_to_the_ceiling_without_reaching_it() {
+        let ceiling = 0.5f32;
+        let knee_start = ceiling * 10f32.powf(-6.0 / 20.0);
+        let mut prev = 0.0f32;
+        for i in 1..4_000 {
+            let u = i as f32 / 1_000.0;
+            let y = clip_sample(u, knee_start, ceiling);
+            if u <= knee_start {
+                assert_eq!(y, u);
+            }
+            assert!(y <= ceiling, "{u} -> {y}");
+            assert!(y >= prev, "falls at {u}");
+            assert!(y - prev <= 1.0 / 1_000.0 + 1e-6, "steeper than 1:1 at {u}");
+            assert_eq!(clip_sample(-u, knee_start, ceiling), -y);
+            prev = y;
+        }
+        assert!(prev > ceiling * 0.99, "approaches the ceiling");
+    }
+
+    #[test]
+    fn a_clipper_with_nothing_to_clip_changes_nothing() {
+        let src = sine(440.0, 9_600, 0.2);
+        let off = ClipperSettings {
+            oversampling: Oversampling::Off,
+            ..ClipperSettings::default()
+        };
+        let out = clip(&[&src], SR, &off, &go()).unwrap();
+        assert_eq!(out.channels[0], src);
+        assert!(out.trace.max_reduction_db() < 1e-4);
+        let out = clip(&[&src], SR, &ClipperSettings::default(), &go()).unwrap();
+        assert!(out.trace.max_reduction_db() < 1e-3, "{}", out.trace.max_reduction_db());
+    }
+
+    /// The power of `x` at `hz` (Hann-windowed Goertzel).
+    fn power_at(x: &[f32], hz: f64) -> f64 {
+        let n = x.len() as f64;
+        let w = std::f64::consts::TAU * hz / f64::from(SR);
+        let k = 2.0 * w.cos();
+        let (mut s1, mut s2) = (0.0f64, 0.0f64);
+        for (i, v) in x.iter().enumerate() {
+            let win = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / n).cos();
+            let s0 = f64::from(*v) * win + k * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        s1 * s1 + s2 * s2 - k * s1 * s2
+    }
+
+    /// How loud the folded-back harmonics of a clipped 4.1 kHz tone are
+    /// against the tone, in dB. Its odd harmonics from the 7th land, at
+    /// 48 kHz, on 19.3, 11.1, 2.9, 5.3 and 13.5 kHz -- none of them a harmonic.
+    fn aliasing_db(s: &ClipperSettings) -> f64 {
+        let src = sine(4_100.0, SR as usize, 0.9);
+        let y = &clip(&[&src], SR, s, &go()).unwrap().channels[0];
+        let folded: f64 = [19_300.0, 11_100.0, 2_900.0, 5_300.0, 13_500.0]
+            .iter()
+            .map(|hz| power_at(y, *hz))
+            .sum();
+        10.0 * (folded / power_at(y, 4_100.0)).log10()
+    }
+
+    #[test]
+    fn oversampled_clipping_folds_far_less_back() {
+        let plain = ClipperSettings {
+            ceiling_db: -6.0,
+            oversampling: Oversampling::Off,
+            ..ClipperSettings::default()
+        };
+        let off = aliasing_db(&plain);
+        let x8 = aliasing_db(&ClipperSettings {
+            oversampling: Oversampling::X8,
+            hard_ceiling: false,
+            ..plain
+        });
+        let x8_hard = aliasing_db(&ClipperSettings {
+            oversampling: Oversampling::X8,
+            hard_ceiling: true,
+            ..plain
+        });
+        eprintln!("aliasing: off {off:.1} dB, 8x {x8:.1} dB, 8x hard ceiling {x8_hard:.1} dB");
+        assert!(off > -40.0, "the plain clip should alias: {off:.1} dB");
+        assert!(x8 < off - 40.0, "8x: {x8:.1} dB against {off:.1} dB");
+        // The hard ceiling's limiter rides the level smoothly: clamping
+        // instead brought this back to about -45 dB.
+        assert!(x8_hard < off - 50.0, "8x hard ceiling: {x8_hard:.1} dB against {off:.1} dB");
+    }
+
+    #[test]
+    fn the_hard_ceiling_trims_what_the_filter_rounds_over() {
+        let src = sine(1_000.0, SR as usize / 4, 0.9);
+        let ceiling = 10f32.powf(-6.0 / 20.0);
+        let s = ClipperSettings {
+            input_gain_db: 12.0,
+            ceiling_db: -6.0,
+            oversampling: Oversampling::X4,
+            hard_ceiling: false,
+            ..ClipperSettings::default()
+        };
+        let soft = clip(&[&src], SR, &s, &go()).unwrap();
+        assert!(peak(&soft.channels[0]) > ceiling * 1.01, "a band-limited square overshoots");
+        let hard = clip(
+            &[&src],
+            SR,
+            &ClipperSettings {
+                hard_ceiling: true,
+                ..s
+            },
+            &go(),
+        )
+        .unwrap();
+        assert!(peak(&hard.channels[0]) <= ceiling + 1e-6);
+        // Turned down only as far as the overshoot needs.
+        let held = 20.0 * (rms(&hard.channels[0][4_800..]) / rms(&soft.channels[0][4_800..])).log10();
+        assert!(held > -1.5 && held < 0.0, "{held:.2} dB");
+    }
+
+    #[test]
+    fn a_clipper_curve_moves_the_ceiling_where_it_says() {
+        let len = SR as usize;
+        let src = sine(997.0, len, 0.9);
+        let s = ClipperSettings {
+            oversampling: Oversampling::Off,
+            ..ClipperSettings::default()
+        };
+        let plain = clip(&[&src], SR, &s, &go()).unwrap();
+        let mut tracks = Tracks::none();
+        tracks.push(ClipperParam::Ceiling, curve(Scale::Linear, &[(0, s.ceiling_db)]));
+        let same = clip_automated(&[&src], SR, &s, &tracks, 0, &go()).unwrap();
+        assert_eq!(plain.channels, same.channels, "a constant curve is the setting");
+        let mut tracks = Tracks::none();
+        tracks.push(
+            ClipperParam::Ceiling,
+            curve(Scale::Linear, &[(len / 2 - 1, -1.0), (len / 2, -12.0)]),
+        );
+        let y = &clip_automated(&[&src], SR, &s, &tracks, 0, &go()).unwrap().channels[0];
+        assert!((peak(&y[..len / 2 - AUTOMATION_BLOCK]) - 10f32.powf(-1.0 / 20.0)).abs() < 1e-6);
+        assert!((peak(&y[len / 2 + AUTOMATION_BLOCK..]) - 10f32.powf(-12.0 / 20.0)).abs() < 1e-6);
+    }
+
+    /// What each factor costs: ten seconds of stereo through the limiter
+    /// (true peak on) and the clipper. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn oversampling_cost() {
+        let len = SR as usize * 10;
+        let left = sine(997.0, len, 0.9);
+        let right = sine(331.0, len, 0.9);
+        let chans = [left.as_slice(), right.as_slice()];
+        for os in Oversampling::ALL {
+            let lim = LimiterSettings {
+                input_gain_db: 6.0,
+                oversampling: os,
+                ..LimiterSettings::default()
+            };
+            let t = std::time::Instant::now();
+            limit(&chans, SR, &lim, &go()).unwrap();
+            let lim_secs = t.elapsed().as_secs_f64();
+            let clipper = ClipperSettings {
+                input_gain_db: 6.0,
+                oversampling: os,
+                ..ClipperSettings::default()
+            };
+            let t = std::time::Instant::now();
+            clip(&chans, SR, &clipper, &go()).unwrap();
+            let clip_secs = t.elapsed().as_secs_f64();
+            eprintln!(
+                "{:>4}: limiter {lim_secs:.2} s, clipper {clip_secs:.2} s per 10 s of stereo",
+                os.label()
             );
         }
+    }
+
+    #[test]
+    fn the_transfer_curve_is_the_clip() {
+        let s = ClipperSettings {
+            input_gain_db: 6.0,
+            ceiling_db: -3.0,
+            knee_db: 0.0,
+            ..ClipperSettings::default()
+        };
+        assert!((s.transfer_db(-20.0) - -14.0).abs() < 1e-4);
+        assert!((s.transfer_db(-6.0) - -3.0).abs() < 1e-4);
+        assert!((s.transfer_db(0.0) - -3.0).abs() < 1e-4);
+        let soft = ClipperSettings { knee_db: 6.0, ..s };
+        assert!(soft.transfer_db(0.0) < -3.0);
+        assert!((soft.transfer_db(-20.0) - -14.0).abs() < 1e-4, "below the knee");
     }
 
     #[test]
@@ -1590,6 +2591,12 @@ mod tests {
         let stop = AtomicBool::new(true);
         assert!(compress(&[&src], SR, &CompressorSettings::default(), &stop).is_none());
         assert!(limit(&[&src], SR, &LimiterSettings::default(), &stop).is_none());
+        let oversampled = LimiterSettings {
+            oversampling: Oversampling::X4,
+            ..LimiterSettings::default()
+        };
+        assert!(limit(&[&src], SR, &oversampled, &stop).is_none());
+        assert!(clip(&[&src], SR, &ClipperSettings::default(), &stop).is_none());
         assert!(gate(&[&src], SR, &GateSettings::default(), &stop).is_none());
     }
 }

@@ -74,6 +74,21 @@ impl WavesPreviewer {
         }
     }
 
+    /// An audio file to use as the Reverb's impulse response.
+    pub(super) fn pick_ir_file_dialog(&mut self) -> Option<PathBuf> {
+        #[cfg(feature = "kittest")]
+        {
+            return self.test_dialogs.next_files()?.into_iter().next();
+        }
+        #[cfg(not(feature = "kittest"))]
+        {
+            rfd::FileDialog::new()
+                .set_title("Impulse response")
+                .add_filter("Audio", &["wav", "wave", "aif", "aiff", "flac"])
+                .pick_file()
+        }
+    }
+
     pub(super) fn pick_project_open_dialog(&mut self) -> Option<PathBuf> {
         #[cfg(feature = "kittest")]
         {

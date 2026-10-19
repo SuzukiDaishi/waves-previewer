@@ -35,7 +35,7 @@ pub struct DraftSnapshot {
     pub loop_xfade_shape: LoopXfadeShape,
     pub spectral_warp_points: Vec<SpectralWarpPoint>,
     pub spectral_brush_stamps: Vec<SpectralBrushStamp>,
-    /// The EQ / Compressor / Limiter curves (`tool_automation`).
+    /// The EQ / Compressor / Limiter / Clipper curves (`tool_automation`).
     pub automation: Vec<crate::app::tool_automation::AutomationLane>,
 }
 
@@ -166,7 +166,10 @@ impl AnalysisKind {
     pub fn for_tool(tool: ToolKind) -> Option<Self> {
         match tool {
             ToolKind::Eq => Some(AnalysisKind::Spectrum),
-            ToolKind::Compressor | ToolKind::Limiter | ToolKind::NoiseGate => {
+            ToolKind::Compressor
+            | ToolKind::Limiter
+            | ToolKind::Clipper
+            | ToolKind::NoiseGate => {
                 Some(AnalysisKind::Levels)
             }
             _ => None,

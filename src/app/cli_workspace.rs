@@ -414,7 +414,16 @@ impl CliWorkspace {
                     "DeNoise is interactive-only (the noise profile is learned in the editor)"
                 )
             }
-            ToolKind::NoiseGate | ToolKind::Eq | ToolKind::Compressor | ToolKind::Limiter => {
+            ToolKind::Reverb => {
+                anyhow::bail!(
+                    "Reverb is interactive-only for now (its impulse response is loaded in the editor)"
+                )
+            }
+            ToolKind::NoiseGate
+            | ToolKind::Eq
+            | ToolKind::Compressor
+            | ToolKind::Limiter
+            | ToolKind::Clipper => {
                 if !self.app.editor_apply_tool_whole(tab_idx, active_tool) {
                     bail!("{:?} changed nothing with these settings", active_tool);
                 }

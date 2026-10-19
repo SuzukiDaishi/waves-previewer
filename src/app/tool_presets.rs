@@ -3,7 +3,9 @@
 //! takes it back and the auto preview plays it at once. Rules only.
 
 use super::types::{ToolKind, ToolState};
-use crate::dynamics::{CompressorSettings, Detection, GateSettings, LimiterSettings};
+use crate::dynamics::{ClipperSettings, CompressorSettings, Detection, GateSettings, LimiterSettings};
+use crate::oversample::Oversampling;
+use crate::reverb::ReverbSettings;
 use crate::eq::{CutSlope, EqBand, EqChannelMode, EqKind, ParametricEqParams};
 
 /// One named setting.
@@ -18,6 +20,8 @@ pub fn presets(tool: ToolKind) -> &'static [ToolPreset] {
         ToolKind::Eq => EQ,
         ToolKind::Compressor => COMPRESSOR,
         ToolKind::Limiter => LIMITER,
+        ToolKind::Clipper => CLIPPER,
+        ToolKind::Reverb => REVERB,
         ToolKind::NoiseGate => GATE,
         _ => &[],
     }
@@ -194,6 +198,80 @@ static LIMITER: &[ToolPreset] = &[
             }
         },
     },
+    ToolPreset {
+        name: "Loud, clean (8x)",
+        apply: |st| {
+            st.limiter = LimiterSettings {
+                input_gain_db: 9.0,
+                release_ms: 20.0,
+                lookahead_ms: 2.0,
+                oversampling: Oversampling::X8,
+                ..LimiterSettings::default()
+            }
+        },
+    },
+];
+
+static CLIPPER: &[ToolPreset] = &[
+    ToolPreset {
+        name: "Safety -1 dB",
+        apply: |st| st.clipper = ClipperSettings::default(),
+    },
+    ToolPreset {
+        name: "Soft knee",
+        apply: |st| {
+            st.clipper = ClipperSettings {
+                input_gain_db: 3.0,
+                knee_db: 3.0,
+                ..ClipperSettings::default()
+            }
+        },
+    },
+    ToolPreset {
+        name: "Drums, before a limiter (8x)",
+        apply: |st| {
+            st.clipper = ClipperSettings {
+                input_gain_db: 4.0,
+                ceiling_db: -0.3,
+                oversampling: Oversampling::X8,
+                hard_ceiling: false,
+                ..ClipperSettings::default()
+            }
+        },
+    },
+];
+
+// The Reverb's presets keep the IR: they are about how it is used.
+static REVERB: &[ToolPreset] = &[
+    ToolPreset {
+        name: "Ambience",
+        apply: |st| {
+            st.reverb = ReverbSettings {
+                ir: st.reverb.ir,
+                mix_pct: 15.0,
+                low_cut_hz: 250.0,
+                length_pct: 60.0,
+                ..ReverbSettings::default()
+            }
+        },
+    },
+    ToolPreset {
+        name: "Room",
+        apply: |st| st.reverb = ReverbSettings { ir: st.reverb.ir, ..ReverbSettings::default() },
+    },
+    ToolPreset {
+        name: "Wash",
+        apply: |st| {
+            st.reverb = ReverbSettings {
+                ir: st.reverb.ir,
+                mix_pct: 60.0,
+                predelay_ms: 30.0,
+                high_cut_hz: 8_000.0,
+                width_pct: 140.0,
+                ..ReverbSettings::default()
+            }
+        },
+    },
 ];
 
 static GATE: &[ToolPreset] = &[
@@ -251,6 +329,8 @@ mod tests {
             ToolKind::Eq,
             ToolKind::Compressor,
             ToolKind::Limiter,
+            ToolKind::Clipper,
+            ToolKind::Reverb,
             ToolKind::NoiseGate,
         ] {
             assert!(!presets(tool).is_empty(), "{tool:?}");
@@ -264,6 +344,8 @@ mod tests {
                         back.compressor = ToolState::default_values().compressor
                     }
                     ToolKind::Limiter => back.limiter = ToolState::default_values().limiter,
+                    ToolKind::Clipper => back.clipper = ToolState::default_values().clipper,
+                    ToolKind::Reverb => back.reverb = ToolState::default_values().reverb,
                     _ => back.gate = ToolState::default_values().gate,
                 }
                 assert_eq!(back, ToolState::default_values(), "{}", preset.name);

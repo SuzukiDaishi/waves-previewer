@@ -1,5 +1,5 @@
 //! Breakpoint curves on the waveform canvas: the Gain and Pitch Shift
-//! curves and the EQ / Compressor / Limiter automation lanes. One editor and
+//! curves and the EQ / Compressor / Limiter / Clipper automation lanes. One editor and
 //! one painter, so every curve answers the pointer the same way --
 //! double-click empty space to add a point, double-click a point to remove
 //! it, drag a point (kept between its neighbours); a plain click still

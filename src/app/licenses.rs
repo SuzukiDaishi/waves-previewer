@@ -568,6 +568,33 @@ mod tests {
         }
     }
 
+    /// The IR library is quoted under its own key: the first pooled "MIT"
+    /// text is somebody else's copyright line, and the library's notice is
+    /// the one condition its licence sets. NeoWaves ships its files (the
+    /// installer's selection), so its notice has to reach the reader.
+    #[test]
+    fn the_ir_library_carries_its_own_notice() {
+        let manifest = manifest();
+        let library = manifest
+            .components
+            .iter()
+            .find(|c| c.name == "Conner's Impulse Response Library")
+            .expect("the IR library is missing from the licence snapshot");
+        assert_eq!(library.kind, "data");
+        let text: String = library
+            .license_keys
+            .iter()
+            .filter_map(|key| manifest.license(key))
+            .map(|license| license.text.as_str())
+            .collect();
+        assert!(text.contains("Copyright (c) 2022 Conner"), "{text}");
+        assert!(text.contains("Permission is hereby granted"));
+        assert!(
+            library.note.as_deref().is_some_and(|n| n.contains("assets/ir/bundled.txt")),
+            "the note says which files ship"
+        );
+    }
+
     /// Every flag still has to explain itself, whatever its level.
     #[test]
     fn flags_are_explained() {

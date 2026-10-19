@@ -231,7 +231,7 @@ impl WavesPreviewer {
         let fmt = |samples: usize| crate::app::helpers::format_time_s(samples as f32 / sr);
         let has_selection = Self::editor_selected_range(tab).is_some();
         let extra = tab.extra_selections.len();
-        let channel_text = if spec.changes_length {
+        let channel_text = if spec.changes_length && !spec.honors_channel_view {
             "All channels (the length changes)".to_string()
         } else if spec.honors_channel_view {
             Self::editor_channel_mask_label(tab).unwrap_or_else(|| "All channels".to_string())

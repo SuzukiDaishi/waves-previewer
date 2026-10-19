@@ -1795,6 +1795,8 @@ pub enum ToolKind {
     Eq,
     Compressor,
     Limiter,
+    Clipper,
+    Reverb,
     MusicAnalyze,
     PluginFx,
     SpectralWarp,
@@ -2172,6 +2174,8 @@ impl ToolState {
             eq: crate::eq::ParametricEqParams::default(),
             compressor: crate::dynamics::CompressorSettings::default(),
             limiter: crate::dynamics::LimiterSettings::default(),
+            clipper: crate::dynamics::ClipperSettings::default(),
+            reverb: crate::reverb::ReverbSettings::default(),
             gate: crate::dynamics::GateSettings::default(),
             insert_silence_ms: 1000.0,
             trim_mode: 2,
@@ -2254,6 +2258,9 @@ pub struct ToolState {
     /// The dynamics tools (`crate::dynamics`).
     pub compressor: crate::dynamics::CompressorSettings,
     pub limiter: crate::dynamics::LimiterSettings,
+    pub clipper: crate::dynamics::ClipperSettings,
+    /// The convolution reverb (`crate::reverb`), the IR it uses included.
+    pub reverb: crate::reverb::ReverbSettings,
     pub gate: crate::dynamics::GateSettings,
     pub insert_silence_ms: f32,
     /// What the Trim tool's Apply does with the selection: 0 cut it out,
@@ -3341,6 +3348,9 @@ pub struct EditorTab {
     pub automation_selected: Option<crate::app::tool_automation::AutoParam>,
     /// Index of the point being dragged in that lane (transient).
     pub automation_drag: Option<usize>,
+    /// The IR the Reverb's settings name, loaded at the buffer's rate
+    /// (`reverb_ops`). A cache of that choice, not part of the draft.
+    pub reverb_ir: Option<std::sync::Arc<crate::impulse::ImpulseResponse>>,
     // --- Canvas gesture state for PitchShift (transient) ---
     pub pitch_drag_active: bool, // dragging the static pitch line up/down
     // --- Spectral warp (image-like frequency warp on Spec/Log views, transient) ---
@@ -3663,6 +3673,7 @@ impl EditorTab {
             pitch_env_points: Vec::new(),
             pitch_env_drag: None,
             automation: Vec::new(),
+            reverb_ir: None,
             automation_selected: None,
             automation_drag: None,
             pitch_drag_active: false,

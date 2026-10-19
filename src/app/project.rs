@@ -974,6 +974,10 @@ pub struct ProjectToolState {
     #[serde(default)]
     pub limiter_settings: Option<crate::dynamics::LimiterSettings>,
     #[serde(default)]
+    pub clipper_settings: Option<crate::dynamics::ClipperSettings>,
+    #[serde(default)]
+    pub reverb_settings: Option<crate::reverb::ReverbSettings>,
+    #[serde(default)]
     pub gate_settings: Option<crate::dynamics::GateSettings>,
 }
 
@@ -1103,6 +1107,8 @@ impl From<&super::types::ToolState> for ProjectToolState {
             eq_parametric: Some(t.eq),
             compressor_settings: Some(t.compressor),
             limiter_settings: Some(t.limiter),
+            clipper_settings: Some(t.clipper),
+            reverb_settings: Some(t.reverb),
             gate_settings: Some(t.gate),
         }
     }
@@ -2341,6 +2347,8 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         eq: t.eq_parametric.unwrap_or_else(|| legacy_parametric_eq(t)),
         compressor: t.compressor_settings.unwrap_or_else(|| legacy_compressor(t)),
         limiter: t.limiter_settings.unwrap_or_default(),
+        clipper: t.clipper_settings.unwrap_or_default(),
+        reverb: t.reverb_settings.unwrap_or_default(),
         gate: t.gate_settings.unwrap_or_else(|| legacy_gate(t)),
         pan_mode: t.pan_mode,
         pan_balance: t.pan_balance.clamp(-1.0, 1.0),
@@ -2748,6 +2756,8 @@ mod tests {
         old.eq_parametric = None;
         old.compressor_settings = None;
         old.limiter_settings = None;
+        old.clipper_settings = None;
+        old.reverb_settings = None;
         old.gate_settings = None;
         old.eq_low_shelf_gain_db = -3.0;
         old.eq_mid_freq_hz = 700.0;
@@ -2768,6 +2778,13 @@ mod tests {
         assert_eq!(st.gate.threshold_db, -33.0);
         assert_eq!(st.gate.hysteresis_db, 0.0, "the old gate had none");
         assert_eq!(st.limiter, crate::dynamics::LimiterSettings::default());
+        assert_eq!(
+            st.limiter.oversampling,
+            crate::oversample::Oversampling::Off,
+            "an old session's limiter renders as it did"
+        );
+        assert_eq!(st.clipper, crate::dynamics::ClipperSettings::default());
+        assert_eq!(st.reverb, crate::reverb::ReverbSettings::default());
 
         // A new session writes the old fields too, for an older build.
         let mut st2 = ToolState::default_values();

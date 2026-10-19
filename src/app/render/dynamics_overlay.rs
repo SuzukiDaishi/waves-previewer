@@ -1,5 +1,5 @@
 //! The dynamics tools on the waveform itself: each tool's level lines
-//! (threshold, close, the limiter's onset) as +/- amplitude lines across
+//! (threshold, close, where the limiter or clipper starts) as +/- amplitude lines across
 //! every lane, and the gain the rendered preview takes, hanging from the top
 //! of the waveform over the target -- so where the compressor works, the
 //! limiter catches and the gate shuts is seen against the audio.
@@ -48,6 +48,16 @@ impl DynamicsOverlay {
                 false,
                 24.0,
             ),
+            // Where the source starts being cut, and where a soft knee
+            // starts bending it.
+            ToolKind::Clipper => {
+                let c = &st.clipper;
+                let mut lines = vec![(c.ceiling_db - c.input_gain_db, CEILING)];
+                if c.knee_db > 0.0 {
+                    lines.push((c.ceiling_db - c.knee_db - c.input_gain_db, THRESHOLD));
+                }
+                (lines, false, c.gr_scale_db())
+            }
             ToolKind::NoiseGate => (
                 vec![
                     (st.gate.threshold_db, THRESHOLD),

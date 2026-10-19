@@ -8,7 +8,7 @@ use egui::{Color32, CursorIcon, Mesh, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::app::render::mini_meter::SPECTRUM_DB_FLOOR;
 use crate::app::tool_session::LiveMeters;
-use crate::dynamics::{CompressorSettings, DynamicsTrace, GateSettings};
+use crate::dynamics::{ClipperSettings, CompressorSettings, DynamicsTrace, GateSettings};
 use crate::eq::{EqBand, EqChannelMode, EqKind, ParametricEqParams, EQ_MAX_BANDS};
 
 const BG: Color32 = Color32::from_rgb(19, 21, 26);
@@ -619,12 +619,14 @@ fn dyn_y_db(r: Rect, y: f32) -> f32 {
 pub(in crate::app) enum Transfer<'a> {
     Compressor(&'a mut CompressorSettings),
     Gate(&'a mut GateSettings),
+    Clipper(&'a mut ClipperSettings),
 }
 
 /// Input level (x) to output level (y), with how often each input level
 /// occurs over the target along the bottom and the level playing now as a
 /// dot. Handles: the compressor's threshold, ratio and knee width; the
-/// gate's open and close thresholds and its floor.
+/// gate's open and close thresholds and its floor; the clipper's corner
+/// (ceiling up and down, input gain sideways) and its knee.
 pub(in crate::app) fn transfer_plot(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -794,6 +796,9 @@ pub(in crate::app) fn transfer_plot(
                 );
             }
         }
+        Transfer::Clipper(s) => {
+            clipper_transfer(ui, &painter, &resp, r, s, &mut grab, live_in_db, &mut edit);
+        }
         Transfer::Gate(s) => {
             let floor = s.range_db;
             let close = s.close_db();
@@ -918,6 +923,105 @@ pub(in crate::app) fn transfer_plot(
         });
     }
     edit
+}
+
+/// The clipper's curve on a transfer plot: the ceiling, the knee shaded,
+/// and its two handles.
+#[allow(clippy::too_many_arguments)]
+fn clipper_transfer(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    resp: &egui::Response,
+    r: Rect,
+    s: &mut ClipperSettings,
+    grab: &mut Option<u8>,
+    live_in_db: Option<f32>,
+    edit: &mut PlotEdit,
+) {
+    let steps = 160usize;
+    // Where the source reaches the ceiling, and where the knee starts.
+    let corner_in = s.ceiling_db - s.input_gain_db;
+    let knee_in = corner_in - s.knee_db;
+    if s.knee_db > 0.0 {
+        painter.rect_filled(
+            Rect::from_x_y_ranges(dyn_x(r, knee_in)..=dyn_x(r, corner_in), r.y_range()),
+            0.0,
+            Color32::from_rgba_premultiplied(20, 20, 8, 24),
+        );
+    }
+    painter.add(egui::Shape::dashed_line(
+        &[
+            Pos2::new(r.left(), dyn_y(r, s.ceiling_db)),
+            Pos2::new(r.right(), dyn_y(r, s.ceiling_db)),
+        ],
+        Stroke::new(1.0, GR_LINE.gamma_multiply(0.6)),
+        5.0,
+        3.0,
+    ));
+    let curve: Vec<Pos2> = (0..=steps)
+        .map(|i| {
+            let db = DYN_LO + i as f32 / steps as f32 * (DYN_HI - DYN_LO);
+            Pos2::new(dyn_x(r, db), dyn_y(r, s.transfer_db(db)))
+        })
+        .collect();
+    painter.add(egui::Shape::line(curve, Stroke::new(2.0, CURVE)));
+    let corner = Pos2::new(dyn_x(r, corner_in), dyn_y(r, s.ceiling_db));
+    let knee = Pos2::new(dyn_x(r, knee_in), dyn_y(r, s.transfer_db(knee_in)) + 10.0);
+    let pts = [corner, knee];
+    if resp.drag_started() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            *grab = pts
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (i as u8, p.distance(pos)))
+                .filter(|(_, d)| *d <= HANDLE_HIT)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i);
+            edit.began = grab.is_some();
+        }
+    }
+    if let (true, Some(which), Some(pos)) = (resp.dragged(), *grab, resp.interact_pointer_pos()) {
+        if which == 0 {
+            s.ceiling_db = dyn_y_db(r, pos.y).clamp(
+                *ClipperSettings::CEILING_DB.start(),
+                *ClipperSettings::CEILING_DB.end(),
+            );
+            s.input_gain_db = (s.ceiling_db - dyn_x_db(r, pos.x)).clamp(
+                *ClipperSettings::INPUT_GAIN_DB.start(),
+                *ClipperSettings::INPUT_GAIN_DB.end(),
+            );
+        } else {
+            s.knee_db = (s.ceiling_db - s.input_gain_db - dyn_x_db(r, pos.x)).clamp(
+                *ClipperSettings::KNEE_DB.start(),
+                *ClipperSettings::KNEE_DB.end(),
+            );
+        }
+        edit.changed = true;
+    }
+    let hover = resp.hover_pos();
+    for (i, (p, color)) in [(corner, BAND_COLORS[0]), (knee, BAND_COLORS[1])]
+        .into_iter()
+        .enumerate()
+    {
+        let active = *grab == Some(i as u8) || hover.is_some_and(|h| h.distance(p) <= HANDLE_HIT);
+        painter.circle_filled(p, if active { 6.5 } else { 5.0 }, color);
+        painter.circle_stroke(
+            p,
+            if active { 6.5 } else { 5.0 },
+            Stroke::new(1.5, Color32::from_rgb(14, 14, 18)),
+        );
+        if active {
+            let text = if i == 0 {
+                format!("Ceiling {:.1} dB · Input +{:.1} dB", s.ceiling_db, s.input_gain_db)
+            } else {
+                format!("Knee {:.1} dB", s.knee_db)
+            };
+            tag(painter, ui, r, p, text);
+        }
+    }
+    if let Some(db) = live_in_db.filter(|db| *db > DYN_LO) {
+        painter.circle_filled(Pos2::new(dyn_x(r, db), dyn_y(r, s.transfer_db(db))), 4.0, LIVE_DOT);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,6 +1245,85 @@ pub(in crate::app) fn history_plot(
         });
     }
     (edit, moved)
+}
+
+// ---------------------------------------------------------------------------
+// Reverb: the impulse response
+
+const IR_LO_DB: f32 = -90.0;
+
+/// An impulse response as the settings use it: its envelope (dB) over time,
+/// after the pre-delay (shaded), reversed when it is, with the point where
+/// Length cuts it.
+pub(in crate::app) fn ir_plot(
+    ui: &mut egui::Ui,
+    ir: &crate::impulse::ImpulseResponse,
+    s: &crate::reverb::ReverbSettings,
+    size: Vec2,
+) {
+    let (_resp, painter, r) = frame(ui, size);
+    let sr = ir.buffer_sr.max(1) as f32;
+    let predelay = s.predelay_ms.max(0.0) / 1000.0;
+    let ir_secs = ir.frames() as f32 / sr;
+    let total = (predelay + ir_secs).max(0.01);
+    let x_of = |secs: f32| r.left() + (secs / total).clamp(0.0, 1.0) * r.width();
+    let y_of =
+        |db: f32| r.bottom() - ((db - IR_LO_DB) / -IR_LO_DB).clamp(0.0, 1.0) * r.height();
+    for db in [-30.0f32, -60.0] {
+        hline(&painter, r, y_of(db), GRID);
+        label_at(
+            &painter,
+            ui,
+            Pos2::new(r.left() + 2.0, y_of(db) - 1.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{db:.0}"),
+            LABEL,
+        );
+    }
+    if predelay > 0.0 {
+        painter.rect_filled(
+            Rect::from_x_y_ranges(r.left()..=x_of(predelay), r.y_range()),
+            0.0,
+            CLOSED_SHADE,
+        );
+    }
+    let hop_secs = ir.envelope_hop as f32 / sr;
+    let points = ir.envelope_db.len();
+    let env = |i: usize| {
+        if s.reverse {
+            ir.envelope_db[points - 1 - i]
+        } else {
+            ir.envelope_db[i]
+        }
+    };
+    let curve: Vec<Pos2> = (0..points)
+        .map(|i| Pos2::new(x_of(predelay + i as f32 * hop_secs), y_of(env(i))))
+        .collect();
+    fill_to(&painter, &curve, r.bottom(), INPUT_FILL);
+    painter.add(egui::Shape::line(curve, Stroke::new(1.4, CURVE)));
+    let kept = ir_secs * s.length_pct.clamp(0.0, 100.0) / 100.0;
+    if kept < ir_secs {
+        let x = x_of(predelay + kept);
+        painter.add(egui::Shape::dashed_line(
+            &[Pos2::new(x, r.top()), Pos2::new(x, r.bottom())],
+            Stroke::new(1.2, GR_LINE),
+            5.0,
+            3.0,
+        ));
+        painter.rect_filled(
+            Rect::from_x_y_ranges(x..=r.right(), r.y_range()),
+            0.0,
+            CLOSED_SHADE,
+        );
+    }
+    label_at(
+        &painter,
+        ui,
+        Pos2::new(r.right() - 2.0, r.top() + 1.0),
+        egui::Align2::RIGHT_TOP,
+        format!("{:.2} s", predelay + kept),
+        LABEL,
+    );
 }
 
 // ---------------------------------------------------------------------------

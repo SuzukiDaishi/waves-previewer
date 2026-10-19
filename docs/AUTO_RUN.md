@@ -65,8 +65,15 @@ A key names a field of the session's tool settings (`ProjectToolState` in
     `threshold_db`, `ratio`, `knee_db`, `attack_ms`, `release_ms`,
     `lookahead_ms`, `makeup_db`, `auto_makeup`, `mix_pct`, `range_db`,
     `detection`, `rms_ms`, `link_pct`, `sidechain_hpf_hz`.
-  - `limiter.` is the limiter: `input_gain_db`, `ceiling_db`, `release_ms`,
-    `lookahead_ms`, `true_peak`, `link`.
+  - `limiter.` is the Brickwall Limiter: `input_gain_db`, `ceiling_db`,
+    `release_ms`, `lookahead_ms`, `true_peak`, `link`, `oversampling`.
+  - `clipper.` is the Clipper: `input_gain_db`, `ceiling_db`, `knee_db`,
+    `oversampling`, `hard_ceiling`.
+  - `reverb.` is the Reverb: `ir`, `mix_pct`, `output_db`, `width_pct`,
+    `low_cut_hz`, `high_cut_hz` (0 is off), `predelay_ms`, `length_pct`,
+    `reverse`, `normalize`, `tail`. `ir` is `lib:<path inside the IR
+    library>` (`set reverb.ir lib:Rooms/Commercial/Hotels/Ballrooms/Royal Ballroom.wav`)
+    or `file:<path>`; the rest of the line is the value, spaces and all.
   - `gate.` is the noise gate: `threshold_db`, `hysteresis_db`, `range_db`,
     `attack_ms`, `hold_ms`, `release_ms`, `lookahead_ms`, `detection`,
     `rms_ms`, `link_pct`, `key_hpf_hz`, `key_lpf_hz`.
@@ -77,6 +84,8 @@ A key names a field of the session's tool settings (`ProjectToolState` in
   - `slope`: `db12` ... `db48`
   - `mode`: `stereo`, `mid`, `side`
   - `detection`: `peak`, `rms`
+  - `oversampling`: `off`, `x2`, `x4`, `x8`, `x16`
+  - `tail`: `extend`, `overlap`, `cut`
 - A whole band can be set at once. The fields left out take their defaults:
   `set eq.bands.3 {"enabled":true,"kind":"low_cut","freq_hz":80}`
 - An unknown key is refused, and the error lists the keys that exist there.

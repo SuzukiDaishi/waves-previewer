@@ -7,6 +7,7 @@ mod basic;
 mod dynamics;
 mod edit;
 mod loop_markers;
+mod reverb;
 mod spectral;
 
 use crate::app::inspector_ops::InspectorAction;
@@ -35,6 +36,8 @@ pub(super) fn panel(
         ToolKind::Eq => dynamics::eq(app, ui, tab_idx, g, actions),
         ToolKind::Compressor => dynamics::compressor(app, ui, tab_idx, g, actions),
         ToolKind::Limiter => dynamics::limiter(app, ui, tab_idx, g, actions),
+        ToolKind::Clipper => dynamics::clipper(app, ui, tab_idx, g, actions),
+        ToolKind::Reverb => reverb::reverb(app, ui, tab_idx, g, actions),
         ToolKind::NoiseGate => dynamics::gate(app, ui, tab_idx, g, actions),
         ToolKind::DeClick | ToolKind::DeClip => basic::declick(app, ui, tab_idx, g, actions, tool),
         ToolKind::DeHum => basic::dehum(app, ui, tab_idx, g, actions),

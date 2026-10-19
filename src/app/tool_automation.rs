@@ -1,4 +1,4 @@
-//! Automation of the EQ, Compressor and Limiter as rules, with no UI: which
+//! Automation of the EQ, Compressor, Limiter, Clipper and Reverb as rules, with no UI: which
 //! of a tool's settings can follow a curve (`AutoParam`), what each is
 //! called and how it is drawn (unit, range, scale), the curves a tab holds
 //! (`AutomationLane`), and the `Tracks` its render runs with. The DSP side
@@ -16,15 +16,19 @@ use std::ops::RangeInclusive;
 use super::tool_render::TimeMap;
 use super::types::{EditorTab, ToolKind, ToolState};
 use crate::automation::{Automatable, Curve, Scale, Tracks};
-use crate::dynamics::{CompParam, LimiterParam};
+use crate::dynamics::{ClipperParam, CompParam, LimiterParam};
 use crate::eq::{EqKind, EqParam, EQ_MAX_BANDS};
+use crate::reverb::ReverbParam;
 
-/// A setting of the EQ, Compressor or Limiter that can follow a curve.
+/// A setting of the EQ, Compressor, Limiter, Clipper or Reverb that can
+/// follow a curve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AutoParam {
     Eq(EqParam),
     Comp(CompParam),
     Limiter(LimiterParam),
+    Clipper(ClipperParam),
+    Reverb(ReverbParam),
 }
 
 /// One automated setting on a tab: its curve, and whether the curve is in
@@ -50,6 +54,8 @@ impl AutoParam {
             AutoParam::Eq(_) => ToolKind::Eq,
             AutoParam::Comp(_) => ToolKind::Compressor,
             AutoParam::Limiter(_) => ToolKind::Limiter,
+            AutoParam::Clipper(_) => ToolKind::Clipper,
+            AutoParam::Reverb(_) => ToolKind::Reverb,
         }
     }
 
@@ -62,6 +68,11 @@ impl AutoParam {
                 .into_iter()
                 .map(AutoParam::Limiter)
                 .collect(),
+            ToolKind::Clipper => ClipperParam::ALL
+                .into_iter()
+                .map(AutoParam::Clipper)
+                .collect(),
+            ToolKind::Reverb => ReverbParam::ALL.into_iter().map(AutoParam::Reverb).collect(),
             ToolKind::Eq => {
                 let mut out = Vec::new();
                 if let Some(band) = st.eq.bands.get(eq_band).filter(|b| b.enabled) {
@@ -115,12 +126,27 @@ impl AutoParam {
                 LimiterParam::Ceiling => "Ceiling",
                 LimiterParam::Release => "Release",
             },
+            AutoParam::Clipper(p) => match p {
+                ClipperParam::InputGain => "Input",
+                ClipperParam::Ceiling => "Ceiling",
+                ClipperParam::Knee => "Knee",
+            },
+            AutoParam::Reverb(p) => match p {
+                ReverbParam::Mix => "Mix",
+                ReverbParam::Output => "Output",
+                ReverbParam::Width => "Width",
+                ReverbParam::LowCut => "Low cut",
+                ReverbParam::HighCut => "High cut",
+            },
         }
     }
 
     pub fn unit(self) -> &'static str {
         match self {
-            AutoParam::Eq(EqParam::Freq(_)) | AutoParam::Comp(CompParam::SidechainHpf) => " Hz",
+            AutoParam::Eq(EqParam::Freq(_))
+            | AutoParam::Comp(CompParam::SidechainHpf)
+            | AutoParam::Reverb(ReverbParam::LowCut | ReverbParam::HighCut) => " Hz",
+            AutoParam::Reverb(ReverbParam::Mix | ReverbParam::Width) => " %",
             AutoParam::Eq(EqParam::Q(_)) => "",
             AutoParam::Comp(CompParam::Ratio) => ":1",
             AutoParam::Comp(CompParam::Mix | CompParam::Link) => " %",
@@ -134,7 +160,10 @@ impl AutoParam {
         match self {
             AutoParam::Eq(EqParam::Freq(_))
             | AutoParam::Comp(CompParam::SidechainHpf | CompParam::Mix | CompParam::Link)
-            | AutoParam::Limiter(LimiterParam::Release) => 0,
+            | AutoParam::Limiter(LimiterParam::Release)
+            | AutoParam::Reverb(
+                ReverbParam::Mix | ReverbParam::Width | ReverbParam::LowCut | ReverbParam::HighCut,
+            ) => 0,
             AutoParam::Eq(EqParam::Q(_)) => 2,
             _ => 1,
         }
@@ -145,6 +174,8 @@ impl AutoParam {
             AutoParam::Eq(p) => p.scale(),
             AutoParam::Comp(p) => p.scale(),
             AutoParam::Limiter(p) => p.scale(),
+            AutoParam::Clipper(p) => p.scale(),
+            AutoParam::Reverb(p) => p.scale(),
         }
     }
 
@@ -160,6 +191,8 @@ impl AutoParam {
             }
             AutoParam::Comp(p) => p.range(),
             AutoParam::Limiter(p) => p.range(),
+            AutoParam::Clipper(p) => p.range(),
+            AutoParam::Reverb(p) => p.range(),
         }
     }
 
@@ -169,6 +202,8 @@ impl AutoParam {
             AutoParam::Eq(p) => st.eq.param(p),
             AutoParam::Comp(p) => st.compressor.param(p),
             AutoParam::Limiter(p) => st.limiter.param(p),
+            AutoParam::Clipper(p) => st.clipper.param(p),
+            AutoParam::Reverb(p) => st.reverb.param(p),
         }
     }
 
@@ -330,6 +365,20 @@ pub fn limiter_tracks(tab: &EditorTab) -> Tracks<LimiterParam> {
     })
 }
 
+pub fn clipper_tracks(tab: &EditorTab) -> Tracks<ClipperParam> {
+    tracks(tab, |p| match p {
+        AutoParam::Clipper(p) => Some(p),
+        _ => None,
+    })
+}
+
+pub fn reverb_tracks(tab: &EditorTab) -> Tracks<ReverbParam> {
+    tracks(tab, |p| match p {
+        AutoParam::Reverb(p) => Some(p),
+        _ => None,
+    })
+}
+
 /// The tool's settings at `sample`, curves applied: what the Inspector
 /// shows while the playhead is there.
 pub fn tool_state_at(tab: &EditorTab, sample: usize) -> ToolState {
@@ -338,6 +387,8 @@ pub fn tool_state_at(tab: &EditorTab, sample: usize) -> ToolState {
         st.eq = crate::automation::settings_at(&st.eq, &eq_tracks(tab), sample);
         st.compressor = crate::automation::settings_at(&st.compressor, &comp_tracks(tab), sample);
         st.limiter = crate::automation::settings_at(&st.limiter, &limiter_tracks(tab), sample);
+        st.clipper = crate::automation::settings_at(&st.clipper, &clipper_tracks(tab), sample);
+        st.reverb = crate::automation::settings_at(&st.reverb, &reverb_tracks(tab), sample);
     }
     st
 }
@@ -398,6 +449,18 @@ pub fn merge_unautomated(tab: &mut EditorTab, before: &ToolState, shown: &ToolSt
             tab.tool_state.limiter.set_param(p, now);
         }
     }
+    for p in ClipperParam::ALL {
+        let (was, now) = (before.clipper.param(p), shown.clipper.param(p));
+        if was != now && keep(AutoParam::Clipper(p)) {
+            tab.tool_state.clipper.set_param(p, now);
+        }
+    }
+    for p in ReverbParam::ALL {
+        let (was, now) = (before.reverb.param(p), shown.reverb.param(p));
+        if was != now && keep(AutoParam::Reverb(p)) {
+            tab.tool_state.reverb.set_param(p, now);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -413,6 +476,8 @@ mod tests {
         let st = ToolState::default_values();
         assert_eq!(AutoParam::for_tool(ToolKind::Compressor, 0, &st).len(), 11);
         assert_eq!(AutoParam::for_tool(ToolKind::Limiter, 0, &st).len(), 3);
+        assert_eq!(AutoParam::for_tool(ToolKind::Clipper, 0, &st).len(), 3);
+        assert_eq!(AutoParam::for_tool(ToolKind::Reverb, 0, &st).len(), 5);
         // The default EQ's band 2 is a bell: freq, gain, Q, then the output.
         let eq = AutoParam::for_tool(ToolKind::Eq, 1, &st);
         assert_eq!(

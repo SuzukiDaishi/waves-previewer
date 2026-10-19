@@ -28,7 +28,7 @@
 //! `set` names a field of the session's tool settings (`ProjectToolState`),
 //! so every setting of every tool is reachable without a command per tool:
 //! `gain_db`, `pitch_semitones`, `compressor.threshold_db`,
-//! `eq.bands.3.freq_hz`, `gate.detection`. `compressor.`, `limiter.`,
+//! `eq.bands.3.freq_hz`, `gate.detection`. `compressor.`, `limiter.`, `clipper.`, `reverb.`,
 //! `gate.` and `eq.` stand for the settings structs the session stores;
 //! array elements are numbered from 0. A value is JSON when it parses as JSON
 //! (`-30`, `true`, `{"enabled":true,"kind":"low_cut"}`) and a string
@@ -217,6 +217,8 @@ fn session_path(key: &str) -> Vec<String> {
             "eq" => Some("eq_parametric"),
             "compressor" | "comp" => Some("compressor_settings"),
             "limiter" => Some("limiter_settings"),
+            "clipper" => Some("clipper_settings"),
+            "reverb" => Some("reverb_settings"),
             "gate" | "noise_gate" => Some("gate_settings"),
             _ => None,
         };
@@ -417,6 +419,18 @@ mod tests {
         assert_eq!(st.gate.detection, crate::dynamics::Detection::Rms);
         set_tool_setting(&mut st, "limiter.true_peak", "false").unwrap();
         assert!(!st.limiter.true_peak);
+        set_tool_setting(&mut st, "limiter.oversampling", "x8").unwrap();
+        assert_eq!(st.limiter.oversampling, crate::oversample::Oversampling::X8);
+        set_tool_setting(&mut st, "clipper.knee_db", "3").unwrap();
+        assert_eq!(st.clipper.knee_db, 3.0);
+        assert!(set_tool_setting(&mut st, "clipper.oversampling", "x3").is_err());
+        set_tool_setting(&mut st, "reverb.ir", "lib:Plates/A Plate.wav").unwrap();
+        assert_eq!(
+            st.reverb.ir.map(crate::impulse::IrId::get),
+            Some(crate::impulse::IrRef::Library("Plates/A Plate.wav".into()))
+        );
+        set_tool_setting(&mut st, "reverb.tail", "cut").unwrap();
+        assert_eq!(st.reverb.tail, crate::reverb::ReverbTail::Cut);
         set_tool_setting(
             &mut st,
             "eq.bands.4",

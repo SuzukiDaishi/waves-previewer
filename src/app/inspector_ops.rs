@@ -660,6 +660,18 @@ impl WavesPreviewer {
                 st.limiter = d.limiter;
                 tab.automation.retain(|l| l.param.tool() != ToolKind::Limiter);
             }
+            ToolKind::Clipper => {
+                st.clipper = d.clipper;
+                tab.automation.retain(|l| l.param.tool() != ToolKind::Clipper);
+            }
+            // The IR stays: Reset is about how it is used.
+            ToolKind::Reverb => {
+                st.reverb = crate::reverb::ReverbSettings {
+                    ir: st.reverb.ir,
+                    ..d.reverb
+                };
+                tab.automation.retain(|l| l.param.tool() != ToolKind::Reverb);
+            }
             ToolKind::DeClick => st.declick_sensitivity = d.declick_sensitivity,
             ToolKind::DeClip => st.declip_sensitivity = d.declip_sensitivity,
             ToolKind::DeHum => {

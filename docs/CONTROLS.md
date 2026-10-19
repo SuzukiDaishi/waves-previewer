@@ -118,7 +118,7 @@
   - **対象バー**: 選択範囲 / ファイル全体 / 挿入位置、対象のチャンネル、周波数帯。▶ で対象範囲だけを再生
   - 設定
   - **固定フッター**: いま聞こえている音、Auto、Preview / A/B、Discard / Apply
-- **EQ / Compressor / Limiter / Noise Gate**（EQ/Dynamics カテゴリ）
+- **EQ / Compressor / Brickwall Limiter / Clipper / Noise Gate**（EQ/Dynamics カテゴリ）
   - EQ は最大 8 バンド。
     - グラフをダブルクリックでバンドを追加する。
     - ハンドルをドラッグで周波数とゲインを変える（Shift で微調整）。ホイールで Q（Cut は傾き）を変える。
@@ -127,8 +127,16 @@
   - Compressor / Gate:
     - 転送曲線のハンドルで、しきい値・レシオ・ニー（Gate は開く／閉じるしきい値と床）を動かす。
     - 下のグラフは対象範囲のレベル（灰）・出力（青）・ゲインリダクション（赤）。クリックでその位置へ移動し、しきい値の線をドラッグできる。
-  - Limiter: グラフの Ceiling 線をドラッグする。Input で押し込む量、True peak でサンプル間のピークも抑える。
+  - Brickwall Limiter: グラフの Ceiling 線をドラッグする。Input で押し込む量、True peak でサンプル間のピークも抑える。
+  - Clipper: 転送曲線の角のハンドルを上下で Ceiling、左右で Input、下のハンドルで Knee（0 でハードクリップ）を動かす。
+  - Brickwall Limiter と Clipper は Oversampling（Off / 2x / 4x / 8x / 16x）で、高いレートで処理してから戻す。折り返しノイズ（エイリアシング）が減り、時間方向にはずれない。倍率に比例して処理時間が延びる。
+    - Clipper の Hard ceiling（既定 ON）は、戻すときのフィルタで天井をわずかに超えた分（最大 1 dB 程度）だけを高速リミッターで下げる。OFF にするとクリップだけになり、超えた分は後段の Limiter に任せる。
   - 再生中は In / GR / Out メーターと、転送曲線の上の点が動く。
+- **Reverb**（Analyze/FX カテゴリ）: インパルス応答（IR）を畳み込むリバーブ。
+  - IR ブラウザでカテゴリと検索から選ぶ（クリックで選択、Ctrl+Z で戻せる）。「IR ファイルを開く…」で任意の WAV も使える。
+  - インストール版には厳選した 41 本が入っている。全ライブラリ（738 本）は「IR folder...」でそのフォルダを指定すれば使える。
+  - Mix / Output / Width / Low cut / High cut は波形上のカーブで動かせる。Pre-delay / Length / Reverse / Normalize は IR そのものを変える設定。
+  - Tail（残響の尾）: Ring on（後ろへ響かせ、ファイル末尾では延長）／ Keep length（長さは変えない）／ Stop at the end（範囲の終わりで止める）。
   - 波形にも、しきい値の線とゲインリダクションの帯（Gate は閉じた区間の網掛け）が出る。
   - Preset… から組み込みの設定を選べる（Ctrl+Z で戻せる）。
 - **自動プレビュー**: ツールを開いただけでは音は変わらない。設定を変えると約 0.2 秒後に処理済みの音へ差し替わり、以後は変更に追従する。再生は止まらず、再生位置もそのまま。

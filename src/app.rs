@@ -59,6 +59,7 @@ mod hf_cache;
 mod input_focus;
 mod input_ops;
 mod inspect_ops;
+pub(crate) mod ir_library;
 pub mod inspection;
 pub mod keymap;
 #[cfg(feature = "kittest")]
@@ -98,6 +99,7 @@ mod recording_ops;
 mod rename_ops;
 mod render;
 mod resample_ops;
+mod reverb_ops;
 mod scan_ops;
 mod search_ops;
 mod session_baseline;
@@ -1335,6 +1337,8 @@ pub struct WavesPreviewer {
     /// Headphone monitoring through an HRTF (prefs). See `hrtf_ops`.
     hrtf: hrtf_ops::HrtfSettings,
     hrtf_runtime: hrtf_ops::HrtfRuntime,
+    /// The Reverb's IR library and the IRs loaded for it. See `reverb_ops`.
+    reverb: reverb_ops::ReverbRuntime,
     /// Object audio: scenes read, the mix handed to the engine, spatial
     /// edits. See `spatial_ops`.
     spatial: spatial_ops::SpatialRuntime,
